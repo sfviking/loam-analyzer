@@ -1210,6 +1210,21 @@
     <div id="fitPedalCount" class="dim" style="font-size:13px; margin-top:8px;"></div>
   </section>
 
+  <section id="roadSection" class="hidden">
+    <div class="section-title">
+      Climbs &amp; balance
+      <span class="subtitle">per-climb power, cadence, and pacing (grade &gt; 3% sustained) · left/right power balance</span>
+    </div>
+    <div id="roadBalance" style="margin-bottom:14px;"></div>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="roadClimbsTable">
+        <thead><tr><th>#</th><th>Time</th><th>Grade</th><th>VAM</th><th>Avg W</th><th>NP</th><th>Cad</th><th>HR drift</th><th>Fade</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="dim" style="font-size:12px; margin-top:8px;">VAM is vertical metres climbed per hour. Fade is last-third vs first-third power on the climb: strongly negative means you started too hard.</div>
+  </section>
+
   <section id="geekStatsSection" class="hidden">
     <div class="section-title">
       Raw metrics
@@ -1399,6 +1414,17 @@ function extractFitData(messages) {
       hr:  f[3], cad: f[4],
       dist: f[5] != null ? f[5] / 100.0 : null,
       speed, power: f[7], altitude: alt,
+      // Road-cycling record fields. temp is degC direct; TE/PS are FIT scale 2
+      // (percent). balanceRaw is the undecoded uint8 (see decodeLrBalance in
+      // garmin-fit.js): its right-vs-left flag convention needs verifying
+      // against a real dual-sided file before any balance number is trusted.
+      temp: f[13],
+      balanceRaw: f[30],
+      teLeft: f[43] != null ? f[43] / 2.0 : null,
+      teRight: f[44] != null ? f[44] / 2.0 : null,
+      psLeft: f[45] != null ? f[45] / 2.0 : null,
+      psRight: f[46] != null ? f[46] / 2.0 : null,
+      psCombined: f[47] != null ? f[47] / 2.0 : null,
     });
   }
   const jumps = [];
@@ -4971,8 +4997,18 @@ async function analyze(files) {
   try {
     const sensorFile = files.find(f => /\.(zip|csv)$/i.test(f.name) && !/\.fit$/i.test(f.name));
     const fitFile = files.find(f => /\.fit$/i.test(f.name));
-    /* A FIT with no sensor recording analyzes on its own as a GPS-only ride. */
-    if (!sensorFile && fitFile) { await analyzeFitOnly(fitFile, onProgress, superseded); return; }
+    /* A bare .fit with no phone recording analyzes on its own. Route by content: a power meter (road
+       cycling, or an e-bike motor) goes to the road power analysis (NP/IF/TSS, climbs, balance); a
+       position-only head-unit FIT (e.g. Amflow/Avinox) analyzes as a GPS ride with lift detection. */
+    if (!sensorFile && fitFile) {
+      const probeBuf = await fitFile.arrayBuffer();
+      if (superseded()) return;
+      const probe = extractFitData(parseFIT(probeBuf));
+      const hasPower = probe.records.filter(r => r.power != null && r.power > 0).length >= 20;
+      if (hasPower) await analyzeRoadFit(fitFile, onProgress, superseded);
+      else await analyzeFitOnly(fitFile, onProgress, superseded);
+      return;
+    }
     if (!sensorFile) throw new Error('Need a sensor file (.zip or .csv)');
     /* Keep both Files around: the sensor file so a FIT can be attached after the fact (web parity
        with the app's "Replace FIT"), and the FIT itself so re-analysis paths (calibration-strategy
@@ -5936,7 +5972,7 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   formStop();
-  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
 }
@@ -8672,12 +8708,14 @@ function totalPedalStrokes(fitInRide) {
   }
   return revs;
 }
-function renderFitChart(fitInRide, ride) {
+function renderFitChart(fitInRide, ride, opts = {}) {
+  const target = opts.target || 'fitChart';
+  const powerLabel = opts.powerLabel || 'Motor power (W)';
   const t = fitInRide.map(r => r.t_phone - ride.start);
   const traces = [];
   if (fitInRide.some(r => r.power != null)) {
     traces.push({ x: t, y: fitInRide.map(r => r.power), type: 'scatter', mode: 'lines',
-                  line: { color: '#c54b3c', width: 1.5 }, name: 'Motor power (W)', yaxis: 'y' });
+                  line: { color: '#c54b3c', width: 1.5 }, name: powerLabel, yaxis: 'y' });
   }
   if (fitInRide.some(r => r.hr != null)) {
     traces.push({ x: t, y: fitInRide.map(r => r.hr), type: 'scatter', mode: 'lines',
@@ -8697,13 +8735,268 @@ function renderFitChart(fitInRide, ride) {
     showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
     hovermode: 'x unified'
   };
-  loamPlot('fitChart', traces, layout, PLOT_CFG);
-  const el = document.getElementById('fitPedalCount');
+  loamPlot(target, traces, layout, PLOT_CFG);
+  const el = target === 'fitChart' ? document.getElementById('fitPedalCount') : null;
   if (el) {
     const revs = totalPedalStrokes(fitInRide);
     el.innerHTML = revs > 0
       ? `Total pedal count: <strong>${Math.round(revs).toLocaleString()}</strong> crank revolutions over the ride (integrated from FIT cadence).`
       : 'No cadence in this FIT, so pedal count is unavailable.';
+  }
+}
+
+/* ==================== Road cycling (FIT-only) ====================
+   A bare Garmin FIT dropped on its own is a road-cycling ride: power, cadence, HR, GPS, and the head
+   unit's own ride/lap summaries, but no phone IMU. The functions below are vendored copies of the
+   tested modules under analyzer/ (core/parsers/garmin-fit.js, sports/road/power-metrics.js,
+   sports/road/climbs.js). The single-file dashboard is the runtime source of truth; keep the two in
+   sync (see CLAUDE.md). Field numbers follow the FIT Profile and are validated against real Garmin
+   exports (an 18.4 km ride reproduces the device's own NP/TSS/IF). */
+
+const ROAD_SESSION_FIELDS = {
+  5:{key:'sport'},6:{key:'subSport'},7:{key:'elapsedTime',scale:1000},8:{key:'timerTime',scale:1000},
+  9:{key:'distance',scale:100},10:{key:'totalStrokes'},11:{key:'calories'},14:{key:'avgSpeed',scale:1000},
+  15:{key:'maxSpeed',scale:1000},16:{key:'avgHr'},17:{key:'maxHr'},18:{key:'avgCadence'},19:{key:'maxCadence'},
+  20:{key:'avgPower'},21:{key:'maxPower'},22:{key:'totalAscent'},23:{key:'totalDescent'},
+  34:{key:'normalizedPower'},35:{key:'tss',scale:10},36:{key:'intensityFactor',scale:1000},
+  45:{key:'thresholdPower'},253:{key:'timestamp'},
+};
+const ROAD_LAP_FIELDS = {
+  7:{key:'elapsedTime',scale:1000},8:{key:'timerTime',scale:1000},9:{key:'distance',scale:100},
+  10:{key:'totalStrokes'},11:{key:'calories'},13:{key:'avgSpeed',scale:1000},14:{key:'maxSpeed',scale:1000},
+  15:{key:'avgHr'},16:{key:'maxHr'},17:{key:'avgCadence'},18:{key:'maxCadence'},19:{key:'avgPower'},
+  20:{key:'maxPower'},21:{key:'totalAscent'},22:{key:'totalDescent'},33:{key:'normalizedPower'},253:{key:'timestamp'},
+};
+function roadDecodeByMap(fields, map) {
+  const out = {};
+  for (const fn of Object.keys(map)) {
+    const spec = map[fn], raw = fields[fn];
+    out[spec.key] = raw == null ? null : (spec.scale ? raw / spec.scale : raw);
+  }
+  return out;
+}
+function decodeLrBalance(raw) {
+  if (raw == null) return null;
+  const pct = raw & 0x7F;
+  if (pct === 0) return null;
+  const rightFlagged = (raw & 0x80) !== 0;
+  return rightFlagged ? { left: 100 - pct, right: pct, side: 'right' } : { left: pct, right: 100 - pct, side: 'left' };
+}
+function decodeLrBalance100(raw) {
+  if (raw == null) return null;
+  const pct = (raw & 0x3FFF) / 100;
+  if (pct === 0) return null;
+  const rightFlagged = (raw & 0x8000) !== 0;
+  return rightFlagged ? { left: 100 - pct, right: pct, side: 'right' } : { left: pct, right: 100 - pct, side: 'left' };
+}
+function extractFitSummary(messages) {
+  let session = null; const laps = [];
+  for (const m of messages) {
+    if (m.gm === 18 && !session) {
+      session = roadDecodeByMap(m.fields, ROAD_SESSION_FIELDS);
+      session.balance = decodeLrBalance100(m.fields[37]);
+    } else if (m.gm === 19) {
+      const lap = roadDecodeByMap(m.fields, ROAD_LAP_FIELDS);
+      lap.balance = decodeLrBalance100(m.fields[34]);
+      laps.push(lap);
+    }
+  }
+  return { session, laps };
+}
+
+function resampleTo1Hz(samples, maxGap = 3) {
+  const pts = (samples || []).filter(s => s && s.t != null).sort((a, b) => a.t - b.t);
+  if (pts.length < 2) return { t: [], power: [] };
+  const t0 = Math.floor(pts[0].t), tN = Math.floor(pts[pts.length - 1].t);
+  const t = [], power = []; let j = 0;
+  for (let sec = t0; sec <= tN; sec++) {
+    while (j + 1 < pts.length && pts[j + 1].t <= sec) j++;
+    const a = pts[j], b = pts[Math.min(j + 1, pts.length - 1)], pa = a.power == null ? 0 : a.power;
+    let val;
+    if (b === a || b.t <= a.t || sec <= a.t) val = pa;
+    else if (b.t - a.t > maxGap) val = 0;
+    else { const pb = b.power == null ? 0 : b.power; val = pa + (pb - pa) * ((sec - a.t) / (b.t - a.t)); }
+    t.push(sec); power.push(val);
+  }
+  return { t, power };
+}
+function normalizedPower(power1Hz, window = 30) {
+  if (!power1Hz || power1Hz.length < window) return null;
+  const p = power1Hz.map(v => (v == null ? 0 : v));
+  const roll = []; let sum = 0;
+  for (let i = 0; i < p.length; i++) {
+    sum += p[i];
+    if (i >= window) sum -= p[i - window];
+    if (i >= window - 1) roll.push(sum / window);
+  }
+  const mean4 = roll.reduce((a, v) => a + v ** 4, 0) / roll.length;
+  return Math.pow(mean4, 0.25);
+}
+function averagePower(power1Hz) {
+  if (!power1Hz || !power1Hz.length) return null;
+  const p = power1Hz.map(v => (v == null ? 0 : v));
+  return p.reduce((a, b) => a + b, 0) / p.length;
+}
+function variabilityIndex(np, avg) { return np != null && avg ? np / avg : null; }
+function intensityFactor(np, ftp) { return np != null && ftp ? np / ftp : null; }
+function trainingStressScore(durationSec, np, ftp) {
+  if (np == null || !ftp || !durationSec) return null;
+  const intensity = np / ftp;
+  return ((durationSec * np * intensity) / (ftp * 3600)) * 100;
+}
+
+function roadMean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null; }
+function vam(gainMeters, durationSec) { return durationSec > 0 && gainMeters != null ? (gainMeters / durationSec) * 3600 : null; }
+function roadClimbMetrics(seg, samples, opts, index) {
+  const inSeg = samples.filter(s => s.t >= seg.tStart && s.t <= seg.tEnd);
+  const duration = seg.tEnd - seg.tStart;
+  const alts = inSeg.map(s => s.altitude).filter(v => v != null);
+  const gain = alts.length >= 2 ? Math.max(0, alts[alts.length - 1] - alts[0]) : Math.max(0, (seg.gradeAvg / 100) * seg.distance);
+  const powers = inSeg.map(s => s.power).filter(v => v != null);
+  const havePower = powers.length > 0;
+  const { power: p1hz } = resampleTo1Hz(inSeg.map(s => ({ t: s.t, power: s.power })));
+  const cads = inSeg.map(s => s.cad).filter(v => v != null && v > 0);
+  const hrs = inSeg.map(s => s.hr).filter(v => v != null);
+  const third = duration / 3;
+  const firstP = inSeg.filter(s => s.t <= seg.tStart + third).map(s => s.power).filter(v => v != null);
+  const lastP = inSeg.filter(s => s.t >= seg.tEnd - third).map(s => s.power).filter(v => v != null);
+  const firstMean = roadMean(firstP);
+  const pacingFade = firstP.length && lastP.length && firstMean ? (roadMean(lastP) - firstMean) / firstMean : null;
+  const firstH = inSeg.filter(s => s.t <= seg.tStart + third).map(s => s.hr).filter(v => v != null);
+  const lastH = inSeg.filter(s => s.t >= seg.tEnd - third).map(s => s.hr).filter(v => v != null);
+  const hrDrift = firstH.length && lastH.length ? roadMean(lastH) - roadMean(firstH) : null;
+  const avgP = havePower ? roadMean(powers) : null;
+  return {
+    index: index + 1, tStart: seg.tStart, tEnd: seg.tEnd, duration, distance: seg.distance,
+    gain, avgGrade: seg.gradeAvg, vam: vam(gain, duration),
+    avgPower: avgP, normalizedPower: normalizedPower(p1hz), maxPower: havePower ? Math.max(...powers) : null,
+    wattsPerKg: avgP != null && opts.weightKg ? avgP / opts.weightKg : null,
+    avgCadence: cads.length ? roadMean(cads) : null, avgHr: hrs.length ? roadMean(hrs) : null, hrDrift, pacingFade,
+  };
+}
+function analyzeClimbs(segments, samples, opts = {}) {
+  return (segments || []).filter(s => s.dir === 'up').map((seg, i) => roadClimbMetrics(seg, samples || [], opts, i));
+}
+
+/* Reshape FIT records into the sensors.location schema the shared pipeline expects (grade
+   segmentation, map, ride window), so a phone-less FIT reuses them unchanged. baro is left empty:
+   detectGradeSegments then reads GPS altitude, which is what the FIT carries. */
+function fitRecordsToSensors(records) {
+  const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
+  const sensors = { location: [], baro: [], accel: [], gyro: [], gravity: [], annotations: [] };
+  if (!pts.length) return { sensors, startFitSec: records.length ? records[0].ts : null };
+  const t0 = pts[0].ts;
+  pts.forEach(p => sensors.location.push({
+    t: p.ts - t0, speed: p.speed != null ? p.speed : 0,
+    latitude: p.lat, longitude: p.lon, altitude: p.altitude != null ? p.altitude : null,
+  }));
+  return { sensors, startFitSec: t0 };
+}
+/* Power-weighted L/R balance: balance sampled at low power is noise, so weight each reading by the
+   power at that instant. Returns { left, right } percentages or null when the meter is single-sided. */
+function powerWeightedBalance(fitInRide) {
+  let sw = 0, sp = 0;
+  for (const r of fitInRide) {
+    const b = decodeLrBalance(r.balanceRaw);
+    if (b && r.power) { sw += b.right * r.power; sp += r.power; }
+  }
+  if (!sp) return null;
+  const right = sw / sp;
+  return { left: Math.round((100 - right) * 10) / 10, right: Math.round(right * 10) / 10 };
+}
+
+async function analyzeRoadFit(fitFile, onProgress, superseded) {
+  _lastSensorFile = null; _lastFitFile = fitFile; _lastHadFit = true;
+  onProgress('parsing FIT file');
+  const buf = await fitFile.arrayBuffer();
+  if (superseded()) return;
+  const messages = parseFIT(buf);
+  const { records } = extractFitData(messages);
+  const { session, laps } = extractFitSummary(messages);
+  if (records.length < 20) throw new Error('This FIT has no usable ride data.');
+  const { sensors } = fitRecordsToSensors(records);
+  if (sensors.location.length < 10) throw new Error('This FIT has no GPS track, so it cannot be mapped as a road ride yet (indoor trainer support is coming).');
+  onProgress('detecting active window');
+  let ride = detectRidingWindow(sensors.location);
+  if (ride.start == null || ride.end == null) ride = { start: 0, end: sensors.location[sensors.location.length - 1].t };
+  onProgress('analyzing power and climbs');
+  const t0 = records[0].ts;
+  const inWin = (t) => t >= ride.start && t <= ride.end;
+  const fitInRide = records.map(r => Object.assign({}, r, { t_phone: r.ts - t0 })).filter(r => inWin(r.t_phone));
+  const samples = records.map(r => ({ t: r.ts - t0, power: r.power, cad: r.cad, hr: r.hr, altitude: r.altitude, speed: r.speed, latitude: r.lat, longitude: r.lon })).filter(s => inWin(s.t));
+  const segments = detectGradeSegments([], sensors.location, ride);
+  const climbs = analyzeClimbs(segments, samples, {});
+  const { power: p1hz } = resampleTo1Hz(samples.map(s => ({ t: s.t, power: s.power })));
+  const np = normalizedPower(p1hz), avg = averagePower(p1hz);
+  const ftp = session && session.thresholdPower ? session.thresholdPower : null;
+  const dur = ride.end - ride.start;
+  const metrics = { np, avg, vi: variabilityIndex(np, avg), if: intensityFactor(np, ftp), tss: trainingStressScore(dur, np, ftp), ftp };
+  const balance = powerWeightedBalance(fitInRide);
+  if (superseded()) return;
+  const D = { sensors, ride, fitInRide, session, laps, climbs, metrics, balance, segments, title: fitFile.name, sport: 'road' };
+  onProgress('rendering');
+  hide('loading'); show('results');
+  renderAllRoad(D);
+  const km = session && session.distance ? (session.distance / 1000).toFixed(1) + ' km' : '';
+  setStatus(`Road ride loaded (Garmin FIT${km ? ' · ' + km : ''})`, true);
+}
+
+function renderAllRoad(D) {
+  _lastRender = { fn: renderAllRoad, D };
+  hideAllSections();
+  { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  { const ct = document.getElementById('carryToggle'); if (ct) ct.classList.add('hidden'); }
+  renderRoadStats(document.getElementById('statsPanel'), D);
+  renderRunMap(D.sensors.location, D.ride, D.segments);
+  { const lg = document.querySelector('#overviewSection .map-legend'); if (lg) lg.classList.add('hidden'); }
+  const sub = document.getElementById('timelineSubtitle'); if (sub) sub.textContent = 'power · cadence · heart rate over the ride';
+  /* #timelineChart has no CSS height (the MTB/run timelines set it before plotting); do the same so
+     Plotly does not collapse the road power chart to a sliver. */
+  { const tc = document.getElementById('timelineChart'); if (tc) tc.style.height = '320px'; }
+  renderFitChart(D.fitInRide, D.ride, { target: 'timelineChart', powerLabel: 'Power (W)' });
+  renderRoadClimbsAndBalance(D);
+  show('roadSection');
+  try { buildSectionNav(); } catch (e) { console.warn('section nav', e); }
+}
+function renderRoadStats(el, D) {
+  if (!el) return;
+  const s = D.session || {}, m = D.metrics || {};
+  const dur = D.ride.end - D.ride.start;
+  const mins = Math.floor(dur / 60), secs = Math.round(dur - mins * 60);
+  const dist = s.distance != null ? (s.distance / 1000) : null;
+  const revs = totalPedalStrokes(D.fitInRide);
+  const bal = D.balance ? `${Math.round(D.balance.left)} / ${Math.round(D.balance.right)}` : '—';
+  const npv = m.np != null ? Math.round(m.np) : null;
+  el.innerHTML = `
+    <div class="stat accent"><div class="label">Norm. power</div><div class="value">${npv != null ? npv : '—'}<span class="unit">W</span></div><div class="sub">${m.avg != null ? Math.round(m.avg) + ' W avg · VI ' + (m.vi ? m.vi.toFixed(2) : '—') : ''}</div></div>
+    <div class="stat accent2"><div class="label">Intensity</div><div class="value">${m.if != null ? m.if.toFixed(2) : '—'}<span class="unit"> IF</span></div><div class="sub">${m.tss != null ? Math.round(m.tss) + ' TSS · FTP ' + m.ftp + ' W' : 'no FTP in FIT'}</div></div>
+    <div class="stat"><div class="label">Duration</div><div class="value">${mins}<span class="unit">m</span> ${secs}<span class="unit">s</span></div><div class="sub">${dist != null ? dist.toFixed(1) + ' km' : ''}</div></div>
+    <div class="stat"><div class="label">Elevation</div><div class="value">${s.totalAscent != null ? Math.round(s.totalAscent) : '—'}<span class="unit">m ↑</span></div><div class="sub">${s.totalDescent != null ? Math.round(s.totalDescent) + 'm ↓ · ' : ''}${D.climbs.length} climbs</div></div>
+    <div class="stat accent3"><div class="label">Cadence / HR</div><div class="value">${s.avgCadence != null ? s.avgCadence : '—'}<span class="unit">rpm</span></div><div class="sub">${s.avgHr != null ? s.avgHr + ' bpm avg' : ''}${revs > 0 ? ' · ' + Math.round(revs).toLocaleString() + ' strokes' : ''}</div></div>
+    <div class="stat"><div class="label">L / R balance</div><div class="value">${bal}</div><div class="sub">power-weighted</div></div>
+  `;
+}
+function renderRoadClimbsAndBalance(D) {
+  const bEl = document.getElementById('roadBalance');
+  if (bEl) {
+    if (D.balance) {
+      const l = Math.round(D.balance.left), r = 100 - l;
+      bEl.innerHTML = `<div style="font-size:13px;color:var(--text-muted);margin-bottom:4px;">Left / right power balance</div>
+        <div style="display:flex;height:24px;border-radius:6px;overflow:hidden;font-size:12px;color:#fff;">
+          <div style="width:${l}%;background:#3d6fb0;display:flex;align-items:center;justify-content:center;">L ${l}%</div>
+          <div style="width:${r}%;background:#5f9e7f;display:flex;align-items:center;justify-content:center;">${r}% R</div></div>`;
+    } else bEl.innerHTML = '<div class="dim" style="font-size:12px;">No left/right balance in this FIT (single-sided or crank power meter).</div>';
+  }
+  const tb = document.querySelector('#roadClimbsTable tbody');
+  if (tb) {
+    const fmtT = (sec) => { const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
+    const fmt = (v, d = 0) => v == null ? '—' : (Number.isInteger(v) ? v : v.toFixed(d));
+    const rows = D.climbs.map(c => {
+      const fade = c.pacingFade == null ? '—' : Math.round(c.pacingFade * 100) + '%';
+      const fadeStyle = (c.pacingFade != null && c.pacingFade <= -0.2) ? ' style="color:#c0392b; font-weight:600;"' : '';
+      return `<tr><td>${c.index}</td><td>${fmtT(c.duration)}</td><td>${fmt(c.avgGrade, 1)}%</td><td>${fmt(c.vam)}</td><td>${fmt(c.avgPower)}</td><td>${fmt(c.normalizedPower)}</td><td>${fmt(c.avgCadence)}</td><td>${c.hrDrift == null ? '—' : (c.hrDrift > 0 ? '+' : '') + fmt(c.hrDrift)}</td><td${fadeStyle}>${fade}</td></tr>`;
+    }).join('');
+    tb.innerHTML = rows || '<tr><td colspan="9" class="dim">No sustained climbs detected.</td></tr>';
   }
 }
 
@@ -9387,6 +9680,24 @@ window.loamAnalyzeURLWithFit = async function (csvUrl, fitUrl) {
   }
 };
 
+/* Analyze a bare head-unit FIT with no phone recording (road-cycling FIT-only path). Fetches the
+   FIT, wraps it in a File, and runs the same dropzone pipeline a dragged .fit takes. */
+window.loamAnalyzeFitURL = async function (fitUrl) {
+  try {
+    const resp = await fetch(fitUrl);
+    if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
+    const raw = (window.LOAM_SESSION_NAME || fitUrl.split('/').pop() || 'ride.fit');
+    const name = /\.fit$/i.test(raw) ? raw : raw + '.fit';
+    const files = [new File([await resp.arrayBuffer()], name, { type: 'application/octet-stream' })];
+    const p = analyze(files);
+    if (p && p.then) p.then(() => { const r = document.getElementById('results'); if (r && LOAM_EMBEDDED) r.scrollIntoView(); });
+    return await p;
+  } catch (e) {
+    hide('loading'); showError('Could not load this FIT.', (e && e.stack) || String(e));
+    setStatus('Error');
+  }
+};
+
 /* ========== Library modal ========== */
 async function openLibraryModal() {
   const modal = document.getElementById('libraryModal');
@@ -9600,7 +9911,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'aacb4b8 · 2026-07-03';
+const LOAM_BUILD = '1bb2238 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
