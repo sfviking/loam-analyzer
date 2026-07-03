@@ -4214,7 +4214,7 @@ function computeRunSummary(loc, baro, ride, R) {
    lazily on first call. */
 
 const DB_NAME = 'loam-library';
-const DB_VERSION = 3;
+const DB_VERSION = 4;  // v4: 'sources' store (FIT bytes for re-openable GPS rides)
 const ANALYSIS_CACHE_VERSION = 5;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 const COACHING_CACHE_VERSION = 1;  // bump to invalidate cached AI coaching when the coach prompt/system changes
@@ -4241,6 +4241,13 @@ function openLibrary() {
       if (!db.objectStoreNames.contains('coaching')) {
         const c = db.createObjectStore('coaching', { keyPath: 'hash' });
         c.createIndex('savedAt', 'savedAt', { unique: false });
+      }
+      /* Source bytes for rides small enough to keep whole (FIT-only rides, 150-250 KB), keyed by
+         the ride's dedupKey. Lets a library row re-open by re-analyzing through the CURRENT
+         pipeline, where the analysis cache only replays the last N renders and dies on version
+         bumps. CSV recordings (100+ MB) never go here. */
+      if (!db.objectStoreNames.contains('sources')) {
+        db.createObjectStore('sources', { keyPath: 'key' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -4395,6 +4402,34 @@ async function analysisCacheKeyForFile(file) {
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   const hash = (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
   return n.toString(36) + '-' + hash;
+}
+
+/* ---------- Ride source bytes (small files only) ----------
+   A FIT-only ride's source is tiny, so the library keeps it whole and an Open on the ride
+   re-analyzes through the current pipeline (survives cache eviction and version bumps). Keyed by
+   the ride's dedupKey (the FIT content hash). CSVs are never stored (far too large). */
+const SOURCE_MAX_BYTES = 5 * 1024 * 1024;
+async function putRideSource(key, filename, bytes) {
+  if (!key || !bytes || bytes.byteLength > SOURCE_MAX_BYTES) return;
+  try {
+    const db = await openLibrary();
+    await _req(_tx(db, 'sources', 'readwrite').put({ key, filename, bytes, savedAt: new Date().toISOString() }));
+  } catch (e) { console.warn('source save failed:', e); }
+}
+async function getRideSource(key) {
+  if (!key) return null;
+  try {
+    const db = await openLibrary();
+    const rec = await _req(_tx(db, 'sources', 'readonly').get(key));
+    return rec && rec.bytes ? rec : null;
+  } catch (e) { return null; }
+}
+async function deleteRideSource(key) {
+  if (!key) return;
+  try {
+    const db = await openLibrary();
+    await _req(_tx(db, 'sources', 'readwrite').delete(key));
+  } catch (e) { /* orphaned sources are small; best-effort */ }
 }
 
 async function getCachedAnalysis(hash) {
@@ -4881,6 +4916,8 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
        filenames rarely carry the full stamp saveRideToLibrary would otherwise parse. */
     recordedAt: startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null,
   });
+  /* Keep the FIT bytes so the ride re-opens from the library forever (Open re-analyzes). */
+  await putRideSource(contentHash, fitFile.name, buf);
   if (superseded()) return;
   onProgress('rendering');
   hide('loading'); show('results');
@@ -9056,15 +9093,17 @@ async function renderRideSwitcher() {
   rides = rides.sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || '')).slice(0, 20);
   if (!rides.length) { list.innerHTML = '<div class="rs-dim" style="padding:10px;">No saved rides yet.</div>'; return; }
   const cachedByRide = new Map();
+  const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
     if (!r.dedupKey) return;
     try { const c = await getCachedAnalysis(r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); } catch (e) {}
+    try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
   list.innerHTML = rides.map(r => {
     const when = r.savedAt ? new Date(r.savedAt).toLocaleDateString() : '';
     const dur = r.duration ? fmtDuration(r.duration) : '';
     const label = (typeof rsLabel === 'function' && rsLabel(r.filename) !== 'RECORDING') ? rsLabel(r.filename) : r.filename;
-    const openable = cachedByRide.has(r.id);
+    const openable = cachedByRide.has(r.id) || sourceByRide.has(r.id);
     const current = r.dedupKey && r.dedupKey === _currentRunKey;
     const meta = [r.sport, dur, when].filter(Boolean).join(' · ');
     return `<button type="button" class="rs-item${current ? ' current' : ''}" data-id="${r.id}" ${openable ? '' : 'data-locked="1"'}>
@@ -9078,7 +9117,9 @@ async function renderRideSwitcher() {
       const id = +b.dataset.id;
       const ride = rides.find(r => r.id === id);
       const cached = cachedByRide.get(id);
-      if (cached) replayCachedAnalysis(cached, ride && ride.dedupKey);
+      if (cached) { replayCachedAnalysis(cached, ride && ride.dedupKey); return; }
+      const src = sourceByRide.get(id);
+      if (src) { closeRideSwitcher(); analyze([new File([src.bytes], src.filename || (ride && ride.filename) || 'ride.fit')]); }
       else { closeRideSwitcher(); openLibraryModal(); }
     };
   });
@@ -9095,15 +9136,18 @@ async function renderRecentRides() {
   if (!rides.length) { host.classList.add('hidden'); host.innerHTML = ''; return; }
   rides = rides.sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || '')).slice(0, 6);
   const cachedByRide = new Map();
+  const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
     if (!r.dedupKey) return;
     try { const c = await getCachedAnalysis(r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); } catch (e) {}
+    /* Stored source bytes (FIT rides) make a row openable even with no cached render. */
+    try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
   host.innerHTML = `<div class="recent-head">Recent rides</div>` + rides.map(r => {
     const when = r.savedAt ? new Date(r.savedAt).toLocaleDateString() : '';
     const dur = r.duration ? fmtDuration(r.duration) : '';
     const meta = [r.sport, dur, when].filter(Boolean).join(' · ');
-    const openable = cachedByRide.has(r.id);
+    const openable = cachedByRide.has(r.id) || sourceByRide.has(r.id);
     return `<div class="recent-row">
       <span class="recent-name">${escapeHtml(r.filename)}</span>
       <span class="recent-meta">${escapeHtml(meta)}</span>
@@ -9115,7 +9159,10 @@ async function renderRecentRides() {
     b.onclick = () => {
       const id = +b.dataset.id;
       const ride = rides.find(r => r.id === id);
-      replayCachedAnalysis(cachedByRide.get(id), ride && ride.dedupKey);
+      const cached = cachedByRide.get(id);
+      if (cached) { replayCachedAnalysis(cached, ride && ride.dedupKey); return; }
+      const src = sourceByRide.get(id);
+      if (src) analyze([new File([src.bytes], src.filename || (ride && ride.filename) || 'ride.fit')]);
     };
   });
 }
@@ -9350,20 +9397,24 @@ function closeLibraryModal() { document.getElementById('libraryModal').classList
 
 /* Open/Delete wiring for ride rows, re-applied each time the (filterable, re-rendered) rides table is
    redrawn. Scoped to the table host so it does not double-bind the tags table. */
-function wireRideRowActions(host, rides, cachedByRide) {
+function wireRideRowActions(host, rides, cachedByRide, sourceByRide) {
   host.querySelectorAll('button[data-action="open-ride"]').forEach(b => {
     b.onclick = () => {
       const id = +b.dataset.id;
       const cached = cachedByRide.get(id);
       const ride = rides.find(r => r.id === id);
       closeLibraryModal();
-      replayCachedAnalysis(cached, ride && ride.dedupKey);
+      if (cached) { replayCachedAnalysis(cached, ride && ride.dedupKey); return; }
+      const src = sourceByRide && sourceByRide.get(id);
+      if (src) analyze([new File([src.bytes], src.filename || (ride && ride.filename) || 'ride.fit')]);
     };
   });
   host.querySelectorAll('button[data-action="delete-ride"]').forEach(b => {
     b.onclick = async () => {
       if (!confirm('Delete this ride from the library?')) return;
+      const ride = rides.find(r => r.id === +b.dataset.id);
       await deleteRide(+b.dataset.id);
+      if (ride && ride.dedupKey) await deleteRideSource(ride.dedupKey);
       await renderLibraryContents();
     };
   });
@@ -9372,14 +9423,17 @@ function wireRideRowActions(host, rides, cachedByRide) {
 async function renderLibraryContents() {
   await dedupeRides();
   const [rides, tags] = await Promise.all([listRides(), listTaggedSegments()]);
-  /* A ride can be re-opened (not just deleted) when its full render is still in the analysis cache,
-     which is keyed by the same content hash stored as the ride's dedupKey. The cache is bounded and
-     evicts oldest-first, so older rides simply won't offer Open; that is fine and self-explanatory. */
+  /* A ride can be re-opened (not just deleted) when its full render is still in the analysis cache
+     (keyed by the same content hash stored as the ride's dedupKey), or when its source bytes are
+     stored (FIT rides, small): those re-analyze on Open. The cache is bounded and evicts
+     oldest-first, so older CSV rides simply won't offer Open; that is fine and self-explanatory. */
   const cachedByRide = new Map();
+  const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
     if (!r.dedupKey) return;
     try { const c = await getCachedAnalysis(r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); }
     catch (e) {}
+    try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
   const ridesSection = document.getElementById('libRidesSection');
   const tagsSection = document.getElementById('libTagsSection');
@@ -9446,7 +9500,7 @@ async function renderLibraryContents() {
               const nTagged = taggedCount(r);
               const dur = r.duration ? fmtDuration(r.duration) : '—';
               const when = r.savedAt ? new Date(r.savedAt).toLocaleString() : '—';
-              const openable = cachedByRide.has(r.id);
+              const openable = cachedByRide.has(r.id) || sourceByRide.has(r.id);
               return `<tr>
                 <td style="color:var(--accent);">${escapeHtml(r.filename)}</td>
                 <td>${r.sport || '—'}</td>
@@ -9462,7 +9516,7 @@ async function renderLibraryContents() {
             }).join('')}
           </tbody>
         </table>`;
-      wireRideRowActions(host, rides, cachedByRide);
+      wireRideRowActions(host, rides, cachedByRide, sourceByRide);
     };
     searchEl.addEventListener('input', renderRidesTable);
     sportEl.addEventListener('change', () => { lset('loam_lib_sport', sportEl.value); renderRidesTable(); });
@@ -9546,7 +9600,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '852943f · 2026-07-03';
+const LOAM_BUILD = 'aacb4b8 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
