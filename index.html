@@ -594,6 +594,32 @@
     font-family: 'IBM Plex Sans', sans-serif; font-size: 13px;
     color: var(--text-dim); line-height: 1.5;
   }
+  /* GPS-only gateway panel: locked-feature cards. Deliberately quieter than live sections
+     (dashed border, muted lock chip) so it reads as "not yet", not as data. */
+  .upsell-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 12px; margin-bottom: 14px;
+  }
+  .upsell-card {
+    border: 1px dashed var(--border); border-radius: 6px; padding: 14px 16px;
+    background: rgba(148,163,184,0.05);
+  }
+  .upsell-card .uc-lock {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
+  }
+  .upsell-card .uc-title {
+    font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600; font-size: 15px;
+    color: var(--text); margin-bottom: 4px;
+  }
+  .upsell-card .uc-body {
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 12.5px; line-height: 1.5;
+    color: var(--text-muted);
+  }
+  .upsell-cta {
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; line-height: 1.5;
+    color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 12px;
+  }
   .mount-notice strong { color: var(--accent-4); font-weight: 600; }
   .notice-action {
     display: inline-block; margin-top: 10px;
@@ -800,6 +826,7 @@
       <option value="mtb">MTB</option>
       <option value="emtb">e-MTB</option>
       <option value="running">Running</option>
+      <option value="walking">Walking</option>
     </select>
   </div>
   <div class="or">— or —</div>
@@ -819,7 +846,7 @@
 
 <div id="dropOverlay" aria-hidden="true">
   <div class="drop-inner">Drop to analyze
-    <div class="drop-sub">Sensor Logger .zip · Loam Capture .csv · optional companion .fit</div>
+    <div class="drop-sub">Sensor Logger .zip · Loam Capture .csv · .fit (companion, or alone for a GPS-only ride)</div>
   </div>
 </div>
 
@@ -968,6 +995,17 @@
     </div>
   </section>
 
+  <section id="gpsUpsellSection" class="hidden">
+    <div class="section-title">
+      What a phone recording adds
+      <span class="subtitle">this FIT has no motion data · the analysis below is what it unlocks</span>
+    </div>
+    <div class="panel">
+      <div id="gpsUpsellGrid" class="upsell-grid"></div>
+      <div class="upsell-cta">Next ride: start <strong>Loam Capture</strong> on your phone (pocket or backpack is fine), ride as usual, then attach this bike's FIT to the session. Everything above lights up on the same ride.</div>
+    </div>
+  </section>
+
   <section id="jumpsSection" class="hidden">
     <div class="section-title">
       Jumps
@@ -1035,6 +1073,12 @@
       dominates the horizontal accel. Cadence and pace are reliable; vertical
       oscillation may be inflated by hand motion (treat it as an upper bound).
       For cleanest form metrics, switch to a hip pack or armband on your next run.
+    </div>
+  </section>
+
+  <section id="gpsOnlyNotice" class="hidden">
+    <div class="mount-notice">
+      <strong>GPS-only ride.</strong> <span id="gpsOnlyNoticeBody"></span>
     </div>
   </section>
 
@@ -1944,6 +1988,71 @@ function analyzeRunning(sensors, ride) {
   };
 }
 
+/* ========== Gait classification (walk vs run) ==========
+   Per-window walk/run/idle over the active window, from two mount-robust signals measured on
+   the reference recordings (2026-07-03): median GPS speed and impact energy (RMS of detrended
+   |accel|). Step FREQUENCY deliberately does not discriminate: a hand-carried run shows the
+   arm-swing stride line (~1.3 Hz), indistinguishable from a slow walk's step line, while impact
+   separates walk (~0.36 m/s2) from run (>=1.0 even hand-damped) by ~3.6x and the speed gap
+   (walk p90 1.5 vs run p10 2.6 m/s) covers the rest. Windows: 10 s, hop 5 s.
+
+     run  if speed >= 2.6 m/s, or impact >= 0.8 m/s2 at speed >= 1.8 m/s
+     walk otherwise (idle below 0.5 m/s)
+
+   Aggregate: >= 60% walk windows of the moving windows -> the activity is a walk; otherwise a
+   run, with contiguous walk stretches >= 20 s reported as walk breaks. Walk cadence comes from
+   a walk-band FFT (1.2-2.6 Hz) because the running band (2.0-3.5 Hz) reads a harmonic on walks
+   (a 113 spm walk showed as 169 spm). Validated: the 2026-06-09 walk classifies walking (100%
+   walk, 113 spm); the 2026-06-05 run classifies running (6% walk, 3 short walk breaks). */
+function classifyGait(sensors, ride) {
+  const acc = sensors.accel.filter(r => r.t >= ride.start && r.t <= ride.end);
+  const loc = sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  if (acc.length < 200 || !loc.length) return { activity: null, windows: [], breaks: [], walkFrac: null, runFrac: null, walkCadSeries: [] };
+  const tArr = acc.map(r => r.t);
+  const mag = acc.map(r => Math.hypot(r.x, r.y, r.z));
+  const lower = (arr, x) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; };
+  const locT = loc.map(r => r.t);
+  const windows = [];
+  const walkCadSeries = [];
+  for (let w0 = ride.start; w0 + 10 <= ride.end; w0 += 5) {
+    const w1 = w0 + 10;
+    const i0 = lower(tArr, w0), i1 = lower(tArr, w1);
+    if (i1 - i0 < 200) continue;
+    const j0 = lower(locT, w0), j1 = lower(locT, w1);
+    const spd = loc.slice(j0, j1).map(r => r.speed).sort((a, b) => a - b);
+    const speed = spd.length ? spd[Math.floor(spd.length / 2)] : null;
+    const sig = mag.slice(i0, i1);
+    const m = sig.reduce((a, b) => a + b, 0) / sig.length;
+    const detr = sig.map(v => v - m);
+    const impact = Math.sqrt(detr.reduce((s, v) => s + v * v, 0) / detr.length);
+    let gait;
+    if (speed == null || speed < 0.5) gait = 'idle';
+    else if (speed >= 2.6) gait = 'run';
+    else if (impact >= 0.8 && speed >= 1.8) gait = 'run';
+    else gait = 'walk';
+    windows.push({ t0: w0, t1: w1, gait, speed, impact });
+    if (gait === 'walk') {
+      const ts = tArr.slice(i0, i1).map(t => t - w0);
+      const f = dftPeakFreq(detr, ts, 1.2, 2.6, 0.02);
+      const conf = impact > 0 ? Math.min(dftMagAt(detr, ts, f) / impact, 1) : 0;
+      if (conf > 0.15) walkCadSeries.push({ t: (w0 + w1) / 2, freq: f, spm: f * 60, conf });
+    }
+  }
+  const moving = windows.filter(w => w.gait !== 'idle');
+  const walkN = moving.filter(w => w.gait === 'walk').length;
+  const runN = moving.length - walkN;
+  const walkFrac = moving.length ? walkN / moving.length : null;
+  const activity = moving.length < 6 ? null : (walkFrac >= 0.6 ? 'walking' : 'running');
+  const breaks = [];
+  let cur = null;
+  for (const w of windows) {
+    if (w.gait === 'walk') { if (cur && w.t0 <= cur.t1) cur.t1 = w.t1; else { if (cur && cur.t1 - cur.t0 >= 20) breaks.push(cur); cur = { t0: w.t0, t1: w.t1 }; } }
+    else if (w.gait === 'run') { if (cur && cur.t1 - cur.t0 >= 20) breaks.push(cur); cur = null; }
+  }
+  if (cur && cur.t1 - cur.t0 >= 20) breaks.push(cur);
+  return { activity, windows, breaks, walkFrac, runFrac: moving.length ? runN / moving.length : null, walkCadSeries };
+}
+
 function lowerBound(arr, target) {
   let lo = 0, hi = arr.length;
   while (lo < hi) {
@@ -2251,7 +2360,7 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 /* Pull descent objects out of a single ride. Each descent gets GPS start/end,
    a 1 Hz speed series, cumulative distance, and any nearby annotation text
    (used purely as a display label — matching across rides uses GPS). */
-function extractRideDescents(sensors, ride, fileLabel) {
+function extractRideDescents(sensors, ride, fileLabel, minDropM) {
   const segments = detectGradeSegments(sensors.baro, sensors.location, ride);
   const descents = segments.filter(s => s.dir === 'down');
   const annotations = sensors.annotations || [];
@@ -2259,6 +2368,19 @@ function extractRideDescents(sensors, ride, fileLabel) {
   for (const seg of descents) {
     const loc = sensors.location.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.latitude != null);
     if (loc.length < 5) continue;
+    /* Net vertical drop across the segment (start to end, not max-minus-min wiggle), from the
+       barometer when present else GPS altitude. Callers pass minDropM to reject nuisance
+       "descents" (lift-exit dips, drift blobs, rolling traverses); missing altitude means no
+       gating, and the measured value rides along on the descent for display. */
+    let drop = null;
+    if (sensors.baro && sensors.baro.length) {
+      const w = sensors.baro.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.relativeAltitude != null);
+      if (w.length > 1) drop = w[0].relativeAltitude - w[w.length - 1].relativeAltitude;
+    } else {
+      const w = loc.filter(r => r.altitude != null);
+      if (w.length > 1) drop = w[0].altitude - w[w.length - 1].altitude;
+    }
+    if (minDropM && drop != null && drop < minDropM) continue;
     const speed = resample1Hz(
       sensors.location.filter(r => r.speed != null), seg.tStart, seg.tEnd, 'speed');
     const dist = [0];
@@ -2283,6 +2405,7 @@ function extractRideDescents(sensors, ride, fileLabel) {
       file: fileLabel,
       tStart: seg.tStart, tEnd: seg.tEnd,
       duration: seg.duration, distance: totalDist,
+      drop,
       latStart: loc[0].latitude, lonStart: loc[0].longitude,
       latEnd: loc[loc.length-1].latitude, lonEnd: loc[loc.length-1].longitude,
       gradeAvg: seg.gradeAvg,
@@ -4398,10 +4521,12 @@ function descentPolyline(sensors, descent) {
    data (decimated polyline + 1Hz speed). Heavy raw IMU stays out. Also runs
    tag matching so the saved record carries autoTag hints. Returns the inserted
    ride id (Number) so the UI can refer to it for future tagging actions. */
-async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns }) {
+async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt }) {
   /* Build descent list with polylines + speed for every recording, not just
-     runs — the MTB pipeline doesn't compute these natively. */
-  const rawDescents = extractRideDescents(sensors, ride, filename);
+     runs — the MTB pipeline doesn't compute these natively. Bike descents get the
+     net-drop floor; running keeps every graded segment (hill repeats are short). */
+  const rawDescents = extractRideDescents(sensors, ride, filename,
+    (isMtbFamily(sport) || sport === 'ride') ? MIN_DESCENT_DROP_M : 0);
   const descents = [];
   for (const d of rawDescents) {
     const poly = descentPolyline(sensors, d);
@@ -4438,10 +4563,13 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
        composite of the ride window + distance. saveRide upserts on this so a
        recording analyzed more than once updates its row instead of duplicating. */
     dedupKey: contentKey || `${filename}|${Math.round(ride.start)}|${Math.round(ride.end)}|${Math.round((summary && summary.distance) || 0)}`,
-    /* Real recording start when the filename carries the UTC stamp (app sessions and Sensor
-       Logger exports both do); save time is only the fallback for undated names, where it is
-       still roughly the ride day. Run-comparison date labels read this back via memberDate. */
+    /* Explicit recordedAt wins when the caller has a better clock than the filename (a FIT-only
+       ride reads it from the FIT records, which are absolute UTC). Otherwise: the filename's UTC
+       stamp (app sessions and Sensor Logger exports both carry one); save time is only the
+       fallback for undated names, where it is still roughly the ride day. Run-comparison date
+       labels read this back via memberDate. */
     recordedAt: (() => {
+      if (recordedAt) return recordedAt;
       const dt = parseUTCFromFilename(filename || '');
       if (dt && !isNaN(dt)) return dt.toISOString();
       return ride.start != null ? new Date().toISOString() : null;
@@ -4482,6 +4610,12 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
 
 /* ========== Turn detection ========== */
 const TURN_PARAMS = { entryRate: 25.0, exitRate: 8.0, minHeadingChg: 25.0, minDuration: 0.5 };
+
+/* A "descent" must actually go down. Grade segmentation alone admits nuisance segments (lift-exit
+   dips, altitude-drift blobs, long rolling traverses); requiring 30 m of NET drop keeps every real
+   run measured on the reference rides (>= 63 m on Tanga, >= 96 m at Flumserberg) and rejects all
+   the junk (<= 18 m net). Applied to bike descents (MTB family + GPS rides), not running. */
+const MIN_DESCENT_DROP_M = 30;
 
 /* ---------- GPS speed for turn radii (no FIT) ----------
    Without the Specialized FIT we read apex speed from the phone's CoreLocation
@@ -4558,6 +4692,212 @@ function detectTurns(t, yawSeg, yawMetric, rollSmooth, rideStart, rideEnd, param
   return turns;
 }
 
+/* ========== FIT-only (GPS ride) analysis ==========
+   A bare .fit dropped on its own (Amflow/DJI Avinox, Garmin, any head-unit export) carries a GPS
+   track but no phone IMU, so none of the motion pipeline (calibration, turns, jumps, airtime,
+   coaching) can run. It still analyzes as a GPS ride: map, speed, elevation profile,
+   climb/descent segments, and the runs panel, reusing the same downstream components as a phone
+   recording. The FIT's records are reshaped into the sensors.location schema; altitude is also
+   synthesized into sensors.baro (smoothed, relative) so grade segmentation, per-run drop, and the
+   timeline altitude trace work unchanged without special-casing a missing barometer. */
+function fitOnlySensors(records) {
+  const sensors = emptyCombinedSensors();
+  const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
+  if (!pts.length) return { sensors, speedDerived: false, startFitSec: null };
+  const startFitSec = pts[0].ts;
+  /* Speed: trust the FIT when it records one (Garmin/Specialized do); otherwise derive it from
+     consecutive fixes. Raw fix-to-fix speed is jitter-dominated (a 3 m GPS error over 1 s reads as
+     11 km/h), so a 5-point median rejects the spikes without flattening real speed. Some head
+     units (Amflow/Avinox) log position-only records, which is the case this path exists for. */
+  const withSpeed = pts.filter(p => p.speed != null).length;
+  const useFitSpeed = withSpeed >= pts.length / 2;
+  let derived = null;
+  if (!useFitSpeed) {
+    const step = new Array(pts.length).fill(0);
+    for (let i = 1; i < pts.length; i++) {
+      const dt = pts[i].ts - pts[i - 1].ts;
+      step[i] = dt > 0 ? haversineMeters(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon) / dt : step[i - 1];
+    }
+    if (pts.length > 1) step[0] = step[1];
+    derived = step.map((_, i) => {
+      const w = step.slice(Math.max(0, i - 2), Math.min(step.length, i + 3)).sort((a, b) => a - b);
+      const v = w[Math.floor(w.length / 2)];
+      /* Floor residual jitter to zero so hours parked do not accumulate phantom distance. */
+      return v < 0.5 ? 0 : v;
+    });
+  }
+  let lastSpeed = 0;
+  pts.forEach((p, i) => {
+    if (useFitSpeed) { if (p.speed != null) lastSpeed = p.speed; }
+    else lastSpeed = derived[i];
+    sensors.location.push({
+      t: p.ts - startFitSec, speed: lastSpeed,
+      latitude: p.lat, longitude: p.lon,
+      altitude: p.altitude != null ? p.altitude : null,
+    });
+  });
+  /* GPS altitude smoothed over ~9 s, rebased to the first fix, standing in for the barometer. */
+  const altPts = sensors.location.filter(r => r.altitude != null).map(r => ({ t: r.t, alt: r.altitude }));
+  if (altPts.length > 10) {
+    const sm = altPts.map((a, i) => {
+      let s = 0, n = 0;
+      for (let j = i; j >= 0 && altPts[j].t >= a.t - 4.5; j--) { s += altPts[j].alt; n++; }
+      for (let j = i + 1; j < altPts.length && altPts[j].t <= a.t + 4.5; j++) { s += altPts[j].alt; n++; }
+      return s / n;
+    });
+    sensors.baro = altPts.map((a, i) => ({ t: a.t, relativeAltitude: sm[i] - sm[0] }));
+  }
+  return { sensors, speedDerived: !useFitSpeed, startFitSec };
+}
+
+/* Mark climb segments that are lift/gondola rides, not pedaling. A lift is geometrically
+   unmistakable in GPS: steep (>=12% sustained; pedaled straight climbs measured 4-10%), dead
+   straight (net/path displacement >= 0.92 with the loading/unloading ends trimmed), and metronome
+   speed (CV <= 0.30). Validated 2026-07-03: 7/7 lifts on a Flumserberg Avinox FIT (ridden distance
+   reconstructs to 25.0 km vs the bike's 25.5 km wheel odometer) and 0 false positives across every
+   pedaled climb of the Tanga reference ride (the grade cutoff is what rejects its straight road
+   climbs). Only climbs are classified; descending transport is rare and unvalidated. */
+function markLiftSegments(segments, locRows) {
+  for (const seg of segments) {
+    seg.kind = 'ride';
+    if (seg.dir !== 'up' || seg.duration < 90 || seg.gradeAvg < 12) continue;
+    const rows = locRows.filter(r => r.t >= seg.tStart + 15 && r.t <= seg.tEnd - 15 && r.latitude != null);
+    if (rows.length < 20) continue;
+    let path = 0;
+    for (let i = 1; i < rows.length; i++)
+      path += haversineMeters(rows[i - 1].latitude, rows[i - 1].longitude, rows[i].latitude, rows[i].longitude);
+    const net = haversineMeters(rows[0].latitude, rows[0].longitude, rows[rows.length - 1].latitude, rows[rows.length - 1].longitude);
+    const straightness = path > 0 ? net / path : 0;
+    const spd = rows.map(r => r.speed).filter(v => v != null && v > 0.3);
+    const mean = spd.reduce((a, b) => a + b, 0) / Math.max(1, spd.length);
+    const cv = Math.sqrt(spd.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, spd.length)) / Math.max(0.01, mean);
+    if (straightness >= 0.92 && cv <= 0.30) seg.kind = 'lift';
+  }
+  return segments;
+}
+
+/* GPS-grade summary for a FIT-only ride, computed purely from the (possibly derived) speed series
+   and the synthesized altitude. Lift segments are split out so riding stats mean riding: distance,
+   average speed, and time all exclude detected lifts, and stopped time is separated from moving. */
+function computeGpsSummary(sensors, ride, segments) {
+  const inRide = sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  const speeds = inRide.map(r => r.speed);
+  const lifts = segments.filter(s => s.kind === 'lift');
+  const inLift = (t) => lifts.some(s => t >= s.tStart && t <= s.tEnd);
+  let distance = 0, liftDistance = 0, movingTime = 0, liftTime = 0;
+  for (let i = 1; i < inRide.length; i++) {
+    const dt = inRide[i].t - inRide[i - 1].t;
+    const d = ((inRide[i].speed + inRide[i - 1].speed) / 2) * dt;
+    distance += d;
+    const lifted = inLift(inRide[i].t);
+    if (lifted) { liftDistance += d; liftTime += dt; }
+    if (inRide[i].speed >= 0.5) movingTime += dt;
+  }
+  /* Peak speeds: best distance covered in a sliding window, so a lone jittery fix cannot set the
+     record the way a raw max would. */
+  const peakOver = (win) => {
+    let best = 0, j = 0, acc = 0;
+    for (let i = 1; i < inRide.length; i++) {
+      acc += ((inRide[i].speed + inRide[i - 1].speed) / 2) * (inRide[i].t - inRide[i - 1].t);
+      while (inRide[i].t - inRide[j].t > win && j < i) {
+        acc -= ((inRide[j + 1].speed + inRide[j].speed) / 2) * (inRide[j + 1].t - inRide[j].t);
+        j++;
+      }
+      const span = inRide[i].t - inRide[j].t;
+      if (span >= win * 0.8) best = Math.max(best, acc / span);
+    }
+    return best;
+  };
+  let altGain = 0, altLoss = 0;
+  const inB = (sensors.baro || []).filter(r => r.t >= ride.start && r.t <= ride.end);
+  for (let i = 1; i < inB.length; i++) {
+    const d = inB[i].relativeAltitude - inB[i - 1].relativeAltitude;
+    if (d > 0) altGain += d; else altLoss -= d;
+  }
+  /* Per-window ascent for lifts and pedaled climbs (VAM), read off the smoothed altitude. */
+  const climbOf = (seg) => {
+    const w = inB.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
+    return w.length > 1 ? Math.max(0, w[w.length - 1].relativeAltitude - w[0].relativeAltitude) : 0;
+  };
+  const liftAscent = lifts.reduce((a, s) => a + climbOf(s), 0);
+  const pedaled = segments.filter(s => s.dir === 'up' && s.kind !== 'lift');
+  const pedaledAscent = pedaled.reduce((a, s) => a + climbOf(s), 0);
+  const pedaledTime = pedaled.reduce((a, s) => a + s.duration, 0);
+  /* Descents that count are ones with real net drop (MIN_DESCENT_DROP_M), matching the runs
+     panel; nuisance down-segments still shade the timeline but do not inflate the headline. */
+  const dropOf = (seg) => {
+    const w = inB.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
+    return w.length > 1 ? Math.max(0, w[0].relativeAltitude - w[w.length - 1].relativeAltitude) : 0;
+  };
+  const downs = segments.filter(s => s.dir === 'down' && dropOf(s) >= MIN_DESCENT_DROP_M);
+  const maxDescentDrop = downs.length ? Math.max(...downs.map(dropOf)) : 0;
+  const duration = ride.end - ride.start;
+  const ridingTime = Math.max(1, movingTime - liftTime);
+  return {
+    duration, distance, movingTime, stoppedTime: Math.max(0, duration - movingTime),
+    maxSpeed: speeds.length ? Math.max(...speeds) : 0,
+    avgSpeed: (distance - liftDistance) / ridingTime,
+    peak30: peakOver(30),
+    altGain, altLoss,
+    liftCount: lifts.length, liftDistance, liftTime, liftAscent,
+    riddenDistance: distance - liftDistance,
+    vamPedaled: pedaledTime > 60 && pedaledAscent > 20 ? pedaledAscent / (pedaledTime / 3600) : null,
+    maxDescentDrop,
+    nDownhills: downs.length,
+    nUphills: segments.filter(s => s.dir === 'up').length - lifts.length,
+  };
+}
+
+async function analyzeFitOnly(fitFile, onProgress, superseded) {
+  /* No sensor recording backs this render: the calibration selector must not re-run it and the
+     Attach FIT button must not offer to attach a FIT to a FIT. */
+  _lastSensorFile = null; _lastFitFile = fitFile; _lastHadFit = true;
+  onProgress('parsing FIT file');
+  const buf = await fitFile.arrayBuffer();
+  if (superseded()) return;
+  const messages = parseFIT(buf);
+  const { records, jumps } = extractFitData(messages);
+  const { sensors, speedDerived, startFitSec } = fitOnlySensors(records);
+  if (sensors.location.length < 30)
+    throw new Error('This FIT has no usable GPS track, so it cannot be analyzed on its own. Attach it to a ride recording instead.');
+  onProgress('detecting active window');
+  const ride = detectRidingWindow(sensors.location);
+  if (ride.start == null || ride.end == null) throw new Error('Could not detect a moving window in GPS data');
+  onProgress('detecting climbs, descents, and lifts');
+  const segments = markLiftSegments(detectGradeSegments(sensors.baro, sensors.location, ride), sensors.location);
+  onProgress('computing summary');
+  const summary = computeGpsSummary(sensors, ride, segments);
+  /* Content hash keys the library upsert (re-analyzing the same FIT updates its row even when an
+     algorithm tweak changes the numbers) and persists per-run rename labels, same as CSVs. FIT-only
+     renders are not put in the analysis cache, so this is not a cache key here. */
+  let contentHash = null;
+  try { contentHash = await analysisCacheKeyForFile(fitFile); } catch (e) { console.warn('FIT hash failed', e); }
+  if (superseded()) return;
+  _currentRunKey = contentHash;
+  onProgress('saving to library');
+  const saved = await saveRideToLibrary({
+    filename: fitFile.name, sport: 'ride', sensors, ride, summary, contentKey: contentHash,
+    /* FIT timestamps are absolute UTC, so date the library entry from the recording itself; FIT
+       filenames rarely carry the full stamp saveRideToLibrary would otherwise parse. */
+    recordedAt: startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null,
+  });
+  if (superseded()) return;
+  onProgress('rendering');
+  hide('loading'); show('results');
+  const D = {
+    sensors, ride, summary, segments, sport: 'ride', gpsOnly: true, speedDerived,
+    /* renderRunTimeline shades climb/descent segments from D.running.segments; this shim is the
+       only "running" state a GPS ride has. */
+    running: { segments },
+    libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
+    title: fitFile.name,
+  };
+  renderAllGps(D);
+  const liftNote = summary.liftCount ? ` · ${summary.liftCount} lifts` : '';
+  const jumpNote = jumps.length ? ` · ${jumps.length} FIT jumps ignored (no phone recording to sync to)` : '';
+  setStatus(`FIT ride loaded (GPS-only · ${sensors.location.length.toLocaleString()} fixes${liftNote}${jumpNote})`, true);
+}
+
 /* ========== Pipeline ========== */
 /* Generation guard for the analysis pipelines. analyze() and analyzeMulti() have many awaits and
    write shared globals (_currentRunKey, _lastSensorFile, the map, the view hash); without a token,
@@ -4594,6 +4934,8 @@ async function analyze(files) {
   try {
     const sensorFile = files.find(f => /\.(zip|csv)$/i.test(f.name) && !/\.fit$/i.test(f.name));
     const fitFile = files.find(f => /\.fit$/i.test(f.name));
+    /* A FIT with no sensor recording analyzes on its own as a GPS-only ride. */
+    if (!sensorFile && fitFile) { await analyzeFitOnly(fitFile, onProgress, superseded); return; }
     if (!sensorFile) throw new Error('Need a sensor file (.zip or .csv)');
     /* Keep both Files around: the sensor file so a FIT can be attached after the fact (web parity
        with the app's "Replace FIT"), and the FIT itself so re-analysis paths (calibration-strategy
@@ -4621,8 +4963,8 @@ async function analyze(files) {
           if (cached && cached.data) {
             onProgress('loading cached analysis');
             hide('loading'); show('results');
-            if (cached.sport === 'running') renderAllRunning(cached.data); else renderAll(cached.data);
-            setStatus('Loaded from cache (' + (cached.sport === 'running' ? 'run' : 'ride') + ')', true);
+            if (cached.sport === 'running' || cached.sport === 'walking') renderAllRunning(cached.data); else renderAll(cached.data);
+            setStatus('Loaded from cache (' + (cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride') + ')', true);
             return;
           }
         } catch (e) { console.warn('analysis cache: replay failed, recomputing', e); }
@@ -4674,9 +5016,29 @@ async function analyze(files) {
       try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
     }
 
-    if (sport === 'running') {
+    if (sport === 'running' || sport === 'walking') {
       onProgress('analyzing run');
       const running = analyzeRunning(sensors, ride);
+      onProgress('classifying gait (walk vs run)');
+      const gait = classifyGait(sensors, ride);
+      /* Auto-detected "running" refines to walking when the windows say so; an explicit sport
+         pick is respected. detectSport cannot tell them apart (a walk usually lands there via
+         the unknown -> running fallback), so this is where the walk label is decided. */
+      if (userSport === 'auto' && gait.activity === 'walking') {
+        sport = 'walking';
+        console.log('[gait] walk fraction', gait.walkFrac != null ? (gait.walkFrac * 100).toFixed(0) + '%' : '?', '-> walking');
+        if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
+          try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
+        }
+      }
+      /* The running cadence band (2.0-3.5 Hz) reads a harmonic on walks (a 113 spm walk showed
+         as 169 spm); swap in the walk-band series so walk cadence is the real step rate. */
+      if (sport === 'walking' && gait.walkCadSeries.length) {
+        running.cadSeries = gait.walkCadSeries;
+        const spms = gait.walkCadSeries.map(c => c.spm).sort((a, b) => a - b);
+        running.cadMedian = spms[Math.floor(spms.length / 2)];
+        running.cadMean = spms.reduce((a, b) => a + b, 0) / spms.length;
+      }
       const runSummary = computeRunSummary(sensors.location, sensors.baro, ride, running);
       onProgress('pairing annotation-based descents');
       const descents = pairDescentAnnotations(sensors.annotations || []);
@@ -4687,20 +5049,21 @@ async function analyze(files) {
       }
       onProgress('saving to library');
       const saved = await saveRideToLibrary({
-        filename: sensorFile.name, sport: 'running', sensors, ride, summary: runSummary, contentKey: contentHash,
+        filename: sensorFile.name, sport, sensors, ride, summary: runSummary, contentKey: contentHash,
       });
       if (superseded()) return;
       onProgress('rendering');
       hide('loading'); show('results');
       const runRender = {
-        sensors, ride, running, summary: runSummary, detection, sport,
+        sensors, ride, running, gait, summary: runSummary, detection, sport,
         descents, comparison, libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
         title: sensorFile && sensorFile.name,
       };
-      if (cacheKey) { putCachedAnalysis(cacheKey, 'running', runRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+      if (cacheKey) { putCachedAnalysis(cacheKey, sport, runRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
       renderAllRunning(runRender);
       const cmpStr = comparison && comparison.dtw ? ` · DTW: ${descents.length} descents` : '';
-      setStatus(`Run loaded (${runSummary.cadMedian ? runSummary.cadMedian.toFixed(0) + ' SPM' : 'no cadence'} · phone ${running.mount}${cmpStr})`, true);
+      const breakStr = sport === 'running' && gait.breaks.length ? ` · ${gait.breaks.length} walk break${gait.breaks.length > 1 ? 's' : ''}` : '';
+      setStatus(`${sport === 'walking' ? 'Walk' : 'Run'} loaded (${runSummary.cadMedian ? runSummary.cadMedian.toFixed(0) + ' SPM' : 'no cadence'} · phone ${running.mount}${cmpStr}${breakStr})`, true);
       return;
     }
 
@@ -5536,7 +5899,7 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   formStop();
-  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','runCompareSection','coachSection'].forEach(id => {
+  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
 }
@@ -5557,11 +5920,13 @@ function renderAllRunning(D) {
   { const ct = document.getElementById('carryToggle');
     if (ct) { ct.classList.remove('hidden'); ct.value = carryGet();
       ct.options[0].text = 'Carry: auto (' + ((D.running && D.running._detectedMount) || '?') + ')'; } }
+  /* Walking reuses this whole render; only labels, cadence framing, and the coach change. */
+  const sport = D.sport === 'walking' ? 'walking' : 'running';
   const sub = document.getElementById('timelineSubtitle');
-  if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded · annotations marked';
-  renderRideSignature(D, 'running');
+  if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
+  renderRideSignature(D, sport);
   renderRunStats(D.summary, D.detection, D.running && D.running.mount);
-  renderCoachHighlights(D, 'running');
+  if (sport === 'running') renderCoachHighlights(D, 'running');
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
   renderRunTimeline(D);
   renderRunCadence(D.running.cadSeries);
@@ -5573,10 +5938,105 @@ function renderAllRunning(D) {
   if (D.running.mount === 'hand') show('runMountNotice');
   if (D.comparison && D.comparison.dtw) renderDescentComparison(D);
   else hide('runCompareSection');
-  renderGeekStats(D, 'running');
-  renderCoachPanel(D, 'running');
-  updateAttachFitVisibility('running', false);
+  renderGeekStats(D, sport);
+  renderCoachPanel(D, sport);
+  updateAttachFitVisibility(sport, false);
   buildSectionNav();
+}
+
+/* GPS-only render for a standalone FIT: stats, map, timeline, climb/descent segments, and the
+   runs panel. Everything IMU-backed (turns, jumps, airtime, form replay, coach) stays hidden,
+   and a notice says why. */
+function renderAllGps(D) {
+  _lastRender = { fn: renderAllGps, D };
+  hideAllSections();
+  { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  { const ct = document.getElementById('carryToggle'); if (ct) ct.classList.add('hidden'); }
+  const sub = document.getElementById('timelineSubtitle');
+  if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded';
+  renderGpsStats(D.summary);
+  { const body = document.getElementById('gpsOnlyNoticeBody');
+    if (body) body.textContent =
+      'This FIT file carries a GPS track but no phone motion data, so turn, jump, airtime, and body-motion analysis is unavailable.'
+      + (D.speedDerived ? ' The FIT records no speed either; speed here is derived from GPS positions (median-filtered), so treat top speed as approximate.' : '')
+      + ' Record with Loam Capture and attach the FIT to get the full analysis.'; }
+  show('gpsOnlyNotice');
+  renderRunMap(D.sensors.location, D.ride, D.segments);
+  renderRunTimeline(D);
+  renderRunSegments(D.segments);
+  renderGpsParams(D);
+  currentRide = D.ride;
+  renderRunsPanel(D);
+  renderGpsUpsell(D);
+  renderGeekStats(D, 'ride');
+  renderCoachPanel(D, 'ride');
+  updateAttachFitVisibility('ride', true);
+  buildSectionNav();
+}
+
+/* The gateway pitch, rendered only on GPS-only rides: name exactly what a phone recording adds.
+   The numbers are measured, not marketing: the GPS-only turn detector was validated against the
+   IMU pipeline on a reference ride and rejected (52% precision, 17% recall, 67% radius error), so
+   "turns need motion data" is a fact this panel can honestly claim. */
+function renderGpsUpsell(D) {
+  const grid = document.getElementById('gpsUpsellGrid');
+  if (!grid) return;
+  const cards = [
+    ['Turns & cornering', 'Every turn with apex radius, body lean, entry/exit speed, and left/right symmetry. From GPS alone, fewer than 1 in 5 turns are even findable (we measured); body-frame motion finds them all.'],
+    ['Jumps & airtime', 'Real airtime from freefall physics: hang time per jump plus landing impact in g. No bike sensor required, just the phone in a pocket.'],
+    ['Braking & flow', 'Where speed was scrubbed mid-corner versus carried through, per turn, so "brake earlier, release sooner" points at a specific corner.'],
+    ['Form Replay', 'Scrub through any run and watch line, lean, and speed evolve together on a real map.'],
+    ['Deeper AI coaching', 'The coach below sees only pace and elevation today. With motion data it coaches mechanics: which side you trust less, where you stiffen up, what drill fixes it.'],
+  ];
+  grid.innerHTML = cards.map(([t, b]) =>
+    `<div class="upsell-card"><div class="uc-lock">needs phone recording</div><div class="uc-title">${escapeHtml(t)}</div><div class="uc-body">${escapeHtml(b)}</div></div>`).join('');
+  show('gpsUpsellSection');
+}
+
+function renderGpsStats(s) {
+  const mmss = (sec) => { const m = Math.floor(sec / 60), ss = Math.round(sec - m * 60); return `${m}<span class="unit">m</span> ${ss}<span class="unit">s</span>`; };
+  const hasLifts = s.liftCount > 0;
+  document.getElementById('statsPanel').innerHTML = `
+    <div class="stat accent">
+      <div class="label">Distance ridden</div>
+      <div class="value">${U.dist(s.riddenDistance != null ? s.riddenDistance : s.distance)}</div>
+      <div class="sub">${hasLifts ? `+ ${U.dist(s.liftDistance)} on ${s.liftCount} lifts` : 'no lifts detected'}</div>
+    </div>
+    <div class="stat accent2">
+      <div class="label">Avg riding speed</div>
+      <div class="value">${U.speed(s.avgSpeed)}</div>
+      <div class="sub">lifts + stops excluded</div>
+    </div>
+    <div class="stat accent3">
+      <div class="label">Top speed</div>
+      <div class="value">${U.speed(s.maxSpeed)}</div>
+      <div class="sub">best 30 s ${U.speed(s.peak30)}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Time moving</div>
+      <div class="value">${mmss(s.movingTime != null ? s.movingTime : s.duration)}</div>
+      <div class="sub">${hasLifts ? `${Math.round(s.liftTime / 60)}m on lifts · ` : ''}${Math.round((s.stoppedTime || 0) / 60)}m stopped</div>
+    </div>
+    <div class="stat">
+      <div class="label">Elev gain / loss</div>
+      <div class="value">${U.elev(s.altGain)}<span class="unit"> ↑</span></div>
+      <div class="sub">${U.elev(s.altLoss)} ↓${hasLifts ? ` · lifts carried ${U.elev(s.liftAscent)}` : ''}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Descents</div>
+      <div class="value">${s.nDownhills}</div>
+      <div class="sub">${s.maxDescentDrop ? `biggest ${U.elev(s.maxDescentDrop)} drop` : 'sustained grade'}${s.vamPedaled ? ` · VAM ${Math.round(s.vamPedaled)} m/h` : ''}</div>
+    </div>
+  `;
+}
+
+function renderGpsParams(D) {
+  document.getElementById('paramsBar').innerHTML = `
+    <span>sport <strong>RIDE (GPS-only FIT)</strong></span>
+    <span>gps fixes <strong>${D.sensors.location.length.toLocaleString()}</strong></span>
+    <span>speed <strong>${D.speedDerived ? 'derived from positions' : 'from FIT records'}</strong></span>
+    <span style="margin-left:auto">no motion data · turns / jumps / body-motion unavailable</span>
+  `;
 }
 
 /* Per-descent tag/compare actions now live on the Runs table (drawRuns); the standalone Descents
@@ -6284,6 +6744,8 @@ function renderRunMap(loc, ride, segments) {
   const inSeg = (t) => segments.find(s => t >= s.tStart && t <= s.tEnd);
   drawColoredTrack(latlngs, (i) => {
     const seg = inSeg(inRide[i].t);
+    /* Lift segments (GPS-only FIT rides) draw gray: transport, not riding. */
+    if (seg && seg.kind === 'lift') return '#9aa2ad';
     return seg ? (seg.dir === 'down' ? '#c54b3c' : '#8caa6d') : '#6da7c4';
   });
   /* Start/end markers. */
@@ -6316,9 +6778,20 @@ function renderRunTimeline(D) {
   const shapes = D.running.segments.map(s => ({
     type: 'rect', xref: 'x', yref: 'paper',
     x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
-    fillcolor: s.dir === 'down' ? 'rgba(197,75,60,0.15)' : 'rgba(140,170,109,0.15)',
+    /* Gray for detected lift rides (GPS-only FIT rides); red/green for descents/climbs. */
+    fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.22)' : s.dir === 'down' ? 'rgba(197,75,60,0.15)' : 'rgba(140,170,109,0.15)',
     line: { width: 0 }, layer: 'below'
   }));
+  /* Walk breaks on a run: hatched gray bands so a fade-to-walking is visible at a glance. */
+  if (D.sport !== 'walking' && D.gait && D.gait.breaks) {
+    for (const b of D.gait.breaks) {
+      shapes.push({
+        type: 'rect', xref: 'x', yref: 'paper',
+        x0: b.t0 - ride.start, x1: b.t1 - ride.start, y0: 0, y1: 1,
+        fillcolor: 'rgba(100,108,120,0.20)', line: { width: 0 }, layer: 'below',
+      });
+    }
+  }
   /* Annotation vertical lines. */
   const annotations = (D.sensors.annotations || []).filter(a => a.t >= ride.start && a.t <= ride.end);
   for (const a of annotations) {
@@ -6373,7 +6846,10 @@ function renderRunCadence(cadSeries) {
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 24, t: 24, b: 44 },
     xaxis: { title: { text: 'time (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: 'cadence (SPM)', font: { size: 11 } }, gridcolor: '#e2e8f0', range: [140, 200] },
+    /* Range hugs the data: running sits ~150-190, walking ~100-120; a fixed [140,200] cropped
+       walk cadence out of view entirely. */
+    yaxis: { title: { text: 'cadence (SPM)', font: { size: 11 } }, gridcolor: '#e2e8f0',
+             range: [Math.min(140, Math.floor(Math.min(...y) - 10)), Math.max(200, Math.ceil(Math.max(...y) + 10))] },
     showlegend: false, hovermode: 'x unified'
   };
   loamPlot('runCadenceChart', traces, layout, PLOT_CFG);
@@ -6409,7 +6885,7 @@ function renderRunSegments(segments) {
   segments.forEach((s, i) => {
     const tr = document.createElement('tr');
     const dirCls = s.dir === 'down' ? 'dir-down' : 'dir-up';
-    const dirLabel = s.dir === 'down' ? '↓ DESC' : '↑ CLIMB';
+    const dirLabel = s.kind === 'lift' ? '⇡ LIFT' : s.dir === 'down' ? '↓ DESC' : '↑ CLIMB';
     const paceStr = s.paceMinPerKm == null ? '—' : (() => {
       const m = Math.floor(s.paceMinPerKm);
       const sec = Math.round((s.paceMinPerKm - m) * 60);
@@ -6434,14 +6910,21 @@ function renderRunSegments(segments) {
 function renderRunParams(D) {
   const det = D.detection;
   const r = D.running;
+  const sport = D.sport === 'walking' ? 'walking' : 'running';
   const mountStr = r.mount === 'hand' ? 'HAND (arm-swing detected)'
                  : r.mount === 'hip'  ? 'hip / torso (clean signal)'
                  : 'uncertain';
+  /* Gait chip: walk fraction on a walk; walk breaks on a run (only when there are any). */
+  const g = D.gait;
+  const gaitStr = !g ? ''
+    : sport === 'walking' ? `<span>gait <strong>WALK ${g.walkFrac != null ? (g.walkFrac * 100).toFixed(0) + '%' : ''}</strong></span>`
+    : (g.breaks && g.breaks.length ? `<span>walk breaks <strong>${g.breaks.length} (${Math.round(g.breaks.reduce((a, b) => a + (b.t1 - b.t0), 0))}s)</strong></span>` : '');
   document.getElementById('paramsBar').innerHTML = `
-    <span>sport <strong>RUNNING</strong> ${det.confidence ? `(${(det.confidence*100).toFixed(0)}% conf)` : ''}</span>
+    <span>sport <strong>${sport.toUpperCase()}</strong> ${det.confidence ? `(${(det.confidence*100).toFixed(0)}% conf)` : ''}</span>
     <span>phone mount <strong>${mountStr}</strong></span>
-    <span>cadence <strong>${r.cadMedian ? r.cadMedian.toFixed(0)+' SPM' : '—'}</strong></span>
+    <span>cadence <strong>${r.cadMedian ? r.cadMedian.toFixed(0)+' SPM' : '—'}</strong>${sport === 'walking' ? ' (step rate)' : ''}</span>
     <span>osc <strong>${r.oscMedian ? r.oscMedian.toFixed(1)+' cm' : '—'}</strong></span>
+    ${gaitStr}
     <span style="margin-left:auto">${det.reasons ? det.reasons.slice(0,2).join(' · ') : ''}</span>
   `;
 }
@@ -6559,10 +7042,58 @@ function renderCoachHighlights(D, sport) {
 function buildDigest(D, sport) {
   const s = D.summary || {};
   const r1 = (x, n = 1) => (x == null || isNaN(x)) ? null : +(+x).toFixed(n);
-  if (sport === 'running') {
+  /* GPS-only FIT ride: everything the coach may cite must be GPS-derivable. Per-descent detail is
+     computed here (not stored on segments) so the digest stays the single source for the coach. */
+  if (sport === 'ride') {
+    const loc = (D.sensors && D.sensors.location) || [];
+    const baro = (D.sensors && D.sensors.baro) || [];
+    const segStats = (seg) => {
+      const rows = loc.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.speed != null);
+      let d = 0; for (let i = 1; i < rows.length; i++) d += ((rows[i].speed + rows[i - 1].speed) / 2) * (rows[i].t - rows[i - 1].t);
+      const spd = rows.map(r => r.speed);
+      const b = baro.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
+      const vert = b.length > 1 ? Math.abs(b[b.length - 1].relativeAltitude - b[0].relativeAltitude) : null;
+      return {
+        duration_s: r1(seg.duration, 0), distance_m: r1(d, 0), grade_pct: r1(seg.gradeAvg),
+        vertical_m: r1(vert, 0),
+        avg_speed_mph: spd.length ? r1((d / Math.max(1, seg.duration)) * 2.23694) : null,
+        max_speed_mph: spd.length ? r1(Math.max(...spd) * 2.23694) : null,
+      };
+    };
+    const downs = (D.segments || []).filter(x => x.dir === 'down')
+      .map(segStats).filter(d => d.vertical_m == null || d.vertical_m >= MIN_DESCENT_DROP_M);
+    return {
+      sport: 'mountain bike ride (GPS-only FIT import, e.g. bike-park or lift-served day)',
+      duration_min: r1(s.duration / 60),
+      moving_min: r1(s.movingTime / 60),
+      stopped_min: r1(s.stoppedTime / 60),
+      ridden_distance_km: r1(s.riddenDistance / 1000, 2),
+      avg_riding_speed_mph: r1(s.avgSpeed * 2.23694),
+      max_speed_mph: r1(s.maxSpeed * 2.23694),
+      best_30s_mph: r1(s.peak30 * 2.23694),
+      elevation_gain_m: r1(s.altGain, 0),
+      elevation_loss_m: r1(s.altLoss, 0),
+      lifts: s.liftCount ? {
+        count: s.liftCount, distance_km: r1(s.liftDistance / 1000, 2),
+        time_min: r1(s.liftTime / 60), ascent_m: r1(s.liftAscent, 0),
+        note: 'Auto-detected lift/gondola rides, already excluded from the riding stats above.'
+      } : null,
+      vam_pedaled_climbs_m_per_h: r1(s.vamPedaled, 0),
+      descents: downs,
+      data_caveats: 'GPS-only FIT import: no phone motion data, so there are no turn, jump, airtime, braking, lean, or cadence metrics. Speed may be derived from GPS positions and is approximate. Descents are listed in ride order.'
+    };
+  }
+  if (sport === 'running' || sport === 'walking') {
     const run = D.running || {};
     return {
-      sport: 'running',
+      sport: sport === 'walking' ? 'walking (a walk or hike, not a run)' : 'running',
+      /* Gait classification: lets the coach speak to walk breaks on a run, and keeps it from
+         coaching running form on a walk. */
+      gait: D.gait ? {
+        activity: D.gait.activity,
+        walk_fraction_pct: D.gait.walkFrac != null ? +(D.gait.walkFrac * 100).toFixed(0) : null,
+        walk_breaks: (D.gait.breaks || []).map(b => ({ at_min: +((b.t0 - D.ride.start) / 60).toFixed(1), duration_s: Math.round(b.t1 - b.t0) })),
+      } : null,
       duration_min: r1(s.duration / 60),
       distance_km: r1(s.distance / 1000, 2),
       avg_pace_min_per_km: r1(s.paceMinPerKm, 2),
@@ -6579,6 +7110,7 @@ function buildDigest(D, sport) {
         grade_pct: r1(seg.gradeAvg), cadence_spm: r1(seg.cadAvg, 0), oscillation_cm: r1(seg.oscAvg)
       })),
       data_caveats: 'Cadence and oscillation are derived from AirPods/phone IMU; oscillation is head bob (a proxy for hip vertical motion). Phone mount detected as "' + run.mount + '" (confidence ' + r1(run.mountConfidence, 2) + ').'
+        + (sport === 'walking' ? ' This is a WALK: cadence is walking step rate (typical 100-120 spm); do not coach running form, pace zones, or oscillation targets.' : '')
     };
   }
   const turns = D.turns || [];
@@ -6713,8 +7245,39 @@ async function attachCoachDescentHistory(D, sport) {
 }
 
 function coachSystemPrompt(sport, level) {
-  const sportName = sport === 'running' ? 'running' : 'mountain biking';
-  const domain = sport === 'running' ? `Running reference points:
+  const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
+  if (sport === 'ride') {
+    /* GPS-only FIT import: the digest has pace/elevation/lift structure but zero body-motion
+       data. The coach must work within that honestly, and may point at the upgrade path once. */
+    return `You are Loam, an expert mountain-bike coach. This session is a GPS-only import from a bike computer or e-bike app: you have distance, speed, elevation, auto-detected lift rides, and per-descent stats, but NO body-motion data (no turns, jumps, airtime, braking, lean, or cadence). Never invent those.
+
+Method — for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies about the rider's day or riding.
+3. Action: one concrete focus for the next session.
+
+What GPS can honestly show, and how to coach it:
+- Lap structure on a lift day: descents count, vertical per lap, and how descent avg/max speeds evolve across the day (a late-day speed fade suggests fatigue; flat max but falling avg suggests more braking or traffic).
+- Pacing: compare each descent's avg speed to its max; a big gap on a sustained descent usually means the speed came in bursts rather than being carried.
+- Volume and rest: moving vs stopped vs lift time; total descending meters is the real workload on a park day.
+- Climbing (when pedaled climbs exist): VAM and climb grades.
+- Respect the data_caveats; speeds may be GPS-derived and approximate, so avoid overprecise claims.
+- At most once in the whole conversation, note that recording with the Loam Capture phone app on the same ride would add turn, jump, and body-motion coaching; do not repeat this or make it the headline.
+
+The athlete is at ${level} level — pitch depth and vocabulary accordingly.
+Be direct and encouraging, never fluffy. Do not restate the whole dataset.
+
+Format your FIRST analysis as compact markdown:
+- One bold headline takeaway (a single line).
+- 2-4 bullets, each a single metric -> mechanism -> action.
+- A final line "**Next session:** ..." naming one focus.
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+  }
+  const domain = sport === 'walking' ? `Walking/hiking reference points (the digest's gait block confirms this is a walk):
+- Cadence here is walking STEP rate: ~100-120 spm is typical; treat it descriptively, not as a target.
+- Coach what a walk rewards: pacing versus grade (did pace hold on the climbs?), elevation load and duration as training volume, and consistency across the outing.
+- Do NOT coach running form: no running-cadence targets (175-180 spm does not apply), no vertical-oscillation goals, no race-pace talk. If the gait block shows some running mixed in, mention it descriptively.
+- Oscillation on a walk is small and mount-dependent; ignore it unless it is clearly anomalous.` : sport === 'running' ? `Running reference points:
 - Cadence: ~175-180 spm is efficient for most runners. Under ~165 spm at easy pace usually means overstriding (heel-striking ahead of the center of mass, braking each step). A cadence drop of more than ~5% over a run signals fatigue.
 - Vertical oscillation (head bob, from AirPods): ~6-8 cm is good; 10+ cm wastes energy. It should decrease as form improves and on climbs.
 - On climbs cadence should hold or rise (shorter, quicker steps); long slow strides on hills waste energy. On descents: faster turnover, controlled oscillation.` : `Mountain biking reference points:
@@ -6883,6 +7446,10 @@ function renderCoachPanel(D, sport) {
      guards against firing while a reply is still streaming. */
   const chipText = sport === 'running'
     ? ['How do I lower my vertical oscillation?', 'Cadence drills for me', 'Pacing advice for the climbs']
+    : sport === 'walking'
+    ? ['How was my pacing on the climbs?', 'How can walks like this build fitness?', 'What should I try on my next hike?']
+    : sport === 'ride'
+    ? ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?']
     : ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
   if (chips) {
     chips.innerHTML = chipText.map(t => `<button class="coach-chip">${escapeHtml(t)}</button>`).join('');
@@ -6895,7 +7462,7 @@ function renderCoachPanel(D, sport) {
     compose.classList.remove('hidden');
     if (chips) chips.classList.remove('hidden');
     document.getElementById('coachInput').focus();
-    sendCoach(`Analyze this ${sport === 'running' ? 'run' : 'ride'} and coach me: what stands out, what does it mean, and what should I focus on?`);
+    sendCoach(`Analyze this ${sport === 'running' ? 'run' : sport === 'walking' ? 'walk' : 'ride'} and coach me: what stands out, what does it mean, and what should I focus on?`);
   };
   document.getElementById('coachSend').onclick = coachSendFromInput;
   document.getElementById('coachStop').onclick = () => { if (coachAbort) coachAbort.abort(); };
@@ -7099,6 +7666,7 @@ function buildSectionNav() {
     { el: visible('turnSection'), label: 'Per-turn' },
     { el: visible('runCadenceSection'), label: 'Cadence' },
     { el: visible('runSegmentsSection'), label: 'Segments' },
+    { el: visible('gpsUpsellSection'), label: 'Unlock more' },
     { el: visible('coachSection'), label: 'Coach' },
   ].filter(e => e.el);
   nav.innerHTML = '';
@@ -7542,10 +8110,10 @@ function renderRideSignature(D, sport) {
     }
     const s0 = pts[0], s1 = pts[pts.length - 1];
 
-    /* Stats, sport-aware. */
+    /* Stats, sport-aware. Walking shares the running layout. */
     const s = D.summary || {};
     let stats;
-    if (sport === 'running') {
+    if (sport === 'running' || sport === 'walking') {
       stats = [
         { ...rsSplit(U.dist(s.distance)), label: 'DISTANCE' },
         { ...rsSplit(U.pace ? U.pace(s.avgSpeed) : null), label: 'AVG PACE' },
@@ -7565,7 +8133,7 @@ function renderRideSignature(D, sport) {
     }
     const durMin = Math.floor((s.duration || (ride.end - ride.start)) / 60);
     const label = rsLabel(D.title);
-    const subtitle = `${sport === 'running' ? 'RUN' : 'RIDE'} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
+    const subtitle = `${sport === 'running' ? 'RUN' : sport === 'walking' ? 'WALK' : 'RIDE'} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
 
     const statCols = stats.map((st, i) => {
       const cx = 40 + i * ((W - 80) / stats.length);
@@ -8276,7 +8844,8 @@ function errorGuidance(msg) {
   if (/moving window/i.test(m)) return 'No moving window was found in the GPS. The recording may be too short, or Location was off during capture.';
   if (/accel or GPS|Missing accel/i.test(m)) return 'No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.';
   if (/too short|short/i.test(m)) return 'The recording looks too short to analyze. Capture a longer ride (at least a minute of moving) and try again.';
-  if (/Need a sensor file/i.test(m)) return 'Drop a Sensor Logger <strong>.zip</strong> or a Combined <strong>.csv</strong>. The .fit is an optional companion, not a substitute.';
+  if (/Need a sensor file/i.test(m)) return 'Drop a Sensor Logger <strong>.zip</strong> or a Combined <strong>.csv</strong>. A <strong>.fit</strong> works as a companion, or on its own as a GPS-only ride.';
+  if (/no usable GPS track/i.test(m)) return 'This FIT carries no positioned records, so there is nothing to map or measure. Export a FIT that includes GPS, or attach this one to a phone recording.';
   /* Always leave the user with something to do, even for an unrecognized failure. */
   return 'That recording could not be analyzed. Try a different file, switch the Sport above, or re-record with Location and Motion enabled.';
 }
@@ -8400,8 +8969,8 @@ function replayCachedAnalysis(cached, dedupKey) {
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   closeRideSwitcher();
   hide('dropzone'); hide('crossResults'); hide('progressResults'); hide('errorBox'); hide('loading'); show('results');
-  if (cached.sport === 'running') renderAllRunning(cached.data); else renderAll(cached.data);
-  setStatus('Loaded from library (' + (cached.sport === 'running' ? 'run' : 'ride') + ')', true);
+  if (cached.sport === 'running' || cached.sport === 'walking') renderAllRunning(cached.data); else renderAll(cached.data);
+  setStatus('Loaded from library (' + (cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride') + ')', true);
   if (dedupKey) setViewHash('#/ride/' + encodeURIComponent(dedupKey));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -8635,7 +9204,7 @@ function routeDroppedFiles(files) {
   if (skipped.length) {
     const names = skipped.map(f => f.name).join(', ');
     if (!supported.length) {
-      showError(`Unsupported file type: ${names}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv, and an optional companion .fit.`);
+      showError(`Unsupported file type: ${names}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv, and a .fit (companion or standalone).`);
       return;
     }
     /* Toast, not setStatus: analyze() overwrites the status line in the same tick. */
@@ -8651,11 +9220,13 @@ function routeDroppedFiles(files) {
     hide('errorBox');
     analyze(fit ? [...sensors, fit] : sensors);
   } else if (fit) {
-    /* A lone .fit only attaches to a single-ride render that is backed by its own File; on the
-       cross-ride or Progress views _lastSensorFile can belong to an earlier, unrelated ride. */
+    /* A lone .fit attaches to a single-ride render that is backed by its own File; on the
+       cross-ride or Progress views _lastSensorFile can belong to an earlier, unrelated ride.
+       Anywhere else it analyzes standalone as a GPS-only ride. */
     const singleRideShown = !document.getElementById('results').classList.contains('hidden');
+    hide('errorBox');
     if (singleRideShown && _lastSensorFile) analyze([_lastSensorFile, fit]);
-    else showError('That is a companion .fit on its own. Drop the ride recording (.zip or .csv) with it, or open a single ride first and then drop the .fit to attach it.');
+    else analyze([fit]);
   }
 }
 
@@ -8975,7 +9546,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '96d2b31 · 2026-07-03';
+const LOAM_BUILD = '852943f · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
