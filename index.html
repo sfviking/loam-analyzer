@@ -4264,13 +4264,24 @@ function computeRunSummary(loc, baro, ride, R) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
-  const avgSpeed = speeds.length ? speeds.reduce((a,b)=>a+b,0)/speeds.length : 0;
+  /* Distance from the GPS path: the sum of point-to-point great-circle hops, which is exactly how
+     Strava measures the uploaded GPX. Integrating Doppler speed under-reads at walking pace (slow GPS
+     speed floors toward 0), so the path length is the honest figure and agrees with Strava's number.
+     Haversine is inlined so the drift-guard test can run this function in isolation. */
   let distance = 0;
+  const toRad = d => d * Math.PI / 180, R_EARTH = 6371000;
   for (let i = 1; i < inRide.length; i++) {
-    const dt = inRide[i].t - inRide[i-1].t;
-    const v = (inRide[i].speed + inRide[i-1].speed) / 2;
-    distance += v * dt;
+    const a = inRide[i-1], b = inRide[i];
+    if (a.latitude == null || a.longitude == null || b.latitude == null || b.longitude == null) continue;
+    const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
+    const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
+             + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+    distance += 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
   }
+  const duration = ride.end - ride.start;
+  /* Average speed follows the path distance over the window, the way Strava derives pace, so pace and
+     distance stay consistent; max speed stays the instantaneous Doppler peak. */
+  const avgSpeed = duration > 0 ? distance / duration : 0;
   let altGain = 0, altLoss = 0;
   if (baro && baro.length) {
     const inB = baro.filter(r => r.t >= ride.start && r.t <= ride.end);
@@ -4280,7 +4291,7 @@ function computeRunSummary(loc, baro, ride, R) {
     }
   }
   return {
-    duration: ride.end - ride.start,
+    duration,
     distance, maxSpeed, avgSpeed,
     paceMinPerKm: avgSpeed > 0 ? (1000 / avgSpeed) / 60 : null,
     altGain, altLoss,
@@ -6893,6 +6904,10 @@ function renderRunStats(s, detection, mount) {
     const sec = Math.round((s.paceMinPerKm - m) * 60);
     return `${m}:${String(sec).padStart(2,'0')}`;
   })();
+  // Steps: stride count estimated from median cadence over the moving time (this pipeline has no raw
+  // pedometer channel); stride length is the path distance per step.
+  const stepsVal = s.cadMedian ? Math.round(s.cadMedian * (s.duration / 60)) : null;
+  const strideM = (stepsVal && s.distance) ? s.distance / stepsVal : null;
   document.getElementById('statsPanel').innerHTML = `
     <div class="stat accent">
       <div class="label">Cadence</div>
@@ -6913,6 +6928,11 @@ function renderRunStats(s, detection, mount) {
       <div class="label">Distance</div>
       <div class="value">${U.dist(s.distance)}</div>
       <div class="sub">moving distance</div>
+    </div>
+    <div class="stat">
+      <div class="label">Steps</div>
+      <div class="value">${stepsVal != null ? stepsVal.toLocaleString() : '—'}</div>
+      <div class="sub">${strideM != null ? U.small(strideM) + ' stride' : 'cadence × moving time'}</div>
     </div>
     <div class="stat accent3">
       <div class="label">Pace</div>
@@ -10754,7 +10774,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'e8a26d6 · 2026-07-03';
+const LOAM_BUILD = '096e600 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
