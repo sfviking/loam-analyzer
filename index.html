@@ -6220,6 +6220,7 @@ function renderAllGps(D) {
     const cav = document.getElementById('roadCornersCaveat');
     if (cav) cav.textContent = 'These are the sweeping corners 1 Hz GPS can resolve (berms and switchbacks at speed), a floor rather than a census: tight singletrack turns and their mechanics need a phone recording (see below). Repeat the same descent and compare apex speeds to track cornering confidence.';
     show('roadDescentsSection');
+    placeCornersUnderMap();
   }
   renderGpsUpsell(D);
   renderGeekStats(D, sport);
@@ -9513,6 +9514,7 @@ function detectRoadCorners(rows, opts = {}) {
         headingChange,
         apexSpeed: cur.apexV,
         entrySpeed: cur.entryV,
+        exitSpeed: cur.exitV,
         radius: wAbs > 0.01 ? cur.apexV / wAbs : null,
         apexLat: cur.apexLat, apexLon: cur.apexLon, tApex: cur.tApex,
       });
@@ -9522,14 +9524,14 @@ function detectRoadCorners(rows, opts = {}) {
   for (const s of sm) {
     const sign = s.w > 0 ? 1 : -1;
     if (Math.abs(s.w) >= ENTER && (!cur || cur.sign === sign)) {
-      if (!cur) cur = { sign, tStart: s.t, tEnd: s.t, sum: 0, apexW: 0, apexV: s.v, entryV: s.v, apexLat: s.lat, apexLon: s.lon, tApex: s.t };
-      cur.tEnd = s.t;
+      if (!cur) cur = { sign, tStart: s.t, tEnd: s.t, sum: 0, apexW: 0, apexV: s.v, entryV: s.v, exitV: s.v, apexLat: s.lat, apexLon: s.lon, tApex: s.t };
+      cur.tEnd = s.t; cur.exitV = s.v;
       cur.sum += s.w;
       if (Math.abs(s.w) > Math.abs(cur.apexW)) { cur.apexW = s.w; cur.apexV = s.v; cur.apexLat = s.lat; cur.apexLon = s.lon; cur.tApex = s.t; }
     } else if (cur && (Math.abs(s.w) < EXIT || sign !== cur.sign)) {
       close();
     } else if (cur) {
-      cur.tEnd = s.t;
+      cur.tEnd = s.t; cur.exitV = s.v;
       cur.sum += s.w;
     }
   }
@@ -9828,7 +9830,7 @@ function renderAllRoad(D) {
   renderRoadDescents(D);
   { const cav = document.getElementById('roadCornersCaveat');
     if (cav) cav.textContent = 'Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.'; }
-  if (D.descents && D.descents.length) show('roadDescentsSection');
+  if (D.descents && D.descents.length) { show('roadDescentsSection'); placeCornersUnderMap(); }
   if (D.descentHistory && D.descentHistory.length) { renderRoadDescentHistory(D); show('roadDescentHistorySection'); }
   if (D.mmp && D.mmp.length) {
     show('roadPowerCurveSection');
@@ -9886,6 +9888,28 @@ function renderRoadSpeedChart(D) {
   loamPlot('roadSpeedChart', traces, layout, PLOT_CFG);
 }
 
+/* Corner color = tightness (apex radius, in meters, so it is unit-independent). Warm reads as
+   "technical, slow down"; cool green as "open sweeper you can carry speed through". Shared by the
+   corner chips and the map markers so the list and the map speak the same language. */
+function cornerColor(radiusM) {
+  if (radiusM == null) return '#94a3b8';   // unknown radius -> neutral gray
+  if (radiusM < 6) return '#c0392b';        // very tight (hairpin)
+  if (radiusM < 12) return '#e08a3c';       // tight
+  if (radiusM < 25) return '#b8912f';       // medium
+  return '#4e9b74';                          // open / sweeper
+}
+const CORNER_LEGEND = [['tight', '#c0392b'], ['', '#e08a3c'], ['medium', '#b8912f'], ['sweeper', '#4e9b74']];
+
+/* Move the Descents & corners section (with the tap-to-map chips + colored corner markers) to sit
+   directly under the map, so the chip list and the map it drives read together instead of being
+   separated by the timeline and runs table. Only the GPS-ride and road views call this; the section
+   is hidden in every other view, so its relocated DOM position is harmless there. */
+function placeCornersUnderMap() {
+  const ov = document.getElementById('overviewSection');
+  const rd = document.getElementById('roadDescentsSection');
+  if (ov && rd && ov.parentNode) ov.after(rd);
+}
+
 function renderRoadDescents(D) {
   const tb = document.querySelector('#roadDescentsTable tbody');
   if (!tb) return;
@@ -9901,15 +9925,23 @@ function renderRoadDescents(D) {
      to that corner on tap, so the list and the map read together. */
   const det = document.getElementById('roadCornersDetail');
   if (det) {
+    /* Legend: the chips are colored by corner tightness (left bar), so a long list can be scanned
+       for the technical corners at a glance instead of reading every radius. */
+    const legend = `<div style="font-size:11px; color:var(--text-muted); margin-bottom:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+      <span>corner tightness:</span>
+      ${CORNER_LEGEND.map(([lbl, col]) => `<span style="display:inline-flex; align-items:center; gap:4px;"><span style="width:11px; height:11px; border-radius:2px; background:${col}; display:inline-block;"></span>${lbl}</span>`).join('')}
+      <span class="dim">· chip = direction, heading change, radius, apex speed · tap to jump to it on the map</span>
+    </div>`;
     const blocks = (D.descents || []).filter(d => d.corners.length).map(d => {
-      const chips = d.corners.map((c, ci) => {
+      const chips = d.corners.map((c) => {
         const pos = (c.apexLat != null && c.apexLon != null) ? ` data-lat="${c.apexLat}" data-lon="${c.apexLon}"` : '';
-        return `<span class="road-corner-chip"${pos} style="display:inline-block; background:var(--surface2, #f1f5f9); border:1px solid var(--border); border-radius:6px; padding:2px 8px; margin:2px 4px 2px 0; font-size:12px;${pos ? ' cursor:pointer;' : ''}" title="${pos ? 'Show on map' : ''}">${c.dir} ${Math.round(c.headingChange)}&deg; · r ${c.radius != null ? U.small(c.radius) : '?'} · ${U.speed(c.apexSpeed)}</span>`;
+        const col = cornerColor(c.radius);
+        return `<span class="road-corner-chip"${pos} style="display:inline-block; background:var(--surface2, #f1f5f9); border:1px solid var(--border); border-left:4px solid ${col}; border-radius:5px; padding:2px 8px; margin:2px 4px 2px 0; font-size:12px;${pos ? ' cursor:pointer;' : ''}" title="${pos ? 'Show on map' : ''}">${c.dir} ${Math.round(c.headingChange)}&deg; · r ${c.radius != null ? U.small(c.radius) : '?'} · ${U.speed(c.apexSpeed)}</span>`;
       }).join('');
       const lapTag = d.group ? ` <span class="dim" style="font-size:11px;">(lap ${d.group}&middot;${d.lap})</span>` : '';
       return `<div style="margin-top:6px;"><span class="dim" style="font-size:12px;">Descent ${d.index}${lapTag}:</span> ${chips}</div>`;
     }).join('');
-    det.innerHTML = blocks;
+    det.innerHTML = blocks ? (legend + blocks) : '';
     det.querySelectorAll('.road-corner-chip[data-lat]').forEach(el => {
       el.onclick = () => {
         if (!mapInstance) return;
@@ -9925,16 +9957,31 @@ function renderRoadDescents(D) {
    numbers. Added to the current mapInstance, so they are torn down with the map on re-render. */
 function renderRoadCornerMarkers(D) {
   if (!mapInstance) return;
+  const sp = (v) => v != null ? U.speedNum(v).toFixed(1) : '?';
+  /* Arrow between two speeds along the corner: down (red) = braking/scrubbing, up (green) = back on
+     the gas. A corner normally reads entry -> apex (down) -> exit (up); a flat entry->apex means the
+     corner was taken without slowing. Tolerance keeps GPS jitter from flipping the arrow. */
+  const arrow = (from, to) => {
+    if (from == null || to == null) return ' · ';
+    if (to < from - 0.3) return ' <span style="color:#c0392b;">&#8600;</span> ';
+    if (to > from + 0.3) return ' <span style="color:#3b7d5b;">&#8599;</span> ';
+    return ' <span style="color:#94a3b8;">&#8594;</span> ';
+  };
   for (const d of (D.descents || [])) {
     for (const c of d.corners) {
       if (c.apexLat == null || c.apexLon == null) continue;
-      const color = c.dir === 'L' ? '#3d6fb0' : '#5f9e7f';
+      /* Marker color = tightness (matches the chips); the L/R letter carries direction. */
+      const color = cornerColor(c.radius);
       const icon = L.divIcon({ className: '', iconSize: [16, 16], iconAnchor: [8, 8],
         html: `<div style="width:16px; height:16px; border-radius:50%; background:${color}; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.4); color:#fff; font-size:10px; font-weight:700; line-height:12px; text-align:center;">${c.dir}</div>` });
+      /* Entry first, then apex, then exit, with arrows showing where speed dropped and came back. */
+      const trace = `entry ${sp(c.entrySpeed)}${arrow(c.entrySpeed, c.apexSpeed)}apex ${sp(c.apexSpeed)}`
+        + (c.exitSpeed != null ? `${arrow(c.apexSpeed, c.exitSpeed)}exit ${sp(c.exitSpeed)}` : '')
+        + ` ${U.speedUnit()}`;
       L.marker([c.apexLat, c.apexLon], { icon, title: `Corner (descent ${d.index})` })
         .bindPopup(`<strong>Descent ${d.index}${d.group ? ' (lap ' + d.group + '&middot;' + d.lap + ')' : ''}</strong><br>` +
           `${c.dir === 'L' ? 'Left' : 'Right'} ${Math.round(c.headingChange)}&deg; · radius ${c.radius != null ? U.small(c.radius) : '?'}<br>` +
-          `apex ${U.speed(c.apexSpeed)} · entry ${U.speed(c.entrySpeed)}`)
+          trace)
         .addTo(mapInstance);
     }
   }
@@ -11079,7 +11126,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '647271d · 2026-07-03';
+const LOAM_BUILD = 'c99192f · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
