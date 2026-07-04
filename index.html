@@ -4653,7 +4653,7 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
      net-drop floor; running keeps every graded segment (hill repeats are short). */
   const rawDescents = extractRideDescents(sensors, ride, filename,
-    (isMtbFamily(sport) || sport === 'ride') ? MIN_DESCENT_DROP_M : 0);
+    (isMtbFamily(sport) || sport === 'ride' || sport === 'road') ? MIN_DESCENT_DROP_M : 0);
   const descents = [];
   for (const d of rawDescents) {
     const poly = descentPolyline(sensors, d);
@@ -4709,6 +4709,15 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
       maxSpeed: summary && summary.maxSpeed != null ? summary.maxSpeed : null,
       altGain: summary && summary.altGain != null ? summary.altGain : null,
       altLoss: summary && summary.altLoss != null ? summary.altLoss : null,
+      /* Road power headline, stored so the coach can trend it and the Progress dashboard can chart
+         it. Null on non-road rides; older rides simply lack these keys. mmp is the ride's power
+         curve (duration -> watts), the raw material for a library-wide best-power envelope. */
+      ...(summary && summary.np != null ? { np: summary.np } : {}),
+      ...(summary && summary.avgPower != null ? { avgPower: summary.avgPower } : {}),
+      ...(summary && summary.tss != null ? { tss: summary.tss } : {}),
+      ...(summary && summary.intensityFactor != null ? { intensityFactor: summary.intensityFactor } : {}),
+      ...(summary && summary.ftp != null ? { ftp: summary.ftp } : {}),
+      ...(summary && summary.mmp ? { mmp: summary.mmp } : {}),
     },
     turnCount: turnCount || 0,
     jumpCount: jumpCount || 0,
@@ -7224,6 +7233,13 @@ function roadHighlights(D) {
   const out = [];
   const m = D.metrics || {};
   const climbs = D.climbs || [];
+  /* Power PRs vs the library envelope lead the highlights when present, the fitness-arriving moment. */
+  if (D.powerPRs && D.powerPRs.length) {
+    const fmt = (s) => s < 60 ? s + 's' : (s < 3600 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h');
+    const notable = D.powerPRs.filter(s => [5, 15, 60, 300, 1200, 3600].includes(s));
+    const list = (notable.length ? notable : D.powerPRs).slice(0, 4).map(fmt).join(', ');
+    out.push(`<strong>New power best${D.powerPRs.length > 1 ? 's' : ''} today</strong> at ${list} (vs your saved rides)`);
+  }
   const real = climbs.filter(c => c.duration >= 120 && c.avgPower != null);
   if (real.length) {
     const big = real.reduce((a, b) => (b.gain > a.gain ? b : a));
@@ -7299,6 +7315,9 @@ function buildDigest(D, sport) {
       best_power_w: {
         '5s': mmpBy[5] ?? null, '1m': mmpBy[60] ?? null, '5m': mmpBy[300] ?? null, '20m': mmpBy[1200] ?? null,
       },
+      power_bests_set_today: (D.powerPRs && D.powerPRs.length)
+        ? { durations: D.powerPRs.map(s => s < 60 ? s + 's' : s < 3600 ? Math.round(s / 60) + 'm' : (s / 3600) + 'h'), note: 'durations where this ride beat the rider\'s best across their saved road rides; celebrate these specifically' }
+        : null,
       zones: D.zones ? D.zones.filter(z => z.pct > 0.005).map(z => ({ zone: 'Z' + z.zone, name: z.name, pct: r1(z.pct * 100, 0), minutes: r1(z.seconds / 60, 0) })) : null,
       power_cadence_quadrants: D.quadrants ? {
         split_cadence_rpm: D.quadrants.cadSplit, split_power_w: D.quadrants.powerSplit,
@@ -7491,6 +7510,12 @@ async function attachCoachHistory(D, sport) {
         if (u.avgSpeed != null) o.avg_speed_mph = +(u.avgSpeed * 2.23694).toFixed(1);
         if (u.altGain != null) o.elevation_gain_m = +u.altGain.toFixed(0);
         if (isMtbFamily(sport)) { if (r.turnCount) o.turns = r.turnCount; if (r.jumpCount) o.jumps = r.jumpCount; }
+        if (sport === 'road') {
+          if (u.np != null) o.normalized_power_w = u.np;
+          if (u.avgPower != null) o.avg_power_w = u.avgPower;
+          if (u.tss != null) o.tss = u.tss;
+          if (u.intensityFactor != null) o.intensity_factor = u.intensityFactor;
+        }
         return o;
       });
     if (hist.length) coachState.digest.history = hist;
@@ -7568,6 +7593,7 @@ Road reference points:
 - W/kg: when climbs carry w_per_kg (the rider set a weight), that is the honest climbing currency; coach climbs in W/kg, not raw watts. rider FTP may be an estimate (see ftp_source), so hedge zone and IF talk when it says "estimate".
 - Balance: persistent deviation past ~55/45, or drift_pct_points_first_to_second_half beyond ~2-3 points, points at one-sided fatigue, an old injury, or bike fit; suggest single-leg work or a fit check, and re-measuring on a similar ride. The side labels are provisional (see data_caveats), so coach the magnitude of asymmetry and drift, not which specific leg, unless the rider confirms.
 - best_power_w (5s/1m/5m/20m) sketches the rider's profile: sprint vs steady-state. 20m best times 0.95 approximates FTP; if that disagrees with the stored FTP, suggest retesting.
+- Trend and bests: a history array (the rider's recent saved road rides, newest first, with NP/TSS/IF) lets you compare this ride to recent form instead of coaching it in isolation. power_bests_set_today lists the durations where this ride beat the rider's best across all their saved rides; call those out specifically and celebrate them, they are the "fitness is arriving" moments. Never invent history or bests that are not in the data.
 - Descents and corners: counts, radii, and apex speeds are GPS geometry for sweeping corners only, a floor, not a census. repeated_descents lists laps of the same descent: compare times and avg_corner_apex_mph across laps (a later lap slower mainly via lower apex speeds means braking earlier when tired, a skill/confidence signal, not fitness). Never invent lean or braking data.
 - Respect data_caveats. Do not coach motor assist: these are rider watts.
 
@@ -9456,7 +9482,48 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const recMaxSpeed = samples.reduce((a, s) => (s.speed != null && s.speed > a ? s.speed : a), 0);
   const maxSpeed = session && session.maxSpeed != null ? session.maxSpeed : (recMaxSpeed || null);
   if (superseded()) return;
-  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, metrics, mmp, zones, quadrants, balance, balanceDrift, movingTime, maxSpeed, segments, title: fitFile.name, sport: 'road' };
+  /* Persist to the library so road rides accumulate a history: the coach reads prior rides for a
+     trend (NP/TSS week over week), the Progress dashboard can chart them, and a saved ride re-opens
+     from the library. The road summary carries the power headline and the ride's power curve. */
+  const avgMovingSpeed = (session && session.distance != null && movingTime) ? session.distance / movingTime
+    : (session && session.avgSpeed != null ? session.avgSpeed : null);
+  const roadSummary = {
+    distance: session && session.distance != null ? session.distance : null,
+    avgSpeed: avgMovingSpeed, maxSpeed,
+    altGain: session ? session.totalAscent : null, altLoss: session ? session.totalDescent : null,
+    np: metrics.np != null ? Math.round(metrics.np) : null,
+    avgPower: metrics.avg != null ? Math.round(metrics.avg) : null,
+    tss: metrics.tss != null ? Math.round(metrics.tss) : null,
+    intensityFactor: metrics.if != null ? +metrics.if.toFixed(2) : null,
+    ftp: metrics.ftp || null,
+    mmp: mmp.map(e => ({ duration: e.duration, watts: Math.round(e.watts) })),
+  };
+  let contentHash = null;
+  try { contentHash = await analysisCacheKeyForFile(fitFile); } catch (e) { console.warn('FIT hash failed', e); }
+  if (superseded()) return;
+  _currentRunKey = contentHash;
+  const recordedAt = new Date((records[0].ts + FIT_EPOCH_UNIX) * 1000).toISOString();
+  let saved = null;
+  try {
+    saved = await saveRideToLibrary({ filename: fitFile.name, sport: 'road', sensors, ride, summary: roadSummary, contentKey: contentHash, recordedAt });
+    if (contentHash) await putRideSource(contentHash, fitFile.name, buf);
+  } catch (e) { console.warn('road library save failed', e); }
+  if (superseded()) return;
+  /* Best-power envelope: the highest watts ever held at each duration across the rider's other saved
+     road rides. Overlaying it on this ride's curve answers "am I getting fitter", and any duration
+     where today beats it is a power PR. Best-effort; no history just means no envelope. */
+  let powerEnvelope = null, powerPRs = [];
+  try {
+    const priors = (await listRides()).filter(r => r.sport === 'road' && r.summary && r.summary.mmp && r.dedupKey !== contentHash);
+    if (priors.length) {
+      const best = {};
+      for (const r of priors) for (const e of r.summary.mmp) { if (best[e.duration] == null || e.watts > best[e.duration]) best[e.duration] = e.watts; }
+      powerEnvelope = mmp.map(e => ({ duration: e.duration, watts: best[e.duration] != null ? best[e.duration] : null }));
+      powerPRs = mmp.filter(e => best[e.duration] != null && Math.round(e.watts) > best[e.duration]).map(e => e.duration);
+    }
+  } catch (e) { console.warn('power envelope', e); }
+  if (superseded()) return;
+  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, metrics, mmp, powerEnvelope, powerPRs, zones, quadrants, balance, balanceDrift, movingTime, maxSpeed, segments, libraryRideId: saved && saved.id, title: fitFile.name, sport: 'road' };
   onProgress('rendering');
   hide('loading'); show('results');
   renderAllRoad(D);
@@ -9603,11 +9670,23 @@ function renderRoadCornerMarkers(D) {
 function renderRoadPowerCurve(D) {
   if (!D.mmp || !D.mmp.length) return;
   const fmtDur = (s) => s < 60 ? s + 's' : (s < 3600 ? Math.round(s / 60) + 'm' : (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h');
-  const trace = {
+  const traces = [];
+  /* Best-power envelope from prior rides, drawn behind this ride so today reads against all-time. */
+  if (D.powerEnvelope && D.powerEnvelope.some(e => e.watts != null)) {
+    const env = D.powerEnvelope.filter(e => e.watts != null);
+    traces.push({
+      x: env.map(e => e.duration), y: env.map(e => e.watts),
+      type: 'scatter', mode: 'lines', line: { color: '#94a3b8', width: 1.5, dash: 'dot' },
+      name: 'best ever', text: env.map(e => fmtDur(e.duration)), hovertemplate: 'best-ever %{text}: %{y} W<extra></extra>',
+    });
+  }
+  const prSet = new Set(D.powerPRs || []);
+  traces.push({
     x: D.mmp.map(e => e.duration), y: D.mmp.map(e => Math.round(e.watts)),
-    type: 'scatter', mode: 'lines+markers', line: { color: '#c54b3c', width: 2 }, marker: { size: 6 },
-    text: D.mmp.map(e => fmtDur(e.duration)), hovertemplate: 'best %{text}: <b>%{y} W</b><extra></extra>',
-  };
+    type: 'scatter', mode: 'lines+markers', line: { color: '#c54b3c', width: 2 }, name: 'this ride',
+    marker: { size: D.mmp.map(e => prSet.has(e.duration) ? 11 : 6), color: D.mmp.map(e => prSet.has(e.duration) ? '#e0a53a' : '#c54b3c'), symbol: D.mmp.map(e => prSet.has(e.duration) ? 'star' : 'circle') },
+    text: D.mmp.map(e => fmtDur(e.duration) + (prSet.has(e.duration) ? ' (new best!)' : '')), hovertemplate: 'best %{text}: <b>%{y} W</b><extra></extra>',
+  });
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
@@ -9615,7 +9694,7 @@ function renderRoadPowerCurve(D) {
     xaxis: { type: 'log', title: { text: 'duration', font: { size: 11 } }, gridcolor: '#e2e8f0',
       tickvals: [1, 5, 15, 60, 300, 1200, 3600], ticktext: ['1s', '5s', '15s', '1m', '5m', '20m', '1h'] },
     yaxis: { title: { text: 'watts', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
-    showlegend: false, hovermode: 'x unified',
+    showlegend: traces.length > 1, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } }, hovermode: 'x unified',
   };
   const ftp = D.metrics && D.metrics.ftp;
   if (ftp) {
@@ -9624,7 +9703,7 @@ function renderRoadPowerCurve(D) {
     layout.annotations = [{ xref: 'paper', yref: 'y', x: 1, y: ftp, xanchor: 'right', yanchor: 'bottom',
       showarrow: false, text: `FTP ${ftp} W`, font: { size: 10, color: '#8caa6d' } }];
   }
-  loamPlot('roadPowerCurve', [trace], layout, PLOT_CFG);
+  loamPlot('roadPowerCurve', traces, layout, PLOT_CFG);
 }
 
 /* FTP + weight inputs. Changing either recomputes the power metrics, so commit re-runs the road
@@ -10675,7 +10754,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '40a2351 · 2026-07-03';
+const LOAM_BUILD = 'e8a26d6 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
