@@ -1251,9 +1251,20 @@
   <section id="roadPowerCurveSection" class="hidden">
     <div class="section-title">
       Power curve
-      <span class="subtitle">best average power for every duration in this ride</span>
+      <span class="subtitle">best average power for every duration · your FTP and weight set the zones and W/kg</span>
     </div>
+    <div id="roadRiderControls" style="margin-bottom:12px;"></div>
     <div class="chart" id="roadPowerCurve" style="height:280px;"></div>
+    <div id="roadZones" style="margin-top:14px;"></div>
+  </section>
+
+  <section id="roadQuadrantSection" class="hidden">
+    <div class="section-title">
+      Power vs cadence
+      <span class="subtitle">how you make your power · split at your median cadence and FTP</span>
+    </div>
+    <div class="chart" id="roadQuadrantChart" style="height:340px;"></div>
+    <div id="roadQuadrantShares" style="margin-top:10px;"></div>
   </section>
 
   <section id="roadLapsSection" class="hidden">
@@ -6034,7 +6045,7 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   formStop();
-  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadPowerCurveSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
 }
@@ -6756,6 +6767,16 @@ function setLoamUnits(u) { try { localStorage.setItem('loam_units', u); } catch 
    See findCalibWithWindow. Persisted in localStorage; takes effect by re-running the current ride. */
 function loamCalibStrategy() { return localStorage.getItem('loam_calib') === 'quietest' ? 'quietest' : 'preride'; }
 function setLoamCalibStrategy(s) { try { localStorage.setItem('loam_calib', s === 'preride' ? 'preride' : 'quietest'); } catch (e) { /* private mode / quota */ } }
+/* Rider settings for road power analysis: FTP (W) and weight (kg), persisted locally. FTP is an
+   optional override of the head unit's stored value; weight unlocks W/kg. Both stored as numbers or
+   omitted. Kept minimal; the era-correct ftpHistory in the spec is a later (library) concern. */
+function loamAthlete() { try { return JSON.parse(localStorage.getItem('loamAthlete') || '{}') || {}; } catch (e) { return {}; } }
+function setLoamAthlete(patch) {
+  const cur = loamAthlete();
+  for (const k of Object.keys(patch)) { if (patch[k] == null || patch[k] === '' || isNaN(patch[k])) delete cur[k]; else cur[k] = +patch[k]; }
+  try { localStorage.setItem('loamAthlete', JSON.stringify(cur)); } catch (e) { /* private mode / quota */ }
+  return cur;
+}
 const U = {
   metric() { return loamUnits() === 'metric'; },
   dist(m) { if (m == null || isNaN(m)) return '—'; return U.metric() ? (m >= 1000 ? (m/1000).toFixed(2)+' km' : Math.round(m)+' m') : (m >= 160.9 ? (m/1609.34).toFixed(2)+' mi' : Math.round(m*3.28084)+' ft'); },
@@ -7270,11 +7291,21 @@ function buildDigest(D, sport) {
       power: {
         normalized_w: r1(m.np, 0), average_w: r1(m.avg, 0),
         variability_index: r1(m.vi, 2), intensity_factor: r1(m.if, 2), tss: r1(m.tss, 0),
-        ftp_w: m.ftp || null, ftp_source: m.ftp ? 'stored on the head unit' : 'unknown (IF/TSS unavailable)',
+        ftp_w: m.ftp || null,
+        ftp_source: m.ftpSource === 'device' ? 'stored on the head unit' : m.ftpSource === 'manual' ? 'entered by the rider' : m.ftpSource === 'estimate' ? 'estimated from this ride (0.95 x best 20 min), not a test' : 'unknown (IF/TSS unavailable)',
+        ftp_estimate_from_this_ride_w: r1(m.eftp, 0),
+        rider_weight_kg: m.weightKg || null,
       },
       best_power_w: {
         '5s': mmpBy[5] ?? null, '1m': mmpBy[60] ?? null, '5m': mmpBy[300] ?? null, '20m': mmpBy[1200] ?? null,
       },
+      zones: D.zones ? D.zones.filter(z => z.pct > 0.005).map(z => ({ zone: 'Z' + z.zone, name: z.name, pct: r1(z.pct * 100, 0), minutes: r1(z.seconds / 60, 0) })) : null,
+      power_cadence_quadrants: D.quadrants ? {
+        split_cadence_rpm: D.quadrants.cadSplit, split_power_w: D.quadrants.powerSplit,
+        grind_pct: r1(D.quadrants.grind * 100, 0), attack_pct: r1(D.quadrants.attack * 100, 0),
+        spin_pct: r1(D.quadrants.spin * 100, 0), cruise_pct: r1(D.quadrants.cruise * 100, 0),
+        note: 'grind = high force low rpm, attack = high force high rpm, spin = low force high rpm, cruise = low force low rpm; over-representation in grind suggests low neuromuscular range',
+      } : null,
       balance: D.balance ? {
         left_pct: r1(D.balance.left), right_pct: r1(D.balance.right),
         drift_pct_points_first_to_second_half: D.balanceDrift,
@@ -7287,7 +7318,7 @@ function buildDigest(D, sport) {
       climbs: (D.climbs || []).map(c => ({
         n: c.index, duration_s: r1(c.duration, 0), distance_m: r1(c.distance, 0), gain_m: r1(c.gain, 0),
         avg_grade_pct: r1(c.avgGrade), vam_m_per_h: r1(c.vam, 0),
-        avg_power_w: r1(c.avgPower, 0), np_w: r1(c.normalizedPower, 0), cadence_rpm: r1(c.avgCadence, 0),
+        avg_power_w: r1(c.avgPower, 0), w_per_kg: r1(c.wattsPerKg, 1), np_w: r1(c.normalizedPower, 0), cadence_rpm: r1(c.avgCadence, 0),
         hr_drift_bpm: r1(c.hrDrift, 0), pacing_fade_pct: c.pacingFade != null ? r1(c.pacingFade * 100, 0) : null,
       })),
       descents: (D.descents || []).map(descentRow),
@@ -7533,6 +7564,8 @@ Road reference points:
 - intensity_factor = NP/FTP and tss size the ride: IF 0.7 is endurance, 0.85 hard tempo, near 1.0 a maximal hour. Trust these only as far as the stored FTP is current; say so if the numbers look inconsistent with HR.
 - Climbs: pacing_fade_pct is last-third vs first-third power. Below about -10% means the climb started too hot; a small positive fade with steady HR is well ridden. VAM (vertical m/h) is the climbing-speed currency; hr_drift with flat power suggests heat or fatigue.
 - Cadence: most riders are efficient at 85-95 rpm on the flat; a big cadence drop on climbs (grinding) loads the knees and burns matches. Compare climb cadence to overall.
+- Zones and quadrants: the zones block is time in Coggan power zones, which reveals the ride's intent (lots of Z2 is base endurance; heavy Z4-Z5 is intervals; scattered means unstructured). power_cadence_quadrants is pedaling style: a high grind_pct is low-cadence mashing (knee load, matches burned), and the fix is high-cadence work to expand that quadrant. Coach the shape, not one data point.
+- W/kg: when climbs carry w_per_kg (the rider set a weight), that is the honest climbing currency; coach climbs in W/kg, not raw watts. rider FTP may be an estimate (see ftp_source), so hedge zone and IF talk when it says "estimate".
 - Balance: persistent deviation past ~55/45, or drift_pct_points_first_to_second_half beyond ~2-3 points, points at one-sided fatigue, an old injury, or bike fit; suggest single-leg work or a fit check, and re-measuring on a similar ride. The side labels are provisional (see data_caveats), so coach the magnitude of asymmetry and drift, not which specific leg, unless the rider confirms.
 - best_power_w (5s/1m/5m/20m) sketches the rider's profile: sprint vs steady-state. 20m best times 0.95 approximates FTP; if that disagrees with the stored FTP, suggest retesting.
 - Descents and corners: counts, radii, and apex speeds are GPS geometry for sweeping corners only, a floor, not a census. repeated_descents lists laps of the same descent: compare times and avg_corner_apex_mph across laps (a later lap slower mainly via lower apex speeds means braking earlier when tired, a skill/confidence signal, not fitness). Never invent lean or braking data.
@@ -9158,6 +9191,47 @@ function mmpCurve(power1Hz, durations = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600,
   }
   return out;
 }
+/* Estimated FTP: 0.95 x best 20-minute power (a rough single-ride estimate, not a test). */
+function estimatedFtp(power1Hz) {
+  const c = mmpCurve(power1Hz, [1200]);
+  return c.length ? Math.round(c[0].watts * 0.95) : null;
+}
+/* Coggan power zones as fractions of FTP. Coasting (0 W) falls in Z1 (recovery). Null without FTP. */
+function powerZones(power1Hz, ftp) {
+  if (!ftp || !power1Hz || !power1Hz.length) return null;
+  const edges = [0.55, 0.75, 0.90, 1.05, 1.20, 1.50].map(f => f * ftp);
+  const names = ['Active recovery', 'Endurance', 'Tempo', 'Threshold', 'VO2max', 'Anaerobic', 'Neuromuscular'];
+  const secs = new Array(7).fill(0);
+  for (const raw of power1Hz) {
+    const w = raw == null ? 0 : raw;
+    let z = 0;
+    while (z < 6 && w >= edges[z]) z++;
+    secs[z]++;
+  }
+  const total = power1Hz.length;
+  return names.map((name, i) => ({ zone: i + 1, name, seconds: secs[i], pct: secs[i] / total }));
+}
+/* Power-cadence quadrants: pedaling samples split by cadence (rider median, default 85 rpm) and
+   power (FTP) into grind / attack / spin / cruise. Null without a power split or enough samples. */
+function powerCadenceQuadrants(rows, cadSplit, powerSplit) {
+  const pts = (rows || []).filter(r => r.cad != null && r.cad > 0 && r.power != null && r.power > 0);
+  if (pts.length < 10 || !powerSplit) return null;
+  const cs = cadSplit || 85;
+  const q = { grind: 0, attack: 0, spin: 0, cruise: 0 };
+  for (const r of pts) {
+    const highP = r.power >= powerSplit, highC = r.cad >= cs;
+    if (highP && highC) q.attack++;
+    else if (highP && !highC) q.grind++;
+    else if (!highP && highC) q.spin++;
+    else q.cruise++;
+  }
+  const n = pts.length;
+  return {
+    cadSplit: cs, powerSplit, n,
+    grind: q.grind / n, attack: q.attack / n, spin: q.spin / n, cruise: q.cruise / n,
+    points: pts.map(r => ({ cad: r.cad, power: r.power })),
+  };
+}
 
 /* Road descent corners from GPS heading rate. Road corners are long sweepers (radius 20-200 m,
    several seconds at descent speed), so 1 Hz GPS resolves them; entry threshold is 4 deg/s, far
@@ -9345,16 +9419,28 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const inWin = (t) => t >= ride.start && t <= ride.end;
   const fitInRide = records.map(r => Object.assign({}, r, { t_phone: r.ts - t0 })).filter(r => inWin(r.t_phone));
   const samples = records.map(r => ({ t: r.ts - t0, power: r.power, cad: r.cad, hr: r.hr, altitude: r.altitude, speed: r.speed, latitude: r.lat, longitude: r.lon })).filter(s => inWin(s.t));
+  const { power: p1hz } = resampleTo1Hz(samples.map(s => ({ t: s.t, power: s.power })));
+  const mmp = mmpCurve(p1hz);
+  /* FTP precedence: a rider-entered override wins, else the value the head unit stored, else a
+     single-ride estimate (0.95 x best 20 min). Weight (kg) unlocks W/kg and is rider-entered only. */
+  const athlete = loamAthlete();
+  const eftp = estimatedFtp(p1hz);
+  const deviceFtp = session && session.thresholdPower ? session.thresholdPower : null;
+  const ftp = athlete.ftp || deviceFtp || eftp || null;
+  const ftpSource = athlete.ftp ? 'manual' : (deviceFtp ? 'device' : (eftp ? 'estimate' : null));
+  const weightKg = athlete.weightKg || null;
   const segments = detectGradeSegments([], sensors.location, ride);
-  const climbs = analyzeClimbs(segments, samples, {});
+  const climbs = analyzeClimbs(segments, samples, { weightKg });
   const descents = analyzeRoadDescents(segments, sensors.location);
   const descentGroups = groupRepeatedDescents(descents);
-  const { power: p1hz } = resampleTo1Hz(samples.map(s => ({ t: s.t, power: s.power })));
   const np = normalizedPower(p1hz), avg = averagePower(p1hz);
-  const ftp = session && session.thresholdPower ? session.thresholdPower : null;
   const dur = ride.end - ride.start;
-  const metrics = { np, avg, vi: variabilityIndex(np, avg), if: intensityFactor(np, ftp), tss: trainingStressScore(dur, np, ftp), ftp };
-  const mmp = mmpCurve(p1hz);
+  const metrics = { np, avg, vi: variabilityIndex(np, avg), if: intensityFactor(np, ftp), tss: trainingStressScore(dur, np, ftp), ftp, ftpSource, eftp, weightKg };
+  const zones = powerZones(p1hz, ftp);
+  /* Median pedaling cadence sets the quadrant split; FTP the power split. */
+  const cads = fitInRide.map(r => r.cad).filter(v => v != null && v > 0).sort((a, b) => a - b);
+  const medianCad = cads.length ? cads[Math.floor(cads.length / 2)] : 85;
+  const quadrants = powerCadenceQuadrants(fitInRide, medianCad, ftp);
   const balance = powerWeightedBalance(fitInRide);
   /* Balance drift: first half vs second half, power-weighted. One-sided fatigue shows up here. */
   const half = (ride.start + ride.end) / 2;
@@ -9370,7 +9456,7 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const recMaxSpeed = samples.reduce((a, s) => (s.speed != null && s.speed > a ? s.speed : a), 0);
   const maxSpeed = session && session.maxSpeed != null ? session.maxSpeed : (recMaxSpeed || null);
   if (superseded()) return;
-  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, metrics, mmp, balance, balanceDrift, movingTime, maxSpeed, segments, title: fitFile.name, sport: 'road' };
+  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, metrics, mmp, zones, quadrants, balance, balanceDrift, movingTime, maxSpeed, segments, title: fitFile.name, sport: 'road' };
   onProgress('rendering');
   hide('loading'); show('results');
   renderAllRoad(D);
@@ -9404,7 +9490,13 @@ function renderAllRoad(D) {
   { const cav = document.getElementById('roadCornersCaveat');
     if (cav) cav.textContent = 'Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.'; }
   if (D.descents && D.descents.length) show('roadDescentsSection');
-  if (D.mmp && D.mmp.length) { show('roadPowerCurveSection'); renderRoadPowerCurve(D); }
+  if (D.mmp && D.mmp.length) {
+    show('roadPowerCurveSection');
+    renderRoadRiderControls(D);
+    renderRoadPowerCurve(D);
+    renderRoadZones(D);
+  }
+  if (D.quadrants) { show('roadQuadrantSection'); renderRoadQuadrant(D); }
   renderRoadLaps(D);
   if (D.laps && D.laps.length >= 2) show('roadLapsSection');
   renderRoadUpsell(D);
@@ -9535,6 +9627,87 @@ function renderRoadPowerCurve(D) {
   loamPlot('roadPowerCurve', [trace], layout, PLOT_CFG);
 }
 
+/* FTP + weight inputs. Changing either recomputes the power metrics, so commit re-runs the road
+   analysis from the same FIT (fast) rather than re-rendering stale numbers. */
+function renderRoadRiderControls(D) {
+  const el = document.getElementById('roadRiderControls');
+  if (!el) return;
+  const a = loamAthlete();
+  const m = D.metrics || {};
+  const src = m.ftpSource === 'device' ? 'from your head unit' : m.ftpSource === 'estimate' ? 'estimated from this ride'
+    : m.ftpSource === 'manual' ? 'your setting' : 'set one to unlock zones, IF and TSS';
+  const eftpHint = (m.eftp && m.ftpSource !== 'estimate') ? ` · this ride estimates ${m.eftp} W` : '';
+  el.innerHTML =
+    `<div style="display:flex; flex-wrap:wrap; gap:14px 18px; align-items:center; font-size:13px; color:var(--text-secondary);">
+      <span style="color:var(--text-muted);">Your numbers:</span>
+      <label style="display:flex; align-items:center; gap:6px;">FTP
+        <input id="roadFtpInput" type="number" min="80" max="600" step="1" value="${a.ftp != null ? a.ftp : ''}" placeholder="${m.ftp != null ? m.ftp : '—'}" style="width:66px;"> W</label>
+      <span style="color:var(--text-muted); font-size:12px;">${src}${eftpHint}</span>
+      <label style="display:flex; align-items:center; gap:6px;">Weight
+        <input id="roadWeightInput" type="number" min="35" max="150" step="0.5" value="${a.weightKg != null ? a.weightKg : ''}" placeholder="kg" style="width:60px;"> kg</label>
+      ${a.weightKg ? '' : '<span style="color:var(--text-muted); font-size:12px;">set weight for W/kg</span>'}
+    </div>`;
+  const commit = () => {
+    setLoamAthlete({ ftp: document.getElementById('roadFtpInput').value, weightKg: document.getElementById('roadWeightInput').value });
+    if (_lastFitFile) {
+      const gen = ++_analyzeGen;
+      analyzeRoadFit(_lastFitFile, () => {}, () => gen !== _analyzeGen).catch(e => console.warn('road re-analyze', e));
+    }
+  };
+  const fi = document.getElementById('roadFtpInput'), wi = document.getElementById('roadWeightInput');
+  if (fi) fi.onchange = commit;
+  if (wi) wi.onchange = commit;
+}
+
+/* Time in Coggan power zones as a stacked bar plus a legend with per-zone time. */
+function renderRoadZones(D) {
+  const el = document.getElementById('roadZones');
+  if (!el) return;
+  if (!D.zones) { el.innerHTML = '<div class="dim" style="font-size:12px;">Set your FTP above to see time in power zones.</div>'; return; }
+  const colors = ['#9aa7b0', '#3d6fb0', '#5f9e7f', '#e0a53a', '#e0733a', '#c0392b', '#7d2b8b'];
+  const fmt = (s) => { const mn = Math.round(s / 60); return mn >= 60 ? Math.floor(mn / 60) + 'h' + String(mn % 60).padStart(2, '0') : mn + 'm'; };
+  const bar = D.zones.map((z) => z.pct > 0 ? `<div title="Z${z.zone} ${z.name}: ${Math.round(z.pct * 100)}%" style="width:${z.pct * 100}%; background:${colors[z.zone - 1]};"></div>` : '').join('');
+  const legend = D.zones.filter(z => z.pct > 0.005).map((z) =>
+    `<span style="display:inline-flex; align-items:center; gap:5px; margin:2px 14px 2px 0; font-size:12px; color:var(--text-secondary);"><span style="width:10px; height:10px; border-radius:2px; background:${colors[z.zone - 1]};"></span>Z${z.zone} ${z.name} ${Math.round(z.pct * 100)}% · ${fmt(z.seconds)}</span>`).join('');
+  el.innerHTML = `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:6px;">Time in power zones</div>
+    <div style="display:flex; height:22px; border-radius:6px; overflow:hidden;">${bar}</div>
+    <div style="margin-top:8px;">${legend}</div>`;
+}
+
+/* Power-vs-cadence scatter with the four quadrants labeled and split lines at median cadence + FTP. */
+function renderRoadQuadrant(D) {
+  const q = D.quadrants;
+  if (!q) return;
+  const quadColor = (r) => { const hp = r.power >= q.powerSplit, hc = r.cad >= q.cadSplit; return hp && hc ? '#c0392b' : hp && !hc ? '#e0733a' : !hp && hc ? '#3d6fb0' : '#9aa7b0'; };
+  const step = Math.max(1, Math.floor(q.points.length / 800));
+  const xs = [], ys = [], cols = [];
+  for (let i = 0; i < q.points.length; i += step) { const r = q.points[i]; xs.push(r.cad); ys.push(r.power); cols.push(quadColor(r)); }
+  const trace = { x: xs, y: ys, mode: 'markers', type: 'scatter', marker: { size: 4, color: cols, opacity: 0.45 }, hovertemplate: '%{x} rpm · %{y} W<extra></extra>' };
+  const layout = {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 56, r: 16, t: 16, b: 44 },
+    xaxis: { title: { text: 'cadence (rpm)', font: { size: 11 } }, gridcolor: '#e2e8f0', range: [Math.max(0, Math.min(...xs) - 5), Math.max(...xs) + 5] },
+    yaxis: { title: { text: 'power (W)', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
+    shapes: [
+      { type: 'line', x0: q.cadSplit, x1: q.cadSplit, yref: 'paper', y0: 0, y1: 1, line: { color: '#94a3b8', width: 1, dash: 'dot' } },
+      { type: 'line', yref: 'y', y0: q.powerSplit, y1: q.powerSplit, xref: 'paper', x0: 0, x1: 1, line: { color: '#8caa6d', width: 1, dash: 'dot' } },
+    ],
+    annotations: [
+      { x: 0.02, y: 0.98, xref: 'paper', yref: 'paper', text: 'grind', showarrow: false, font: { size: 11, color: '#b45f2b' } },
+      { x: 0.98, y: 0.98, xref: 'paper', yref: 'paper', xanchor: 'right', text: 'attack', showarrow: false, font: { size: 11, color: '#c0392b' } },
+      { x: 0.98, y: 0.05, xref: 'paper', yref: 'paper', xanchor: 'right', text: 'spin', showarrow: false, font: { size: 11, color: '#3d6fb0' } },
+      { x: 0.02, y: 0.05, xref: 'paper', yref: 'paper', text: 'cruise', showarrow: false, font: { size: 11, color: '#64748b' } },
+    ],
+    showlegend: false, hovermode: 'closest',
+  };
+  loamPlot('roadQuadrantChart', [trace], layout, PLOT_CFG);
+  const shares = document.getElementById('roadQuadrantShares');
+  if (shares) {
+    const pct = (v) => Math.round(v * 100) + '%';
+    shares.innerHTML = `<div style="font-size:12px; color:var(--text-secondary);">Split at ${q.cadSplit} rpm and ${q.powerSplit} W (FTP) · <span style="color:#c0392b;">attack ${pct(q.attack)}</span> · <span style="color:#b45f2b;">grind ${pct(q.grind)}</span> · <span style="color:#3d6fb0;">spin ${pct(q.spin)}</span> · cruise ${pct(q.cruise)}</div>`;
+  }
+}
+
 function renderRoadLaps(D) {
   const tb = document.querySelector('#roadLapsTable tbody');
   if (!tb) return;
@@ -9584,7 +9757,8 @@ function renderRoadClimbsAndBalance(D) {
     const rows = D.climbs.map(c => {
       const fade = c.pacingFade == null ? '—' : Math.round(c.pacingFade * 100) + '%';
       const fadeStyle = (c.pacingFade != null && c.pacingFade <= -0.2) ? ' style="color:#c0392b; font-weight:600;"' : '';
-      return `<tr><td>${c.index}</td><td>${fmtT(c.duration)}</td><td>${fmt(c.avgGrade, 1)}%</td><td>${fmt(c.vam)}</td><td>${fmt(c.avgPower)}</td><td>${fmt(c.normalizedPower)}</td><td>${fmt(c.avgCadence)}</td><td>${c.hrDrift == null ? '—' : (c.hrDrift > 0 ? '+' : '') + fmt(c.hrDrift)}</td><td${fadeStyle}>${fade}</td></tr>`;
+      const wkg = c.wattsPerKg != null ? `<br><span class="dim" style="font-size:11px;">${c.wattsPerKg.toFixed(1)} W/kg</span>` : '';
+      return `<tr><td>${c.index}</td><td>${fmtT(c.duration)}</td><td>${fmt(c.avgGrade, 1)}%</td><td>${fmt(c.vam)}</td><td>${fmt(c.avgPower)}${wkg}</td><td>${fmt(c.normalizedPower)}</td><td>${fmt(c.avgCadence)}</td><td>${c.hrDrift == null ? '—' : (c.hrDrift > 0 ? '+' : '') + fmt(c.hrDrift)}</td><td${fadeStyle}>${fade}</td></tr>`;
     }).join('');
     tb.innerHTML = rows || '<tr><td colspan="9" class="dim">No sustained climbs detected.</td></tr>';
   }
@@ -10501,7 +10675,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '263db28 · 2026-07-03';
+const LOAM_BUILD = '40a2351 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
