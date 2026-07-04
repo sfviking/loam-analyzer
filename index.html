@@ -4907,6 +4907,23 @@ function fitDeclaredSport(messages) {
   return 'ride';
 }
 
+/* Is this GPS ride from an e-bike / e-MTB? Three signals: the FIT sport enum 21 (e_biking); an
+   e-bike sub_sport (28 e_bike_fitness, 46 e_bike_mountain, in the sport msg field 1 or session
+   field 6); or the DJI Avinox export fingerprint, which declares no sport but stamps file_id with
+   the "development" manufacturer (255) and the placeholder serial 0x12345678. In an MTB analyzer an
+   e-bike is an e-MTB, so this only relabels a 'ride' as e-MTB; it never changes the bike-vs-foot
+   split. See [[amflow-avinox-fit-format]]. */
+function fitIsEbike(messages) {
+  const sportMsg = messages.find(m => m.gm === 12);
+  const sess = messages.find(m => m.gm === 18);
+  const sport = (sportMsg && sportMsg.fields[0] != null) ? sportMsg.fields[0] : (sess ? sess.fields[5] : null);
+  const sub = (sportMsg && sportMsg.fields[1] != null) ? sportMsg.fields[1] : (sess ? sess.fields[6] : null);
+  if (sport === 21 || sub === 28 || sub === 46) return true;
+  const fid = messages.find(m => m.gm === 0);
+  if (fid && fid.fields[1] === 255 && fid.fields[3] === 305419896) return true;   // Avinox: dev mfr + 0x12345678
+  return false;
+}
+
 function fitOnlySensors(records) {
   const sensors = emptyCombinedSensors();
   const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
@@ -5067,6 +5084,9 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   /* run | walk | ride, from the FIT's own declared sport. Drives foot vs bike framing below. */
   const gpsSport = fitDeclaredSport(messages);
   const foot = gpsSport !== 'ride';
+  /* A bike ride from an e-bike/e-MTB (Avinox, Specialized Levo, etc.) is relabeled e-MTB; it is
+     still the same GPS 'ride' render, only the wording and library sport change. */
+  const eBike = !foot && fitIsEbike(messages);
   const { sensors, speedDerived, startFitSec } = fitOnlySensors(records);
   if (sensors.location.length < 30)
     throw new Error('This FIT has no usable GPS track, so it cannot be analyzed on its own. Attach it to a ride recording instead.');
@@ -5096,7 +5116,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   _currentRunKey = contentHash;
   onProgress('saving to library');
   const saved = await saveRideToLibrary({
-    filename: fitFile.name, sport: gpsSport, sensors, ride, summary, contentKey: contentHash,
+    filename: fitFile.name, sport: eBike ? 'emtb' : gpsSport, sensors, ride, summary, contentKey: contentHash,
     /* FIT timestamps are absolute UTC, so date the library entry from the recording itself; FIT
        filenames rarely carry the full stamp saveRideToLibrary would otherwise parse. */
     recordedAt: startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null,
@@ -5107,7 +5127,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   onProgress('rendering');
   hide('loading'); show('results');
   const D = {
-    sensors, ride, summary, segments, sport: gpsSport, gpsSport, gpsOnly: true, speedDerived,
+    sensors, ride, summary, segments, sport: gpsSport, gpsSport, eBike, gpsOnly: true, speedDerived,
     /* Sweeping-corner analysis is a bike concept; suppress it for foot activities (a run's
        "descents" are not cornering lines), so the road-corners section + digest corners stay off. */
     descents: foot ? [] : descents, descentGroups: foot ? [] : descentGroups,
@@ -5118,7 +5138,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
     title: fitFile.name,
   };
   renderAllGps(D);
-  const noun = gpsSport === 'run' ? 'run' : gpsSport === 'walk' ? 'walk' : 'ride';
+  const noun = gpsSport === 'run' ? 'run' : gpsSport === 'walk' ? 'walk' : (eBike ? 'e-MTB ride' : 'ride');
   const liftNote = summary.liftCount ? ` · ${summary.liftCount} lifts` : '';
   const jumpNote = jumps.length ? ` · ${jumps.length} FIT jumps ignored (no phone recording to sync to)` : '';
   setStatus(`FIT ${noun} loaded (GPS-only · ${sensors.location.length.toLocaleString()} fixes${liftNote}${jumpNote})`, true);
@@ -6338,7 +6358,7 @@ function renderGpsStats(s, sport) {
 function renderGpsParams(D) {
   const sport = D.gpsSport || 'ride';
   const foot = sport === 'run' || sport === 'walk';
-  const label = sport === 'run' ? 'RUN' : sport === 'walk' ? 'WALK' : 'RIDE';
+  const label = sport === 'run' ? 'RUN' : sport === 'walk' ? 'WALK' : (D.eBike ? 'E-MTB' : 'RIDE');
   document.getElementById('paramsBar').innerHTML = `
     <span>sport <strong>${label} (GPS-only FIT)</strong></span>
     <span>gps fixes <strong>${D.sensors.location.length.toLocaleString()}</strong></span>
@@ -7536,9 +7556,12 @@ function buildDigest(D, sport) {
       .map(segStats).filter(d => d.vertical_m == null || d.vertical_m >= MIN_DESCENT_DROP_M);
     const label = sport === 'run' ? 'run (GPS-only FIT import, no phone motion data)'
       : sport === 'walk' ? 'walk or hike (GPS-only FIT import, no phone motion data)'
+      : D.eBike ? 'e-MTB ride (GPS-only FIT import, e.g. bike-park or lift-served day; motor-assisted)'
       : 'mountain bike ride (GPS-only FIT import, e.g. bike-park or lift-served day)';
     return {
       sport: label,
+      /* Motor assist means climb speed and VAM reflect the motor, not fitness; tell the coach so. */
+      ebike: D.eBike ? { note: 'This is an e-MTB (motor-assisted). Do not read climb speed, VAM, or lift-excluded pace as rider fitness; coach descending, lap consistency, and cornering instead.' } : null,
       duration_min: r1(s.duration / 60),
       moving_min: r1(s.movingTime / 60),
       stopped_min: r1(s.stoppedTime / 60),
@@ -8725,7 +8748,7 @@ function renderRideSignature(D, sport) {
     }
     const durMin = Math.floor((s.duration || (ride.end - ride.start)) / 60);
     const label = rsLabel(D.title);
-    const rideWord = (sport === 'running' || sport === 'run') ? 'RUN' : (sport === 'walking' || sport === 'walk') ? 'WALK' : sport === 'road' ? 'ROAD' : 'RIDE';
+    const rideWord = (sport === 'running' || sport === 'run') ? 'RUN' : (sport === 'walking' || sport === 'walk') ? 'WALK' : sport === 'road' ? 'ROAD' : (D.eBike ? 'E-MTB' : 'RIDE');
     const subtitle = `${rideWord} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
 
     const statCols = stats.map((st, i) => {
@@ -11126,7 +11149,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'c99192f · 2026-07-03';
+const LOAM_BUILD = '8cfcbe1 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
