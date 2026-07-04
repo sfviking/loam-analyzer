@@ -1245,7 +1245,7 @@
       </table>
     </div>
     <div id="roadCornersDetail" style="margin-top:10px;"></div>
-    <div class="dim" style="font-size:12px; margin-top:8px;">Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.</div>
+    <div class="dim" id="roadCornersCaveat" style="font-size:12px; margin-top:8px;">Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.</div>
   </section>
 
   <section id="roadPowerCurveSection" class="hidden">
@@ -4972,6 +4972,12 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   const segments = markLiftSegments(detectGradeSegments(sensors.baro, sensors.location, ride), sensors.location);
   onProgress('computing summary');
   const summary = computeGpsSummary(sensors, ride, segments);
+  /* Sweeping-corner analysis on the real descents (same detector as the road view; park berms at
+     speed span enough GPS samples to register). Junk down-segments with no meaningful drop are
+     dropped to match the runs panel's MIN_DESCENT_DROP_M bar, then renumbered. */
+  const descents = analyzeRoadDescents(segments, sensors.location)
+    .filter(d => d.drop != null && d.drop >= MIN_DESCENT_DROP_M);
+  descents.forEach((d, i) => { d.index = i + 1; });
   /* Content hash keys the library upsert (re-analyzing the same FIT updates its row even when an
      algorithm tweak changes the numbers) and persists per-run rename labels, same as CSVs. FIT-only
      renders are not put in the analysis cache, so this is not a cache key here. */
@@ -4992,7 +4998,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   onProgress('rendering');
   hide('loading'); show('results');
   const D = {
-    sensors, ride, summary, segments, sport: 'ride', gpsOnly: true, speedDerived,
+    sensors, ride, summary, segments, descents, sport: 'ride', gpsOnly: true, speedDerived,
     /* renderRunTimeline shades climb/descent segments from D.running.segments; this shim is the
        only "running" state a GPS ride has. */
     running: { segments },
@@ -6084,6 +6090,15 @@ function renderAllGps(D) {
   renderGpsParams(D);
   currentRide = D.ride;
   renderRunsPanel(D);
+  /* Sweeping corners per descent, same table the road view uses. Framed as a floor, not a census:
+     the full GPS-only turn detector was measured against the IMU pipeline and rejected (see
+     renderGpsUpsell), so only corners wide and long enough for 1 Hz GPS appear here. */
+  if (D.descents && D.descents.length) {
+    renderRoadDescents(D);
+    const cav = document.getElementById('roadCornersCaveat');
+    if (cav) cav.textContent = 'These are the sweeping corners 1 Hz GPS can resolve (berms and switchbacks at speed), a floor rather than a census: tight singletrack turns and their mechanics need a phone recording (see below). Repeat the same descent and compare apex speeds to track cornering confidence.';
+    show('roadDescentsSection');
+  }
   renderGpsUpsell(D);
   renderGeekStats(D, 'ride');
   renderCoachPanel(D, 'ride');
@@ -9135,6 +9150,8 @@ function renderAllRoad(D) {
   renderRoadSpeedChart(D);
   show('roadSpeedSection');
   renderRoadDescents(D);
+  { const cav = document.getElementById('roadCornersCaveat');
+    if (cav) cav.textContent = 'Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.'; }
   if (D.descents && D.descents.length) show('roadDescentsSection');
   renderRoadPowerCurve(D);
   if (D.mmp && D.mmp.length) show('roadPowerCurveSection');
@@ -10187,7 +10204,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '5d2d2fd · 2026-07-03';
+const LOAM_BUILD = '212e304 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
