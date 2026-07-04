@@ -1236,11 +1236,11 @@
   <section id="roadDescentsSection" class="hidden">
     <div class="section-title">
       Descents &amp; corners
-      <span class="subtitle">corners from GPS heading rate · radius r = v/&omega; at the apex</span>
+      <span class="subtitle">corners marked on the map (tap a chip to jump to one) · repeated descents grouped as laps (A&middot;1, A&middot;2) · radius r = v/&omega; at the apex</span>
     </div>
     <div class="panel" style="overflow-x:auto;">
       <table id="roadDescentsTable">
-        <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Drop</th><th>Grade</th><th>Max speed</th><th>Corners</th><th>Tightest</th><th>Apex speed</th></tr></thead>
+        <thead><tr><th>#</th><th>Lap</th><th>Time</th><th>Dist</th><th>Drop</th><th>Grade</th><th>Max speed</th><th>Corners</th><th>Tightest</th><th>Apex speed</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -4978,6 +4978,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   const descents = analyzeRoadDescents(segments, sensors.location)
     .filter(d => d.drop != null && d.drop >= MIN_DESCENT_DROP_M);
   descents.forEach((d, i) => { d.index = i + 1; });
+  const descentGroups = groupRepeatedDescents(descents);
   /* Content hash keys the library upsert (re-analyzing the same FIT updates its row even when an
      algorithm tweak changes the numbers) and persists per-run rename labels, same as CSVs. FIT-only
      renders are not put in the analysis cache, so this is not a cache key here. */
@@ -4998,7 +4999,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   onProgress('rendering');
   hide('loading'); show('results');
   const D = {
-    sensors, ride, summary, segments, descents, sport: 'ride', gpsOnly: true, speedDerived,
+    sensors, ride, summary, segments, descents, descentGroups, sport: 'ride', gpsOnly: true, speedDerived,
     /* renderRunTimeline shades climb/descent segments from D.running.segments; this shim is the
        only "running" state a GPS ride has. */
     running: { segments },
@@ -6085,6 +6086,7 @@ function renderAllGps(D) {
       + ' Record with Loam Capture and attach the FIT to get the full analysis.'; }
   show('gpsOnlyNotice');
   renderRunMap(D.sensors.location, D.ride, D.segments);
+  renderRoadCornerMarkers(D);
   renderRunTimeline(D);
   renderRunSegments(D.segments);
   renderGpsParams(D);
@@ -7159,12 +7161,43 @@ function runningHighlights(D) {
   return c.slice(0, 3);
 }
 
+/* Road ride highlights: the two or three findings a roadie would text a friend. Pure reads of the
+   already-computed analysis, so they always agree with the panels below. */
+function roadHighlights(D) {
+  const out = [];
+  const m = D.metrics || {};
+  const climbs = D.climbs || [];
+  const real = climbs.filter(c => c.duration >= 120 && c.avgPower != null);
+  if (real.length) {
+    const big = real.reduce((a, b) => (b.gain > a.gain ? b : a));
+    out.push(`Biggest climb: <strong>${Math.round(big.duration / 60)} min at ${big.avgGrade.toFixed(1)}%</strong>, ${Math.round(big.avgPower)} W (VAM ${Math.round(big.vam)})`);
+    const faded = climbs.filter(c => c.pacingFade != null && c.pacingFade <= -0.15 && c.avgPower > (m.avg || 0));
+    if (faded.length) {
+      const w = faded.reduce((a, b) => (b.pacingFade < a.pacingFade ? b : a));
+      out.push(`Climb ${w.index} started too hot: power faded <strong>${Math.round(Math.abs(w.pacingFade) * 100)}%</strong> from first to last third`);
+    }
+  }
+  if (m.np != null && m.vi != null) out.push(`Ride effort: <strong>NP ${Math.round(m.np)} W</strong>${m.if ? ` at ${m.if.toFixed(2)} IF` : ''} · VI ${m.vi.toFixed(2)} ${m.vi > 1.15 ? '(surgy: matches burned)' : '(steady pacing)'}`);
+  if (D.balance) {
+    const drift = D.balanceDrift;
+    out.push(`L/R balance <strong>${Math.round(D.balance.left)}/${Math.round(D.balance.right)}</strong>${drift != null ? (Math.abs(drift) >= 2 ? `, drifting ${Math.abs(drift).toFixed(1)} pts late in the ride (one-sided fatigue?)` : ', held steady all ride') : ''}`);
+  }
+  const groups = D.descentGroups || [];
+  if (groups.length) {
+    const g = groups[0];
+    const laps = g.indexes.map(ix => (D.descents || []).find(x => x.index === ix)).filter(Boolean);
+    const times = laps.map(l => Math.round(l.duration));
+    out.push(`Descent ${g.group} ridden <strong>${laps.length}x</strong> (${times.map(t => Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0')).join(', ')}) — ask the coach what changed between laps`);
+  }
+  return out.slice(0, 4);
+}
+
 function renderCoachHighlights(D, sport) {
   const sec = document.getElementById('coachHighlights');
   const card = document.getElementById('coachHighlightsCard');
   if (!sec || !card) return;
   let bullets = [];
-  try { bullets = (sport === 'running') ? runningHighlights(D) : mtbHighlights(D); } catch (e) { console.warn('highlights failed', e); bullets = []; }
+  try { bullets = (sport === 'running') ? runningHighlights(D) : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D); } catch (e) { console.warn('highlights failed', e); bullets = []; }
   if (!bullets.length) { sec.classList.add('hidden'); card.innerHTML = ''; return; }
   card.innerHTML = `<h3>&#9968;&#65039; Ride highlights</h3><ul>${bullets.map(b => `<li>${b}</li>`).join('')}</ul>`
     + `<button class="ch-cta" type="button" onclick="scrollToCoach()">Ask the AI coach for the why and the drill &rarr;</button>`;
@@ -7174,6 +7207,68 @@ function renderCoachHighlights(D, sport) {
 function buildDigest(D, sport) {
   const s = D.summary || {};
   const r1 = (x, n = 1) => (x == null || isNaN(x)) ? null : +(+x).toFixed(n);
+  /* Road cycling (head-unit FIT with a power meter): the coach's currency is rider watts. Every
+     number here is computed by the road pipeline and shown in the UI, so the coach cites what the
+     rider sees. */
+  if (sport === 'road') {
+    const m = D.metrics || {}, ses = D.session || {};
+    const mph = (v) => v == null ? null : r1(v * 2.23694);
+    const temps = (D.fitInRide || []).map(r => r.temp).filter(v => v != null);
+    const mmpBy = {};
+    for (const e of (D.mmp || [])) mmpBy[e.duration] = Math.round(e.watts);
+    const descentRow = (d) => ({
+      n: d.index, lap: d.group ? d.group + '-' + d.lap : null,
+      duration_s: r1(d.duration, 0), drop_m: r1(d.drop, 0), avg_grade_pct: r1(d.avgGrade),
+      max_speed_mph: mph(d.maxSpeed), corners: d.corners.length,
+      tightest_radius_m: r1(d.minRadius, 0), avg_corner_apex_mph: mph(d.avgApexSpeed),
+    });
+    return {
+      sport: 'road cycling (head-unit FIT import with a power meter; watts are RIDER power, not motor assist)',
+      duration_min: r1((D.ride.end - D.ride.start) / 60),
+      moving_min: r1((D.movingTime || 0) / 60),
+      distance_km: ses.distance != null ? r1(ses.distance / 1000, 2) : null,
+      avg_moving_speed_mph: ses.distance != null && D.movingTime ? mph(ses.distance / D.movingTime) : null,
+      max_speed_mph: mph(D.maxSpeed),
+      elevation_gain_m: r1(ses.totalAscent, 0),
+      elevation_loss_m: r1(ses.totalDescent, 0),
+      power: {
+        normalized_w: r1(m.np, 0), average_w: r1(m.avg, 0),
+        variability_index: r1(m.vi, 2), intensity_factor: r1(m.if, 2), tss: r1(m.tss, 0),
+        ftp_w: m.ftp || null, ftp_source: m.ftp ? 'stored on the head unit' : 'unknown (IF/TSS unavailable)',
+      },
+      best_power_w: {
+        '5s': mmpBy[5] ?? null, '1m': mmpBy[60] ?? null, '5m': mmpBy[300] ?? null, '20m': mmpBy[1200] ?? null,
+      },
+      balance: D.balance ? {
+        left_pct: r1(D.balance.left), right_pct: r1(D.balance.right),
+        drift_pct_points_first_to_second_half: D.balanceDrift,
+        note: 'power-weighted; a positive drift means load shifted onto the right leg late in the ride',
+      } : null,
+      cadence_rpm_avg: ses.avgCadence ?? null,
+      heart_rate_bpm: ses.avgHr != null ? { avg: ses.avgHr, max: ses.maxHr } : null,
+      total_pedal_strokes: ses.totalStrokes ?? (totalPedalStrokes(D.fitInRide) > 0 ? Math.round(totalPedalStrokes(D.fitInRide)) : null),
+      temperature_c: temps.length ? { avg: r1(temps.reduce((a, b) => a + b, 0) / temps.length, 0), max: Math.max(...temps) } : null,
+      climbs: (D.climbs || []).map(c => ({
+        n: c.index, duration_s: r1(c.duration, 0), distance_m: r1(c.distance, 0), gain_m: r1(c.gain, 0),
+        avg_grade_pct: r1(c.avgGrade), vam_m_per_h: r1(c.vam, 0),
+        avg_power_w: r1(c.avgPower, 0), np_w: r1(c.normalizedPower, 0), cadence_rpm: r1(c.avgCadence, 0),
+        hr_drift_bpm: r1(c.hrDrift, 0), pacing_fade_pct: c.pacingFade != null ? r1(c.pacingFade * 100, 0) : null,
+      })),
+      descents: (D.descents || []).map(descentRow),
+      repeated_descents: (D.descentGroups || []).map(g => ({
+        group: g.group,
+        note: 'same descent ridden multiple times, in ride order; compare corner apex speeds and times across laps',
+        laps: g.indexes.map(ix => descentRow((D.descents || []).find(x => x.index === ix))),
+      })),
+      device_laps: (D.laps || []).map((l, i) => ({
+        n: i + 1, timer_s: r1(l.timerTime ?? l.elapsedTime, 0), distance_m: r1(l.distance, 0),
+        avg_power_w: l.avgPower ?? null, np_w: l.normalizedPower ?? null, avg_hr: l.avgHr ?? null,
+        cadence_rpm: l.avgCadence ?? null, ascent_m: l.totalAscent ?? null,
+        balance: l.balance ? r1(l.balance.left, 0) + '/' + r1(l.balance.right, 0) : null,
+      })),
+      data_caveats: 'Head-unit FIT only (no phone motion data). Corners come from 1 Hz GPS heading geometry: counts, radii, and apex speeds cover sweeping corners only (a floor, not a census) and carry no lean or braking mechanics. pacing_fade_pct is last-third vs first-third power on a climb (strongly negative = started too hot). The left/right balance flag convention is unverified against Garmin Connect, so treat balance side labels as provisional.',
+    };
+  }
   /* GPS-only FIT ride: everything the coach may cite must be GPS-derivable. Per-descent detail is
      computed here (not stored on segments) so the digest stays the single source for the coach. */
   if (sport === 'ride') {
@@ -7212,7 +7307,16 @@ function buildDigest(D, sport) {
       } : null,
       vam_pedaled_climbs_m_per_h: r1(s.vamPedaled, 0),
       descents: downs,
-      data_caveats: 'GPS-only FIT import: no phone motion data, so there are no turn, jump, airtime, braking, lean, or cadence metrics. Speed may be derived from GPS positions and is approximate. Descents are listed in ride order.'
+      corners: (D.descents && D.descents.length) ? {
+        note: 'Sweeping corners from 1 Hz GPS heading geometry: a floor, not a census (tight singletrack turns are invisible at 1 Hz), with no lean or braking mechanics.',
+        per_descent: D.descents.map(d => ({
+          n: d.index, lap: d.group ? d.group + '-' + d.lap : null, corners: d.corners.length,
+          tightest_radius_m: r1(d.minRadius, 0),
+          avg_corner_apex_mph: d.avgApexSpeed != null ? r1(d.avgApexSpeed * 2.23694) : null,
+        })),
+        repeated_descents: (D.descentGroups || []).map(g => ({ group: g.group, descent_numbers: g.indexes, note: 'same descent ridden multiple times, in ride order' })),
+      } : null,
+      data_caveats: 'GPS-only FIT import: no phone motion data, so there are no jump, airtime, braking, lean, or cadence metrics, and turn data is limited to the sweeping-corner geometry in the corners block. Speed may be derived from GPS positions and is approximate. Descents are listed in ride order.'
     };
   }
   if (sport === 'running' || sport === 'walking') {
@@ -7378,10 +7482,39 @@ async function attachCoachDescentHistory(D, sport) {
 
 function coachSystemPrompt(sport, level) {
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
+  if (sport === 'road') {
+    /* Road cycling: rider watts from a real power meter, so this coach can be quantitative in a
+       way the GPS-only prompt cannot. It still has no body-motion data (no lean, no bar inputs). */
+    return `You are Loam, an expert road-cycling coach. This session is a head-unit FIT import with a power meter: you have per-second rider power, cadence, heart rate, left/right balance, per-climb and per-descent breakdowns, best-power efforts, and device laps. There is NO body-motion data (no lean, no braking mechanics), and corner data is GPS geometry only.
+
+Method — for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies physiologically or technically.
+3. Action: one concrete workout, cue, or pacing rule for next time.
+
+Road reference points:
+- Normalized power weights surges the way the body pays for them; variability_index = NP/avg. VI near 1.0 is disciplined steady pacing; over ~1.15 on a solo steady ride means surging and burned matches.
+- intensity_factor = NP/FTP and tss size the ride: IF 0.7 is endurance, 0.85 hard tempo, near 1.0 a maximal hour. Trust these only as far as the stored FTP is current; say so if the numbers look inconsistent with HR.
+- Climbs: pacing_fade_pct is last-third vs first-third power. Below about -10% means the climb started too hot; a small positive fade with steady HR is well ridden. VAM (vertical m/h) is the climbing-speed currency; hr_drift with flat power suggests heat or fatigue.
+- Cadence: most riders are efficient at 85-95 rpm on the flat; a big cadence drop on climbs (grinding) loads the knees and burns matches. Compare climb cadence to overall.
+- Balance: persistent deviation past ~55/45, or drift_pct_points_first_to_second_half beyond ~2-3 points, points at one-sided fatigue, an old injury, or bike fit; suggest single-leg work or a fit check, and re-measuring on a similar ride. The side labels are provisional (see data_caveats), so coach the magnitude of asymmetry and drift, not which specific leg, unless the rider confirms.
+- best_power_w (5s/1m/5m/20m) sketches the rider's profile: sprint vs steady-state. 20m best times 0.95 approximates FTP; if that disagrees with the stored FTP, suggest retesting.
+- Descents and corners: counts, radii, and apex speeds are GPS geometry for sweeping corners only, a floor, not a census. repeated_descents lists laps of the same descent: compare times and avg_corner_apex_mph across laps (a later lap slower mainly via lower apex speeds means braking earlier when tired, a skill/confidence signal, not fitness). Never invent lean or braking data.
+- Respect data_caveats. Do not coach motor assist: these are rider watts.
+
+The athlete is at ${level} level — pitch depth and vocabulary accordingly.
+Be direct and encouraging, never fluffy. Do not restate the whole dataset.
+
+Format your FIRST analysis as compact markdown:
+- One bold headline takeaway (a single line).
+- 2-4 bullets, each a single metric -> mechanism -> action.
+- A final line "**Next session:** ..." naming one focus.
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+  }
   if (sport === 'ride') {
     /* GPS-only FIT import: the digest has pace/elevation/lift structure but zero body-motion
        data. The coach must work within that honestly, and may point at the upgrade path once. */
-    return `You are Loam, an expert mountain-bike coach. This session is a GPS-only import from a bike computer or e-bike app: you have distance, speed, elevation, auto-detected lift rides, and per-descent stats, but NO body-motion data (no turns, jumps, airtime, braking, lean, or cadence). Never invent those.
+    return `You are Loam, an expert mountain-bike coach. This session is a GPS-only import from a bike computer or e-bike app: you have distance, speed, elevation, auto-detected lift rides, per-descent stats, and (when a corners block is present) sweeping-corner geometry per descent, but NO body-motion data (no jumps, airtime, braking, lean, or cadence). Corner data is a floor, not a census: tight singletrack turns are invisible at 1 Hz GPS, and there are no mechanics behind the counts. Never invent what is not there.
 
 Method — for every point, follow "metric -> mechanism -> action":
 1. Metric: cite the actual number from the data.
@@ -7392,6 +7525,7 @@ What GPS can honestly show, and how to coach it:
 - Lap structure on a lift day: descents count, vertical per lap, and how descent avg/max speeds evolve across the day (a late-day speed fade suggests fatigue; flat max but falling avg suggests more braking or traffic).
 - Pacing: compare each descent's avg speed to its max; a big gap on a sustained descent usually means the speed came in bursts rather than being carried.
 - Volume and rest: moving vs stopped vs lift time; total descending meters is the real workload on a park day.
+- Corners (when a corners block is present): per-descent counts, tightest radius, and average apex speed, plus repeated_descents grouping laps of the same run. Comparing apex speeds and lap times across repeats of the same descent is the honest skill read here: a later lap slower mainly via lower apex speeds means braking earlier when tired.
 - Climbing (when pedaled climbs exist): VAM and climb grades.
 - Respect the data_caveats; speeds may be GPS-derived and approximate, so avoid overprecise claims.
 - At most once in the whole conversation, note that recording with the Loam Capture phone app on the same ride would add turn, jump, and body-motion coaching; do not repeat this or make it the headline.
@@ -7582,6 +7716,8 @@ function renderCoachPanel(D, sport) {
     ? ['How was my pacing on the climbs?', 'How can walks like this build fitness?', 'What should I try on my next hike?']
     : sport === 'ride'
     ? ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?']
+    : sport === 'road'
+    ? ['How was my climb pacing?', 'What does my L/R balance say?', 'How do I descend with more confidence?']
     : ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
   if (chips) {
     chips.innerHTML = chipText.map(t => `<button class="coach-chip">${escapeHtml(t)}</button>`).join('');
@@ -8983,7 +9119,7 @@ function detectRoadCorners(rows, opts = {}) {
     if (!(dt > 0) || dt > 4) continue;
     const v = ((b.speed || 0) + (a.speed || 0)) / 2;
     if (v * dt < 2) continue;
-    hs.push({ t: b.t, h: roadBearing(a.latitude, a.longitude, b.latitude, b.longitude), v });
+    hs.push({ t: b.t, h: roadBearing(a.latitude, a.longitude, b.latitude, b.longitude), v, lat: b.latitude, lon: b.longitude });
   }
   const om = [];
   for (let i = 1; i < hs.length; i++) {
@@ -8992,11 +9128,11 @@ function detectRoadCorners(rows, opts = {}) {
     while (d < -180) d += 360;
     const dt = hs[i].t - hs[i - 1].t;
     if (!(dt > 0) || dt > 4) continue;
-    om.push({ t: hs[i].t, w: d / dt, v: hs[i].v });
+    om.push({ t: hs[i].t, w: d / dt, v: hs[i].v, lat: hs[i].lat, lon: hs[i].lon });
   }
   const sm = om.map((o, i) => {
     const win = om.slice(Math.max(0, i - 1), Math.min(om.length, i + 2));
-    return { t: o.t, w: win.reduce((a, x) => a + x.w, 0) / win.length, v: o.v };
+    return { t: o.t, w: win.reduce((a, x) => a + x.w, 0) / win.length, v: o.v, lat: o.lat, lon: o.lon };
   });
   const corners = [];
   let cur = null;
@@ -9013,6 +9149,7 @@ function detectRoadCorners(rows, opts = {}) {
         apexSpeed: cur.apexV,
         entrySpeed: cur.entryV,
         radius: wAbs > 0.01 ? cur.apexV / wAbs : null,
+        apexLat: cur.apexLat, apexLon: cur.apexLon, tApex: cur.tApex,
       });
     }
     cur = null;
@@ -9020,10 +9157,10 @@ function detectRoadCorners(rows, opts = {}) {
   for (const s of sm) {
     const sign = s.w > 0 ? 1 : -1;
     if (Math.abs(s.w) >= ENTER && (!cur || cur.sign === sign)) {
-      if (!cur) cur = { sign, tStart: s.t, tEnd: s.t, sum: 0, apexW: 0, apexV: s.v, entryV: s.v };
+      if (!cur) cur = { sign, tStart: s.t, tEnd: s.t, sum: 0, apexW: 0, apexV: s.v, entryV: s.v, apexLat: s.lat, apexLon: s.lon, tApex: s.t };
       cur.tEnd = s.t;
       cur.sum += s.w;
-      if (Math.abs(s.w) > Math.abs(cur.apexW)) { cur.apexW = s.w; cur.apexV = s.v; }
+      if (Math.abs(s.w) > Math.abs(cur.apexW)) { cur.apexW = s.w; cur.apexV = s.v; cur.apexLat = s.lat; cur.apexLon = s.lon; cur.tApex = s.t; }
     } else if (cur && (Math.abs(s.w) < EXIT || sign !== cur.sign)) {
       close();
     } else if (cur) {
@@ -9040,6 +9177,7 @@ function analyzeRoadDescents(segments, locRows) {
     const rows = (locRows || []).filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
     const speeds = rows.map(r => r.speed).filter(v => v != null);
     const alts = rows.map(r => r.altitude).filter(v => v != null);
+    const fixes = rows.filter(r => r.latitude != null);
     const corners = detectRoadCorners(rows);
     const radii = corners.map(c => c.radius).filter(v => v != null);
     const apexes = corners.map(c => c.apexSpeed);
@@ -9055,8 +9193,48 @@ function analyzeRoadDescents(segments, locRows) {
       corners,
       minRadius: radii.length ? Math.min(...radii) : null,
       avgApexSpeed: apexes.length ? apexes.reduce((a, b) => a + b, 0) / apexes.length : null,
+      startLat: fixes.length ? fixes[0].latitude : null,
+      startLon: fixes.length ? fixes[0].longitude : null,
+      endLat: fixes.length ? fixes[fixes.length - 1].latitude : null,
+      endLon: fixes.length ? fixes[fixes.length - 1].longitude : null,
     };
   });
+}
+function roadHaversine(lat1, lon1, lat2, lon2) {
+  const toR = Math.PI / 180, R = 6371000;
+  const dLat = (lat2 - lat1) * toR, dLon = (lon2 - lon1) * toR;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+/* Group repeated descents (laps of the same run) by geometry: start and end within 200 m each and
+   length within 20 percent. Labels group ('A','B',...) and lap (ride order) on repeats. */
+function groupRepeatedDescents(descents) {
+  const list = descents || [];
+  const groups = [];
+  const gOf = new Array(list.length).fill(-1);
+  for (let i = 0; i < list.length; i++) {
+    const d = list[i];
+    if (d.startLat == null || d.endLat == null) continue;
+    let placed = false;
+    for (let g = 0; g < groups.length && !placed; g++) {
+      const ex = list[groups[g][0]];
+      const lenOk = Math.abs(d.distance - ex.distance) / Math.max(d.distance, ex.distance, 1) <= 0.2;
+      const startOk = roadHaversine(d.startLat, d.startLon, ex.startLat, ex.startLon) <= 200;
+      const endOk = roadHaversine(d.endLat, d.endLon, ex.endLat, ex.endLon) <= 200;
+      if (lenOk && startOk && endOk) { groups[g].push(i); gOf[i] = g; placed = true; }
+    }
+    if (!placed) { groups.push([i]); gOf[i] = groups.length - 1; }
+  }
+  const repeated = groups.filter(g => g.length >= 2);
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const out = [];
+  repeated.forEach((g, gi) => {
+    const label = letters[gi % letters.length];
+    g.forEach((idx, li) => { list[idx].group = label; list[idx].lap = li + 1; });
+    out.push({ group: label, indexes: g.map(i => list[i].index) });
+  });
+  for (const d of list) { if (d.group === undefined) { d.group = null; d.lap = null; } }
+  return out;
 }
 
 /* Reshape FIT records into the sensors.location schema the shared pipeline expects (grade
@@ -9108,6 +9286,7 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const segments = detectGradeSegments([], sensors.location, ride);
   const climbs = analyzeClimbs(segments, samples, {});
   const descents = analyzeRoadDescents(segments, sensors.location);
+  const descentGroups = groupRepeatedDescents(descents);
   const { power: p1hz } = resampleTo1Hz(samples.map(s => ({ t: s.t, power: s.power })));
   const np = normalizedPower(p1hz), avg = averagePower(p1hz);
   const ftp = session && session.thresholdPower ? session.thresholdPower : null;
@@ -9115,6 +9294,11 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const metrics = { np, avg, vi: variabilityIndex(np, avg), if: intensityFactor(np, ftp), tss: trainingStressScore(dur, np, ftp), ftp };
   const mmp = mmpCurve(p1hz);
   const balance = powerWeightedBalance(fitInRide);
+  /* Balance drift: first half vs second half, power-weighted. One-sided fatigue shows up here. */
+  const half = (ride.start + ride.end) / 2;
+  const balFirst = powerWeightedBalance(fitInRide.filter(r => r.t_phone < half));
+  const balSecond = powerWeightedBalance(fitInRide.filter(r => r.t_phone >= half));
+  const balanceDrift = (balFirst && balSecond) ? +(balSecond.right - balFirst.right).toFixed(1) : null;
   /* Moving time: dt where moving, gaps capped so a paused recording does not count as moving. */
   let movingTime = 0;
   for (let i = 1; i < samples.length; i++) {
@@ -9124,7 +9308,7 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const recMaxSpeed = samples.reduce((a, s) => (s.speed != null && s.speed > a ? s.speed : a), 0);
   const maxSpeed = session && session.maxSpeed != null ? session.maxSpeed : (recMaxSpeed || null);
   if (superseded()) return;
-  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, metrics, mmp, balance, movingTime, maxSpeed, segments, title: fitFile.name, sport: 'road' };
+  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, metrics, mmp, balance, balanceDrift, movingTime, maxSpeed, segments, title: fitFile.name, sport: 'road' };
   onProgress('rendering');
   hide('loading'); show('results');
   renderAllRoad(D);
@@ -9139,6 +9323,7 @@ function renderAllRoad(D) {
   { const ct = document.getElementById('carryToggle'); if (ct) ct.classList.add('hidden'); }
   renderRoadStats(document.getElementById('statsPanel'), D);
   renderRunMap(D.sensors.location, D.ride, D.segments);
+  renderRoadCornerMarkers(D);
   { const lg = document.querySelector('#overviewSection .map-legend'); if (lg) lg.classList.add('hidden'); }
   const sub = document.getElementById('timelineSubtitle'); if (sub) sub.textContent = 'power · cadence · heart rate over the ride';
   /* #timelineChart has no CSS height (the MTB/run timelines set it before plotting); do the same so
@@ -9159,6 +9344,8 @@ function renderAllRoad(D) {
   if (D.mmp && D.mmp.length) { show('roadPowerCurveSection'); renderRoadPowerCurve(D); }
   renderRoadLaps(D);
   if (D.laps && D.laps.length >= 2) show('roadLapsSection');
+  renderCoachHighlights(D, 'road');
+  renderCoachPanel(D, 'road');
   try { buildSectionNav(); } catch (e) { console.warn('section nav', e); }
 }
 
@@ -9198,18 +9385,50 @@ function renderRoadDescents(D) {
   const rows = (D.descents || []).map(d => {
     const tight = d.minRadius != null ? U.small(d.minRadius) : '—';
     const apex = d.avgApexSpeed != null ? U.speed(d.avgApexSpeed) : '—';
-    return `<tr><td>${d.index}</td><td>${fmtT(d.duration)}</td><td>${U.dist(d.distance)}</td><td>${d.drop != null ? U.elev(d.drop) : '—'}</td><td>${d.avgGrade.toFixed(1)}%</td><td>${U.speed(d.maxSpeed)}</td><td>${d.corners.length}</td><td>${tight}</td><td>${apex}</td></tr>`;
+    const lap = d.group ? `${d.group}&middot;${d.lap}` : '—';
+    return `<tr><td>${d.index}</td><td>${lap}</td><td>${fmtT(d.duration)}</td><td>${U.dist(d.distance)}</td><td>${d.drop != null ? U.elev(d.drop) : '—'}</td><td>${d.avgGrade.toFixed(1)}%</td><td>${U.speed(d.maxSpeed)}</td><td>${d.corners.length}</td><td>${tight}</td><td>${apex}</td></tr>`;
   }).join('');
-  tb.innerHTML = rows || '<tr><td colspan="9" class="dim">No sustained descents detected.</td></tr>';
-  /* Corner chips for descents that have them: direction, heading change, radius, apex speed. */
+  tb.innerHTML = rows || '<tr><td colspan="10" class="dim">No sustained descents detected.</td></tr>';
+  /* Corner chips: direction, heading change, radius, apex speed. Chips with a position pan the map
+     to that corner on tap, so the list and the map read together. */
   const det = document.getElementById('roadCornersDetail');
   if (det) {
     const blocks = (D.descents || []).filter(d => d.corners.length).map(d => {
-      const chips = d.corners.map(c =>
-        `<span style="display:inline-block; background:var(--surface2, #f1f5f9); border:1px solid var(--border); border-radius:6px; padding:2px 8px; margin:2px 4px 2px 0; font-size:12px;">${c.dir} ${Math.round(c.headingChange)}&deg; · r ${c.radius != null ? U.small(c.radius) : '?'} · ${U.speed(c.apexSpeed)}</span>`).join('');
-      return `<div style="margin-top:6px;"><span class="dim" style="font-size:12px;">Descent ${d.index}:</span> ${chips}</div>`;
+      const chips = d.corners.map((c, ci) => {
+        const pos = (c.apexLat != null && c.apexLon != null) ? ` data-lat="${c.apexLat}" data-lon="${c.apexLon}"` : '';
+        return `<span class="road-corner-chip"${pos} style="display:inline-block; background:var(--surface2, #f1f5f9); border:1px solid var(--border); border-radius:6px; padding:2px 8px; margin:2px 4px 2px 0; font-size:12px;${pos ? ' cursor:pointer;' : ''}" title="${pos ? 'Show on map' : ''}">${c.dir} ${Math.round(c.headingChange)}&deg; · r ${c.radius != null ? U.small(c.radius) : '?'} · ${U.speed(c.apexSpeed)}</span>`;
+      }).join('');
+      const lapTag = d.group ? ` <span class="dim" style="font-size:11px;">(lap ${d.group}&middot;${d.lap})</span>` : '';
+      return `<div style="margin-top:6px;"><span class="dim" style="font-size:12px;">Descent ${d.index}${lapTag}:</span> ${chips}</div>`;
     }).join('');
     det.innerHTML = blocks;
+    det.querySelectorAll('.road-corner-chip[data-lat]').forEach(el => {
+      el.onclick = () => {
+        if (!mapInstance) return;
+        mapInstance.setView([parseFloat(el.dataset.lat), parseFloat(el.dataset.lon)], Math.max(mapInstance.getZoom(), 16));
+        const mapEl = document.getElementById('map');
+        if (mapEl) mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      };
+    });
+  }
+}
+
+/* Corner markers on the ride map: a small L/R disc at each detected apex, popup with the corner's
+   numbers. Added to the current mapInstance, so they are torn down with the map on re-render. */
+function renderRoadCornerMarkers(D) {
+  if (!mapInstance) return;
+  for (const d of (D.descents || [])) {
+    for (const c of d.corners) {
+      if (c.apexLat == null || c.apexLon == null) continue;
+      const color = c.dir === 'L' ? '#3d6fb0' : '#5f9e7f';
+      const icon = L.divIcon({ className: '', iconSize: [16, 16], iconAnchor: [8, 8],
+        html: `<div style="width:16px; height:16px; border-radius:50%; background:${color}; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.4); color:#fff; font-size:10px; font-weight:700; line-height:12px; text-align:center;">${c.dir}</div>` });
+      L.marker([c.apexLat, c.apexLon], { icon, title: `Corner (descent ${d.index})` })
+        .bindPopup(`<strong>Descent ${d.index}${d.group ? ' (lap ' + d.group + '&middot;' + d.lap + ')' : ''}</strong><br>` +
+          `${c.dir === 'L' ? 'Left' : 'Right'} ${Math.round(c.headingChange)}&deg; · radius ${c.radius != null ? U.small(c.radius) : '?'}<br>` +
+          `apex ${U.speed(c.apexSpeed)} · entry ${U.speed(c.entrySpeed)}`)
+        .addTo(mapInstance);
+    }
   }
 }
 
@@ -10206,7 +10425,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'af017ef · 2026-07-03';
+const LOAM_BUILD = '67d116d · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
