@@ -2665,15 +2665,29 @@ function drawRuns() {
     const taggable = runs.some(r => r.src);
     const anyTagged = runs.some(r => r.src && r.src.autoTag);
     if (taggable && !anyTagged) {
-      cta.innerHTML = `Tag a run below (Tag as…) to track it across rides: next time you ride it,
-        Loam auto-recognizes it and unlocks Compare past laps and the segment leaderboard.
-        Riding the same trail twice in one session unlocks the turn-by-turn play-by-play and ghost race.`;
+      /* Turn-by-turn play-by-play and ghost race need body-frame turns (MTB only). On GPS-only
+         rides, only the GPS-based features (auto-match, Compare past laps, leaderboard) work, so do
+         not promise the turn features the same page says are unavailable. */
+      cta.innerHTML = isMtbFamily(D.sport)
+        ? `Tag a run below (Tag as…) to track it across rides: next time you ride it,
+           Loam auto-recognizes it and unlocks Compare past laps and the segment leaderboard.
+           Riding the same trail twice in one session unlocks the turn-by-turn play-by-play and ghost race.`
+        : `Tag a run below (Tag as…) to track it across rides: next time you ride it, Loam
+           auto-recognizes it and unlocks Compare past laps and the segment leaderboard.`;
       cta.classList.remove('hidden');
     } else { cta.innerHTML = ''; cta.classList.add('hidden'); }
   }
   const bestTime = Math.min(...runs.map(r => r.metrics.duration));
   const bestTop = Math.max(...runs.map(r => r.metrics.maxSpeed));
   const hi = 'style="color:#7fb069;font-weight:600;"';
+  /* Turns / L·R / Radius come from body-frame turn detection, which only exists for MTB. On running
+     and GPS-only rides those columns are always 0/0/— (dead), so swap in an Avg-speed column and
+     rebuild the header to match, instead of showing three columns of zeros. */
+  const showTurns = isMtbFamily(D.sport);
+  const thead = document.querySelector('#runsTable thead');
+  if (thead) thead.innerHTML = showTurns
+    ? `<tr><th>#</th><th>Run</th><th>Time</th><th>Dist</th><th>Top</th><th>Turns</th><th>L/R</th><th title="Median apex radius">Radius</th><th>Drop</th><th></th></tr>`
+    : `<tr><th>#</th><th>Run</th><th>Time</th><th>Dist</th><th>Top</th><th>Avg</th><th>Drop</th><th></th></tr>`;
   document.querySelector('#runsTable tbody').innerHTML = runs.map(r => {
     const m = r.metrics;
     const label = runLabel(r.tStart) || r.label;
@@ -2691,6 +2705,10 @@ function drawRuns() {
            <button data-act="tag" data-idx="${r.n - 1}">Retag</button>`
         : `<button data-act="tag" data-idx="${r.n - 1}">Tag as…</button>`;
     }
+    const metricCells = showTurns
+      ? `<td data-l="Turns">${m.nTurns}</td><td data-l="L/R">${m.leftTurns}/${m.rightTurns}</td>
+         <td data-l="Radius">${m.medianRadius != null ? U.small(m.medianRadius) : '—'}</td>`
+      : `<td data-l="Avg">${U.speed(m.avgSpeed)}</td>`;
     /* The classes + data-n/data-l attributes drive the phone card reflow (max-width 700px CSS):
        data-n prefixes the name with the run number, data-l becomes each metric tile's label. */
     return `<tr data-idx="${r.n - 1}" style="cursor:pointer;">
@@ -2698,8 +2716,7 @@ function drawRuns() {
       <td data-l="Time" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist">${U.dist(m.distance)}</td>
       <td data-l="Top" ${m.maxSpeed === bestTop ? hi : ''}>${U.speed(m.maxSpeed)}</td>
-      <td data-l="Turns">${m.nTurns}</td><td data-l="L/R">${m.leftTurns}/${m.rightTurns}</td>
-      <td data-l="Radius">${m.medianRadius != null ? U.small(m.medianRadius) : '—'}</td>
+      ${metricCells}
       <td data-l="Drop">${m.drop != null ? U.elev(m.drop) : '—'}</td>
       <td class="descent-row-actions">${actions}</td></tr>`;
   }).join('');
@@ -2747,9 +2764,20 @@ function setRunLabel(tStart, name) {
   try { (name && name.length) ? localStorage.setItem(runLabelKey(tStart), name) : localStorage.removeItem(runLabelKey(tStart)); } catch (e) {}
 }
 
-/* Show only this run's turns in the per-turn table, revealing the table even in focused view. */
+/* Focus one run: zoom the map to its segment, and (MTB only) filter the per-turn table to it. */
 function showTurnsForRun(r, D) {
   focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline }, D.ride);
+  /* Turn-by-turn is an MTB-only feature (needs body-frame turns). On running and GPS-only rides
+     there are no turns, so do NOT show a "0 turns" filter tag or force-scroll to the map (both read
+     as broken). Just tag the map focus in place; the row stays highlighted for feedback. */
+  const label = escapeHtml(runLabel(r.tStart) || r.label);
+  const mapTag = document.getElementById('mapFocusTag');
+  if (mapTag) {
+    mapTag.innerHTML = `showing <strong>${label}</strong> · <a id="mapFocusReset">show full ride</a>`;
+    mapTag.classList.remove('hidden');
+    document.getElementById('mapFocusReset').onclick = () => clearTurnFilter(D);
+  }
+  if (!isMtbFamily(D.sport)) return;
   const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
   renderTurnTable(turns);
   const sec = document.getElementById('turnSection');
@@ -2759,17 +2787,11 @@ function showTurnsForRun(r, D) {
   if (det) det.open = true;
   const tag = document.getElementById('turnFilterTag');
   tag.classList.remove('hidden');
-  tag.innerHTML = `Turn-by-turn: <strong>${escapeHtml(runLabel(r.tStart) || r.label)}</strong> · ${turns.length} turns · <a id="turnFilterReset">show full ride</a>`;
+  tag.innerHTML = `Turn-by-turn: <strong>${label}</strong> · ${turns.length} turns · <a id="turnFilterReset">show full ride</a>`;
   document.getElementById('turnFilterReset').onclick = () => clearTurnFilter(D);
   /* The point of tapping a run is to see it in place, so bring the map (which just zoomed to this
      segment) into view rather than jumping down to the turn table; the table stays filtered for
      when the rider scrolls to it. The legend chip names the focus and offers the way back out. */
-  const mapTag = document.getElementById('mapFocusTag');
-  if (mapTag) {
-    mapTag.innerHTML = `showing <strong>${escapeHtml(runLabel(r.tStart) || r.label)}</strong> · <a id="mapFocusReset">show full ride</a>`;
-    mapTag.classList.remove('hidden');
-    document.getElementById('mapFocusReset').onclick = () => clearTurnFilter(D);
-  }
   const mapSec = document.getElementById('overviewSection');
   if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -4318,7 +4340,7 @@ function computeRunSummary(loc, baro, ride, R) {
 
 const DB_NAME = 'loam-library';
 const DB_VERSION = 4;  // v4: 'sources' store (FIT bytes for re-openable GPS rides)
-const ANALYSIS_CACHE_VERSION = 5;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate)
+const ANALYSIS_CACHE_VERSION = 6;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 const COACHING_CACHE_VERSION = 1;  // bump to invalidate cached AI coaching when the coach prompt/system changes
 const COACHING_CACHE_MAX = 24;     // keep the N most recent first-analysis coaching replies; evict oldest
@@ -4847,6 +4869,23 @@ function detectTurns(t, yawSeg, yawMetric, rollSmooth, rideStart, rideEnd, param
    recording. The FIT's records are reshaped into the sensors.location schema; altitude is also
    synthesized into sensors.baro (smoothed, relative) so grade segmentation, per-run drop, and the
    timeline altitude trace work unchanged without special-casing a missing barometer. */
+/* The activity type declared inside the FIT file itself (Strava / Garmin / Specialized all write
+   it): the 'sport' message (global msg 12, field 0), falling back to the session summary (global
+   msg 18, field 5). FIT sport enum: 1 running, 11 walking, 16 mountaineering, 17 hiking are on
+   foot; everything else (cycling, e-biking = 21, skiing, or absent, e.g. the Avinox export which
+   declares none) is treated as a ride. This is what keeps a Strava run/hike exported as .fit from
+   rendering as a mountain-bike ride. We trust the declared sport rather than guessing from cadence:
+   crank RPM and running step rate overlap, and an e-bike carries cadence too. */
+function fitDeclaredSport(messages) {
+  let sport = null;
+  const sportMsg = messages.find(m => m.gm === 12);
+  if (sportMsg && sportMsg.fields[0] != null) sport = sportMsg.fields[0];
+  if (sport == null) { const sess = messages.find(m => m.gm === 18); if (sess && sess.fields[5] != null) sport = sess.fields[5]; }
+  if (sport === 1) return 'run';
+  if (sport === 11 || sport === 16 || sport === 17) return 'walk';
+  return 'ride';
+}
+
 function fitOnlySensors(records) {
   const sensors = emptyCombinedSensors();
   const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
@@ -5004,14 +5043,20 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   if (superseded()) return;
   const messages = parseFIT(buf);
   const { records, jumps } = extractFitData(messages);
+  /* run | walk | ride, from the FIT's own declared sport. Drives foot vs bike framing below. */
+  const gpsSport = fitDeclaredSport(messages);
+  const foot = gpsSport !== 'ride';
   const { sensors, speedDerived, startFitSec } = fitOnlySensors(records);
   if (sensors.location.length < 30)
     throw new Error('This FIT has no usable GPS track, so it cannot be analyzed on its own. Attach it to a ride recording instead.');
   onProgress('detecting active window');
   const ride = detectRidingWindow(sensors.location);
   if (ride.start == null || ride.end == null) throw new Error('Could not detect a moving window in GPS data');
-  onProgress('detecting climbs, descents, and lifts');
-  const segments = markLiftSegments(detectGradeSegments(sensors.baro, sensors.location, ride), sensors.location);
+  /* Lift/gondola detection is a bike-park concept; a run or hike does not take lifts, so skip it on
+     foot activities (a straight steep stretch on foot is not a lift). */
+  onProgress(foot ? 'detecting climbs and descents' : 'detecting climbs, descents, and lifts');
+  const graded = detectGradeSegments(sensors.baro, sensors.location, ride);
+  const segments = foot ? graded : markLiftSegments(graded, sensors.location);
   onProgress('computing summary');
   const summary = computeGpsSummary(sensors, ride, segments);
   /* Sweeping-corner analysis on the real descents (same detector as the road view; park berms at
@@ -5030,7 +5075,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   _currentRunKey = contentHash;
   onProgress('saving to library');
   const saved = await saveRideToLibrary({
-    filename: fitFile.name, sport: 'ride', sensors, ride, summary, contentKey: contentHash,
+    filename: fitFile.name, sport: gpsSport, sensors, ride, summary, contentKey: contentHash,
     /* FIT timestamps are absolute UTC, so date the library entry from the recording itself; FIT
        filenames rarely carry the full stamp saveRideToLibrary would otherwise parse. */
     recordedAt: startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null,
@@ -5041,7 +5086,10 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   onProgress('rendering');
   hide('loading'); show('results');
   const D = {
-    sensors, ride, summary, segments, descents, descentGroups, sport: 'ride', gpsOnly: true, speedDerived,
+    sensors, ride, summary, segments, sport: gpsSport, gpsSport, gpsOnly: true, speedDerived,
+    /* Sweeping-corner analysis is a bike concept; suppress it for foot activities (a run's
+       "descents" are not cornering lines), so the road-corners section + digest corners stay off. */
+    descents: foot ? [] : descents, descentGroups: foot ? [] : descentGroups,
     /* renderRunTimeline shades climb/descent segments from D.running.segments; this shim is the
        only "running" state a GPS ride has. */
     running: { segments },
@@ -5049,9 +5097,10 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
     title: fitFile.name,
   };
   renderAllGps(D);
+  const noun = gpsSport === 'run' ? 'run' : gpsSport === 'walk' ? 'walk' : 'ride';
   const liftNote = summary.liftCount ? ` · ${summary.liftCount} lifts` : '';
   const jumpNote = jumps.length ? ` · ${jumps.length} FIT jumps ignored (no phone recording to sync to)` : '';
-  setStatus(`FIT ride loaded (GPS-only · ${sensors.location.length.toLocaleString()} fixes${liftNote}${jumpNote})`, true);
+  setStatus(`FIT ${noun} loaded (GPS-only · ${sensors.location.length.toLocaleString()} fixes${liftNote}${jumpNote})`, true);
 }
 
 /* ========== Pipeline ========== */
@@ -5356,7 +5405,7 @@ async function analyze(files) {
     hide('loading'); show('results');
     const mtbRender = {
       sensors, t, yawSeg, rollSmooth, R,
-      ride, turns, summary, calibWin,
+      ride, turns, summary, calibWin, sport,
       fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
@@ -6116,22 +6165,29 @@ function renderAllRunning(D) {
 function renderAllGps(D) {
   _lastRender = { fn: renderAllGps, D };
   hideAllSections();
+  const sport = D.gpsSport || 'ride';   // 'ride' | 'run' | 'walk'
+  const foot = sport === 'run' || sport === 'walk';
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
   { const ct = document.getElementById('carryToggle'); if (ct) ct.classList.add('hidden'); }
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded';
-  renderRideSignature(D, 'ride');
-  renderGpsStats(D.summary);
+  renderRideSignature(D, sport);
+  renderGpsStats(D.summary, sport);
   { const body = document.getElementById('gpsOnlyNoticeBody');
+    /* The notice names exactly what is missing for THIS activity: turns/jumps for a bike, cadence
+       and form for a run/hike. Otherwise a runner reads a bike-flavored disclaimer. */
+    const missing = foot
+      ? 'cadence, vertical oscillation, and running-form analysis is unavailable'
+      : 'turn, jump, airtime, and body-motion analysis is unavailable';
     if (body) body.textContent =
-      'This FIT file carries a GPS track but no phone motion data, so turn, jump, airtime, and body-motion analysis is unavailable.'
+      'This FIT file carries a GPS track but no phone motion data, so ' + missing + '.'
       + (D.speedDerived ? ' The FIT records no speed either; speed here is derived from GPS positions (median-filtered), so treat top speed as approximate.' : '')
       + ' Record with Loam Capture and attach the FIT to get the full analysis.'; }
   show('gpsOnlyNotice');
   renderRunMap(D.sensors.location, D.ride, D.segments);
   renderRoadCornerMarkers(D);
   renderRunTimeline(D);
-  renderRunSegments(D.segments);
+  renderRunSegments(D.segments, { motionColumns: false });
   renderGpsParams(D);
   currentRide = D.ride;
   renderRunsPanel(D);
@@ -6145,9 +6201,9 @@ function renderAllGps(D) {
     show('roadDescentsSection');
   }
   renderGpsUpsell(D);
-  renderGeekStats(D, 'ride');
-  renderCoachPanel(D, 'ride');
-  updateAttachFitVisibility('ride', true);
+  renderGeekStats(D, sport);
+  renderCoachPanel(D, sport);
+  updateAttachFitVisibility(sport, true);
   buildSectionNav();
   resizeChartsSoon();
 }
@@ -6159,13 +6215,25 @@ function renderAllGps(D) {
 function renderGpsUpsell(D) {
   const grid = document.getElementById('gpsUpsellGrid');
   if (!grid) return;
-  const cards = [
-    ['Turns & cornering', 'Every turn with apex radius, body lean, entry/exit speed, and left/right symmetry. From GPS alone, fewer than 1 in 5 turns are even findable (we measured); body-frame motion finds them all.'],
-    ['Jumps & airtime', 'Real airtime from freefall physics: hang time per jump plus landing impact in g. No bike sensor required, just the phone in a pocket.'],
-    ['Braking & flow', 'Where speed was scrubbed mid-corner versus carried through, per turn, so "brake earlier, release sooner" points at a specific corner.'],
-    ['Form Replay', 'Scrub through any run and watch line, lean, and speed evolve together on a real map.'],
-    ['Deeper AI coaching', 'The coach below sees only pace and elevation today. With motion data it coaches mechanics: which side you trust less, where you stiffen up, what drill fixes it.'],
-  ];
+  const sport = D.gpsSport || 'ride';
+  const foot = sport === 'run' || sport === 'walk';
+  /* Pitch what a phone recording adds for THIS activity: cornering/jumps for a bike, cadence and
+     running form for a run/hike. Pitching turns and jumps to a runner reads as broken. */
+  const cards = foot
+    ? [
+        ['Cadence', 'Your step rate through the ' + (sport === 'walk' ? 'walk' : 'run') + ', and how it holds or drops as you fatigue and on the climbs. GPS cannot see steps; the phone or AirPods can.'],
+        ['Vertical oscillation', 'How much you bounce per stride (from AirPods head motion), a proxy for wasted energy. Lower and steadier is more efficient.'],
+        ['Form on the hills', 'Whether your cadence stays quick on the climbs or your stride slows and lengthens, per hill split.'],
+        ['Walk-break detection', 'Where a run drops to a walk (or a hike breaks into a jog), so pacing and fade show up honestly across the outing.'],
+        ['Deeper AI coaching', 'The coach below sees only pace and elevation today. With motion data it coaches form: cadence targets, oscillation, and where you tire.'],
+      ]
+    : [
+        ['Turns & cornering', 'Every turn with apex radius, body lean, entry/exit speed, and left/right symmetry. From GPS alone, fewer than 1 in 5 turns are even findable (we measured); body-frame motion finds them all.'],
+        ['Jumps & airtime', 'Real airtime from freefall physics: hang time per jump plus landing impact in g. No bike sensor required, just the phone in a pocket.'],
+        ['Braking & flow', 'Where speed was scrubbed mid-corner versus carried through, per turn, so "brake earlier, release sooner" points at a specific corner.'],
+        ['Form Replay', 'Scrub through any run and watch line, lean, and speed evolve together on a real map.'],
+        ['Deeper AI coaching', 'The coach below sees only pace and elevation today. With motion data it coaches mechanics: which side you trust less, where you stiffen up, what drill fixes it.'],
+      ];
   grid.innerHTML = cards.map(([t, b]) =>
     `<div class="upsell-card"><div class="uc-lock">needs phone recording</div><div class="uc-title">${escapeHtml(t)}</div><div class="uc-body">${escapeHtml(b)}</div></div>`).join('');
   show('gpsUpsellSection');
@@ -6194,20 +6262,34 @@ function renderRoadUpsell(D) {
   show('roadUpsellSection');
 }
 
-function renderGpsStats(s) {
+function renderGpsStats(s, sport) {
   const mmss = (sec) => { const m = Math.floor(sec / 60), ss = Math.round(sec - m * 60); return `${m}<span class="unit">m</span> ${ss}<span class="unit">s</span>`; };
+  const foot = sport === 'run' || sport === 'walk';
   const hasLifts = s.liftCount > 0;
-  document.getElementById('statsPanel').innerHTML = `
-    <div class="stat accent">
-      <div class="label">Distance ridden</div>
-      <div class="value">${U.dist(s.riddenDistance != null ? s.riddenDistance : s.distance)}</div>
-      <div class="sub">${hasLifts ? `+ ${U.dist(s.liftDistance)} on ${s.liftCount} lifts` : 'no lifts detected'}</div>
-    </div>
-    <div class="stat accent2">
-      <div class="label">Avg riding speed</div>
-      <div class="value">${U.speed(s.avgSpeed)}</div>
-      <div class="sub">lifts + stops excluded</div>
-    </div>
+  /* Foot activities lead with distance + pace (no lifts, no "riding" speed); bike rides lead with
+     ridden distance and riding speed and surface the lift split. */
+  const first = foot
+    ? `<div class="stat accent">
+         <div class="label">Distance</div>
+         <div class="value">${U.dist(s.distance)}</div>
+         <div class="sub">${sport === 'walk' ? 'walked' : 'covered'}</div>
+       </div>
+       <div class="stat accent2">
+         <div class="label">Avg pace</div>
+         <div class="value">${U.pace(s.avgSpeed)}</div>
+         <div class="sub">${U.speed(s.avgSpeed)} · moving</div>
+       </div>`
+    : `<div class="stat accent">
+         <div class="label">Distance ridden</div>
+         <div class="value">${U.dist(s.riddenDistance != null ? s.riddenDistance : s.distance)}</div>
+         <div class="sub">${hasLifts ? `+ ${U.dist(s.liftDistance)} on ${s.liftCount} lifts` : 'no lifts detected'}</div>
+       </div>
+       <div class="stat accent2">
+         <div class="label">Avg riding speed</div>
+         <div class="value">${U.speed(s.avgSpeed)}</div>
+         <div class="sub">lifts + stops excluded</div>
+       </div>`;
+  document.getElementById('statsPanel').innerHTML = first + `
     <div class="stat accent3">
       <div class="label">Top speed</div>
       <div class="value">${U.speed(s.maxSpeed)}</div>
@@ -6232,11 +6314,14 @@ function renderGpsStats(s) {
 }
 
 function renderGpsParams(D) {
+  const sport = D.gpsSport || 'ride';
+  const foot = sport === 'run' || sport === 'walk';
+  const label = sport === 'run' ? 'RUN' : sport === 'walk' ? 'WALK' : 'RIDE';
   document.getElementById('paramsBar').innerHTML = `
-    <span>sport <strong>RIDE (GPS-only FIT)</strong></span>
+    <span>sport <strong>${label} (GPS-only FIT)</strong></span>
     <span>gps fixes <strong>${D.sensors.location.length.toLocaleString()}</strong></span>
     <span>speed <strong>${D.speedDerived ? 'derived from positions' : 'from FIT records'}</strong></span>
-    <span style="margin-left:auto">no motion data · turns / jumps / body-motion unavailable</span>
+    <span style="margin-left:auto">no motion data · ${foot ? 'cadence / form' : 'turns / jumps / body-motion'} unavailable</span>
   `;
 }
 
@@ -7097,31 +7182,43 @@ function renderRunOsc(oscSeries) {
   loamPlot('runOscChart', traces, layout, PLOT_CFG);
 }
 
-function renderRunSegments(segments) {
+function renderRunSegments(segments, opts) {
   if (!segments.length) { hide('runSegmentsSection'); return; }
   show('runSegmentsSection');
+  /* Cadence / Osc / Pace need the phone IMU (running path). GPS-only rides have none, so those three
+     columns would be all dashes; swap them for one Avg-speed column and rebuild the header to match. */
+  const motion = !opts || opts.motionColumns !== false;
+  const thead = document.querySelector('#runSegmentsTable thead');
+  if (thead) thead.innerHTML = motion
+    ? `<tr><th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Cadence</th><th>Osc</th><th>Pace</th></tr>`
+    : `<tr><th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Avg speed</th></tr>`;
   const tbody = document.querySelector('#runSegmentsTable tbody');
   tbody.innerHTML = '';
   segments.forEach((s, i) => {
     const tr = document.createElement('tr');
     const dirCls = s.dir === 'down' ? 'dir-down' : 'dir-up';
     const dirLabel = s.kind === 'lift' ? '⇡ LIFT' : s.dir === 'down' ? '↓ DESC' : '↑ CLIMB';
-    const paceStr = s.paceMinPerKm == null ? '—' : (() => {
-      const m = Math.floor(s.paceMinPerKm);
-      const sec = Math.round((s.paceMinPerKm - m) * 60);
-      return `${m}:${String(sec).padStart(2,'0')}/km`;
-    })();
-    tr.innerHTML = `
+    const common = `
       <td><strong>${i+1}</strong></td>
       <td class="${dirCls}">${dirLabel}</td>
       <td class="dim">${s.tStart.toFixed(0)}s</td>
       <td>${s.duration.toFixed(0)}s</td>
       <td>${s.distance != null ? (s.distance).toFixed(0)+'m' : '—'}</td>
-      <td><strong>${s.gradeAvg > 0 ? '+' : ''}${s.gradeAvg.toFixed(1)}%</strong></td>
-      <td>${s.cadAvg ? s.cadAvg.toFixed(0)+' spm' : '—'}</td>
-      <td>${s.oscAvg ? s.oscAvg.toFixed(1)+' cm' : '—'}</td>
-      <td>${paceStr}</td>
-    `;
+      <td><strong>${s.gradeAvg > 0 ? '+' : ''}${s.gradeAvg.toFixed(1)}%</strong></td>`;
+    if (motion) {
+      const paceStr = s.paceMinPerKm == null ? '—' : (() => {
+        const m = Math.floor(s.paceMinPerKm);
+        const sec = Math.round((s.paceMinPerKm - m) * 60);
+        return `${m}:${String(sec).padStart(2,'0')}/km`;
+      })();
+      tr.innerHTML = common
+        + `<td>${s.cadAvg ? s.cadAvg.toFixed(0)+' spm' : '—'}</td>`
+        + `<td>${s.oscAvg ? s.oscAvg.toFixed(1)+' cm' : '—'}</td>`
+        + `<td>${paceStr}</td>`;
+    } else {
+      const avg = (s.distance != null && s.duration > 0) ? s.distance / s.duration : null;
+      tr.innerHTML = common + `<td>${avg != null ? U.speed(avg) : '—'}</td>`;
+    }
     tbody.appendChild(tr);
   });
   document.getElementById('runSegCountLabel').textContent = segments.length;
@@ -7377,7 +7474,8 @@ function buildDigest(D, sport) {
   }
   /* GPS-only FIT ride: everything the coach may cite must be GPS-derivable. Per-descent detail is
      computed here (not stored on segments) so the digest stays the single source for the coach. */
-  if (sport === 'ride') {
+  if (sport === 'ride' || sport === 'run' || sport === 'walk') {
+    const foot = sport === 'run' || sport === 'walk';
     const loc = (D.sensors && D.sensors.location) || [];
     const baro = (D.sensors && D.sensors.baro) || [];
     const segStats = (seg) => {
@@ -7395,24 +7493,30 @@ function buildDigest(D, sport) {
     };
     const downs = (D.segments || []).filter(x => x.dir === 'down')
       .map(segStats).filter(d => d.vertical_m == null || d.vertical_m >= MIN_DESCENT_DROP_M);
+    const label = sport === 'run' ? 'run (GPS-only FIT import, no phone motion data)'
+      : sport === 'walk' ? 'walk or hike (GPS-only FIT import, no phone motion data)'
+      : 'mountain bike ride (GPS-only FIT import, e.g. bike-park or lift-served day)';
     return {
-      sport: 'mountain bike ride (GPS-only FIT import, e.g. bike-park or lift-served day)',
+      sport: label,
       duration_min: r1(s.duration / 60),
       moving_min: r1(s.movingTime / 60),
       stopped_min: r1(s.stoppedTime / 60),
-      ridden_distance_km: r1(s.riddenDistance / 1000, 2),
-      avg_riding_speed_mph: r1(s.avgSpeed * 2.23694),
+      distance_km: r1((foot ? s.distance : s.riddenDistance) / 1000, 2),
+      [foot ? 'avg_speed_mph' : 'avg_riding_speed_mph']: r1(s.avgSpeed * 2.23694),
+      avg_pace_min_per_km: (foot && s.avgSpeed > 0) ? r1((1000 / s.avgSpeed) / 60, 2) : null,
       max_speed_mph: r1(s.maxSpeed * 2.23694),
       best_30s_mph: r1(s.peak30 * 2.23694),
       elevation_gain_m: r1(s.altGain, 0),
       elevation_loss_m: r1(s.altLoss, 0),
-      lifts: s.liftCount ? {
+      /* Foot activities have no lifts (detection is skipped); the block only appears for bike rides. */
+      lifts: (!foot && s.liftCount) ? {
         count: s.liftCount, distance_km: r1(s.liftDistance / 1000, 2),
         time_min: r1(s.liftTime / 60), ascent_m: r1(s.liftAscent, 0),
         note: 'Auto-detected lift/gondola rides, already excluded from the riding stats above.'
       } : null,
       vam_pedaled_climbs_m_per_h: r1(s.vamPedaled, 0),
       descents: downs,
+      /* Sweeping-corner geometry per descent (bike GPS rides only; foot rides carry descents:[]). */
       corners: (D.descents && D.descents.length) ? {
         note: 'Sweeping corners from 1 Hz GPS heading geometry: a floor, not a census (tight singletrack turns are invisible at 1 Hz), with no lean or braking mechanics.',
         per_descent: D.descents.map(d => ({
@@ -7422,7 +7526,9 @@ function buildDigest(D, sport) {
         })),
         repeated_descents: (D.descentGroups || []).map(g => ({ group: g.group, descent_numbers: g.indexes, note: 'same descent ridden multiple times, in ride order' })),
       } : null,
-      data_caveats: 'GPS-only FIT import: no phone motion data, so there are no jump, airtime, braking, lean, or cadence metrics, and turn data is limited to the sweeping-corner geometry in the corners block. Speed may be derived from GPS positions and is approximate. Descents are listed in ride order.'
+      data_caveats: foot
+        ? 'GPS-only FIT import of a ' + (sport === 'walk' ? 'walk/hike' : 'run') + ': no phone motion data, so there are no cadence, oscillation, or running-form metrics. Coach pace, elevation, and splits only; do not invent form data. Pace/speed may be GPS-derived and approximate.'
+        : 'GPS-only FIT import: no phone motion data, so there are no jump, airtime, braking, lean, or cadence metrics, and turn data is limited to the sweeping-corner geometry in the corners block. Speed may be derived from GPS positions and is approximate. Descents are listed in ride order.'
     };
   }
   if (sport === 'running' || sport === 'walking') {
@@ -7594,6 +7700,33 @@ async function attachCoachDescentHistory(D, sport) {
 
 function coachSystemPrompt(sport, level) {
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
+  if (sport === 'run' || sport === 'walk') {
+    /* GPS-only foot activity (a run or hike imported from a watch/phone FIT): pace + elevation +
+       splits, but NO cadence, oscillation, or form. Coach the runnable/hikeable signal honestly. */
+    const act = sport === 'walk' ? 'walk or hike' : 'run';
+    return `You are Loam, an expert ${sport === 'walk' ? 'hiking and walking' : 'running'} coach. This session is a GPS-only import (from a watch or phone app): you have distance, pace, elevation, and per-segment climb/descent stats, but NO body-motion data (no cadence, vertical oscillation, ground contact, or running-form metrics). Never invent those.
+
+Method — for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies about the athlete's ${act}.
+3. Action: one concrete focus for next time.
+
+What GPS can honestly show, and how to coach it:
+- Pacing vs terrain: how pace holds (or fades) on the climbs vs the flats and descents; a big positive split late in the ${act} suggests fatigue or going out too hard.
+- Elevation load: total gain/loss and the biggest climbs are the real workload; VAM on sustained climbs when present.
+- Consistency across segments; on a ${act}, steady effort-adjusted pace is usually the goal.
+- Respect the data_caveats; pace/speed may be GPS-derived and approximate, so avoid overprecise claims. Do NOT coach cadence or form (there is no motion data for it).
+- At most once in the whole conversation, note that recording with the Loam Capture phone app (or AirPods) would add cadence, oscillation, and form coaching; do not repeat this or make it the headline.
+
+The athlete is at ${level} level — pitch depth and vocabulary accordingly.
+Be direct and encouraging, never fluffy. Do not restate the whole dataset.
+
+Format your FIRST analysis as compact markdown:
+- One bold headline takeaway (a single line).
+- 2-4 bullets, each a single metric -> mechanism -> action.
+- A final line "**Next time:** ..." naming one focus.
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+  }
   if (sport === 'road') {
     /* Road cycling: rider watts from a real power meter, so this coach can be quantitative in a
        way the GPS-only prompt cannot. It still has no body-motion data (no lean, no bar inputs). */
@@ -7829,6 +7962,8 @@ function renderCoachPanel(D, sport) {
     ? ['How do I lower my vertical oscillation?', 'Cadence drills for me', 'Pacing advice for the climbs']
     : sport === 'walking'
     ? ['How was my pacing on the climbs?', 'How can walks like this build fitness?', 'What should I try on my next hike?']
+    : (sport === 'run' || sport === 'walk')
+    ? ['How was my pacing on the climbs?', 'Where did I fade?', `What should I focus on next ${sport === 'walk' ? 'hike' : 'run'}?`]
     : sport === 'ride'
     ? ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?']
     : sport === 'road'
@@ -7845,7 +7980,7 @@ function renderCoachPanel(D, sport) {
     compose.classList.remove('hidden');
     if (chips) chips.classList.remove('hidden');
     document.getElementById('coachInput').focus();
-    sendCoach(`Analyze this ${sport === 'running' ? 'run' : sport === 'walking' ? 'walk' : 'ride'} and coach me: what stands out, what does it mean, and what should I focus on?`);
+    sendCoach(`Analyze this ${(sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride'} and coach me: what stands out, what does it mean, and what should I focus on?`);
   };
   document.getElementById('coachSend').onclick = coachSendFromInput;
   document.getElementById('coachStop').onclick = () => { if (coachAbort) coachAbort.abort(); };
@@ -8520,6 +8655,14 @@ function renderRideSignature(D, sport) {
         { num: m.np != null ? String(Math.round(m.np)) : '—', unit: 'W', label: 'NP' },
         { ...rsSplit(U.elev(ses.totalAscent)), label: 'CLIMB' },
       ];
+    } else if (sport === 'run' || sport === 'walk') {
+      /* GPS-only foot activity: pace is the story, no cadence tile (no motion data). */
+      stats = [
+        { ...rsSplit(U.dist(s.distance)), label: 'DISTANCE' },
+        { ...rsSplit(U.pace ? U.pace(s.avgSpeed) : null), label: 'AVG PACE' },
+        { ...rsSplit(U.elev(s.altGain)), label: 'CLIMB' },
+        { ...rsSplit(U.elev(s.altLoss)), label: 'DESCENT' },
+      ];
     } else if (sport === 'ride') {
       /* GPS-only ride (park/lift day): ridden distance excludes lifts, and the descent is the story. */
       stats = [
@@ -8541,7 +8684,7 @@ function renderRideSignature(D, sport) {
     }
     const durMin = Math.floor((s.duration || (ride.end - ride.start)) / 60);
     const label = rsLabel(D.title);
-    const rideWord = sport === 'running' ? 'RUN' : sport === 'walking' ? 'WALK' : sport === 'road' ? 'ROAD' : 'RIDE';
+    const rideWord = (sport === 'running' || sport === 'run') ? 'RUN' : (sport === 'walking' || sport === 'walk') ? 'WALK' : sport === 'road' ? 'ROAD' : 'RIDE';
     const subtitle = `${rideWord} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
 
     const statCols = stats.map((st, i) => {
@@ -10774,7 +10917,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '096e600 · 2026-07-03';
+const LOAM_BUILD = 'a66feee · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
