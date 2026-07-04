@@ -1269,6 +1269,17 @@
     </div>
   </section>
 
+  <section id="roadUpsellSection" class="hidden">
+    <div class="section-title">
+      What your phone would add
+      <span class="subtitle">the head unit sees power and position on the map · the phone and AirPods see your body</span>
+    </div>
+    <div class="panel">
+      <div id="roadUpsellGrid" class="upsell-grid"></div>
+      <div class="upsell-cta">Next ride: start <strong>Loam Capture</strong> on your phone (jersey pocket is fine) with AirPods in, ride as usual, then attach this bike's FIT to the session. Power stays from the meter; everything above is added from motion.</div>
+    </div>
+  </section>
+
   <section id="geekStatsSection" class="hidden">
     <div class="section-title">
       Raw metrics
@@ -6023,7 +6034,7 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   formStop();
-  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadPowerCurveSection','roadLapsSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadPowerCurveSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
 }
@@ -6078,6 +6089,7 @@ function renderAllGps(D) {
   { const ct = document.getElementById('carryToggle'); if (ct) ct.classList.add('hidden'); }
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded';
+  renderRideSignature(D, 'ride');
   renderGpsStats(D.summary);
   { const body = document.getElementById('gpsOnlyNoticeBody');
     if (body) body.textContent =
@@ -6106,6 +6118,7 @@ function renderAllGps(D) {
   renderCoachPanel(D, 'ride');
   updateAttachFitVisibility('ride', true);
   buildSectionNav();
+  resizeChartsSoon();
 }
 
 /* The gateway pitch, rendered only on GPS-only rides: name exactly what a phone recording adds.
@@ -6125,6 +6138,29 @@ function renderGpsUpsell(D) {
   grid.innerHTML = cards.map(([t, b]) =>
     `<div class="upsell-card"><div class="uc-lock">needs phone recording</div><div class="uc-title">${escapeHtml(t)}</div><div class="uc-body">${escapeHtml(b)}</div></div>`).join('');
   show('gpsUpsellSection');
+}
+
+/* The road gateway: a head-unit FIT already gives power and a GPS line, so the pitch is different
+   from the GPS-only one. It names what the phone plus AirPods add that a power meter cannot see,
+   body position and cornering mechanics, and earns the cornering card by referencing this ride's
+   own GPS-estimated corner count. */
+function renderRoadUpsell(D) {
+  const grid = document.getElementById('roadUpsellGrid');
+  if (!grid) return;
+  const nCorners = (D.descents || []).reduce((a, d) => a + d.corners.length, 0);
+  const cornerLine = nCorners
+    ? `The ${nCorners} corners in this ride are estimated from 1 Hz GPS geometry. The phone's motion sensors measure real lean angle and exactly where you brake into each corner, turning a corner count into cornering mechanics: braking too early, running wide, or trusting one side less.`
+    : `The phone's motion sensors measure real lean angle and where you brake into each corner, turning the map line into cornering mechanics: braking too early, running wide, or trusting one side less.`;
+  const cards = [
+    ['Aero position & posture', 'AirPods measure head pitch, so we show how low and aero you hold in the drops versus sitting up, and whether your position falls apart as you tire. Aerodynamics is the biggest force at road speed and the cheapest free speed, and no power meter or head unit sees it.'],
+    ['Cornering, measured', cornerLine],
+    ['Seated vs standing', 'The phone tells seated from standing and reads out-of-saddle sway, so climbs and sprints get technique feedback, not just watts: energy wasted rocking the bike, and how long you hold a standing effort.'],
+    ['Smoothness & fatigue', 'Head stability from the AirPods is a clean fatigue read: a steady head that starts bobbing, or a gaze that drops late in a long ride, marks where you stopped riding relaxed, often before your power fades.'],
+    ['Deeper AI coaching', 'The coach below works from power and GPS. With motion data it also coaches position and cornering: which side you trust less, where you sit up and lose aero, and the drill that fixes it.'],
+  ];
+  grid.innerHTML = cards.map(([t, b]) =>
+    `<div class="upsell-card"><div class="uc-lock">needs phone + AirPods</div><div class="uc-title">${escapeHtml(t)}</div><div class="uc-body">${escapeHtml(b)}</div></div>`).join('');
+  show('roadUpsellSection');
 }
 
 function renderGpsStats(s) {
@@ -8376,6 +8412,13 @@ function renderRideSignature(D, sport) {
       const p = { latitude: J.lat, longitude: J.lon };
       accents += `<circle cx="${g(X(p))}" cy="${g(Y(p))}" r="6" fill="none" stroke="#f5c542" stroke-width="2" opacity="0.9"/>`;
     }
+    /* Road: mark detected corner apexes, the road analog of MTB turn accents. */
+    if (sport === 'road') {
+      for (const d of (D.descents || [])) for (const c of d.corners) {
+        if (c.apexLat == null || c.apexLon == null) continue;
+        accents += `<circle cx="${g(X({ latitude: c.apexLat, longitude: c.apexLon }))}" cy="${g(Y({ latitude: c.apexLat, longitude: c.apexLon }))}" r="2.4" fill="#ffffff" fill-opacity="0.5"/>`;
+      }
+    }
     const s0 = pts[0], s1 = pts[pts.length - 1];
 
     /* Stats, sport-aware. Walking shares the running layout. */
@@ -8387,6 +8430,24 @@ function renderRideSignature(D, sport) {
         { ...rsSplit(U.pace ? U.pace(s.avgSpeed) : null), label: 'AVG PACE' },
         { num: s.cadMedian ? Math.round(s.cadMedian) : '—', unit: 'spm', label: 'CADENCE' },
         { ...rsSplit(U.elev(s.altGain)), label: 'CLIMB' },
+      ];
+    } else if (sport === 'road') {
+      /* Road reads from the FIT session/metrics, not the phone summary: distance, top speed,
+         normalized power (the roadie's headline), and total climb. */
+      const ses = D.session || {}, m = D.metrics || {};
+      stats = [
+        { ...rsSplit(U.dist(ses.distance)), label: 'DISTANCE' },
+        { ...rsSplit(U.speed(D.maxSpeed)), label: 'TOP SPEED' },
+        { num: m.np != null ? String(Math.round(m.np)) : '—', unit: 'W', label: 'NP' },
+        { ...rsSplit(U.elev(ses.totalAscent)), label: 'CLIMB' },
+      ];
+    } else if (sport === 'ride') {
+      /* GPS-only ride (park/lift day): ridden distance excludes lifts, and the descent is the story. */
+      stats = [
+        { ...rsSplit(U.dist(s.riddenDistance != null ? s.riddenDistance : s.distance)), label: 'DISTANCE' },
+        { ...rsSplit(U.speed(s.maxSpeed)), label: 'TOP SPEED' },
+        { num: String(s.nDownhills != null ? s.nDownhills : (D.descents ? D.descents.length : 0)), unit: '', label: 'DESCENTS' },
+        { ...rsSplit(U.elev(s.altLoss)), label: 'DESCENT' },
       ];
     } else {
       const fourth = (s.nJumps && D.hasFit)
@@ -8401,7 +8462,8 @@ function renderRideSignature(D, sport) {
     }
     const durMin = Math.floor((s.duration || (ride.end - ride.start)) / 60);
     const label = rsLabel(D.title);
-    const subtitle = `${sport === 'running' ? 'RUN' : sport === 'walking' ? 'WALK' : 'RIDE'} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
+    const rideWord = sport === 'running' ? 'RUN' : sport === 'walking' ? 'WALK' : sport === 'road' ? 'ROAD' : 'RIDE';
+    const subtitle = `${rideWord} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
 
     const statCols = stats.map((st, i) => {
       const cx = 40 + i * ((W - 80) / stats.length);
@@ -9321,6 +9383,7 @@ function renderAllRoad(D) {
   hideAllSections();
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
   { const ct = document.getElementById('carryToggle'); if (ct) ct.classList.add('hidden'); }
+  renderRideSignature(D, 'road');
   renderRoadStats(document.getElementById('statsPanel'), D);
   renderRunMap(D.sensors.location, D.ride, D.segments);
   renderRoadCornerMarkers(D);
@@ -9344,9 +9407,22 @@ function renderAllRoad(D) {
   if (D.mmp && D.mmp.length) { show('roadPowerCurveSection'); renderRoadPowerCurve(D); }
   renderRoadLaps(D);
   if (D.laps && D.laps.length >= 2) show('roadLapsSection');
+  renderRoadUpsell(D);
   renderCoachHighlights(D, 'road');
   renderCoachPanel(D, 'road');
   try { buildSectionNav(); } catch (e) { console.warn('section nav', e); }
+  /* A chart lower on the page can be plotted before fonts, map tiles, and layout settle at their
+     final width; the transient narrow measurement shows as a half-width chart until something
+     resizes. responsive:true charts re-fit on a window resize, so nudge them once layout is stable
+     (matches the focus-toggle and backToCompare paths). Two nudges cover both a quick reflow and a
+     slower font/tile settle. */
+  resizeChartsSoon();
+}
+/* Re-fit every responsive Plotly chart after layout settles. Cheap, and the map ignores it. */
+function resizeChartsSoon() {
+  const fire = () => { try { window.dispatchEvent(new Event('resize')); } catch (e) {} };
+  setTimeout(fire, 80);
+  setTimeout(fire, 450);
 }
 
 function renderRoadSpeedChart(D) {
@@ -10425,7 +10501,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '67d116d · 2026-07-03';
+const LOAM_BUILD = '263db28 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
