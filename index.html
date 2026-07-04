@@ -1248,6 +1248,14 @@
     <div class="dim" id="roadCornersCaveat" style="font-size:12px; margin-top:8px;">Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.</div>
   </section>
 
+  <section id="roadDescentHistorySection" class="hidden">
+    <div class="section-title">
+      Descent ghost
+      <span class="subtitle">the same descent across your rides · speed at each point of the descent, today against your history</span>
+    </div>
+    <div id="roadDescentHistory"></div>
+  </section>
+
   <section id="roadPowerCurveSection" class="hidden">
     <div class="section-title">
       Power curve
@@ -6114,7 +6122,7 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   formStop();
-  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
 }
@@ -7357,6 +7365,11 @@ function roadHighlights(D) {
     const list = (notable.length ? notable : D.powerPRs).slice(0, 4).map(fmt).join(', ');
     out.push(`<strong>New power best${D.powerPRs.length > 1 ? 's' : ''} today</strong> at ${list} (vs your saved rides)`);
   }
+  /* Same-descent ghost PRs belong with the power PRs at the top of the card. */
+  { const hist = D.descentHistory || []; const pb = hist.find(h => h.isBest);
+    if (pb) out.push(`<strong>Descent PR</strong> on descent ${pb.today.index} — fastest of your ${pb.count} attempts on it`);
+    else if (hist.length) { const h = hist[0]; out.push(`Descent ${h.today.index}: ${Math.round(h.secondsOffBest)}s off your best of ${h.count} attempts — the ghost shows where`); }
+  }
   const real = climbs.filter(c => c.duration >= 120 && c.avgPower != null);
   if (real.length) {
     const big = real.reduce((a, b) => (b.gain > a.gain ? b : a));
@@ -7379,7 +7392,7 @@ function roadHighlights(D) {
     const times = laps.map(l => Math.round(l.duration));
     out.push(`Descent ${g.group} ridden <strong>${laps.length}x</strong> (${times.map(t => Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0')).join(', ')}) — ask the coach what changed between laps`);
   }
-  return out.slice(0, 4);
+  return out.slice(0, 6);
 }
 
 function renderCoachHighlights(D, sport) {
@@ -7463,6 +7476,12 @@ function buildDigest(D, sport) {
         note: 'same descent ridden multiple times, in ride order; compare corner apex speeds and times across laps',
         laps: g.indexes.map(ix => descentRow((D.descents || []).find(x => x.index === ix))),
       })),
+      descent_ghost: (D.descentHistory && D.descentHistory.length) ? D.descentHistory.map(g => ({
+        descent_n: g.today.index, times_ridden_across_rides: g.count,
+        today_time_s: r1(g.today.duration, 0), today_rank: g.rankOfToday, seconds_off_best: r1(g.secondsOffBest, 0),
+        is_personal_best: g.isBest,
+        note: 'the SAME descent compared across the rider\'s saved rides (a ghost race). A time slower than the best is usually lower corner apex speed (braking earlier, less commitment when tired), not straight-line speed; that is a skill and confidence read, not fitness.',
+      })) : null,
       device_laps: (D.laps || []).map((l, i) => ({
         n: i + 1, timer_s: r1(l.timerTime ?? l.elapsedTime, 0), distance_m: r1(l.distance, 0),
         avg_power_w: l.avgPower ?? null, np_w: l.normalizedPower ?? null, avg_hr: l.avgHr ?? null,
@@ -7747,7 +7766,7 @@ Road reference points:
 - Balance: persistent deviation past ~55/45, or drift_pct_points_first_to_second_half beyond ~2-3 points, points at one-sided fatigue, an old injury, or bike fit; suggest single-leg work or a fit check, and re-measuring on a similar ride. The side labels are provisional (see data_caveats), so coach the magnitude of asymmetry and drift, not which specific leg, unless the rider confirms.
 - best_power_w (5s/1m/5m/20m) sketches the rider's profile: sprint vs steady-state. 20m best times 0.95 approximates FTP; if that disagrees with the stored FTP, suggest retesting.
 - Trend and bests: a history array (the rider's recent saved road rides, newest first, with NP/TSS/IF) lets you compare this ride to recent form instead of coaching it in isolation. power_bests_set_today lists the durations where this ride beat the rider's best across all their saved rides; call those out specifically and celebrate them, they are the "fitness is arriving" moments. Never invent history or bests that are not in the data.
-- Descents and corners: counts, radii, and apex speeds are GPS geometry for sweeping corners only, a floor, not a census. repeated_descents lists laps of the same descent: compare times and avg_corner_apex_mph across laps (a later lap slower mainly via lower apex speeds means braking earlier when tired, a skill/confidence signal, not fitness). Never invent lean or braking data.
+- Descents and corners: counts, radii, and apex speeds are GPS geometry for sweeping corners only, a floor, not a census. repeated_descents lists laps of the same descent WITHIN this ride; descent_ghost compares the same descent ACROSS the rider's saved rides (today's time, rank, and seconds off their best). For both, a slower time via lower apex speeds means braking earlier when tired, a skill and confidence read, not fitness; celebrate a descent_ghost personal best. Never invent lean or braking data.
 - Respect data_caveats. Do not coach motor assist: these are rider watts.
 
 The athlete is at ${level} level — pitch depth and vocabulary accordingly.
@@ -9562,6 +9581,57 @@ function groupRepeatedDescents(descents) {
   return out;
 }
 
+/* Same-descent comparison across rides (the road "ghost"). Matches a descent to prior saved rides'
+   descents by geometry (endpoints within ~150 m, length within 25%) and lines up attempts by
+   distance along the descent. Vendored from analyzer/sports/road/descent-history.js. */
+function descentHaversineM(lat1, lon1, lat2, lon2) {
+  const toR = Math.PI / 180, R = 6371000;
+  const dLat = (lat2 - lat1) * toR, dLon = (lon2 - lon1) * toR;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+function descentsMatch(a, b, opts = {}) {
+  const startTol = opts.startTol ?? 150, endTol = opts.endTol ?? 150, lenTol = opts.lenTol ?? 0.25;
+  if (a == null || b == null || a.startLat == null || b.startLat == null || a.endLat == null || b.endLat == null) return false;
+  if (!(a.distance > 0) || !(b.distance > 0)) return false;
+  const s = descentHaversineM(a.startLat, a.startLon, b.startLat, b.startLon);
+  const e = descentHaversineM(a.endLat, a.endLon, b.endLat, b.endLon);
+  const lenOk = Math.abs(a.distance - b.distance) / Math.max(a.distance, b.distance) <= lenTol;
+  return s <= startTol && e <= endTol && lenOk;
+}
+function speedVsDistance(speed, nPoints = 80) {
+  const s = (speed || []).filter(v => v != null);
+  if (s.length < 4) return null;
+  const cum = [0];
+  for (let i = 0; i < s.length; i++) cum.push(cum[i] + s[i]);
+  const total = cum[cum.length - 1];
+  if (!(total > 0)) return null;
+  const out = [];
+  let i = 0;
+  for (let k = 0; k < nPoints; k++) {
+    const d = (k / (nPoints - 1)) * total;
+    while (i < cum.length - 2 && cum[i + 1] < d) i++;
+    out.push(+s[Math.min(i, s.length - 1)].toFixed(3));
+  }
+  return out;
+}
+function matchDescentHistory(current, priors, opts = {}) {
+  const out = [];
+  for (const t of (current || [])) {
+    const matches = (priors || []).filter(p => descentsMatch(t, p, opts));
+    if (!matches.length) continue;
+    const ranked = [t, ...matches].slice().sort((a, b) => a.duration - b.duration);
+    const rankOfToday = ranked.findIndex(a => a.isToday) + 1;
+    const best = ranked[0];
+    out.push({
+      today: t, priors: matches, ranked, count: ranked.length, rankOfToday,
+      secondsOffBest: best.isToday ? 0 : +(t.duration - best.duration).toFixed(1),
+      isBest: rankOfToday === 1,
+    });
+  }
+  return out;
+}
+
 /* Reshape FIT records into the sensors.location schema the shared pipeline expects (grade
    segmentation, map, ride window), so a phone-less FIT reuses them unchanged. baro is left empty:
    detectGradeSegments then reads GPS altitude, which is what the FIT carries. */
@@ -9675,18 +9745,36 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   /* Best-power envelope: the highest watts ever held at each duration across the rider's other saved
      road rides. Overlaying it on this ride's curve answers "am I getting fitter", and any duration
      where today beats it is a power PR. Best-effort; no history just means no envelope. */
-  let powerEnvelope = null, powerPRs = [];
+  let powerEnvelope = null, powerPRs = [], descentHistory = [];
   try {
-    const priors = (await listRides()).filter(r => r.sport === 'road' && r.summary && r.summary.mmp && r.dedupKey !== contentHash);
-    if (priors.length) {
+    const priorRides = (await listRides()).filter(r => r.sport === 'road' && r.dedupKey !== contentHash);
+    const withMmp = priorRides.filter(r => r.summary && r.summary.mmp);
+    if (withMmp.length) {
       const best = {};
-      for (const r of priors) for (const e of r.summary.mmp) { if (best[e.duration] == null || e.watts > best[e.duration]) best[e.duration] = e.watts; }
+      for (const r of withMmp) for (const e of r.summary.mmp) { if (best[e.duration] == null || e.watts > best[e.duration]) best[e.duration] = e.watts; }
       powerEnvelope = mmp.map(e => ({ duration: e.duration, watts: best[e.duration] != null ? best[e.duration] : null }));
       powerPRs = mmp.filter(e => best[e.duration] != null && Math.round(e.watts) > best[e.duration]).map(e => e.duration);
     }
-  } catch (e) { console.warn('power envelope', e); }
+    /* Same-descent ghost: today's descents (speed read from the ride) against prior saved rides'
+       descents (their stored speed series), matched by geometry. */
+    const todayAttempts = descents.map(d => ({
+      isToday: true, date: recordedAt.slice(0, 10), index: d.index,
+      duration: d.duration, distance: d.distance, avgSpeed: d.avgSpeed, maxSpeed: d.maxSpeed,
+      startLat: d.startLat, startLon: d.startLon, endLat: d.endLat, endLon: d.endLon,
+      speed: sensors.location.filter(r => r.t >= d.tStart && r.t <= d.tEnd && r.speed != null).map(r => r.speed),
+    }));
+    const priorAttempts = [];
+    for (const r of priorRides) for (const d of (r.descents || [])) {
+      priorAttempts.push({
+        isToday: false, date: (r.recordedAt || '').slice(0, 10), rideFile: r.filename,
+        duration: d.duration, distance: d.distance, avgSpeed: d.avgSpeed, maxSpeed: d.maxSpeed,
+        startLat: d.latStart, startLon: d.lonStart, endLat: d.latEnd, endLon: d.lonEnd, speed: d.speed,
+      });
+    }
+    descentHistory = matchDescentHistory(todayAttempts, priorAttempts);
+  } catch (e) { console.warn('road history (envelope/ghost)', e); }
   if (superseded()) return;
-  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, metrics, mmp, powerEnvelope, powerPRs, zones, quadrants, balance, balanceDrift, movingTime, maxSpeed, segments, libraryRideId: saved && saved.id, title: fitFile.name, sport: 'road' };
+  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, descentGroups, descentHistory, metrics, mmp, powerEnvelope, powerPRs, zones, quadrants, balance, balanceDrift, movingTime, maxSpeed, segments, libraryRideId: saved && saved.id, title: fitFile.name, sport: 'road' };
   onProgress('rendering');
   hide('loading'); show('results');
   renderAllRoad(D);
@@ -9720,6 +9808,7 @@ function renderAllRoad(D) {
   { const cav = document.getElementById('roadCornersCaveat');
     if (cav) cav.textContent = 'Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.'; }
   if (D.descents && D.descents.length) show('roadDescentsSection');
+  if (D.descentHistory && D.descentHistory.length) { renderRoadDescentHistory(D); show('roadDescentHistorySection'); }
   if (D.mmp && D.mmp.length) {
     show('roadPowerCurveSection');
     renderRoadRiderControls(D);
@@ -9828,6 +9917,58 @@ function renderRoadCornerMarkers(D) {
         .addTo(mapInstance);
     }
   }
+}
+
+/* Same-descent ghost: one card per descent the rider has ridden before, with a speed-vs-distance
+   overlay (today bold, prior attempts faded) and a table of every attempt ranked by time. */
+function renderRoadDescentHistory(D) {
+  const host = document.getElementById('roadDescentHistory');
+  if (!host) return;
+  host.innerHTML = '';
+  const fmtT = (s) => { const m = Math.floor(s / 60), sc = Math.round(s - m * 60); return m + ':' + String(sc).padStart(2, '0'); };
+  const ord = (n) => ['', '1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th'][n] || (n + 'th');
+  (D.descentHistory || []).forEach((g, gi) => {
+    const t = g.today, best = g.ranked[0];
+    const verdict = g.isBest
+      ? '<strong style="color:#3b7d5b;">fastest yet</strong>'
+      : `${ord(g.rankOfToday)} fastest of ${g.count} · ${Math.round(g.secondsOffBest)}s off your best (${best.isToday ? 'today' : best.date})`;
+    const chartId = 'ghostChart' + gi;
+    const rows = g.ranked.map(a => {
+      const delta = a.duration - best.duration;
+      const deltaTxt = a === best ? '<span style="color:#3b7d5b;">best</span>' : '+' + Math.round(delta) + 's';
+      return `<tr${a.isToday ? ' style="font-weight:600;"' : ''}><td>${a.isToday ? 'Today' : a.date}</td><td>${fmtT(a.duration)}</td><td>${deltaTxt}</td><td>${U.speed(a.avgSpeed)}</td><td>${U.speed(a.maxSpeed)}</td></tr>`;
+    }).join('');
+    const card = document.createElement('div');
+    card.style.cssText = 'margin-bottom:20px;';
+    card.innerHTML =
+      `<div style="font-size:14px; margin-bottom:6px;">Descent ${t.index}: <span class="dim">ridden ${g.count} times</span> · today ${fmtT(t.duration)} · ${verdict}</div>
+       <div class="chart" id="${chartId}" style="height:220px;"></div>
+       <div class="panel" style="overflow-x:auto; margin-top:8px;"><table><thead><tr><th>When</th><th>Time</th><th>vs best</th><th>Avg</th><th>Max</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    host.appendChild(card);
+    renderGhostChart(chartId, g);
+  });
+}
+function renderGhostChart(chartId, g) {
+  const N = 80;
+  const x = Array.from({ length: N }, (_, k) => Math.round((k / (N - 1)) * 100));
+  const traces = [];
+  g.ranked.forEach(a => {
+    const sd = speedVsDistance(a.speed, N);
+    if (!sd) return;
+    traces.push({
+      x, y: sd.map(v => +U.speedNum(v).toFixed(1)), type: 'scatter', mode: 'lines',
+      line: a.isToday ? { color: '#c54b3c', width: 2.5 } : { color: '#94a3b8', width: 1, dash: 'dot' },
+      opacity: a.isToday ? 1 : 0.7, name: a.isToday ? 'Today' : a.date,
+    });
+  });
+  const layout = {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 52, r: 16, t: 26, b: 40 },
+    xaxis: { title: { text: 'through the descent (%)', font: { size: 11 } }, gridcolor: '#e2e8f0', range: [0, 100] },
+    yaxis: { title: { text: 'speed (' + U.speedUnit() + ')', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
+    showlegend: true, legend: { x: 0, y: 1.16, orientation: 'h', font: { size: 10 } }, hovermode: 'x unified',
+  };
+  loamPlot(chartId, traces, layout, PLOT_CFG);
 }
 
 function renderRoadPowerCurve(D) {
@@ -10917,7 +11058,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'a66feee · 2026-07-03';
+const LOAM_BUILD = 'a37d5e5 · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
