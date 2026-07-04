@@ -1225,6 +1225,50 @@
     <div class="dim" style="font-size:12px; margin-top:8px;">VAM is vertical metres climbed per hour. Fade is last-third vs first-third power on the climb: strongly negative means you started too hard.</div>
   </section>
 
+  <section id="roadSpeedSection" class="hidden">
+    <div class="section-title">
+      Speed &amp; elevation
+      <span class="subtitle">where the ride went fast and where it went up</span>
+    </div>
+    <div class="chart" id="roadSpeedChart" style="height:280px;"></div>
+  </section>
+
+  <section id="roadDescentsSection" class="hidden">
+    <div class="section-title">
+      Descents &amp; corners
+      <span class="subtitle">corners from GPS heading rate · radius r = v/&omega; at the apex</span>
+    </div>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="roadDescentsTable">
+        <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Drop</th><th>Grade</th><th>Max speed</th><th>Corners</th><th>Tightest</th><th>Apex speed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="roadCornersDetail" style="margin-top:10px;"></div>
+    <div class="dim" style="font-size:12px; margin-top:8px;">Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.</div>
+  </section>
+
+  <section id="roadPowerCurveSection" class="hidden">
+    <div class="section-title">
+      Power curve
+      <span class="subtitle">best average power for every duration in this ride</span>
+    </div>
+    <div class="chart" id="roadPowerCurve" style="height:280px;"></div>
+  </section>
+
+  <section id="roadLapsSection" class="hidden">
+    <div class="section-title">
+      Laps
+      <span class="subtitle">as recorded by the head unit's lap button or auto-lap</span>
+    </div>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="roadLapsTable">
+        <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Avg W</th><th>NP</th><th>HR</th><th>Cad</th><th>Ascent</th><th>Balance</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <section id="geekStatsSection" class="hidden">
     <div class="section-title">
       Raw metrics
@@ -5972,7 +6016,7 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   formStop();
-  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadPowerCurveSection','roadLapsSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
 }
@@ -8759,7 +8803,8 @@ const ROAD_SESSION_FIELDS = {
   15:{key:'maxSpeed',scale:1000},16:{key:'avgHr'},17:{key:'maxHr'},18:{key:'avgCadence'},19:{key:'maxCadence'},
   20:{key:'avgPower'},21:{key:'maxPower'},22:{key:'totalAscent'},23:{key:'totalDescent'},
   34:{key:'normalizedPower'},35:{key:'tss',scale:10},36:{key:'intensityFactor',scale:1000},
-  45:{key:'thresholdPower'},253:{key:'timestamp'},
+  45:{key:'thresholdPower'},124:{key:'enhancedAvgSpeed',scale:1000},125:{key:'enhancedMaxSpeed',scale:1000},
+  253:{key:'timestamp'},
 };
 const ROAD_LAP_FIELDS = {
   7:{key:'elapsedTime',scale:1000},8:{key:'timerTime',scale:1000},9:{key:'distance',scale:100},
@@ -8795,6 +8840,9 @@ function extractFitSummary(messages) {
     if (m.gm === 18 && !session) {
       session = roadDecodeByMap(m.fields, ROAD_SESSION_FIELDS);
       session.balance = decodeLrBalance100(m.fields[37]);
+      /* Newer units write enhanced_* speeds and leave 14/15 empty; expose one pair. */
+      if (session.avgSpeed == null) session.avgSpeed = session.enhancedAvgSpeed;
+      if (session.maxSpeed == null) session.maxSpeed = session.enhancedMaxSpeed;
     } else if (m.gm === 19) {
       const lap = roadDecodeByMap(m.fields, ROAD_LAP_FIELDS);
       lap.balance = decodeLrBalance100(m.fields[34]);
@@ -8878,6 +8926,124 @@ function analyzeClimbs(segments, samples, opts = {}) {
   return (segments || []).filter(s => s.dir === 'up').map((seg, i) => roadClimbMetrics(seg, samples || [], opts, i));
 }
 
+/* Mean maximal power curve: best average power over each duration, via prefix sums. */
+function mmpCurve(power1Hz, durations = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 2400, 3600]) {
+  const p = (power1Hz || []).map(v => (v == null ? 0 : v));
+  if (!p.length) return [];
+  const prefix = new Array(p.length + 1);
+  prefix[0] = 0;
+  for (let i = 0; i < p.length; i++) prefix[i + 1] = prefix[i] + p[i];
+  const out = [];
+  for (const d of durations) {
+    if (d > p.length) continue;
+    let best = 0;
+    for (let i = d; i <= p.length; i++) {
+      const avg = (prefix[i] - prefix[i - d]) / d;
+      if (avg > best) best = avg;
+    }
+    out.push({ duration: d, watts: best });
+  }
+  return out;
+}
+
+/* Road descent corners from GPS heading rate. Road corners are long sweepers (radius 20-200 m,
+   several seconds at descent speed), so 1 Hz GPS resolves them; entry threshold is 4 deg/s, far
+   below MTB's 25 deg/s gyro yaw gate, because a 140 m sweeper at 12.5 m/s only turns ~5 deg/s.
+   Radius is r = v/omega, same physics as the MTB apex radius, measured from track geometry.
+   Validated on a real lapped ride: the same sweeper detects on every lap at 132-148 m radius.
+   Vendored from analyzer/sports/road/descents.js. */
+function roadBearing(lat1, lon1, lat2, lon2) {
+  const toR = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * toR) * Math.cos(lat2 * toR);
+  const x = Math.cos(lat1 * toR) * Math.sin(lat2 * toR)
+    - Math.sin(lat1 * toR) * Math.cos(lat2 * toR) * Math.cos((lon2 - lon1) * toR);
+  return Math.atan2(y, x) * 180 / Math.PI;
+}
+function detectRoadCorners(rows, opts = {}) {
+  const ENTER = opts.enter ?? 4, EXIT = opts.exit ?? 2, MIN_HEADING = opts.minHeading ?? 20, MIN_DUR = opts.minDur ?? 1.5;
+  const hs = [];
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1], b = rows[i];
+    const dt = b.t - a.t;
+    if (!(dt > 0) || dt > 4) continue;
+    const v = ((b.speed || 0) + (a.speed || 0)) / 2;
+    if (v * dt < 2) continue;
+    hs.push({ t: b.t, h: roadBearing(a.latitude, a.longitude, b.latitude, b.longitude), v });
+  }
+  const om = [];
+  for (let i = 1; i < hs.length; i++) {
+    let d = hs[i].h - hs[i - 1].h;
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    const dt = hs[i].t - hs[i - 1].t;
+    if (!(dt > 0) || dt > 4) continue;
+    om.push({ t: hs[i].t, w: d / dt, v: hs[i].v });
+  }
+  const sm = om.map((o, i) => {
+    const win = om.slice(Math.max(0, i - 1), Math.min(om.length, i + 2));
+    return { t: o.t, w: win.reduce((a, x) => a + x.w, 0) / win.length, v: o.v };
+  });
+  const corners = [];
+  let cur = null;
+  const close = () => {
+    if (!cur) return;
+    const headingChange = Math.abs(cur.sum);
+    const dur = cur.tEnd - cur.tStart;
+    if (headingChange >= MIN_HEADING && dur >= MIN_DUR && cur.apexV > 2) {
+      const wAbs = Math.abs(cur.apexW) * Math.PI / 180;
+      corners.push({
+        tStart: cur.tStart, tEnd: cur.tEnd,
+        dir: cur.sign > 0 ? 'R' : 'L',
+        headingChange,
+        apexSpeed: cur.apexV,
+        entrySpeed: cur.entryV,
+        radius: wAbs > 0.01 ? cur.apexV / wAbs : null,
+      });
+    }
+    cur = null;
+  };
+  for (const s of sm) {
+    const sign = s.w > 0 ? 1 : -1;
+    if (Math.abs(s.w) >= ENTER && (!cur || cur.sign === sign)) {
+      if (!cur) cur = { sign, tStart: s.t, tEnd: s.t, sum: 0, apexW: 0, apexV: s.v, entryV: s.v };
+      cur.tEnd = s.t;
+      cur.sum += s.w;
+      if (Math.abs(s.w) > Math.abs(cur.apexW)) { cur.apexW = s.w; cur.apexV = s.v; }
+    } else if (cur && (Math.abs(s.w) < EXIT || sign !== cur.sign)) {
+      close();
+    } else if (cur) {
+      cur.tEnd = s.t;
+      cur.sum += s.w;
+    }
+  }
+  close();
+  return corners;
+}
+function analyzeRoadDescents(segments, locRows) {
+  const downs = (segments || []).filter(s => s.dir === 'down');
+  return downs.map((seg, i) => {
+    const rows = (locRows || []).filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
+    const speeds = rows.map(r => r.speed).filter(v => v != null);
+    const alts = rows.map(r => r.altitude).filter(v => v != null);
+    const corners = detectRoadCorners(rows);
+    const radii = corners.map(c => c.radius).filter(v => v != null);
+    const apexes = corners.map(c => c.apexSpeed);
+    return {
+      index: i + 1,
+      tStart: seg.tStart, tEnd: seg.tEnd,
+      duration: seg.tEnd - seg.tStart,
+      distance: seg.distance,
+      drop: alts.length >= 2 ? Math.max(0, alts[0] - alts[alts.length - 1]) : null,
+      avgGrade: seg.gradeAvg,
+      maxSpeed: speeds.length ? Math.max(...speeds) : null,
+      avgSpeed: speeds.length ? speeds.reduce((a, b) => a + b, 0) / speeds.length : null,
+      corners,
+      minRadius: radii.length ? Math.min(...radii) : null,
+      avgApexSpeed: apexes.length ? apexes.reduce((a, b) => a + b, 0) / apexes.length : null,
+    };
+  });
+}
+
 /* Reshape FIT records into the sensors.location schema the shared pipeline expects (grade
    segmentation, map, ride window), so a phone-less FIT reuses them unchanged. baro is left empty:
    detectGradeSegments then reads GPS altitude, which is what the FIT carries. */
@@ -8926,14 +9092,24 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const samples = records.map(r => ({ t: r.ts - t0, power: r.power, cad: r.cad, hr: r.hr, altitude: r.altitude, speed: r.speed, latitude: r.lat, longitude: r.lon })).filter(s => inWin(s.t));
   const segments = detectGradeSegments([], sensors.location, ride);
   const climbs = analyzeClimbs(segments, samples, {});
+  const descents = analyzeRoadDescents(segments, sensors.location);
   const { power: p1hz } = resampleTo1Hz(samples.map(s => ({ t: s.t, power: s.power })));
   const np = normalizedPower(p1hz), avg = averagePower(p1hz);
   const ftp = session && session.thresholdPower ? session.thresholdPower : null;
   const dur = ride.end - ride.start;
   const metrics = { np, avg, vi: variabilityIndex(np, avg), if: intensityFactor(np, ftp), tss: trainingStressScore(dur, np, ftp), ftp };
+  const mmp = mmpCurve(p1hz);
   const balance = powerWeightedBalance(fitInRide);
+  /* Moving time: dt where moving, gaps capped so a paused recording does not count as moving. */
+  let movingTime = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const dt = samples[i].t - samples[i - 1].t;
+    if (dt > 0 && dt <= 10 && (samples[i].speed || 0) >= 0.5) movingTime += dt;
+  }
+  const recMaxSpeed = samples.reduce((a, s) => (s.speed != null && s.speed > a ? s.speed : a), 0);
+  const maxSpeed = session && session.maxSpeed != null ? session.maxSpeed : (recMaxSpeed || null);
   if (superseded()) return;
-  const D = { sensors, ride, fitInRide, session, laps, climbs, metrics, balance, segments, title: fitFile.name, sport: 'road' };
+  const D = { sensors, ride, fitInRide, session, laps, climbs, descents, metrics, mmp, balance, movingTime, maxSpeed, segments, title: fitFile.name, sport: 'road' };
   onProgress('rendering');
   hide('loading'); show('results');
   renderAllRoad(D);
@@ -8956,23 +9132,123 @@ function renderAllRoad(D) {
   renderFitChart(D.fitInRide, D.ride, { target: 'timelineChart', powerLabel: 'Power (W)' });
   renderRoadClimbsAndBalance(D);
   show('roadSection');
+  renderRoadSpeedChart(D);
+  show('roadSpeedSection');
+  renderRoadDescents(D);
+  if (D.descents && D.descents.length) show('roadDescentsSection');
+  renderRoadPowerCurve(D);
+  if (D.mmp && D.mmp.length) show('roadPowerCurveSection');
+  renderRoadLaps(D);
+  if (D.laps && D.laps.length >= 2) show('roadLapsSection');
   try { buildSectionNav(); } catch (e) { console.warn('section nav', e); }
+}
+
+function renderRoadSpeedChart(D) {
+  const loc = D.sensors.location.filter(r => r.t >= D.ride.start && r.t <= D.ride.end);
+  const t = loc.map(r => r.t - D.ride.start);
+  const traces = [
+    { x: t, y: loc.map(r => r.speed != null ? U.speedNum(r.speed) : null), type: 'scatter', mode: 'lines',
+      line: { color: '#3d6fb0', width: 1.5 }, name: `Speed (${U.speedUnit()})`, yaxis: 'y' },
+  ];
+  const alts = loc.filter(r => r.altitude != null);
+  if (alts.length > 10) {
+    traces.push({ x: alts.map(r => r.t - D.ride.start), y: alts.map(r => U.smallNum(r.altitude)), type: 'scatter', mode: 'lines',
+      line: { color: '#8a8f7c', width: 1 }, fill: 'tozeroy', fillcolor: 'rgba(138,143,124,0.12)',
+      name: `Elevation (${U.smallUnit()})`, yaxis: 'y2' });
+  }
+  const shapes = (D.descents || []).map(d => ({ type: 'rect', xref: 'x', yref: 'paper',
+    x0: d.tStart - D.ride.start, x1: d.tEnd - D.ride.start, y0: 0, y1: 1,
+    fillcolor: 'rgba(197,75,60,0.07)', line: { width: 0 } }));
+  const layout = {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+    font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 56, r: 56, t: 24, b: 44 },
+    xaxis: { title: { text: 'time in ride (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { color: '#3d6fb0', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#3d6fb0' }, rangemode: 'tozero' },
+    yaxis2: { title: { text: `elevation (${U.smallUnit()})`, font: { color: '#8a8f7c', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#8a8f7c' } },
+    showlegend: true, legend: { x: 0, y: 1.1, orientation: 'h', font: { size: 10 } },
+    shapes, hovermode: 'x unified',
+  };
+  loamPlot('roadSpeedChart', traces, layout, PLOT_CFG);
+}
+
+function renderRoadDescents(D) {
+  const tb = document.querySelector('#roadDescentsTable tbody');
+  if (!tb) return;
+  const fmtT = (sec) => { const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
+  const rows = (D.descents || []).map(d => {
+    const tight = d.minRadius != null ? U.small(d.minRadius) : '—';
+    const apex = d.avgApexSpeed != null ? U.speed(d.avgApexSpeed) : '—';
+    return `<tr><td>${d.index}</td><td>${fmtT(d.duration)}</td><td>${U.dist(d.distance)}</td><td>${d.drop != null ? U.elev(d.drop) : '—'}</td><td>${d.avgGrade.toFixed(1)}%</td><td>${U.speed(d.maxSpeed)}</td><td>${d.corners.length}</td><td>${tight}</td><td>${apex}</td></tr>`;
+  }).join('');
+  tb.innerHTML = rows || '<tr><td colspan="9" class="dim">No sustained descents detected.</td></tr>';
+  /* Corner chips for descents that have them: direction, heading change, radius, apex speed. */
+  const det = document.getElementById('roadCornersDetail');
+  if (det) {
+    const blocks = (D.descents || []).filter(d => d.corners.length).map(d => {
+      const chips = d.corners.map(c =>
+        `<span style="display:inline-block; background:var(--surface2, #f1f5f9); border:1px solid var(--border); border-radius:6px; padding:2px 8px; margin:2px 4px 2px 0; font-size:12px;">${c.dir} ${Math.round(c.headingChange)}&deg; · r ${c.radius != null ? U.small(c.radius) : '?'} · ${U.speed(c.apexSpeed)}</span>`).join('');
+      return `<div style="margin-top:6px;"><span class="dim" style="font-size:12px;">Descent ${d.index}:</span> ${chips}</div>`;
+    }).join('');
+    det.innerHTML = blocks;
+  }
+}
+
+function renderRoadPowerCurve(D) {
+  if (!D.mmp || !D.mmp.length) return;
+  const fmtDur = (s) => s < 60 ? s + 's' : (s < 3600 ? Math.round(s / 60) + 'm' : (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h');
+  const trace = {
+    x: D.mmp.map(e => e.duration), y: D.mmp.map(e => Math.round(e.watts)),
+    type: 'scatter', mode: 'lines+markers', line: { color: '#c54b3c', width: 2 }, marker: { size: 6 },
+    text: D.mmp.map(e => fmtDur(e.duration)), hovertemplate: 'best %{text}: <b>%{y} W</b><extra></extra>',
+  };
+  const layout = {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+    font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 56, r: 24, t: 24, b: 44 },
+    xaxis: { type: 'log', title: { text: 'duration', font: { size: 11 } }, gridcolor: '#e2e8f0',
+      tickvals: [1, 5, 15, 60, 300, 1200, 3600], ticktext: ['1s', '5s', '15s', '1m', '5m', '20m', '1h'] },
+    yaxis: { title: { text: 'watts', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
+    showlegend: false, hovermode: 'x unified',
+  };
+  const ftp = D.metrics && D.metrics.ftp;
+  if (ftp) {
+    layout.shapes = [{ type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: ftp, y1: ftp,
+      line: { color: '#8caa6d', width: 1, dash: 'dot' } }];
+    layout.annotations = [{ xref: 'paper', yref: 'y', x: 1, y: ftp, xanchor: 'right', yanchor: 'bottom',
+      showarrow: false, text: `FTP ${ftp} W`, font: { size: 10, color: '#8caa6d' } }];
+  }
+  loamPlot('roadPowerCurve', [trace], layout, PLOT_CFG);
+}
+
+function renderRoadLaps(D) {
+  const tb = document.querySelector('#roadLapsTable tbody');
+  if (!tb) return;
+  const fmtT = (sec) => { if (sec == null) return '—'; const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
+  tb.innerHTML = (D.laps || []).map((l, i) => {
+    const bal = l.balance ? `${Math.round(l.balance.left)}/${Math.round(l.balance.right)}` : '—';
+    return `<tr><td>${i + 1}</td><td>${fmtT(l.timerTime != null ? l.timerTime : l.elapsedTime)}</td><td>${l.distance != null ? U.dist(l.distance) : '—'}</td><td>${l.avgPower != null ? l.avgPower : '—'}</td><td>${l.normalizedPower != null ? l.normalizedPower : '—'}</td><td>${l.avgHr != null ? l.avgHr : '—'}</td><td>${l.avgCadence != null ? l.avgCadence : '—'}</td><td>${l.totalAscent != null ? U.elev(l.totalAscent) : '—'}</td><td>${bal}</td></tr>`;
+  }).join('');
 }
 function renderRoadStats(el, D) {
   if (!el) return;
   const s = D.session || {}, m = D.metrics || {};
   const dur = D.ride.end - D.ride.start;
-  const mins = Math.floor(dur / 60), secs = Math.round(dur - mins * 60);
-  const dist = s.distance != null ? (s.distance / 1000) : null;
+  const fmtDur = (sec) => { const mn = Math.floor(sec / 60), sc = Math.round(sec - mn * 60); return `${mn}<span class="unit">m</span> ${sc}<span class="unit">s</span>`; };
+  const moving = D.movingTime || dur;
+  const distM = s.distance != null ? s.distance : null;
+  const avgMoving = distM != null && moving > 0 ? distM / moving : (s.avgSpeed != null ? s.avgSpeed : null);
   const revs = totalPedalStrokes(D.fitInRide);
   const bal = D.balance ? `${Math.round(D.balance.left)} / ${Math.round(D.balance.right)}` : '—';
   const npv = m.np != null ? Math.round(m.np) : null;
   el.innerHTML = `
+    <div class="stat"><div class="label">Distance</div><div class="value">${U.dist(distM)}</div><div class="sub">${avgMoving != null ? U.speed(avgMoving) + ' avg (moving)' : ''}</div></div>
+    <div class="stat"><div class="label">Moving time</div><div class="value">${fmtDur(moving)}</div><div class="sub">${fmtDur(dur).replace(/<[^>]+>/g, '')} elapsed</div></div>
+    <div class="stat accent3"><div class="label">Max speed</div><div class="value">${U.speed(D.maxSpeed)}</div><div class="sub">${D.descents && D.descents.length ? D.descents.length + ' descents · ' + D.descents.reduce((a, d) => a + d.corners.length, 0) + ' corners' : ''}</div></div>
     <div class="stat accent"><div class="label">Norm. power</div><div class="value">${npv != null ? npv : '—'}<span class="unit">W</span></div><div class="sub">${m.avg != null ? Math.round(m.avg) + ' W avg · VI ' + (m.vi ? m.vi.toFixed(2) : '—') : ''}</div></div>
     <div class="stat accent2"><div class="label">Intensity</div><div class="value">${m.if != null ? m.if.toFixed(2) : '—'}<span class="unit"> IF</span></div><div class="sub">${m.tss != null ? Math.round(m.tss) + ' TSS · FTP ' + m.ftp + ' W' : 'no FTP in FIT'}</div></div>
-    <div class="stat"><div class="label">Duration</div><div class="value">${mins}<span class="unit">m</span> ${secs}<span class="unit">s</span></div><div class="sub">${dist != null ? dist.toFixed(1) + ' km' : ''}</div></div>
-    <div class="stat"><div class="label">Elevation</div><div class="value">${s.totalAscent != null ? Math.round(s.totalAscent) : '—'}<span class="unit">m ↑</span></div><div class="sub">${s.totalDescent != null ? Math.round(s.totalDescent) + 'm ↓ · ' : ''}${D.climbs.length} climbs</div></div>
-    <div class="stat accent3"><div class="label">Cadence / HR</div><div class="value">${s.avgCadence != null ? s.avgCadence : '—'}<span class="unit">rpm</span></div><div class="sub">${s.avgHr != null ? s.avgHr + ' bpm avg' : ''}${revs > 0 ? ' · ' + Math.round(revs).toLocaleString() + ' strokes' : ''}</div></div>
+    <div class="stat"><div class="label">Elevation</div><div class="value">${s.totalAscent != null ? U.elev(s.totalAscent) : '—'}<span class="unit"> ↑</span></div><div class="sub">${s.totalDescent != null ? U.elev(s.totalDescent) + ' ↓ · ' : ''}${D.climbs.length} climbs</div></div>
+    <div class="stat"><div class="label">Cadence / HR</div><div class="value">${s.avgCadence != null ? s.avgCadence : '—'}<span class="unit">rpm</span></div><div class="sub">${s.avgHr != null ? s.avgHr + ' bpm avg' : ''}${revs > 0 ? ' · ' + Math.round(revs).toLocaleString() + ' strokes' : ''}</div></div>
     <div class="stat"><div class="label">L / R balance</div><div class="value">${bal}</div><div class="sub">power-weighted</div></div>
   `;
 }
@@ -9911,7 +10187,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '1bb2238 · 2026-07-03';
+const LOAM_BUILD = '5d2d2fd · 2026-07-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
