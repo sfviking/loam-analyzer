@@ -4157,12 +4157,21 @@ function formFrame() {
   if (S.headRel) {
     const intoCls = headRel >= 8 ? 'into' : (headRel <= -8 && phase !== 'approach' ? 'late' : '');
     const lead = S.leadTime;
-    const leadStr = lead == null ? '—' : (lead >= 0 ? `${lead.toFixed(2)}s early` : `${Math.abs(lead).toFixed(2)}s late`);
     const leadCls = lead == null ? '' : (lead >= 0 ? 'into' : 'late');
+    /* No lead means the head never sustained a turn-in through the apex, so there is nothing to time
+       (this is a single per-turn verdict, not a live value, so it never animates either way). A bare
+       "—" read as a broken/empty metric; say what happened and why instead. */
+    const leadTile = lead == null
+      ? `<div class="form-metric"><div class="fm-label">Head turn-in lead</div>`
+        + `<div class="fm-value" style="font-size:13px;color:var(--text-muted);font-weight:500;line-height:1.4;">No sustained turn-in</div>`
+        + `<div class="fm-sub">gaze didn't hold ${FORM_HEAD_TH}&deg;+ into this corner</div></div>`
+      : `<div class="form-metric"><div class="fm-label">Head turn-in lead</div>`
+        + `<div class="fm-value ${leadCls}">${lead >= 0 ? `${lead.toFixed(2)}s early` : `${Math.abs(lead).toFixed(2)}s late`}</div>`
+        + `<div class="fm-sub">head vs bike committing</div></div>`;
     cards += `<div class="form-metric"><div class="fm-label">Look-ahead now${S.headBadge ? `<span class="form-badge">${S.headBadge}</span>` : ''}</div>`
       + `<div class="fm-value ${intoCls}">${headRel >= 0 ? '+' : ''}${headRel.toFixed(0)}<span class="fm-unit">° ${headRel >= 8 ? 'into turn' : (headRel <= -8 ? 'trailing' : 'centered')}</span></div>`
       + `<div class="fm-sub">peak ${S.peakLook != null ? S.peakLook.toFixed(0) : '—'}°</div></div>`
-      + `<div class="form-metric"><div class="fm-label">Head turn-in lead</div><div class="fm-value ${leadCls}">${leadStr}</div><div class="fm-sub">head vs bike committing</div></div>`;
+      + leadTile;
   } else if (seg) {
     /* Whole-segment, lean-only: show which way the rider is leaning right now and the cornering state,
        plus the segment's biggest lean either side, instead of the per-turn commitment/gaze cards. */
@@ -4719,6 +4728,28 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
     if (poly.length < 4) continue;
     const decimated = decimatePolyline(poly, 50);
     const autoTag = await matchDescentToTags({ ...d, polyline: decimated });
+    /* Lead-in: an extended decimated polyline + 1 Hz speed starting up to SEG_LEAD_SEC before the
+       drop-in, so a tag placed here can push its start up into the approach. Uniformly (re)sampled
+       over the SAME extended window as the core, so index-fraction still tracks time-fraction (the
+       invariant buildTagMember relies on). segLeadSec is an integer so seg index segLeadSec lands
+       exactly on tStart (= core index 0). Omitted when there is no usable approach track before the
+       run. Core polyline/speed/stats below are left untouched, so matching and the runs panel are
+       unaffected. */
+    let segPolyline = null, segSpeed = null, segLeadSec = 0;
+    {
+      const firstT = sensors.location.length ? sensors.location[0].t : d.tStart;
+      const leadN = Math.max(0, Math.min(SEG_LEAD_SEC, Math.floor(d.tStart - firstT)));
+      if (leadN >= 3) {
+        const t0 = d.tStart - leadN;
+        const segPoly = windowPolyline(sensors.location, t0, d.tEnd);
+        if (segPoly.length >= 4) {
+          segPolyline = decimatePolyline(segPoly, 50);
+          segSpeed = resample1Hz(sensors.location.filter(r => r.speed != null), t0, d.tEnd, 'speed')
+            .map(v => v == null ? null : +v.toFixed(3));
+          segLeadSec = leadN;
+        }
+      }
+    }
     descents.push({
       tStart: d.tStart, tEnd: d.tEnd,
       duration: d.duration, distance: d.distance, gradeAvg: d.gradeAvg,
@@ -4728,6 +4759,7 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
       annotationLabel: d.label || null,
       polyline: decimated,
       speed: d.speed.map(v => v == null ? null : +v.toFixed(3)),
+      ...(segPolyline ? { segPolyline, segSpeed, segLeadSec } : {}),
       /* Compact per-turn metrics inside this descent so a later ride can run a cross-ride turn-by-turn
          against this lap without re-analyzing it. tRel is the apex time from the descent start, used to
          re-window the turns when the descent is clipped to a tagged segment (buildTagMember). Empty for
@@ -6395,7 +6427,7 @@ function renderGpsParams(D) {
    Resolves { name, clipStart, clipEnd } (nulls when the handles sit at the track's own ends), or
    null on cancel. */
 let _segTrimMap = null;
-function openSegmentTrim({ title, name, polyline, clipStart, clipEnd }) {
+function openSegmentTrim({ title, name, polyline, clipStart, clipEnd, coreStartIdx }) {
   return new Promise(resolve => {
     const modal = document.getElementById('segTrimModal');
     const nameEl = document.getElementById('segTrimName');
@@ -6408,6 +6440,11 @@ function openSegmentTrim({ title, name, polyline, clipStart, clipEnd }) {
     mapHost.innerHTML = '';
     if (_segTrimMap) { try { _segTrimMap.remove(); } catch (e) {} _segTrimMap = null; }
     const L1 = polyline.length - 1;
+    /* The polyline may include a lead-in (approach track before the drop-in). cIdx is where the
+       auto-detected run starts within it; the start handle defaults there and "full run" means
+       start-at-cIdx, so dragging the start left of cIdx opts into the approach and leaving it there
+       keeps today's behavior (clipStart stays null). Plain descents pass no lead, so cIdx is 0. */
+    const cIdx = Math.min(Math.max(0, coreStartIdx || 0), Math.max(0, L1 - 3));
     const nearestIdx = (lat, lon) => {
       let bi = 0, bd = Infinity;
       for (let i = 0; i <= L1; i++) {
@@ -6416,9 +6453,9 @@ function openSegmentTrim({ title, name, polyline, clipStart, clipEnd }) {
       }
       return bi;
     };
-    let i0 = clipStart ? nearestIdx(clipStart[0], clipStart[1]) : 0;
+    let i0 = clipStart ? nearestIdx(clipStart[0], clipStart[1]) : cIdx;
     let i1 = clipEnd ? nearestIdx(clipEnd[0], clipEnd[1]) : L1;
-    if (i1 - i0 < 3) { i0 = 0; i1 = L1; }
+    if (i1 - i0 < 3) { i0 = cIdx; i1 = L1; }
 
     let map = null, seg = null, hStart = null, hEnd = null;
     const segLenM = () => {
@@ -6430,8 +6467,9 @@ function openSegmentTrim({ title, name, polyline, clipStart, clipEnd }) {
       if (seg) seg.setLatLngs(polyline.slice(i0, i1 + 1));
       if (hStart) hStart.setLatLng(polyline[i0]);
       if (hEnd) hEnd.setLatLng(polyline[i1]);
-      const whole = i0 === 0 && i1 === L1;
-      statsEl.textContent = `~${segLenM().toFixed(0)} m selected${whole ? ' (full run)' : ''}`;
+      const whole = i0 === cIdx && i1 === L1;
+      const intoApproach = i0 < cIdx;
+      statsEl.textContent = `~${segLenM().toFixed(0)} m selected${whole ? ' (full run)' : ''}${intoApproach ? ' (start extended up the approach)' : ''}`;
     };
     try {
       map = L.map(mapHost, { zoomControl: true, attributionControl: true });
@@ -6479,21 +6517,37 @@ function openSegmentTrim({ title, name, polyline, clipStart, clipEnd }) {
       modal.onclick = null;
       resolve(result);
     };
-    document.getElementById('segTrimReset').onclick = () => { i0 = 0; i1 = L1; redraw(); };
+    document.getElementById('segTrimReset').onclick = () => { i0 = cIdx; i1 = L1; redraw(); };
     document.getElementById('segTrimCancel').onclick = () => done(null);
     document.getElementById('segTrimCloseBtn').onclick = () => done(null);
     modal.onclick = (e) => { if (e.target === modal) done(null); };
     document.getElementById('segTrimSave').onclick = () => {
       const nm = nameEl.value.trim();
       if (!nm) { nameEl.focus(); return; }
-      const whole = i0 === 0 && i1 === L1;
+      /* Start and end resolve independently: a start left at the core drop-in stays null (unchanged
+         "whole run" semantics, even if the end was trimmed), and only a moved start (up the approach
+         or later into the run) stores an explicit gate. */
       done({
         name: nm,
-        clipStart: whole ? null : [polyline[i0][0], polyline[i0][1]],
-        clipEnd: whole ? null : [polyline[i1][0], polyline[i1][1]],
+        clipStart: i0 === cIdx ? null : [polyline[i0][0], polyline[i0][1]],
+        clipEnd: i1 === L1 ? null : [polyline[i1][0], polyline[i1][1]],
       });
     };
   });
+}
+
+/* Resolve the polyline + default start index for the trim modal. Prefer the lead-in extended track
+   (segPolyline) so the start handle can be dragged up into the approach, defaulting to the drop-in
+   (core start). Falls back to the plain core polyline with start index 0 when no lead-in was stored
+   (older rides/tags). Works for both a saved descent (carries tStart/tEnd/segLeadSec) and a tagged
+   segment (carries segCoreFrac). */
+function segTrimGeometry(src) {
+  if (Array.isArray(src.segPolyline) && src.segPolyline.length >= 4 && src.segLeadSec > 0) {
+    const frac = src.segCoreFrac != null ? src.segCoreFrac
+      : (src.tEnd != null && src.tStart != null ? src.segLeadSec / ((src.tEnd - src.tStart) + src.segLeadSec) : 0);
+    return { polyline: src.segPolyline, coreStartIdx: Math.round(frac * (src.segPolyline.length - 1)) };
+  }
+  return { polyline: src.polyline, coreStartIdx: 0 };
 }
 
 async function promptTagDescent(descent, sourceRideId) {
@@ -6501,10 +6555,12 @@ async function promptTagDescent(descent, sourceRideId) {
   /* Descents with no usable GPS track skip the trim map and keep the plain name prompt. */
   let trimmed;
   if (descent.polyline && descent.polyline.length >= 4) {
+    const geo = segTrimGeometry(descent);
     trimmed = await openSegmentTrim({
       title: 'Name this segment',
       name: suggested,
-      polyline: descent.polyline,
+      polyline: geo.polyline,
+      coreStartIdx: geo.coreStartIdx,
       clipStart: null, clipEnd: null,
     });
   } else {
@@ -6513,6 +6569,11 @@ async function promptTagDescent(descent, sourceRideId) {
   }
   if (!trimmed) return;
   try {
+    /* Persist the lead-in fingerprint alongside the core polyline so the segment can later be edited
+       (Library > adjust) to push its start up the approach. The core polyline stays the match
+       fingerprint; segCoreFrac records where the drop-in sits inside segPolyline. */
+    const segCoreFrac = descent.segLeadSec
+      ? descent.segLeadSec / ((descent.tEnd - descent.tStart) + descent.segLeadSec) : 0;
     await saveTaggedSegment({
       name: trimmed.name,
       polyline: descent.polyline,
@@ -6522,6 +6583,8 @@ async function promptTagDescent(descent, sourceRideId) {
       sourceDescentTStart: descent.tStart,
       gradeAvg: descent.gradeAvg,
       typicalDistance: descent.distance,
+      ...(Array.isArray(descent.segPolyline) && descent.segLeadSec > 0
+        ? { segPolyline: descent.segPolyline, segLeadSec: descent.segLeadSec, segCoreFrac } : {}),
     });
     /* Re-match all current descents — the new tag may apply to siblings too. The runs reference these
        same descent objects via src, so redrawing the runs panel reflects the new tag immediately. */
@@ -6637,20 +6700,36 @@ function nearestPolylineFrac(polyline, pt) {
    to seconds in the 1Hz speed series. A run that never passes near both endpoints (rider joined
    mid-segment, GPS gap) keeps its full detected window rather than a bogus cut. */
 const SEG_CLIP_MAX_MISS_M = 75;
+/* Seconds of approach track prepended to a descent so a tagged segment's start can sit above the
+   auto-detected drop-in (the grade detector opens a run only once the pitch steepens; the flatter
+   roll-in never becomes taggable otherwise). Bounded so the extra per-ride storage stays tiny. */
+const SEG_LEAD_SEC = 45;
 function buildTagMember(r, d, targetTag) {
   const { start, end } = tagClipPoints(targetTag);
+  /* Default to the core detected window (today's behavior). When the tag carries an explicit start
+     gate that may sit above the drop-in and this ride was saved with a lead-in (segPolyline/segSpeed,
+     which prepend up to SEG_LEAD_SEC of approach before tStart), clip against those extended arrays so
+     the start can reach up-trail. Rides saved before the lead-in existed have no seg* arrays and keep
+     the core window, falling back to their detected start (the SEG_CLIP_MAX_MISS_M guard skips a gate
+     they cannot reach). Tags with no explicit start (clipStart null = whole run) always use the core
+     arrays, so existing leaderboards are unchanged. */
   let poly = d.polyline, spd = d.speed;
   let tStart = d.tStart, tEnd = d.tEnd, duration = d.duration, distance = d.distance;
   let latStart = d.latStart, lonStart = d.lonStart, latEnd = d.latEnd, lonEnd = d.lonEnd;
   let maxSpeed = d.maxSpeed, avgSpeed = d.avgSpeed;
-  const a = nearestPolylineFrac(poly, start), b = nearestPolylineFrac(poly, end);
-  if (a.distM <= SEG_CLIP_MAX_MISS_M && b.distM <= SEG_CLIP_MAX_MISS_M && b.frac > a.frac && spd.length > 5 && poly.length > 3) {
-    const s0 = Math.round(a.frac * (spd.length - 1)), s1 = Math.round(b.frac * (spd.length - 1));
-    const p0 = Math.round(a.frac * (poly.length - 1)), p1 = Math.round(b.frac * (poly.length - 1));
-    if ((s0 > 0 || s1 < spd.length - 1) && s1 - s0 >= 5 && p1 - p0 >= 3) {
-      spd = spd.slice(s0, s1 + 1);
-      poly = poly.slice(p0, p1 + 1);
-      tStart = d.tStart + s0; tEnd = d.tStart + s1;
+  const useLead = targetTag.clipStart && Array.isArray(d.segPolyline) && d.segPolyline.length > 3
+    && Array.isArray(d.segSpeed) && d.segSpeed.length > 5;
+  const clipPoly = useLead ? d.segPolyline : poly;
+  const clipSpd = useLead ? d.segSpeed : spd;
+  const base = d.tStart - (useLead ? (d.segLeadSec || 0) : 0);   /* absolute time of index 0 in clip* */
+  const a = nearestPolylineFrac(clipPoly, start), b = nearestPolylineFrac(clipPoly, end);
+  if (a.distM <= SEG_CLIP_MAX_MISS_M && b.distM <= SEG_CLIP_MAX_MISS_M && b.frac > a.frac && clipSpd.length > 5 && clipPoly.length > 3) {
+    const s0 = Math.round(a.frac * (clipSpd.length - 1)), s1 = Math.round(b.frac * (clipSpd.length - 1));
+    const p0 = Math.round(a.frac * (clipPoly.length - 1)), p1 = Math.round(b.frac * (clipPoly.length - 1));
+    if ((s0 > 0 || s1 < clipSpd.length - 1) && s1 - s0 >= 5 && p1 - p0 >= 3) {
+      spd = clipSpd.slice(s0, s1 + 1);
+      poly = clipPoly.slice(p0, p1 + 1);
+      tStart = base + s0; tEnd = base + s1;
       duration = s1 - s0;
       let dm = 0;
       for (let i = 1; i < spd.length; i++) dm += ((spd[i] || 0) + (spd[i-1] || 0)) / 2;   /* 1Hz, dt=1s */
@@ -7893,7 +7972,7 @@ ${domain}
 Rules:
 - Ground every claim in the numbers provided. Never invent metrics that are not in the data.
 - If a "history" array is present (recent prior sessions, newest first), use it for trend: call out what is improving or regressing versus those sessions instead of treating this ride in isolation. Do not invent history that is not there.
-- If a "strava_history" block is present, it is the athlete's own Strava data: recent_activities (recent same-sport rides, for volume and trend), pr_efforts (segments where this ride set a personal record), and close_efforts (segments within a few seconds of a PR, where deltaToPRSeconds is the gap left to beat it, and effortCount is how many times they have ridden that segment). Celebrate the real PRs, name a close_effort as a concrete next target, use effortCount to frame progress by experience on the trail, and read recent_activities for training load. Cite the real segment names and times, and never invent efforts that are not listed.
+- If a "strava_history" block is present, it is the athlete's own Strava data: recent_activities (recent same-sport rides, for volume and trend), pr_efforts (segments where this ride set a personal record), and close_efforts (segments within a few seconds of a PR, where deltaToPRSeconds is the gap left to beat it, and effortCount is how many times they have ridden that segment). Celebrate the real PRs, name a close_effort as a concrete next target, use effortCount to frame progress by experience on the trail, and read recent_activities for training load. Cite the real segment names and times, and never invent efforts that are not listed. For runs it may also carry runQuality, recent runs with splitBalancePct (second-half vs first-half pace, negative means a faster finish), paceVariationPct (how even the splits were), decouplingPct (aerobic decoupling, the pace-to-heart-rate drift, higher means the heart climbed to hold pace), and read (an automatic one-line take). Use runQuality to coach pacing and aerobic fitness across runs (for example rising decoupling means going out too hard or a base that needs work); build on the read rather than contradicting it, and cite the real numbers.
 - Respect the data_caveats. If data is sparse or a mount/source is uncertain, say so and hedge rather than overclaiming.
 - The athlete is at ${level} level — pitch depth and vocabulary accordingly.
 - Be direct and encouraging, never fluffy. Do not restate the whole dataset.
@@ -8116,7 +8195,7 @@ async function sendCoach(text) {
     const sc = window.LOAM_STRAVA_CONTEXT;
     if (sc && typeof sc === 'object' && state.digest && !state.digest.strava_history) {
       state.digest.strava_history = sc;
-      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides. pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. Use for progression, celebrate real PRs, name a close_effort as a concrete target, and frame progress by effortCount; cite the real times and never invent efforts not listed here.";
+      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides. pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. runQuality (runs only): recent runs with splitBalancePct (second-half vs first-half pace, negative is a faster finish), paceVariationPct (split evenness), decouplingPct (pace-to-heart-rate drift, higher means more cardiac drift), and read (an automatic one-line take). Use for progression, celebrate real PRs, name a close_effort as a concrete target, frame progress by effortCount, and coach pacing and aerobic fitness from runQuality; cite the real numbers and never invent efforts not listed here.";
     }
   } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
 
@@ -11139,10 +11218,12 @@ async function renderLibraryContents() {
     b.onclick = async () => {
       const t = tags.find(x => x.id === +b.dataset.id);
       if (!t || !t.polyline || t.polyline.length < 4) { alert('This segment has no stored track to adjust.'); return; }
+      const geo = segTrimGeometry(t);
       const trimmed = await openSegmentTrim({
         title: `Adjust "${t.name}"`,
         name: t.name,
-        polyline: t.polyline,
+        polyline: geo.polyline,
+        coreStartIdx: geo.coreStartIdx,
         clipStart: t.clipStart || null,
         clipEnd: t.clipEnd || null,
       });
@@ -11165,9 +11246,10 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'c1091f7 · 2026-07-06';
+const LOAM_BUILD = '9fd3770 · 2026-07-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
+    ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
     ['Ghost Race', 'race a run against a ghost of your fastest lap on the map, with a live time gap.'],
     ['Form Replay', 'scrub a turn as a leaning rear-view rider; lean always, AirPods gaze + watch hand when clean.'],
     ['Ride Signature card', 'a shareable poster generated from each ride.'],
