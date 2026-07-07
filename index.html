@@ -4476,7 +4476,7 @@ function computeRunSummary(loc, baro, ride, R) {
 
 const DB_NAME = 'loam-library';
 const DB_VERSION = 4;  // v4: 'sources' store (FIT bytes for re-openable GPS rides)
-const ANALYSIS_CACHE_VERSION = 6;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns)
+const ANALYSIS_CACHE_VERSION = 7;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 const COACHING_CACHE_VERSION = 1;  // bump to invalidate cached AI coaching when the coach prompt/system changes
 const COACHING_CACHE_MAX = 24;     // keep the N most recent first-analysis coaching replies; evict oldest
@@ -6663,17 +6663,31 @@ function segTrimGeometry(src) {
 }
 
 async function promptTagDescent(descent, sourceRideId) {
-  const suggested = descent.autoTag ? descent.autoTag.name : (descent.annotationLabel || '');
+  /* Retag on an already-matched descent upgrades that same tag in place (keeps its id, so its lap
+     history and leaderboard stay attached) instead of spawning a duplicate. This is also the path
+     that moves an existing segment's start up-trail: re-analyzing a ride re-saves its descent with
+     the approach lead-in (segPolyline), so Retag here opens the trim on the approach-inclusive track,
+     seeded at the tag's current gates, and dragging Start up then updates the tag. */
+  const existingId = descent.autoTag && descent.autoTag.taggedSegmentId;
+  let existing = null;
+  if (existingId) {
+    try { existing = (await listTaggedSegments()).find(t => t.id === existingId) || null; } catch (e) {}
+  }
+  const suggested = existing ? existing.name : (descent.autoTag ? descent.autoTag.name : (descent.annotationLabel || ''));
+  const hasLead = Array.isArray(descent.segPolyline) && descent.segLeadSec > 0;
   /* Descents with no usable GPS track skip the trim map and keep the plain name prompt. */
   let trimmed;
   if (descent.polyline && descent.polyline.length >= 4) {
     const geo = segTrimGeometry(descent);
     trimmed = await openSegmentTrim({
-      title: 'Name this segment',
+      title: existing ? `Adjust "${existing.name}"` : 'Name this segment',
       name: suggested,
       polyline: geo.polyline,
       coreStartIdx: geo.coreStartIdx,
-      clipStart: null, clipEnd: null,
+      /* Seed the handles at the tag's current gates so a retag starts from where the segment is now
+         and you only drag what you want to change (e.g. pull Start up the approach). */
+      clipStart: existing ? (existing.clipStart || null) : null,
+      clipEnd: existing ? (existing.clipEnd || null) : null,
     });
   } else {
     const name = prompt('Name this segment (e.g. "Tanga", "Top of Boy Scout"):', suggested);
@@ -6681,25 +6695,36 @@ async function promptTagDescent(descent, sourceRideId) {
   }
   if (!trimmed) return;
   try {
-    /* Persist the lead-in fingerprint alongside the core polyline so the segment can later be edited
-       (Library > adjust) to push its start up the approach. The core polyline stays the match
-       fingerprint; segCoreFrac records where the drop-in sits inside segPolyline. */
+    /* The lead-in fingerprint (approach track + where the drop-in sits inside it) rides on the tag so
+       a later Library > adjust can also push the start up. The core polyline stays the match
+       fingerprint and is left unchanged on an in-place upgrade, so matched laps keep matching. */
     const segCoreFrac = descent.segLeadSec
       ? descent.segLeadSec / ((descent.tEnd - descent.tStart) + descent.segLeadSec) : 0;
-    await saveTaggedSegment({
-      name: trimmed.name,
-      polyline: descent.polyline,
-      clipStart: trimmed.clipStart,
-      clipEnd: trimmed.clipEnd,
-      sourceRideId,
-      sourceDescentTStart: descent.tStart,
-      gradeAvg: descent.gradeAvg,
-      typicalDistance: descent.distance,
-      ...(Array.isArray(descent.segPolyline) && descent.segLeadSec > 0
-        ? { segPolyline: descent.segPolyline, segLeadSec: descent.segLeadSec, segCoreFrac } : {}),
-    });
-    /* Re-match all current descents — the new tag may apply to siblings too. The runs reference these
-       same descent objects via src, so redrawing the runs panel reflects the new tag immediately. */
+    const leadFields = hasLead
+      ? { segPolyline: descent.segPolyline, segLeadSec: descent.segLeadSec, segCoreFrac } : {};
+    if (existing) {
+      await updateTaggedSegment({
+        ...existing,
+        name: trimmed.name,
+        clipStart: trimmed.clipStart,
+        clipEnd: trimmed.clipEnd,
+        ...leadFields,
+      });
+    } else {
+      await saveTaggedSegment({
+        name: trimmed.name,
+        polyline: descent.polyline,
+        clipStart: trimmed.clipStart,
+        clipEnd: trimmed.clipEnd,
+        sourceRideId,
+        sourceDescentTStart: descent.tStart,
+        gradeAvg: descent.gradeAvg,
+        typicalDistance: descent.distance,
+        ...leadFields,
+      });
+    }
+    /* Re-match all current descents — the new/updated tag may apply to siblings too. The runs
+       reference these same descent objects via src, so redrawing the runs panel reflects it now. */
     for (const d of currentSavedDescents) d.autoTag = await matchDescentToTags(d);
     drawRuns();
   } catch (e) {
@@ -11587,7 +11612,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = 'a9ec8f3 · 2026-07-06';
+const LOAM_BUILD = '79c7e8d · 2026-07-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
