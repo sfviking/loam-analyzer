@@ -383,8 +383,8 @@
   section, #playByPlay { scroll-margin-top: 64px; }
   /* Focused view (default on): lead with map + timeline + key numbers + runs + coach; collapse heavy
      detail. The timeline stays visible: it is the one read the map cannot give (when, in what order,
-     how hard), so it belongs with the essentials, not behind the toggle. */
-  #results.focus-mode #turnSection,
+     how hard), so it belongs with the essentials, not behind the toggle. The turn-by-turn table is a
+     core read too (and its "Turns" jump chip), so it also stays visible in Focused view. */
   #results.focus-mode #radiusSection,
   #results.focus-mode #geekStatsSection,
   #results.focus-mode #runCadenceSection,
@@ -394,8 +394,6 @@
      map already answer "where did I gain or lose time", so the speed/time-lag spaghetti charts are
      detail. They reveal when Focused view is turned off. */
   #results.focus-mode .detail-chart { display: none; }
-  /* Selecting a run from the Runs table filters the turn table to that run; reveal it even in focus. */
-  #results.focus-mode #turnSection.turns-filtered { display: block; }
   #turnFilterTag { font-size: 11px; color: var(--accent); margin-left: auto; }
   #turnFilterTag a { cursor: pointer; text-decoration: underline; }
   /* Focused-run chip in the map legend: names the segment the map is zoomed to and offers the way
@@ -781,7 +779,7 @@
 <header>
   <div>
     <div class="brand">L<span>O</span>AM</div>
-    <div class="tagline">Activity Analyzer · MTB + Running · Phone + FIT</div>
+    <div class="tagline">Activity Analyzer · Phone + FIT</div>
   </div>
   <div class="header-right" id="hdrRight">
     <button id="whatsNewBtn" type="button" title="What's new">v—</button>
@@ -939,11 +937,7 @@
       <div class="panel" style="padding:0; overflow:hidden;">
         <div id="map"></div>
         <div class="map-legend">
-          <span>turn ring = speed kept:</span>
-          <span class="lg scrub"></span>scrubbed
-          <span class="lg held"></span>held
-          <span class="lg carry"></span>carried
-          <span style="opacity:0.6;">· track colour = speed · tap a run below to focus</span>
+          <span id="mapLegendBody"></span>
           <span id="mapFocusTag" class="hidden"></span>
         </div>
       </div>
@@ -961,8 +955,8 @@
 
   <section id="runsSection" class="hidden">
     <div class="section-title">
-      Runs
-      <span class="subtitle" id="runsSubtitle">your laps in one place · tap a row to focus it · tag a run to track it across rides</span>
+      <span id="runsTitle">Runs</span>
+      <span class="subtitle" id="runsSubtitle">tap a row to focus it · tag a segment to track it across rides</span>
       <select id="runsMode" style="margin-left:auto;">
         <option value="auto">Auto</option>
         <option value="descents">Descents</option>
@@ -1181,6 +1175,10 @@
           <option value="0.25">0.25x</option>
           <option value="0.5" selected>0.5x</option>
           <option value="1">1x</option>
+        </select>
+        <select id="formAvatarSel" title="Rider kit">
+          <option value="kit">My kit</option>
+          <option value="classic">Classic</option>
         </select>
       </div>
       <div id="formScrubPicks" class="hidden"></div>
@@ -1838,6 +1836,26 @@ function detectRidingWindow(locRows) {
    so MTB-specific branches (mechanics, coach history, highlights) treat both alike. Running is the
    other pipeline. */
 function isMtbFamily(sport) { return sport === 'mtb' || sport === 'emtb'; }
+
+/* One SPORT lexicon so every shared surface says the right noun for the activity instead of MTB
+   literals (the "sport is a parameter, never a fork" principle; see unified-sport-ux.md). Keyed by
+   canonical sport; the render paths pass seven raw strings (mtb/emtb/road/running/walking/ride and
+   the GPS gpsSport), so route them through normalizeSport() before lookup. Nouns only, no analysis. */
+const SPORT_LEX = {
+  mtb:  { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns' },
+  emtb: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns' },
+  road: { activity: 'Ride', signature: 'ROAD', ctaVerb: 'ride', legend: 'grade' },
+  run:  { activity: 'Run',  signature: 'RUN',  ctaVerb: 'run',  legend: 'grade' },
+  walk: { activity: 'Walk', signature: 'WALK', ctaVerb: 'walk', legend: 'grade' },
+  ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'grade' },   /* GPS-only generic */
+};
+function normalizeSport(sport) {
+  if (sport === 'running') return 'run';
+  if (sport === 'walking') return 'walk';
+  if (SPORT_LEX[sport]) return sport;
+  return 'ride';
+}
+function sportLex(sport) { return SPORT_LEX[normalizeSport(sport)]; }
 function detectSport(sensors, ride) {
   const inRide = sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
   if (!inRide.length) return { sport: 'unknown', confidence: 0, reasons: ['no GPS speed in ride window'] };
@@ -2678,11 +2696,16 @@ function drawRuns() {
   const { mode, runs, lapInfo } = segmentRuns(D, _runsMode);
   if (!runs.length) { hide('runsSection'); return; }
   show('runsSection');
+  /* Title and count-noun follow the segmentation MODE (the row noun), not the sport, so the panel
+     never reads "N runs (descents)": descents -> Descents, laps -> Laps, marks -> Runs. */
+  const nounSingular = mode === 'descents' ? 'descent' : mode === 'laps' ? 'lap' : 'run';
+  const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : 'Runs';
+  { const t = document.getElementById('runsTitle'); if (t) t.textContent = nounTitle; }
   const sub = document.getElementById('runsSubtitle');
   if (sub) {
-    let s = `${runs.length} run${runs.length > 1 ? 's' : ''} (${mode}`;
-    if (mode === 'laps' && lapInfo && lapInfo.period) s += `, lap ~${lapInfo.period.toFixed(0)}s, periodicity ${(lapInfo.strength * 100).toFixed(0)}%`;
-    sub.textContent = s + ')';
+    let s = `${runs.length} ${nounSingular}${runs.length > 1 ? 's' : ''}`;
+    if (mode === 'laps' && lapInfo && lapInfo.period) s += ` · ~${lapInfo.period.toFixed(0)}s each, periodicity ${(lapInfo.strength * 100).toFixed(0)}%`;
+    sub.textContent = s;
   }
   /* Tagging a run is what unlocks cross-ride run-vs-run, but it is easy to miss. When this ride has
      taggable runs (backed by descents) and none are tagged yet, lead with a one-line nudge. */
@@ -2694,11 +2717,14 @@ function drawRuns() {
       /* Turn-by-turn play-by-play and ghost race need body-frame turns (MTB only). On GPS-only
          rides, only the GPS-based features (auto-match, Compare past laps, leaderboard) work, so do
          not promise the turn features the same page says are unavailable. */
+      /* GPS-only foot activities carry run/walk in gpsSport while D.sport stays 'ride', so resolve it
+         to say "run/walk it" not "ride it". */
+      const verb = sportLex((D.gpsOnly && D.gpsSport) ? D.gpsSport : D.sport).ctaVerb;
       cta.innerHTML = isMtbFamily(D.sport)
-        ? `Tag a run below (Tag as…) to track it across rides: next time you ride it,
+        ? `Tag a ${nounSingular} below (Tag as…) to track it across rides: next time you ${verb} it,
            Loam auto-recognizes it and unlocks Compare past laps and the segment leaderboard.
            Riding the same trail twice in one session unlocks the turn-by-turn play-by-play and ghost race.`
-        : `Tag a run below (Tag as…) to track it across rides: next time you ride it, Loam
+        : `Tag a ${nounSingular} below (Tag as…) to track it across rides: next time you ${verb} it, Loam
            auto-recognizes it and unlocks Compare past laps and the segment leaderboard.`;
       cta.classList.remove('hidden');
     } else { cta.innerHTML = ''; cta.classList.add('hidden'); }
@@ -3448,6 +3474,14 @@ function formTurnSeries(D, turn) {
       const wMed = wBase.length ? median(wBase) : median(wRollG);
       S.wristRoll = wRollG.map(v => Math.max(-90, Math.min(90, v - wMed)));
       S.wristRange = Math.max(...S.wristRoll) - Math.min(...S.wristRoll);
+      /* Wrist roll re-signed so + = rolled INTO this corner (the bars follow the bike). The largest-
+         magnitude wrist sample sets the orientation: at the apex the bars are leaned into the turn.
+         Lets the Form strip compare bar/bike lean (wrist) vs torso lean (phone). Rough: the wrist also
+         articulates on the grip and picks up bar buzz, so treat it as directional, not a true angle. */
+      let wi = 0, wm = 0;
+      for (let k = 0; k < n; k++) { const a = Math.abs(S.wristRoll[k]); if (a > wm) { wm = a; wi = k; } }
+      const wSign = Math.sign(S.wristRoll[wi]) || 1;
+      S.barInto = S.wristRoll.map(v => v * wSign);
     }
 
     /* GPS track for the parallel map: the window slice, sorted, as lat/lon arrays the frame loop
@@ -3760,6 +3794,7 @@ function setupFormReplay(D) {
   sel.onchange = pick;
   document.getElementById('formPlay').onclick = formPlayClicked;
   document.getElementById('formSpeedSel').onchange = (e) => { if (_form) _form.mult = +e.target.value; };
+  { const av = document.getElementById('formAvatarSel'); if (av) { av.value = avatarPref(); av.onchange = (e) => setAvatar(e.target.value); } }
   /* Replay map zoom: +/- buttons and the mouse wheel, re-framing the turn about its centre. */
   { const zi = document.getElementById('formZoomIn'); if (zi) zi.onclick = (e) => { e.stopPropagation(); formZoomBy(1.5); }; }
   { const zo = document.getElementById('formZoomOut'); if (zo) zo.onclick = (e) => { e.stopPropagation(); formZoomBy(1 / 1.5); }; }
@@ -3961,6 +3996,28 @@ function formStop() {
   const scrub = document.getElementById('formScrub'); if (scrub) scrub.value = 0;
 }
 
+/* Rider colour kit. 'kit' matches the owner's gear (white/orange POC lid, black jacket + hydration
+   vest, blue shorts, striped black socks); 'classic' is the original orange-jersey rider. Toggle in
+   the Form Replay controls; persisted in localStorage. */
+function avatarPref() {
+  try { const v = localStorage.getItem('loam_avatar'); if (v === 'classic' || v === 'kit') return v; } catch (e) {}
+  return 'kit';
+}
+function setAvatar(v) {
+  try { localStorage.setItem('loam_avatar', v === 'classic' ? 'classic' : 'kit'); } catch (e) {}
+  const sel = document.getElementById('formAvatarSel'); if (sel) sel.value = avatarPref();
+  if (_form) formFrame();   /* redraw the current frame in the new kit */
+}
+function avatarPalette() {
+  return avatarPref() === 'kit'
+    ? { kit: true,  torso: 'url(#frJkt)',   arm: '#242830', leg: 'url(#frLegK)', glove: '#1c1f26',
+        neck: '#20242b', seam: null,       helmShell: 'url(#frHelmK)', helmStroke: '#3a3f47',
+        vent: '#20242b', dial: '#20242b',  dialStroke: '#9aa1a9', dialHub: '#cfd4d9', seamCol: '#9aa1a9', crown: '#e8622a' }
+    : { kit: false, torso: 'url(#frTorso)', arm: '#c2622a', leg: 'url(#frLeg)',  glove: '#c79b76',
+        neck: '#c79b76', seam: '#9c4818',  helmShell: 'url(#frHelm)',  helmStroke: '#160f08',
+        vent: '#160f08', dial: '#1b130b',  dialStroke: '#9c4818', dialHub: '#c79b76', seamCol: '#9c4818', crown: null };
+}
+
 /* Build the rear-view SVG + metric strip for the current tau. One innerHTML write per frame. */
 function formFrame() {
   const F = _form; if (!F) return;
@@ -3970,6 +4027,7 @@ function formFrame() {
   const headRel = S.headRel ? S.headRel[k] : null;
   const wristRoll = S.wristRoll ? S.wristRoll[k] : null;
   const seg = !!(S && S.segment);
+  const barInto = (!seg && S.barInto) ? S.barInto[k] : null;   /* wrist roll oriented into the corner */
   const tNow = S.w0 + F.tau;
   /* In segment mode there is no single corner: phase comes from whether the bike is turning right now
      (yaw rate past the entry threshold), and time is measured from the segment start. */
@@ -4028,6 +4086,30 @@ function formFrame() {
   const elbowLx = (shLx + gxL) / 2 - 6, elbowLy = (shY + gyL) / 2 + 6;
   const elbowRx = (shRx + gxR) / 2 + 6, elbowRy = (shY + gyR) / 2 + 6;
   const wheelCy = ground - 46, wheelRy = 46;
+  const AV = avatarPalette();
+  /* striped socks (kit): short white bands across the shin, perpendicular to the leg. */
+  const sockStripes = (kx, ky, px, py) => {
+    if (!AV.kit) return '';
+    const dx = px - kx, dy = py - ky, len = Math.hypot(dx, dy) || 1, nxp = -dy / len, nyp = dx / len, hw = 5.2;
+    let s = '';
+    for (let i = 1; i <= 4; i++) { const t = 0.12 + i * 0.17, mx = kx + dx * t, my = ky + dy * t;
+      s += `<line x1="${g(mx-nxp*hw)}" y1="${g(my-nyp*hw)}" x2="${g(mx+nxp*hw)}" y2="${g(my+nyp*hw)}" stroke="#e6e9ec" stroke-width="2.4" opacity="0.85" stroke-linecap="round"/>`; }
+    return s;
+  };
+  /* blue shorts + black hydration vest (kit only) */
+  const shorts = AV.kit
+    ? `<path d="M${cx-13},149 Q${cx},146 ${cx+13},149 L${cx+kneeOut-5},${kneeY-6} L${cx+3},${kneeY-2} L${cx-3},${kneeY-2} L${cx-kneeOut+5},${kneeY-6} Z" fill="url(#frShort)"/>`
+    : '';
+  const vest = AV.kit
+    ? `<rect x="${cx-13}" y="${shY-1}" width="26" height="41" rx="7" fill="#24272c" stroke="#3b404a" stroke-width="1.2"/>`
+      + `<line x1="${cx-11}" y1="${shY+14}" x2="${cx+11}" y2="${shY+14}" stroke="#171a1f" stroke-width="2"/>`
+      + `<line x1="${cx-11}" y1="${shY+25}" x2="${cx+11}" y2="${shY+25}" stroke="#171a1f" stroke-width="2"/>`
+      + `<line x1="${shLx+3}" y1="${shY+1}" x2="${cx-6}" y2="${hipY-6}" stroke="#2b2f36" stroke-width="4" stroke-linecap="round"/>`
+      + `<line x1="${shRx-3}" y1="${shY+1}" x2="${cx+6}" y2="${hipY-6}" stroke="#2b2f36" stroke-width="4" stroke-linecap="round"/>`
+    : '';
+  const crown = AV.crown
+    ? `<path d="M${cx-helmetR+1},${helmetCy-2} A ${helmetR} ${helmetR} 0 0 1 ${cx+helmetR-1},${helmetCy-2} Z" fill="${AV.crown}"/>`
+    : '';
   const rider =
     `<g transform="rotate(${g(lc)} ${cx} ${ground})">`
     /* rear wheel: tyre, rim, hub, faint spokes */
@@ -4045,37 +4127,35 @@ function formFrame() {
     /* handlebar shaft, drawn BEFORE the legs/torso so the body occludes its middle: from the rear you
        see the bar disappear behind the rider, not a pole across the frame. Grips + hands go on top. */
     + `<line x1="${g(gxL)}" y1="${g(gyL)}" x2="${g(gxR)}" y2="${g(gyR)}" stroke="${barCol}" stroke-width="6" stroke-linecap="round"/>`
-    /* legs: thighs splay to the knees, shins return to the pedals (mostly behind the bike from rear) */
-    + `<polyline points="${hipLx},${hipY} ${cx-kneeOut},${kneeY} ${cx-pedalOut},${pedalY}" fill="none" stroke="url(#frLeg)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>`
-    + `<polyline points="${hipRx},${hipY} ${cx+kneeOut},${kneeY} ${cx+pedalOut},${pedalY}" fill="none" stroke="url(#frLeg)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>`
-    /* jersey torso: shoulders taper to hips, soft centre seam + side shade */
-    + `<path d="M${shLx},${shY} Q${cx},${shY-7} ${shRx},${shY} L${hipRx+1},${hipY} Q${cx},${hipY+6} ${hipLx-1},${hipY} Z" fill="url(#frTorso)"/>`
-    + `<path d="M${cx},${shY-4} L${cx},${hipY+2}" stroke="#9c4818" stroke-width="1.4" opacity="0.55"/>`
-    /* arms: shoulder -> elbow -> grip, jersey-orange, reaching forward to the grips */
-    + `<polyline points="${g(shLx)},${shY+1} ${g(elbowLx)},${g(elbowLy)} ${g(gxL)},${g(gyL)}" fill="none" stroke="#c2622a" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"/>`
-    + `<polyline points="${g(shRx)},${shY+1} ${g(elbowRx)},${g(elbowRy)} ${g(gxR)},${g(gyR)}" fill="none" stroke="#c2622a" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"/>`
-    /* grips + hands on top: the dark grip ends and the hands wrapped over them, the only part of the bar
-       not hidden by the torso, so it reads as the rider gripping bars that run behind the body. */
+    /* legs: thighs splay to the knees, shins return to the pedals; sock stripes + shorts in kit mode */
+    + `<polyline points="${hipLx},${hipY} ${cx-kneeOut},${kneeY} ${cx-pedalOut},${pedalY}" fill="none" stroke="${AV.leg}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<polyline points="${hipRx},${hipY} ${cx+kneeOut},${kneeY} ${cx+pedalOut},${pedalY}" fill="none" stroke="${AV.leg}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>`
+    + sockStripes(cx - kneeOut, kneeY, cx - pedalOut, pedalY) + sockStripes(cx + kneeOut, kneeY, cx + pedalOut, pedalY)
+    + shorts
+    /* torso: jersey (classic) or jacket (kit) with a centre seam or a hydration vest on the back */
+    + `<path d="M${shLx},${shY} Q${cx},${shY-7} ${shRx},${shY} L${hipRx+1},${hipY} Q${cx},${hipY+6} ${hipLx-1},${hipY} Z" fill="${AV.torso}"/>`
+    + (AV.seam ? `<path d="M${cx},${shY-4} L${cx},${hipY+2}" stroke="${AV.seam}" stroke-width="1.4" opacity="0.55"/>` : '')
+    + vest
+    /* arms: shoulder -> elbow -> grip, reaching forward to the grips */
+    + `<polyline points="${g(shLx)},${shY+1} ${g(elbowLx)},${g(elbowLy)} ${g(gxL)},${g(gyL)}" fill="none" stroke="${AV.arm}" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<polyline points="${g(shRx)},${shY+1} ${g(elbowRx)},${g(elbowRy)} ${g(gxR)},${g(gyR)}" fill="none" stroke="${AV.arm}" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"/>`
+    /* grips + hands on top: the dark grip ends and the (gloved) hands, the only part of the bar not hidden
+       by the torso, so it reads as the rider gripping bars that run behind the body. */
     + `<line x1="${g(gixL)}" y1="${g(giyL)}" x2="${g(gxL)}" y2="${g(gyL)}" stroke="#1f262d" stroke-width="8" stroke-linecap="round"/>`
     + `<line x1="${g(gixR)}" y1="${g(giyR)}" x2="${g(gxR)}" y2="${g(gyR)}" stroke="#1f262d" stroke-width="8" stroke-linecap="round"/>`
-    + `<circle cx="${g(gxL)}" cy="${g(gyL)}" r="5" fill="#c79b76"/><circle cx="${g(gxR)}" cy="${g(gyR)}" r="5" fill="#c79b76"/>`
-    /* neck + gaze + the BACK of the helmet. This is a REAR view (camera behind the rider), so the head is
-       drawn unmistakably from behind: dark exhaust vents up at the crown, a low centred retention dial, a
-       horizontal shell seam, and AirPods stems poking out at the ears. No brow, visor, or eye slits, which
-       were the cues that made it read as a face (and so flipped the apparent lean direction). */
-    + `<rect x="${cx-5}" y="${shY-13}" width="10" height="15" rx="4.5" fill="#c79b76"/>`
+    + `<circle cx="${g(gxL)}" cy="${g(gyL)}" r="5" fill="${AV.glove}"/><circle cx="${g(gxR)}" cy="${g(gyR)}" r="5" fill="${AV.glove}"/>`
+    /* neck + gaze + the BACK of the helmet (rear view): dark crown vents, a low centred retention dial, a
+       shell seam, AirPods stems at the ears, and an orange crown cap in kit mode. No face cues. */
+    + `<rect x="${cx-5}" y="${shY-13}" width="10" height="15" rx="4.5" fill="${AV.neck}"/>`
     + `<line x1="${cx}" y1="${helmetCy}" x2="${g(nx)}" y2="${g(ny)}" stroke="${gazeCol}" stroke-width="4" stroke-linecap="round" filter="url(#frGlow)"/>`
-    + `<circle cx="${cx}" cy="${helmetCy}" r="${helmetR}" fill="url(#frHelm)" stroke="#160f08" stroke-width="2"/>`
-    /* rear exhaust vents clustered high on the crown (not over the face area) */
-    + `<rect x="${cx-8}" y="${helmetCy-12}" width="4" height="9" rx="2" fill="#160f08" opacity="0.85"/>`
-    + `<rect x="${cx-2}" y="${helmetCy-13}" width="4" height="10" rx="2" fill="#160f08" opacity="0.9"/>`
-    + `<rect x="${cx+4}" y="${helmetCy-12}" width="4" height="9" rx="2" fill="#160f08" opacity="0.85"/>`
-    /* horizontal two-piece shell seam across the back */
-    + `<path d="M${cx-helmetR+3},${helmetCy+1} Q${cx},${g(helmetCy+3)} ${cx+helmetR-3},${helmetCy+1}" fill="none" stroke="#9c4818" stroke-width="1.6" opacity="0.6"/>`
-    /* retention dial (BOA) low and centred at the back of the head */
-    + `<circle cx="${cx}" cy="${helmetCy+helmetR-4}" r="3.4" fill="#1b130b" stroke="#9c4818" stroke-width="1.2"/>`
-    + `<circle cx="${cx}" cy="${helmetCy+helmetR-4}" r="1.1" fill="#c79b76"/>`
-    /* AirPods stems at the ears: the gaze sensor, and a strong "this is the back of the head" cue */
+    + `<circle cx="${cx}" cy="${helmetCy}" r="${helmetR}" fill="${AV.helmShell}" stroke="${AV.helmStroke}" stroke-width="2"/>`
+    + crown
+    + `<rect x="${cx-8}" y="${helmetCy-12}" width="4" height="9" rx="2" fill="${AV.vent}" opacity="0.85"/>`
+    + `<rect x="${cx-2}" y="${helmetCy-13}" width="4" height="10" rx="2" fill="${AV.vent}" opacity="0.9"/>`
+    + `<rect x="${cx+4}" y="${helmetCy-12}" width="4" height="9" rx="2" fill="${AV.vent}" opacity="0.85"/>`
+    + `<path d="M${cx-helmetR+3},${helmetCy+1} Q${cx},${g(helmetCy+3)} ${cx+helmetR-3},${helmetCy+1}" fill="none" stroke="${AV.seamCol}" stroke-width="1.6" opacity="0.6"/>`
+    + `<circle cx="${cx}" cy="${helmetCy+helmetR-4}" r="3.4" fill="${AV.dial}" stroke="${AV.dialStroke}" stroke-width="1.2"/>`
+    + `<circle cx="${cx}" cy="${helmetCy+helmetR-4}" r="1.1" fill="${AV.dialHub}"/>`
     + `<rect x="${cx-helmetR-1}" y="${helmetCy+3}" width="3.4" height="8" rx="1.7" fill="#e9edf0" stroke="#9aa3ab" stroke-width="0.6"/>`
     + `<rect x="${cx+helmetR-2.4}" y="${helmetCy+3}" width="3.4" height="8" rx="1.7" fill="#e9edf0" stroke="#9aa3ab" stroke-width="0.6"/>`
     + `<circle cx="${cx}" cy="${ground}" r="4" fill="#0e1310"/>`
@@ -4121,6 +4201,11 @@ function formFrame() {
     + `<linearGradient id="frTorso" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ef8540"/><stop offset="55%" stop-color="#d6691f"/><stop offset="100%" stop-color="#a8491790"/></linearGradient>`
     + `<linearGradient id="frLeg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#222d1c"/><stop offset="100%" stop-color="#141b10"/></linearGradient>`
     + `<radialGradient id="frHelm" cx="42%" cy="34%" r="70%"><stop offset="0%" stop-color="#f59a52"/><stop offset="60%" stop-color="#e0712b"/><stop offset="100%" stop-color="#b4521c"/></radialGradient>`
+    /* "My kit" palette: black jacket, black socks, white/orange POC lid, blue shorts */
+    + `<linearGradient id="frJkt" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2c313a"/><stop offset="60%" stop-color="#1b1e24"/><stop offset="100%" stop-color="#111318"/></linearGradient>`
+    + `<linearGradient id="frLegK" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1a1c20"/><stop offset="100%" stop-color="#0e0f12"/></linearGradient>`
+    + `<radialGradient id="frHelmK" cx="42%" cy="32%" r="72%"><stop offset="0%" stop-color="#f4f6f8"/><stop offset="62%" stop-color="#d3d8dd"/><stop offset="100%" stop-color="#a7adb5"/></radialGradient>`
+    + `<linearGradient id="frShort" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#33517a"/><stop offset="100%" stop-color="#213a5c"/></linearGradient>`
     + `<filter id="frGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="2.4"/></filter>`
     + `</defs>`;
 
@@ -4191,6 +4276,18 @@ function formFrame() {
   }
   if (S.wristRoll) {
     cards += `<div class="form-metric"><div class="fm-label">Hand (wrist roll)</div><div class="fm-value">${wristRoll >= 0 ? '+' : ''}${(wristRoll || 0).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">range ${S.wristRange != null ? S.wristRange.toFixed(0) : '—'}° ${seg ? 'this segment' : 'this turn'}</div></div>`;
+  }
+  /* Bike vs body: the bars (wrist/Watch, ~bike lean) minus the torso (phone) lean. Positive = you laid
+     the bike over more than your body (good separation); negative = you leaned with the bike. Rough and
+     directional (the wrist is not rigidly the frame), so it is labelled as such. Single-turn only, where
+     both are oriented into the corner. */
+  if (barInto != null) {
+    const sep = barInto - lean;
+    const mag = Math.abs(sep).toFixed(0);
+    const who = sep > 3 ? 'bike over body' : (sep < -3 ? 'body over bike' : 'about even');
+    cards += `<div class="form-metric"><div class="fm-label">Bike vs body<span class="form-badge">Watch · rough</span></div>`
+      + `<div class="fm-value ${sep > 3 ? 'into' : ''}">${mag}<span class="fm-unit">° ${who}</span></div>`
+      + `<div class="fm-sub">bars vs torso lean, right now</div></div>`;
   }
   /* Sides: your median peak lean left vs right across the whole ride, flagging the weaker side. The
      current turn's side is highlighted so you can read this turn against your other-side norm. */
@@ -5256,8 +5353,8 @@ async function analyze(files) {
           if (cached && cached.data) {
             onProgress('loading cached analysis');
             hide('loading'); show('results');
-            if (cached.sport === 'running' || cached.sport === 'walking') renderAllRunning(cached.data); else renderAll(cached.data);
-            setStatus('Loaded from cache (' + (cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride') + ')', true);
+            renderCachedAnalysis(cached);
+            setStatus('Loaded from cache (' + cachedSportNoun(cached) + ')', true);
             return;
           }
         } catch (e) { console.warn('analysis cache: replay failed, recomputing', e); }
@@ -5833,6 +5930,7 @@ function renderCrossRide({ perRide, clusters }) {
             <tbody id="crossCmpBody_${ci}"></tbody>
           </table>
         </div>
+        <div style="color:var(--text-muted); font-size:10px; margin-top:6px;">Distance is the geodesic path between the segment gates, so it stays consistent lap to lap for ranking. The smaller "GPS" value in parentheses is the raw Doppler ground distance, closer to what Strava reports.</div>
       </div>
       <div class="chart" id="crossDeltaMap_${ci}" style="height:380px; margin-bottom:8px;"></div>
       <div class="chart detail-chart" id="crossSpeedChart_${ci}" style="height:280px; margin-bottom:8px;"></div>
@@ -5841,12 +5939,15 @@ function renderCrossRide({ perRide, clusters }) {
 
     /* Comparison table rows, re-sortable: best time (fastest first, the default) or date (newest
        first, undated last). The choice sticks across clusters and sessions via localStorage. */
+    const standingBadge = m => m.standingStart
+      ? ` <span title="Launched from a near stop at the start gate: the dead seconds are trimmed, but the slow acceleration still handicaps this time" style="font-weight:400; color:var(--text-muted); font-size:10px; white-space:nowrap;">🧍 standing start</span>`
+      : '';
     const rowHtml = m => `
       <tr>
         <td style="text-align:center;"><input type="checkbox" class="cmp-check" data-mi="${m._mi}" ${selectedMembers.has(m) ? 'checked' : ''} style="cursor:pointer;"></td>
-        <td style="color:${m.color}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}</td>
+        <td style="color:${m.color}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}${standingBadge(m)}</td>
         <td>${fmtDuration(m.duration)}</td>
-        <td>${m.distance.toFixed(0)} m</td>
+        <td>${m.distance.toFixed(0)} m${(m.distanceGps != null && Math.abs(m.distanceGps - m.distance) >= 5) ? ` <span style="color:var(--text-muted); font-size:10px;">(GPS ${m.distanceGps.toFixed(0)})</span>` : ''}</td>
         <td>${(m.avgSpeed * 2.237).toFixed(1)} mph</td>
         <td>${(m.maxSpeed * 2.237).toFixed(1)} mph</td>
         <td>${m.gradeAvg.toFixed(1)}%</td>
@@ -6206,6 +6307,9 @@ function hideAllSections() {
   ['mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
+  /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
+     sport's default (the MTB "yaw rate" timeline subtitle and MTB map legend used to leak this way). */
+  { const ts = document.getElementById('timelineSubtitle'); if (ts) ts.textContent = ''; }
 }
 
 /* Module-level state for the descent-section interactions (tag, compare). */
@@ -6230,7 +6334,8 @@ function renderAllRunning(D) {
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
   renderRideSignature(D, sport);
   renderRunStats(D.summary, D.detection, D.running && D.running.mount);
-  if (sport === 'running') renderCoachHighlights(D, 'running');
+  /* Walking gets the highlights card too (coach parity); the empty-guard hides it if no bullets. */
+  renderCoachHighlights(D, sport);
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
   renderRunTimeline(D);
   renderRunCadence(D.running.cadSeries);
@@ -6262,6 +6367,9 @@ function renderAllGps(D) {
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded';
   renderRideSignature(D, sport);
   renderGpsStats(D.summary, sport);
+  /* Coach highlights parity: GPS rides get the card too, from a GPS-safe producer (empty-guard hides
+     it if the summary yields no bullets). */
+  renderCoachHighlights(D, 'gps');
   { const body = document.getElementById('gpsOnlyNoticeBody');
     /* The notice names exactly what is missing for THIS activity: turns/jumps for a bike, cadence
        and form for a run/hike. Otherwise a runner reads a bike-flavored disclaimer. */
@@ -6685,13 +6793,97 @@ function tagClipPoints(tag) {
 /* Fraction (0..1) along a polyline of the vertex nearest to pt = [lat, lon], plus the miss distance
    in meters. Descent polylines are index-decimated from ~1Hz GPS, so the index fraction is also a
    time fraction into the descent window. */
-function nearestPolylineFrac(polyline, pt) {
-  let bi = 0, bd = Infinity;
-  for (let i = 0; i < polyline.length; i++) {
-    const d = haversineMeters(polyline[i][0], polyline[i][1], pt[0], pt[1]);
-    if (d < bd) { bd = d; bi = i; }
+/* Sub-vertex closest approach of a gate point to a polyline: projects pt onto every segment (in a
+   local equirectangular metric, pt at the origin) and keeps the nearest foot, so the returned frac
+   is continuous in [0,1] rather than snapped to a stored vertex. Decimated polylines put their
+   vertices ~40-50 m apart, so nearest-vertex gating can miss the true crossing by tens of meters and
+   jitter ride-to-ride; the perpendicular foot lands where the rider actually passed the gate. */
+function closestApproachFrac(polyline, pt) {
+  const n = polyline.length;
+  if (n < 2) return { frac: 0, distM: n ? haversineMeters(polyline[0][0], polyline[0][1], pt[0], pt[1]) : Infinity };
+  const mPerLat = 111320, mPerLon = 111320 * Math.cos(pt[0] * Math.PI / 180);
+  const xy = (p) => [(p[1] - pt[1]) * mPerLon, (p[0] - pt[0]) * mPerLat];   /* meters, gate at origin */
+  let bestFrac = 0, bestD2 = Infinity;
+  for (let i = 0; i < n - 1; i++) {
+    const A = xy(polyline[i]), B = xy(polyline[i + 1]);
+    const dx = B[0] - A[0], dy = B[1] - A[1];
+    const len2 = dx * dx + dy * dy;
+    let t = len2 > 0 ? -(A[0] * dx + A[1] * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const fx = A[0] + t * dx, fy = A[1] + t * dy;
+    const d2 = fx * fx + fy * fy;
+    if (d2 < bestD2) { bestD2 = d2; bestFrac = (i + t) / (n - 1); }
   }
-  return { frac: polyline.length > 1 ? bi / (polyline.length - 1) : 0, distM: bd };
+  return { frac: bestFrac, distM: Math.sqrt(bestD2) };
+}
+/* Interpolated [lat, lon] at a continuous fraction along a polyline. Used to place a turn apex (stored
+   only as a time offset) onto the run's track for apex-snap gating. */
+function polyPointAtFrac(poly, frac) {
+  if (!poly.length) return null;
+  if (poly.length === 1) return [poly[0][0], poly[0][1]];
+  const x = Math.max(0, Math.min(1, frac)) * (poly.length - 1);
+  const lo = Math.floor(x), hi = Math.min(poly.length - 1, lo + 1), f = x - lo;
+  return [poly[lo][0] + f * (poly[hi][0] - poly[lo][0]), poly[lo][1] + f * (poly[hi][1] - poly[lo][1])];
+}
+/* Geodesic length of a polyline between two fractional positions along it. */
+function polylineSpanMeters(poly, f0, f1) {
+  if (poly.length < 2) return 0;
+  if (f1 < f0) { const t = f0; f0 = f1; f1 = t; }
+  const i0 = Math.round(f0 * (poly.length - 1)), i1 = Math.round(f1 * (poly.length - 1));
+  let m = 0;
+  for (let i = i0 + 1; i <= i1; i++) m += haversineMeters(poly[i-1][0], poly[i-1][1], poly[i][0], poly[i][1]);
+  return m;
+}
+/* Every distinct pass of a polyline near a gate point (each contiguous run of vertices within maxMissM
+   collapses to its closest vertex). On a self-overlapping trail, a switchback brings the track near a
+   gate more than once; enumerating the passes lets the caller pick the pass that actually belongs to
+   the segment (by span length) instead of blindly taking the global nearest, which is how a winding
+   segment gets a bogus too-short window and a fake fast time. */
+function gatePasses(polyline, pt, maxMissM) {
+  const n = polyline.length, out = [];
+  let inDip = false, bestI = -1, bestD = Infinity;
+  for (let i = 0; i < n; i++) {
+    const d = haversineMeters(polyline[i][0], polyline[i][1], pt[0], pt[1]);
+    if (d <= maxMissM) { if (!inDip) { inDip = true; bestD = Infinity; bestI = -1; } if (d < bestD) { bestD = d; bestI = i; } }
+    else if (inDip) { out.push({ frac: n > 1 ? bestI / (n - 1) : 0, distM: bestD }); inDip = false; }
+  }
+  if (inDip) out.push({ frac: n > 1 ? bestI / (n - 1) : 0, distM: bestD });
+  return out;
+}
+/* Refine a vertex-granularity gate hit to a sub-vertex fraction by projecting the gate onto the two
+   segments adjacent to the chosen vertex (closest-approach precision, but local so it cannot jump to a
+   far-away pass on an overlapping trail). */
+function refineGateFrac(polyline, vertexIdx, pt) {
+  const n = polyline.length;
+  if (n < 2) return { frac: 0, distM: n ? haversineMeters(polyline[0][0], polyline[0][1], pt[0], pt[1]) : Infinity };
+  const lo = Math.max(0, vertexIdx - 1), hi = Math.min(n - 1, vertexIdx + 1);
+  const sub = polyline.slice(lo, hi + 1);
+  const r = closestApproachFrac(sub, pt);
+  return { frac: (lo + r.frac * (sub.length - 1)) / (n - 1), distM: r.distM };
+}
+/* Resolve the start and end gate positions on a run's polyline, robust to self-overlap. When the
+   reference segment length is known, enumerate every pass near each gate and pick the ordered
+   start/end pair whose span best matches that reference length (with gate proximity as a tie-break),
+   so a switchback that passes the finish line early cannot clip a short bogus window. Falls back to
+   plain global closest-approach when there is no reference length or no multi-pass ambiguity. */
+function resolveGates(clipPoly, start, end, refLen) {
+  const globalA = closestApproachFrac(clipPoly, start), globalB = closestApproachFrac(clipPoly, end);
+  if (!refLen || refLen <= 0) return { a: globalA, b: globalB };
+  const sc = gatePasses(clipPoly, start, SEG_CLIP_MAX_MISS_M);
+  const ec = gatePasses(clipPoly, end, SEG_CLIP_MAX_MISS_M);
+  if (sc.length < 2 && ec.length < 2) return { a: globalA, b: globalB };   /* no ambiguity to resolve */
+  let best = null;
+  for (const s of sc) for (const e of ec) {
+    if (e.frac <= s.frac) continue;
+    const span = polylineSpanMeters(clipPoly, s.frac, e.frac);
+    const score = Math.abs(span - refLen) + 0.5 * (s.distM + e.distM);
+    if (!best || score < best.score) best = { s, e, score };
+  }
+  if (!best) return { a: globalA, b: globalB };
+  return {
+    a: refineGateFrac(clipPoly, Math.round(best.s.frac * (clipPoly.length - 1)), start),
+    b: refineGateFrac(clipPoly, Math.round(best.e.frac * (clipPoly.length - 1)), end),
+  };
 }
 /* One comparison member from a matched descent, cut to the tag's segment window: every run is timed
    between the same two trail points (Strava-style segment timing), so durations and distances stay
@@ -6700,10 +6892,23 @@ function nearestPolylineFrac(polyline, pt) {
    to seconds in the 1Hz speed series. A run that never passes near both endpoints (rider joined
    mid-segment, GPS gap) keeps its full detected window rather than a bogus cut. */
 const SEG_CLIP_MAX_MISS_M = 75;
+/* Below this GPS speed the rider is standing, not riding (creep + Doppler noise). Leading/trailing
+   samples under it are trimmed off the timed window so parking on the start line (e.g. staging a
+   drone) does not fold dead seconds into the segment time or shrink its distance. ~0.75 m/s = 1.7 mph. */
+const SEG_MOVING_MIN_MPS = 0.75;
+/* Apex-snap only fires when a detected turn apex sits within this distance of the GPS gate. A gate on
+   a straight has no apex to snap to and keeps its GPS crossing; a gate on a corner locks onto the same
+   apex every lap, which is vibration-independent and far more repeatable than a raw GPS fix. */
+const SEG_APEX_SNAP_MAX_M = 30;
 /* Seconds of approach track prepended to a descent so a tagged segment's start can sit above the
    auto-detected drop-in (the grade detector opens a run only once the pitch steepens; the flatter
    roll-in never becomes taggable otherwise). Bounded so the extra per-ride storage stays tiny. */
 const SEG_LEAD_SEC = 45;
+/* A lap whose entry speed (after the standing-dwell trim above) is still below this was launched from
+   a near stop at the start gate, so it keeps accelerating through the opening while a rolling lap is
+   already at speed. The dead seconds are trimmed, but the slow launch still handicaps the time, so the
+   lap is flagged on the leaderboard rather than ranked as a fair head-to-head. ~2.5 m/s = 5.6 mph. */
+const SEG_STANDING_START_MPS = 2.5;
 function buildTagMember(r, d, targetTag) {
   const { start, end } = tagClipPoints(targetTag);
   /* Default to the core detected window (today's behavior). When the tag carries an explicit start
@@ -6715,32 +6920,83 @@ function buildTagMember(r, d, targetTag) {
      arrays, so existing leaderboards are unchanged. */
   let poly = d.polyline, spd = d.speed;
   let tStart = d.tStart, tEnd = d.tEnd, duration = d.duration, distance = d.distance;
+  /* GPS/Doppler ground distance (the pre-geodesic integral of location_speed) kept alongside the
+     geodesic distance: the geodesic path is the consistent-across-laps ranking distance, this one is
+     the raw GPS distance we surface as a secondary so a Strava cross-check has something to land on. */
+  let distanceGps = d.distance;
   let latStart = d.latStart, lonStart = d.lonStart, latEnd = d.latEnd, lonEnd = d.lonEnd;
   let maxSpeed = d.maxSpeed, avgSpeed = d.avgSpeed;
+  /* Choose the arrays to clip against. When the tag carries an explicit start gate (which may sit
+     above the drop-in) and this ride was saved with a lead-in (segPolyline/segSpeed prepend up to
+     SEG_LEAD_SEC of approach before tStart), clip against those extended arrays so the start can reach
+     up-trail. Otherwise, and for rides saved before the lead-in existed, use the core window. */
   const useLead = targetTag.clipStart && Array.isArray(d.segPolyline) && d.segPolyline.length > 3
     && Array.isArray(d.segSpeed) && d.segSpeed.length > 5;
   const clipPoly = useLead ? d.segPolyline : poly;
   const clipSpd = useLead ? d.segSpeed : spd;
-  const base = d.tStart - (useLead ? (d.segLeadSec || 0) : 0);   /* absolute time of index 0 in clip* */
-  const a = nearestPolylineFrac(clipPoly, start), b = nearestPolylineFrac(clipPoly, end);
+  const leadOffset = useLead ? (d.segLeadSec || 0) : 0;
+  const base = d.tStart - leadOffset;   /* absolute time of index 0 in clip* */
+  /* Reference segment length from the tag itself (its own gate-to-gate span, else stored
+     typicalDistance), used to disambiguate self-overlapping trails so a switchback near the finish
+     line cannot clip a short bogus window. */
+  let refLen = null;
+  if (Array.isArray(targetTag.polyline) && targetTag.polyline.length > 1) {
+    const ra = closestApproachFrac(targetTag.polyline, start), rb = closestApproachFrac(targetTag.polyline, end);
+    refLen = polylineSpanMeters(targetTag.polyline, ra.frac, rb.frac);
+  } else if (targetTag.typicalDistance != null) {
+    refLen = targetTag.typicalDistance;
+  }
+  const { a, b } = resolveGates(clipPoly, start, end, refLen);
   if (a.distM <= SEG_CLIP_MAX_MISS_M && b.distM <= SEG_CLIP_MAX_MISS_M && b.frac > a.frac && clipSpd.length > 5 && clipPoly.length > 3) {
-    const s0 = Math.round(a.frac * (clipSpd.length - 1)), s1 = Math.round(b.frac * (clipSpd.length - 1));
-    const p0 = Math.round(a.frac * (clipPoly.length - 1)), p1 = Math.round(b.frac * (clipPoly.length - 1));
+    /* (3) Snap each gate to a nearby IMU turn apex when the ride carries turns. Turns store tRel (apex
+       seconds from the core drop-in); in the clip arrays that maps to index leadOffset + tRel, so
+       (leadOffset + tRel)/(N-1) is the apex fraction and polyPointAtFrac puts it on the track to test
+       against the gate. A gate with no apex within SEG_APEX_SNAP_MAX_M keeps its GPS crossing. Same
+       physical corner every lap => the gate lands in the same spot every lap, independent of GPS wander. */
+    const nClip = clipSpd.length - 1;
+    const apexSnap = (frac, gatePt) => {
+      if (!Array.isArray(d.turns) || !d.turns.length || nClip <= 0) return frac;
+      let bestF = null, bestErr = Infinity;
+      for (const T of d.turns) {
+        if (T.tRel == null) continue;
+        const af = Math.max(0, Math.min(1, (leadOffset + T.tRel) / nClip));
+        const ap = polyPointAtFrac(clipPoly, af);
+        const err = ap ? haversineMeters(ap[0], ap[1], gatePt[0], gatePt[1]) : Infinity;
+        if (err < bestErr) { bestErr = err; bestF = af; }
+      }
+      return (bestF != null && bestErr <= SEG_APEX_SNAP_MAX_M) ? bestF : frac;
+    };
+    let fA = apexSnap(a.frac, start), fB = apexSnap(b.frac, end);
+    if (fB <= fA) { fA = a.frac; fB = b.frac; }   /* never let a snap invert or collapse the window */
+    let s0 = Math.round(fA * (clipSpd.length - 1)), s1 = Math.round(fB * (clipSpd.length - 1));
+    /* (2) Trim leading/trailing standing dwell: the gate crossing counts from when the rider is
+       actually moving through it, not from a standstill parked on the line (interior stops still count
+       as elapsed time, matching Strava-style segment timing). */
+    while (s0 < s1 && (clipSpd[s0] == null || clipSpd[s0] < SEG_MOVING_MIN_MPS)) s0++;
+    while (s1 > s0 && (clipSpd[s1] == null || clipSpd[s1] < SEG_MOVING_MIN_MPS)) s1--;
+    const p0 = Math.round((s0 / (clipSpd.length - 1)) * (clipPoly.length - 1));
+    const p1 = Math.round((s1 / (clipSpd.length - 1)) * (clipPoly.length - 1));
     if ((s0 > 0 || s1 < clipSpd.length - 1) && s1 - s0 >= 5 && p1 - p0 >= 3) {
       spd = clipSpd.slice(s0, s1 + 1);
       poly = clipPoly.slice(p0, p1 + 1);
       tStart = base + s0; tEnd = base + s1;
       duration = s1 - s0;
+      /* (1) Distance = geodesic path length along the (decimated) track between gates, NOT the integral
+         of GPS Doppler speed. The old integral shrank whenever Doppler read low or the rider stood
+         still, so the same trail measured differently every lap; a path sum is a property of the trail
+         geometry, near-identical lap to lap, and standing time adds no phantom meters. avgSpeed follows
+         from distance/time for the same reason; maxSpeed stays the instantaneous Doppler peak. */
       let dm = 0;
-      for (let i = 1; i < spd.length; i++) dm += ((spd[i] || 0) + (spd[i-1] || 0)) / 2;   /* 1Hz, dt=1s */
+      for (let i = 1; i < poly.length; i++) dm += haversineMeters(poly[i-1][0], poly[i-1][1], poly[i][0], poly[i][1]);
       distance = dm;
+      let dGps = 0;
+      for (let i = 1; i < spd.length; i++) dGps += ((spd[i] || 0) + (spd[i-1] || 0)) / 2;   /* 1Hz Doppler */
+      distanceGps = dGps;
       latStart = poly[0][0]; lonStart = poly[0][1];
       latEnd = poly[poly.length - 1][0]; lonEnd = poly[poly.length - 1][1];
       const vals = spd.filter(v => v != null);
-      if (vals.length) {
-        maxSpeed = Math.max(...vals);
-        avgSpeed = vals.reduce((x, y) => x + y, 0) / vals.length;
-      }
+      maxSpeed = vals.length ? Math.max(...vals) : maxSpeed;
+      avgSpeed = duration > 0 ? distance / duration : (vals.length ? vals.reduce((x, y) => x + y, 0) / vals.length : avgSpeed);
     }
   }
   /* poly is decimated to ~50 points spread over the window while spd is the 1 Hz series, so pairing
@@ -6759,15 +7015,20 @@ function buildTagMember(r, d, targetTag) {
     return va + f * (vb - va);
   };
   const locInWin = poly.map((p, i) => ({ t: tOf(i), latitude: p[0], longitude: p[1], speed: speedAtT(tOf(i)) }));
+  /* "Distance into descent" axis: geodesic cumulative along the track, matching the geodesic total
+     above so the x-axis and the headline distance agree (was a Doppler-speed integral). */
   const dist = [0];
   for (let i = 1; i < locInWin.length; i++) {
-    const dt = locInWin[i].t - locInWin[i-1].t;
-    const v = (locInWin[i].speed + locInWin[i-1].speed) / 2;
-    dist.push(dist[i-1] + v * dt);
+    dist.push(dist[i-1] + haversineMeters(locInWin[i-1].latitude, locInWin[i-1].longitude, locInWin[i].latitude, locInWin[i].longitude));
   }
+  /* Standing start: after the dwell trim, the first moving samples are still crawling, so this lap
+     accelerated through the gate from a stop rather than rolling through it. Flagged (not excluded) so
+     its slower time/avg is read as a launch handicap, not a fair effort. */
+  const entryVals = (spd || []).filter(v => v != null).slice(0, 2);
+  const standingStart = entryVals.length ? Math.min(...entryVals) < SEG_STANDING_START_MPS : false;
   return {
     file: r.filename, recordedAt: r.recordedAt || r.savedAt || null,
-    tStart, tEnd, duration, distance,
+    tStart, tEnd, duration, distance, distanceGps, standingStart,
     latStart, lonStart, latEnd, lonEnd,
     gradeAvg: d.gradeAvg, maxSpeed, avgSpeed,
     speed: spd,
@@ -6878,9 +7139,12 @@ function renderLeaderboardSummary(tag, members) {
     const when = rowLabels[i];
     const delta = m.duration - pr.duration;
     const rank = i === 0 ? '🏆' : `${i + 1}.`;
+    const standing = m.standingStart
+      ? ` <span title="Launched from a near stop at the start gate: the dead seconds are trimmed, but the slow acceleration still handicaps this time" style="color:var(--text-muted); font-size:10px; white-space:nowrap;">🧍 standing start</span>`
+      : '';
     return `<tr>
       <td style="text-align:left; width:34px;">${rank}</td>
-      <td style="text-align:left;">${escapeHtml(when)}</td>
+      <td style="text-align:left;">${escapeHtml(when)}${standing}</td>
       <td>${fmtDuration(m.duration)}</td>
       <td>${(m.avgSpeed * 2.237).toFixed(1)} mph</td>
       <td>${(m.maxSpeed * 2.237).toFixed(1)} mph</td>
@@ -7179,6 +7443,7 @@ function renderRunStats(s, detection, mount) {
 
 function renderRunMap(loc, ride, segments) {
   _linkCursor = null;
+  setMapLegend('grade');
   if (mapInstance) { mapInstance.remove(); mapInstance = null; }
   /* Drop the previous ride's MTB map state: mapOverlay belongs to the map just destroyed, and a
      stale _mapData would let focusSegment/showTurnsForRun draw the old ride onto this one. */
@@ -7489,6 +7754,28 @@ function runningHighlights(D) {
   return c.slice(0, 3);
 }
 
+/* GPS-only rides have no motion data, so highlights are pure reads of the GPS-derived summary
+   (distance, speed, elevation, descents, lifts). runningHighlights assumes cadence/oscillation that a
+   bare FIT lacks, so a GPS ride gets its own producer keyed on gpsSport (ride | run | walk). Every
+   number here is also shown in the stats card, so the highlights always agree with the panels. */
+function gpsHighlights(D) {
+  const s = D.summary || {};
+  const foot = D.gpsSport === 'run' || D.gpsSport === 'walk';
+  const out = [];
+  if (foot) {
+    if (s.distance) out.push(`<strong>${U.dist(s.distance)}</strong> ${D.gpsSport === 'walk' ? 'walked' : 'covered'}${s.avgSpeed ? ' at ' + U.pace(s.avgSpeed) + ' pace' : ''}.`);
+    if (s.altGain != null) out.push(`${U.elev(s.altGain)} climbed${s.altLoss != null ? ', ' + U.elev(s.altLoss) + ' descended' : ''}.`);
+    if (s.maxSpeed) out.push(`Top speed <strong>${U.speed(s.maxSpeed)}</strong>${s.peak30 ? ' (best 30 s ' + U.speed(s.peak30) + ')' : ''}.`);
+  } else {
+    const dist = s.riddenDistance != null ? s.riddenDistance : s.distance;
+    if (dist) out.push(`<strong>${U.dist(dist)}</strong> ridden, top speed ${U.speed(s.maxSpeed)}.`);
+    if (s.nDownhills) out.push(`<strong>${s.nDownhills} descent${s.nDownhills > 1 ? 's' : ''}</strong>${s.maxDescentDrop ? `, biggest ${U.elev(s.maxDescentDrop)} drop` : ''}${s.vamPedaled ? ` &middot; VAM ${Math.round(s.vamPedaled)} m/h` : ''}.`);
+    if (s.liftCount) out.push(`${s.liftCount} lift${s.liftCount > 1 ? 's' : ''} carried you ${U.elev(s.liftAscent)} of climbing.`);
+    else if (s.altGain != null) out.push(`${U.elev(s.altGain)} climbed, ${U.elev(s.altLoss || 0)} descended.`);
+  }
+  return out.slice(0, 3);
+}
+
 /* Road ride highlights: the two or three findings a roadie would text a friend. Pure reads of the
    already-computed analysis, so they always agree with the panels below. */
 function roadHighlights(D) {
@@ -7537,9 +7824,19 @@ function renderCoachHighlights(D, sport) {
   const card = document.getElementById('coachHighlightsCard');
   if (!sec || !card) return;
   let bullets = [];
-  try { bullets = (sport === 'running') ? runningHighlights(D) : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D); } catch (e) { console.warn('highlights failed', e); bullets = []; }
+  /* Walking reuses the running highlights (cadence, oscillation, elevation all apply); road and the
+     MTB family keep theirs. Every sport that renders a coach panel now also renders this card; the
+     empty-guard below still hides it when a sport produces no bullets. */
+  try {
+    bullets = (sport === 'gps') ? gpsHighlights(D)
+      : (sport === 'running' || sport === 'walking') ? runningHighlights(D)
+      : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D);
+  } catch (e) { console.warn('highlights failed', e); bullets = []; }
   if (!bullets.length) { sec.classList.add('hidden'); card.innerHTML = ''; return; }
-  card.innerHTML = `<h3>&#9968;&#65039; Ride highlights</h3><ul>${bullets.map(b => `<li>${b}</li>`).join('')}</ul>`
+  const word = sport === 'running' ? 'Run' : sport === 'walking' ? 'Walk'
+    : sport === 'gps' ? (D.gpsSport === 'run' ? 'Run' : D.gpsSport === 'walk' ? 'Walk' : 'Ride')
+    : 'Ride';
+  card.innerHTML = `<h3>${word} highlights</h3><ul>${bullets.map(b => `<li>${b}</li>`).join('')}</ul>`
     + `<button class="ch-cta" type="button" onclick="scrollToCoach()">Ask the AI coach for the why and the drill &rarr;</button>`;
   sec.classList.remove('hidden');
 }
@@ -8340,7 +8637,7 @@ function buildSectionNav() {
     { el: cmpTarget, label: 'Compare laps', compare: true },
     { el: visible('jumpsSection'), label: 'Jumps' },
     { el: visible('airtimeSection'), label: 'Airtime' },
-    { el: visible('turnSection'), label: 'Per-turn' },
+    { el: visible('turnSection'), label: 'Turns' },
     { el: visible('runCadenceSection'), label: 'Cadence' },
     { el: visible('runSegmentsSection'), label: 'Segments' },
     { el: visible('gpsUpsellSection'), label: 'Unlock more' },
@@ -8644,8 +8941,27 @@ function linkTimelineToMap(loc, ride) {
   } catch (e) { console.warn('linkTimelineToMap failed', e); }
 }
 
+/* Sport-aware map legend. The overview map is shared by every sport but colors its track differently
+   (MTB: speed with turn rings; foot/road/GPS: grade climb/descent/lift), so the legend is set by the
+   map renderer instead of being static MTB HTML that rendered verbatim on runs and rides. */
+function setMapLegend(kind) {
+  const body = document.getElementById('mapLegendBody');
+  if (!body) return;
+  const dot = (cls) => `<span class="lg ${cls}"></span>`;
+  if (kind === 'turns') {
+    body.innerHTML = `<span>turn ring = speed kept:</span>${dot('scrub')}scrubbed${dot('held')}held${dot('carry')}carried`
+      + `<span style="opacity:0.6;">· track colour = speed · tap a run below to focus</span>`;
+  } else {
+    /* Track colors match renderRunMap: climb green (.lg.carry), descent red (.lg.scrub), lift grey. */
+    const lift = `<span class="lg" style="background:#9aa2ad;"></span>`;
+    body.innerHTML = `<span>track colour = grade:</span>${dot('carry')}climb${dot('scrub')}descent${lift}lift`
+      + `<span style="opacity:0.6;">· start &amp; end marked · tap a segment below to focus</span>`;
+  }
+}
+
 function renderMap(loc, turns, ride, ridingJumps) {
   _linkCursor = null; _linkPinned = false;
+  setMapLegend('turns');
   if (mapInstance) { mapInstance.remove(); mapInstance = null; mapOverlay = null; }
   mapInstance = L.map('map', { zoomControl: true, attributionControl: true });
   addBasemap(mapInstance);
@@ -8843,7 +9159,7 @@ function renderRideSignature(D, sport) {
     }
     const durMin = Math.floor((s.duration || (ride.end - ride.start)) / 60);
     const label = rsLabel(D.title);
-    const rideWord = (sport === 'running' || sport === 'run') ? 'RUN' : (sport === 'walking' || sport === 'walk') ? 'WALK' : sport === 'road' ? 'ROAD' : (D.eBike ? 'E-MTB' : 'RIDE');
+    const rideWord = D.eBike ? 'E-MTB' : sportLex(sport).signature;
     const subtitle = `${rideWord} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
 
     const statCols = stats.map((st, i) => {
@@ -8894,7 +9210,7 @@ function renderRideSignature(D, sport) {
   <rect y="${H-96}" width="${W}" height="96" fill="url(#rsScrimB)"/>
   <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="#e0a458">A</tspan>M</text>
   <text x="38" y="72" font-size="11" letter-spacing="2.5" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${subtitle}</text>
-  <text x="${W-38}" y="50" text-anchor="end" font-size="11" letter-spacing="2" fill="#7c8b76" font-family="'JetBrains Mono',monospace">RIDE SIGNATURE</text>
+  <text x="${W-38}" y="50" text-anchor="end" font-size="11" letter-spacing="2" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${rideWord} SIGNATURE</text>
   ${statCols}`;
 
     const svg =
@@ -10621,6 +10937,27 @@ function resetToDropzone() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+/* Route a cached/replayed analysis to the render path that matches its sport. The render object
+   itself carries the discriminators (gpsOnly for GPS-only FIT imports, sport:'road' for road rides),
+   so a road or GPS ride never falls through to the MTB renderer. Phone running/walking use the
+   'running'/'walking' sport tag; everything else is the MTB path. Road and GPS rides are not put in
+   the analysis cache today, so this also future-proofs the day one of those paths starts caching. */
+function renderCachedAnalysis(cached) {
+  const d = cached.data;
+  if (d && d.gpsOnly) { renderAllGps(d); return; }
+  if ((d && d.sport === 'road') || cached.sport === 'road') { renderAllRoad(d); return; }
+  if (cached.sport === 'running' || cached.sport === 'walking') { renderAllRunning(d); return; }
+  renderAll(d);
+}
+
+/* Human noun for the load-status line, matching the render path chosen above. */
+function cachedSportNoun(cached) {
+  const d = cached.data;
+  if (d && d.gpsOnly) return d.gpsSport === 'run' ? 'run' : d.gpsSport === 'walk' ? 'walk' : 'ride';
+  if ((d && d.sport === 'road') || cached.sport === 'road') return 'road ride';
+  return cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride';
+}
+
 /* Replay a cached analysis (function-free render object) without recomputing. Shared by the Library
    modal's Open and the landing "Recent rides" list. A replay has no backing File, so attaching a FIT
    is not offered. */
@@ -10632,8 +10969,8 @@ function replayCachedAnalysis(cached, dedupKey) {
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   closeRideSwitcher();
   hide('dropzone'); hide('crossResults'); hide('progressResults'); hide('errorBox'); hide('loading'); show('results');
-  if (cached.sport === 'running' || cached.sport === 'walking') renderAllRunning(cached.data); else renderAll(cached.data);
-  setStatus('Loaded from library (' + (cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride') + ')', true);
+  renderCachedAnalysis(cached);
+  setStatus('Loaded from library (' + cachedSportNoun(cached) + ')', true);
   if (dedupKey) setViewHash('#/ride/' + encodeURIComponent(dedupKey));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -11246,7 +11583,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '9fd3770 · 2026-07-05';
+const LOAM_BUILD = '4aafb6e · 2026-07-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
