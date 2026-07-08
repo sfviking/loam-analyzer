@@ -6066,14 +6066,37 @@ async function analyze(files) {
     onProgress('extracting sensors');
     const sensors = loaded.sensors ? loaded.sensors : (loaded.format === 'combined' ? extractFromCombined(loaded.data) : extractFromZip(loaded.data));
 
-    if (!sensors.accel.length || !sensors.location.length)
-      throw new Error('Missing accel or GPS data');
+    /* A weightlifting session is stationary and records NO GPS by design, so the GPS guard and the
+       GPS-based ride-window detection below do not apply to it. Decide up front whether this is a lift,
+       from the declared sport (window.LOAM_SPORT or the on-page sport selector) or its "Start set" /
+       "Set" marker taps, and bound its window by the recording's own time span. Everything else keeps
+       the original GPS-backed guard. */
+    const spanT = [];
+    for (const k of ['gravity', 'accel', 'location', 'wrist', 'headphone']) {
+      const arr = sensors[k];
+      if (arr && arr.length) { spanT.push(arr[0].t, arr[arr.length - 1].t); }
+    }
+    const spanRide = spanT.length ? { start: Math.min(...spanT), end: Math.max(...spanT) } : { start: null, end: null };
+    const declaredSport = ((typeof window !== 'undefined' && window.LOAM_SPORT)
+      || (document.getElementById('sportOverride') && document.getElementById('sportOverride').value) || '').toLowerCase();
+    const isLift = /^(weightlifting|strength|lifting)$/.test(declaredSport)
+      || (spanRide.start != null && LoamStrength.parseSetMarks(sensors.annotations || [], spanRide).length >= 1);
 
     const phoneStartUTC = parseUTCFromFilename(sensorFile.name);
 
-    onProgress('detecting active window');
-    const ride = detectRidingWindow(sensors.location);
-    if (ride.start == null || ride.end == null) throw new Error('Could not detect a moving window in GPS data');
+    let ride;
+    if (isLift) {
+      if (!sensors.gravity.length && !sensors.accel.length && !(sensors.wrist && sensors.wrist.length))
+        throw new Error('No motion data found in this lift recording');
+      ride = spanRide;
+    } else {
+      if (!sensors.accel.length) throw new Error('Missing motion data');
+      if (!sensors.location.length)
+        throw new Error('No GPS in this recording. If it was a lift, pick Weightlifting (or tap Start set during the set) so it analyzes as a stationary session.');
+      onProgress('detecting active window');
+      ride = detectRidingWindow(sensors.location);
+      if (ride.start == null || ride.end == null) throw new Error('Could not detect a moving window in GPS data');
+    }
 
     onProgress('detecting sport');
     /* The host (iOS Loam Capture) can pre-declare the sport the user picked on the recording screen
@@ -6088,19 +6111,21 @@ async function analyze(files) {
       sportSel.value = hostSport;
     }
     const userSport = (sportSel && sportSel.value) || 'auto';
-    const detection = detectSport(sensors, ride);
+    /* detectSport reads GPS speed, which a lift does not have; a lift is already known from isLift
+       (declared or Set-tap-labeled), so skip detection and label it directly. */
+    const detection = isLift
+      ? { sport: 'weightlifting', confidence: 1, reasons: ['declared or Set-tap-labeled lift'] }
+      : detectSport(sensors, ride);
     /* Auto: prefer detected sport. If unknown, default to running — MTB needs a stable
        body-frame, which would silently produce garbage on a non-MTB recording, while the
        running pipeline degrades gracefully (no body frame needed, missing gyro is OK). */
     let sport;
-    if (userSport === 'auto') {
-      /* A lift is stationary (no GPS) and detectSport cannot see it, but its "Set" marker taps are
-         unmistakable: if parsing them yields a labeled set, this is a weightlifting session. */
-      const liftSets = LoamStrength.parseSetMarks(sensors.annotations || [], ride);
-      if (liftSets.length >= 1) sport = 'weightlifting';
-      else sport = detection.sport === 'unknown' ? 'running' : detection.sport;
-    } else {
+    if (userSport !== 'auto') {
       sport = userSport;
+    } else if (isLift) {
+      sport = 'weightlifting';
+    } else {
+      sport = detection.sport === 'unknown' ? 'running' : detection.sport;
     }
     console.log('[sport detect]', JSON.stringify(detection), '→ using:', sport);
     /* Tell the iOS host the detected sport so it can auto-label the session's activity type. */
@@ -7029,18 +7054,20 @@ const LIFT_CHARS = [
   { key: 'stick',   name: 'Stick',       skin: '#a8d08a', short: null,      limb: 8,  hipW: 6,  shoW: 10, line: true },
 ];
 
-/* Skeleton at the bottom of a squat, solved so the bar stays over midfoot (bar-over-CoM). World
-   coords, y up, ankle at origin. thigh/lean in degrees; barPos 'high'|'low'. */
+/* Skeleton at a squat pose. World coords, y up, ankle planted over midfoot. thigh/lean in degrees;
+   barPos 'high'|'low'. The shin leans forward only moderately with depth (ankle dorsiflexion is
+   limited) and the torso leans further forward as the hip drops, instead of solving the shin angle
+   from a bar-over-midfoot balance constraint, which over-rotated the shin and threw the knee above and
+   far ahead of the hip (a backward-looking knee). */
 function liftSkeleton(thighDeg, leanDeg, barPos) {
-  const L = { foot: 44, shank: 100, thigh: 98, torso: 120, neck: 16, headR: 16 };
+  const L = { foot: 46, shank: 96, thigh: 96, torso: 120, neck: 16, headR: 16 };
   const R = Math.PI / 180, frac = barPos === 'low' ? 0.17 : 0.05, BARBACK = 15;
-  const restX = (th, ln) => -L.thigh * Math.sin(th * R) + (1 - frac) * L.torso * Math.sin(ln * R) - BARBACK * Math.cos(ln * R);
-  const midfoot = L.shank * Math.sin(4 * R) + restX(0, leanDeg * 0.35);
-  const sh = Math.asin(Math.max(-0.5, Math.min(0.96, (midfoot - restX(thighDeg, leanDeg)) / L.shank)));
-  const ankle = { x: 0, y: 14 };
-  const knee = { x: ankle.x + L.shank * Math.sin(sh), y: ankle.y + L.shank * Math.cos(sh) };
+  const shinDeg = Math.min(22, thighDeg * 0.24);       // shin forward lean, capped so the knee stays near the toe
+  const lean = leanDeg + thighDeg * 0.30;              // torso leans further forward as depth grows
+  const ankle = { x: 16, y: 14 };                      // planted over midfoot
+  const knee = { x: ankle.x + L.shank * Math.sin(shinDeg * R), y: ankle.y + L.shank * Math.cos(shinDeg * R) };
   const hip = { x: knee.x - L.thigh * Math.sin(thighDeg * R), y: knee.y + L.thigh * Math.cos(thighDeg * R) };
-  const td = { x: Math.sin(leanDeg * R), y: Math.cos(leanDeg * R) };
+  const td = { x: Math.sin(lean * R), y: Math.cos(lean * R) };
   const shoulder = { x: hip.x + L.torso * td.x, y: hip.y + L.torso * td.y };
   const head = { x: shoulder.x + (L.neck + L.headR) * td.x, y: shoulder.y + (L.neck + L.headR) * td.y };
   const bbase = { x: shoulder.x - frac * L.torso * td.x, y: shoulder.y - frac * L.torso * td.y };
@@ -7053,28 +7080,33 @@ function liftSkeleton(thighDeg, leanDeg, barPos) {
 function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, bx, by, bw, bh) {
   const c = LIFT_CHARS.find(x => x.key === charKey) || LIFT_CHARS[0];
   const s = liftSkeleton(thighDeg, leanDeg, barPos);
-  const heel = { x: -20, y: 0 }, toe = { x: s.foot, y: 0 };
+  const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
   const pts = [s.ankle, s.knee, s.hip, s.shoulder, s.head, s.bar, heel, toe];
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
-  const pad = 34 + c.limb;
+  const pad = 40 + c.limb;
   const sc = Math.min((bw - pad) / (maxX - minX || 1), (bh - pad) / (maxY - minY || 1));
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const T = p => ({ x: bx + bw / 2 + (p.x - cx) * sc, y: by + bh / 2 - (p.y - cy) * sc });   // flip y
   const A = T(s.ankle), K = T(s.knee), Hi = T(s.hip), Sh = T(s.shoulder), Hd = T(s.head), Ba = T(s.bar), He = T(heel), To = T(toe);
-  const lw = c.limb * sc, plate = 16 * sc, hr = s.headR * sc;
+  const lw = c.limb * sc, plate = 15 * sc, hr = s.headR * sc;
   const seg = (a, b, w, col) => `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${col}" stroke-width="${w.toFixed(1)}" stroke-linecap="round"/>`;
   const dark = (col, f) => { const n = parseInt(col.slice(1), 16); const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255; return `rgb(${Math.round(r * (1 - f))},${Math.round(g * (1 - f))},${Math.round(b * (1 - f))})`; };
   let out = '';
   // midfoot reference line
-  const mid = T({ x: s.foot * 0.42, y: 0 });
+  const mid = T({ x: s.ankle.x + s.foot * 0.15, y: 0 });
   out += `<line x1="${mid.x.toFixed(1)}" y1="${(by + bh - 6).toFixed(1)}" x2="${mid.x.toFixed(1)}" y2="${(by + 12).toFixed(1)}" stroke="#7fb069" stroke-opacity="0.28" stroke-width="1" stroke-dasharray="3 6"/>`;
   out += seg(He, To, Math.max(4, lw * 0.6), c.line ? '#a8d08a' : c.skin);   // foot
-  // barbell plate behind
-  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${(plate + 3).toFixed(1)}" fill="#0a0d07"/><circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${plate.toFixed(1)}" fill="${c.line ? '#7c8b76' : dark(c.skin, 0.45)}" stroke="${c.line ? '#a8d08a' : dark(c.skin, 0.6)}" stroke-width="${(2.5 * sc).toFixed(1)}"/>`;
+  // barbell: a loaded plate (outer disc + collar hub) seen end-on behind the shoulder, plus the arm to it
+  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${(plate + 3).toFixed(1)}" fill="#0a0d07"/>`;
+  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${plate.toFixed(1)}" fill="${c.line ? '#5f6b58' : dark(c.skin, 0.5)}" stroke="${c.line ? '#a8d08a' : dark(c.skin, 0.62)}" stroke-width="${(2.5 * sc).toFixed(1)}"/>`;
+  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${(plate * 0.34).toFixed(1)}" fill="${c.line ? '#8fa07f' : dark(c.skin, 0.3)}"/>`;
   out += seg(Sh, Ba, lw * 0.7, c.line ? '#a8d08a' : dark(c.skin, 0.08));   // arm to bar
   if (c.line) {
     out += seg(A, K, lw, '#a8d08a') + seg(K, Hi, lw, '#a8d08a') + seg(Hi, Sh, lw, '#a8d08a') + seg(Sh, Hd, lw * 0.8, '#a8d08a');
+    // Joint dots so the bends read as knee/hip joints, not sharp kinks (a bare stick zigzags otherwise).
+    const jr = Math.max(2.5, lw * 0.9);
+    for (const j of [A, K, Hi]) out += `<circle cx="${j.x.toFixed(1)}" cy="${j.y.toFixed(1)}" r="${jr.toFixed(1)}" fill="#12160d" stroke="#a8d08a" stroke-width="${(2.4 * sc).toFixed(1)}"/>`;
     out += `<circle cx="${Hd.x.toFixed(1)}" cy="${Hd.y.toFixed(1)}" r="${hr.toFixed(1)}" fill="none" stroke="#a8d08a" stroke-width="${(4 * sc).toFixed(1)}"/>`;
   } else {
     // legs
@@ -7085,14 +7117,16 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, bx, by, bw, bh) {
     out += `<polygon points="${(Hi.x + nx * hw).toFixed(1)},${(Hi.y - ny * hw).toFixed(1)} ${(Sh.x + nx * sw).toFixed(1)},${(Sh.y - ny * sw).toFixed(1)} ${(Sh.x - nx * sw).toFixed(1)},${(Sh.y + ny * sw).toFixed(1)} ${(Hi.x - nx * hw).toFixed(1)},${(Hi.y + ny * hw).toFixed(1)}" fill="${c.skin}"/>`;
     out += seg(Sh, Hd, lw * 0.7, c.skin);  // neck
     out += `<circle cx="${Hd.x.toFixed(1)}" cy="${Hd.y.toFixed(1)}" r="${hr.toFixed(1)}" fill="${c.skin}"/>`;
-    // features (rotate with torso)
+    // Features rotate with the torso. This is a PROFILE (the lifter faces forward, +x toward the toes),
+    // so it gets one eye and a nose bump on the forward side, not two eyes facing the viewer.
     const ang = -Math.atan2(s.td.x, s.td.y) * 180 / Math.PI;
     let feat = '';
-    if (c.brow) feat += `<rect x="${(-hr * 0.7).toFixed(1)}" y="${(-hr * 0.35).toFixed(1)}" width="${(hr * 1.4).toFixed(1)}" height="${(hr * 0.22).toFixed(1)}" fill="${dark(c.skin, 0.5)}"/>`;
-    if (c.mustache) feat += `<rect x="${(-hr * 0.55).toFixed(1)}" y="${(hr * 0.28).toFixed(1)}" width="${(hr * 1.1).toFixed(1)}" height="${(hr * 0.22).toFixed(1)}" fill="#3a2a20"/>`;
+    if (c.brow) feat += `<rect x="${(hr * 0.05).toFixed(1)}" y="${(-hr * 0.4).toFixed(1)}" width="${(hr * 0.8).toFixed(1)}" height="${(hr * 0.2).toFixed(1)}" fill="${dark(c.skin, 0.5)}"/>`;
     if (c.beanie) feat += `<path d="M ${(-hr - 1).toFixed(1)} 0 A ${(hr + 1).toFixed(1)} ${(hr + 1).toFixed(1)} 0 0 1 ${(hr + 1).toFixed(1)} 0 Z" fill="${c.beanie}"/>`;
     if (c.headband) feat += `<rect x="${(-hr - 1).toFixed(1)}" y="${(-hr * 0.55).toFixed(1)}" width="${(2 * (hr + 1)).toFixed(1)}" height="${(hr * 0.3).toFixed(1)}" fill="${c.headband}"/>`;
-    feat += `<circle cx="${(-hr * 0.28).toFixed(1)}" cy="${(-hr * 0.05).toFixed(1)}" r="${(hr * 0.11).toFixed(1)}" fill="#111"/><circle cx="${(hr * 0.28).toFixed(1)}" cy="${(-hr * 0.05).toFixed(1)}" r="${(hr * 0.11).toFixed(1)}" fill="#111"/>`;
+    feat += `<path d="M ${(hr * 0.9).toFixed(1)} ${(hr * 0.02).toFixed(1)} l ${(hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} l ${(-hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} Z" fill="${c.skin}"/>`;   // nose (forward)
+    if (c.mustache) feat += `<rect x="${(hr * 0.2).toFixed(1)}" y="${(hr * 0.34).toFixed(1)}" width="${(hr * 0.7).toFixed(1)}" height="${(hr * 0.2).toFixed(1)}" fill="#3a2a20"/>`;
+    feat += `<circle cx="${(hr * 0.4).toFixed(1)}" cy="${(-hr * 0.05).toFixed(1)}" r="${(hr * 0.12).toFixed(1)}" fill="#111"/>`;   // single (forward) eye
     out += `<g transform="translate(${Hd.x.toFixed(1)} ${Hd.y.toFixed(1)}) rotate(${ang.toFixed(1)})">${feat}</g>`;
   }
   return out;
@@ -7217,8 +7251,8 @@ function onLiftWeight(i, val) {
    is solved bar-over-midfoot by liftSkeleton, so the pose is mechanically honest, not a canned loop. ---- */
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0 };
 function liftFormCharKey() { return localStorage.getItem('loam.liftChar') || 'cleaner'; }
-function liftDepthMaxDeg(set) { return set.depthTarget === 'full' ? 116 : set.depthTarget === 'parallel' ? 92 : 106; }
-function liftLeanDeg(set) { return set.barPosition === 'low' ? 26 : set.barPosition === 'high' ? 12 : 18; }
+function liftDepthMaxDeg(set) { return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
+function liftLeanDeg(set) { return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
 
 function liftFormFrame(ts) {
@@ -12773,7 +12807,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '13facd1 · 2026-07-08';
+const LOAM_BUILD = 'b1f96c5 · 2026-07-08';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
