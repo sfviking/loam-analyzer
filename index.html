@@ -9823,12 +9823,14 @@ function renderCoachPanel(D, sport) {
     compose.classList.remove('hidden');
     if (chips) chips.classList.remove('hidden');
     document.getElementById('coachInput').focus();
-    const noun = sport === 'lift' ? 'lift session' : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
-    sendCoach(`Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`);
+    sendCoach(coachAnalyzePrompt(sport));
   };
   document.getElementById('coachSend').onclick = coachSendFromInput;
   document.getElementById('coachStop').onclick = () => { if (coachAbort) coachAbort.abort(); };
   document.getElementById('coachInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); coachSendFromInput(); } };
+
+  /* If this ride's first insight is already cached, show it now (no click, no API call). */
+  restoreCachedCoach(coachState, sport);
 }
 
 function coachSendFromInput() {
@@ -9858,6 +9860,66 @@ function setCoachSending(on) {
   const s = document.getElementById('coachStop'); if (s) s.classList.toggle('hidden', !on);
 }
 
+/* The deterministic first "analyze this session" turn. Same wording on every open so its cached reply
+   can be found and replayed. Shared by the Start button and the auto-restore path so both build
+   byte-identical text (any drift would miss the cache). */
+function coachAnalyzePrompt(sport) {
+  const noun = sport === 'lift' ? 'lift session' : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
+  return `Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`;
+}
+
+// Fold in the athlete's Strava context when the native app has it: recent same-sport activities
+// plus this ride's segment efforts vs their PRs, injected into window.LOAM_STRAVA_CONTEXT once a
+// Strava account is connected (the fetch is async, so read it lazily and attach once). A note
+// travels with it so the model knows what it is, the same pattern descent_history uses. HTML-only,
+// not part of buildDigest, so the coaching drift-guard is unaffected. Attached BEFORE the cache key
+// is hashed, so a reply generated with old Strava data is not replayed after the data changes, and
+// so the write path (sendCoach) and read path (restoreCachedCoach) hash the same digest.
+function attachStravaContext(state) {
+  try {
+    const sc = window.LOAM_STRAVA_CONTEXT;
+    if (sc && typeof sc === 'object' && state.digest && !state.digest.strava_history) {
+      state.digest.strava_history = sc;
+      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides. pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. runQuality (runs only): recent runs with splitBalancePct (second-half vs first-half pace, negative is a faster finish), paceVariationPct (split evenness), decouplingPct (pace-to-heart-rate drift, higher means more cardiac drift), and read (an automatic one-line take). Use for progression, celebrate real PRs, name a close_effort as a concrete target, frame progress by effortCount, and coach pacing and aerobic fitness from runQuality; cite the real numbers and never invent efforts not listed here.";
+    }
+  } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
+}
+
+/* Cache key for the first turn. Shared by sendCoach (write) and restoreCachedCoach (read) so the two
+   never disagree; folds in digest + level + model + system prompt so any of them changing yields a
+   fresh key. Callers must attach history (await digestReady) and Strava context first. */
+function coachFirstTurnKey(state, level, model, text) {
+  return analysisCacheKey([JSON.stringify(state.digest), level, model, coachSystemPrompt(state.sport, level), text].join('|'));
+}
+
+/* On (re)opening a ride, if the deterministic first insight was generated before (this session or a
+   prior one), replay it from the IndexedDB cache immediately: no click, no API call. Only cache hits
+   are shown, so this never spends money; generating a fresh insight still needs the Start button. */
+async function restoreCachedCoach(state, sport) {
+  attachStravaContext(state);
+  try { await state.digestReady; } catch (e) { /* history is best-effort */ }
+  if (coachState !== state || state.messages.length) return;   // panel re-rendered, or already active
+  const level = coachGet('level', 'intermediate');
+  const model = coachGet('model', 'claude-opus-4-8');
+  const text = coachAnalyzePrompt(sport);
+  let hit;
+  try { hit = await getCachedCoaching(coachFirstTurnKey(state, level, model, text)); } catch (e) { return; }
+  if (!hit || coachState !== state || state.messages.length) return;
+  /* Reveal the conversation UI (as if Start were clicked) and replay the cached reply. */
+  document.getElementById('coachCta').classList.add('hidden');
+  document.getElementById('coachCompose').classList.remove('hidden');
+  const chips = document.getElementById('coachChips');
+  if (chips) chips.classList.remove('hidden');
+  appendCoachBubble('user', text);
+  state.messages.push({ role: 'user', content: text });
+  const bubble = appendCoachBubble('assistant', '');
+  bubble.innerHTML = mdToHtml(hit.text) +
+    '<div style="margin-top:8px;font-size:11px;opacity:0.55">cached reply, no API call</div>';
+  state.messages.push({ role: 'assistant', content: hit.text });
+  const thread = document.getElementById('coachThread');
+  if (thread) thread.scrollTop = 1e9;
+}
+
 async function sendCoach(text) {
   if (!coachState || coachState.streaming) return;
   /* Claim the stream slot before the first await, so a rapid double-click cannot pass the
@@ -9870,19 +9932,7 @@ async function sendCoach(text) {
   let coachCacheKey = null;
   const state = coachState;   /* a re-render replaces coachState; never write into the new one */
 
-  // Fold in the athlete's Strava context when the native app has it: recent same-sport activities
-  // plus this ride's segment efforts vs their PRs, injected into window.LOAM_STRAVA_CONTEXT once a
-  // Strava account is connected (the fetch is async, so read it lazily here and attach once). A note
-  // travels with it so the model knows what it is, the same pattern descent_history uses. HTML-only,
-  // not part of buildDigest, so the coaching drift-guard is unaffected. Attached BEFORE the cache key
-  // is hashed, so a reply generated with old Strava data is not replayed after the data changes.
-  try {
-    const sc = window.LOAM_STRAVA_CONTEXT;
-    if (sc && typeof sc === 'object' && state.digest && !state.digest.strava_history) {
-      state.digest.strava_history = sc;
-      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides. pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. runQuality (runs only): recent runs with splitBalancePct (second-half vs first-half pace, negative is a faster finish), paceVariationPct (split evenness), decouplingPct (pace-to-heart-rate drift, higher means more cardiac drift), and read (an automatic one-line take). Use for progression, celebrate real PRs, name a close_effort as a concrete target, frame progress by effortCount, and coach pacing and aerobic fitness from runQuality; cite the real numbers and never invent efforts not listed here.";
-    }
-  } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
+  attachStravaContext(state);
 
   if (coachState.messages.length === 0) {
     /* History attaches asynchronously after render; wait for it so the digest is complete before
@@ -9892,7 +9942,7 @@ async function sendCoach(text) {
     if (coachState !== state) return;   /* panel re-rendered while waiting; this send is stale */
     // Fold the actual system prompt into the key so editing the prompt wording invalidates stale
     // cached coaching automatically, instead of relying on remembering to bump COACHING_CACHE_VERSION.
-    coachCacheKey = analysisCacheKey([JSON.stringify(state.digest), level, model, coachSystemPrompt(state.sport, level), text].join('|'));
+    coachCacheKey = coachFirstTurnKey(state, level, model, text);
     const hit = await getCachedCoaching(coachCacheKey);
     if (coachState !== state) return;
     if (hit) {
@@ -12973,7 +13023,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '1ec5de5 · 2026-07-09';
+const LOAM_BUILD = '2a3f782 · 2026-07-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
