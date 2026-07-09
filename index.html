@@ -5396,6 +5396,7 @@ const LoamStrength = (function () {
  */
 
 const LABELS = ['high bar', 'low bar', 'full depth', 'parallel'];
+const LIFT_LABELS = ['squat', 'deadlift', 'press', 'bench', 'curl'];
 
 function norm(s) { return (s || '').trim().toLowerCase(); }
 
@@ -5425,11 +5426,22 @@ function parseSetMarks(annotations, ride) {
     }
     return v;
   };
+  /* Most recent lift-type tap at or before t (sticky); a non-squat label makes the analyzer skip the
+     squat-only bar-position / depth reads rather than mislabel e.g. a deadlift as "low bar". */
+  const liftOf = t => {
+    let v = null;
+    for (const a of anns) {
+      if (a.t > t + 1e-6) break;
+      const n = norm(a.text);
+      if (LIFT_LABELS.includes(n)) v = n;
+    }
+    return v;
+  };
   const missesIn = (tStart, tEnd) =>
     anns.filter(a => norm(a.text) === 'miss' && a.t >= tStart && a.t < tEnd).map(a => +a.t.toFixed(2));
   const mkSet = (tStart, tEnd) => ({
     tStart: +tStart.toFixed(2), tEnd: +tEnd.toFixed(2),
-    barPosition: barOf(tEnd), depthTarget: depthOf(tEnd), misses: missesIn(tStart, tEnd),
+    lift: liftOf(tEnd), barPosition: barOf(tEnd), depthTarget: depthOf(tEnd), misses: missesIn(tStart, tEnd),
   });
 
   /* Preferred: explicit "Start set" / "End set" chips. */
@@ -5450,12 +5462,13 @@ function parseSetMarks(annotations, ride) {
      next "Set" is a start; a bare "Set" is a bracket-close (opens nothing). */
   const setMarks = anns.filter(a => norm(a.text) === 'set');
   if (!setMarks.length) return [];
-  const anyLabel = anns.some(a => LABELS.includes(norm(a.text)));
+  const qual = LABELS.concat(LIFT_LABELS);
+  const anyLabel = anns.some(a => qual.includes(norm(a.text)));
   const sets = [];
   for (let i = 0; i < setMarks.length; i++) {
     const tStart = setMarks[i].t;
     const tEnd = i + 1 < setMarks.length ? setMarks[i + 1].t : ride.end;
-    const hasLabel = anns.some(a => LABELS.includes(norm(a.text)) && a.t > tStart && a.t < tEnd);
+    const hasLabel = anns.some(a => qual.includes(norm(a.text)) && a.t > tStart && a.t < tEnd);
     if (anyLabel && !hasLabel) continue;
     sets.push(mkSet(tStart, tEnd));
   }
@@ -5883,11 +5896,15 @@ function analyzeStrength(sensors, ride, opts = {}) {
       flexionProxyDeg: +phone.ampDeg.toFixed(1),          // pocket-tilt depth proxy (secondary)
       headPitchDeg,
       barSpeed,
-      /* Bar position: the lifter's tapped label when present (authoritative),
-         otherwise inferred from torso lean below. */
-      barPosition: win && win.barPosition ? win.barPosition : 'uncertain',
-      labeled: !!(win && win.barPosition),
-      depthTarget: win ? (win.depthTarget || null) : null,
+      /* Lift type: tapped 'squat' | 'deadlift' | 'press' | 'bench' | 'curl', or null (treated as squat).
+         High/low bar and full/parallel depth are squat concepts, so a non-squat lift skips those reads. */
+      lift: win ? (win.lift || null) : null,
+      /* Bar position + depth are squat concepts, so a non-squat lift reports neither, even if a sticky
+         bar / depth tap from an earlier squat set carried into this window. A squat uses the tapped bar
+         position when present (authoritative), else it is inferred from torso lean below. */
+      barPosition: (!win || !win.lift || win.lift === 'squat') ? (win && win.barPosition ? win.barPosition : 'uncertain') : null,
+      labeled: !!(win && win.barPosition && (!win.lift || win.lift === 'squat')),
+      depthTarget: (!win || !win.lift || win.lift === 'squat') ? (win ? (win.depthTarget || null) : null) : null,
       misses: win ? (win.misses || []) : [],
       forwardLeanDeg: null,
     });
@@ -5916,10 +5933,13 @@ function analyzeStrength(sensors, ride, opts = {}) {
  * keep their bar position; forwardLeanDeg is still computed for reference.
  */
 function classifyBarPositions(sets) {
-  const withHead = sets.filter(s => s.headPitchDeg != null);
-  if (withHead.length < 1) { for (const s of sets) if (!s.labeled) s.barPosition = 'uncertain'; return sets; }
+  /* High/low bar is a squat concept: a labeled non-squat lift is left out of the read and keeps null. */
+  const isSquat = s => !s.lift || s.lift === 'squat';
+  const withHead = sets.filter(s => s.headPitchDeg != null && isSquat(s));
+  if (withHead.length < 1) { for (const s of sets) if (!s.labeled && isSquat(s)) s.barPosition = 'uncertain'; return sets; }
   const ref = Math.max(...withHead.map(s => s.headPitchDeg)); // least-negative = most upright
   for (const s of sets) {
+    if (!isSquat(s)) { s.forwardLeanDeg = null; continue; }
     if (s.headPitchDeg == null) { s.forwardLeanDeg = null; if (!s.labeled) s.barPosition = 'uncertain'; continue; }
     const lean = +(ref - s.headPitchDeg).toFixed(1);
     s.forwardLeanDeg = lean;
@@ -5931,7 +5951,7 @@ function classifyBarPositions(sets) {
   /* If nothing separated (spread too small to tell bar positions apart), the
      whole session is one position we cannot name absolutely: call it uncertain. */
   const spread = Math.max(...withHead.map(s => s.headPitchDeg)) - Math.min(...withHead.map(s => s.headPitchDeg));
-  if (spread < LEAN_FORWARD_MIN_DEG) for (const s of sets) if (s.headPitchDeg != null && !s.labeled) s.barPosition = 'uncertain';
+  if (spread < LEAN_FORWARD_MIN_DEG) for (const s of sets) if (s.headPitchDeg != null && isSquat(s) && !s.labeled) s.barPosition = 'uncertain';
   return sets;
 }
 
@@ -7080,10 +7100,10 @@ function shade(col, f) {
 
 /* Fixed transform for a whole rep so the figure keeps one scale/position (no per-frame rescale jitter,
    and a stable frame for the bar-path trail + motion ghosts). Union bbox over the rep extremes. */
-function liftFitTransform(c, dmax, ln, barPos, bx, by, bw, bh) {
+function liftFitTransform(c, dmax, ln, barPos, lift, bx, by, bw, bh) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const th of [0, dmax * 0.5, dmax]) {
-    const s = liftSkeleton(th, ln, barPos);
+    const s = liftSkeleton(th, ln, barPos, lift);
     const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
     for (const p of [s.ankle, s.knee, s.hip, s.shoulder, s.head, s.bar, heel, toe]) {
       minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
@@ -7124,29 +7144,39 @@ function liftTrailSVG(trail, col) {
    limited) and the torso leans further forward as the hip drops, instead of solving the shin angle
    from a bar-over-midfoot balance constraint, which over-rotated the shin and threw the knee above and
    far ahead of the hip (a backward-looking knee). */
-function liftSkeleton(thighDeg, leanDeg, barPos) {
+function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
   const L = { foot: 46, shank: 96, thigh: 96, torso: 120, neck: 16, headR: 16 };
   const R = Math.PI / 180, frac = barPos === 'low' ? 0.17 : 0.05, BARBACK = 15;
+  const isDL = lift === 'deadlift';
   const shinDeg = Math.min(22, thighDeg * 0.24);       // shin forward lean, capped so the knee stays near the toe
-  const lean = leanDeg + thighDeg * 0.30;              // torso leans further forward as depth grows
+  // A deadlift is a hip hinge: the torso folds much more steeply with the pull than a squat's stays-tall
+  // descent, so lean couples harder to the thigh angle and the torso is near-vertical at lockout.
+  const lean = leanDeg + thighDeg * (isDL ? 0.85 : 0.30);
   const ankle = { x: 16, y: 14 };                      // planted over midfoot
   const knee = { x: ankle.x + L.shank * Math.sin(shinDeg * R), y: ankle.y + L.shank * Math.cos(shinDeg * R) };
   const hip = { x: knee.x - L.thigh * Math.sin(thighDeg * R), y: knee.y + L.thigh * Math.cos(thighDeg * R) };
   const td = { x: Math.sin(lean * R), y: Math.cos(lean * R) };
   const shoulder = { x: hip.x + L.torso * td.x, y: hip.y + L.torso * td.y };
   const head = { x: shoulder.x + (L.neck + L.headR) * td.x, y: shoulder.y + (L.neck + L.headR) * td.y };
-  const bbase = { x: shoulder.x - frac * L.torso * td.x, y: shoulder.y - frac * L.torso * td.y };
-  const nrm = { x: -td.y, y: td.x };
-  const bar = { x: bbase.x + BARBACK * nrm.x, y: bbase.y + BARBACK * nrm.y };
-  return { ankle, knee, hip, shoulder, head, bar, td, headR: L.headR, foot: L.foot };
+  // Squat/press: bar rides behind the shoulders (back rack). Deadlift: bar hangs in the hands, so it is
+  // straight below the shoulders (the arms hang vertical) and traces up the legs as the lifter stands.
+  let bar;
+  if (isDL) {
+    bar = { x: shoulder.x, y: shoulder.y - L.torso * 0.85 };   // arms hang straight; bar rides knee->thigh through the pull
+  } else {
+    const bbase = { x: shoulder.x - frac * L.torso * td.x, y: shoulder.y - frac * L.torso * td.y };
+    const nrm = { x: -td.y, y: td.x };
+    bar = { x: bbase.x + BARBACK * nrm.x, y: bbase.y + BARBACK * nrm.y };
+  }
+  return { ankle, knee, hip, shoulder, head, bar, td, headR: L.headR, foot: L.foot, deadlift: isDL };
 }
 
 /* Draw one character at one pose using a fixed transform `tf` ({T, sc}). Returns { markup, bar } with
    the bar point in screen coords (so the caller can extend the bar-path trail). The stick gets a neon
    glow; The Cleaner is a cylinder-shaded mannequin with ball joints; the slab bodies are unchanged. */
-function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, tf) {
+function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf) {
   const c = LIFT_CHARS.find(x => x.key === charKey) || LIFT_CHARS[0];
-  const s = liftSkeleton(thighDeg, leanDeg, barPos);
+  const s = liftSkeleton(thighDeg, leanDeg, barPos, lift);
   const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
   const T = tf.T, sc = tf.sc;
   const A = T(s.ankle), K = T(s.knee), Hi = T(s.hip), Sh = T(s.shoulder), Hd = T(s.head), Ba = T(s.bar), He = T(heel), To = T(toe);
@@ -7170,7 +7200,10 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, tf) {
   // Near arm: from the shoulder down-and-back to a bent elbow, then the forearm up to grip the bar (a
   // back squat holds the bar behind the shoulders). Drawn on top of the torso below, so it reads as the
   // front arm; the elbow point is a fixed offset off the shoulder so it stays believable at any depth.
-  const elbow = { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc }, armW = lw * 0.6;
+  // Squat/press: the arm bends at the elbow back to the bar on the traps. Deadlift: the arm hangs
+  // straight (bar in the hands), so the "elbow" sits on the shoulder->bar line and the arm reads straight.
+  const elbow = s.deadlift ? { x: (Sh.x + Ba.x) / 2, y: (Sh.y + Ba.y) / 2 } : { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc };
+  const armW = lw * 0.6;
   if (c.line) {
     const glow = c.neon || c.skin;
     let fig = seg(A, K, lw, glow) + seg(K, Hi, lw, glow) + seg(Hi, Sh, lw, glow) + seg(Sh, Hd, lw * 0.8, glow);
@@ -7336,9 +7369,12 @@ function onLiftWeight(i, val) {
    is solved bar-over-midfoot by liftSkeleton, so the pose is mechanically honest, not a canned loop. ---- */
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', trail: [], ghosts: [] };
 function liftFormCharKey() { return localStorage.getItem('loam.liftChar') || 'cleaner'; }
-function liftDepthMaxDeg(set) { return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
-function liftLeanDeg(set) { return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
+function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
+function liftLeanDeg(set) { if (set.lift === 'deadlift') return 6; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
+/* The animation models a squat by default and a hip hinge for a deadlift (bar in the hands). Press,
+   bench and curls have no dedicated pose yet, so they fall back to the squat body as an approximation. */
+function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : 'squat'; }
 
 function liftFormFrame(ts) {
   const st = _liftForm;
@@ -7356,19 +7392,22 @@ function liftFormFrame(ts) {
   else thigh = 0;                                                  // lockout pause
   const reps = Math.max(1, set.reps || 1);
   const repNo = (Math.floor(elapsed / T) % reps) + 1;
-  const ck = liftFormCharKey(), c = LIFT_CHARS.find(x => x.key === ck) || LIFT_CHARS[0], bp = liftBarPos(set);
+  const ck = liftFormCharKey(), c = LIFT_CHARS.find(x => x.key === ck) || LIFT_CHARS[0], bp = liftBarPos(set), lk = liftFormLift(set);
   // A fixed transform per (character, set, pose params) so the figure keeps one scale and the bar-path
   // trail lives in a stable frame; recompute (and drop the trail/ghosts) only when any of those change.
-  const key = ck + ':' + st.setIdx + ':' + dmax + ':' + ln + ':' + bp;
-  if (st.tfKey !== key) { st.tf = liftFitTransform(c, dmax, ln, bp, 12, 8, 276, 292); st.tfKey = key; st.trail = []; st.ghosts = []; }
-  const cur = liftAvatarSVG(ck, thigh, ln, bp, st.tf);
+  const key = ck + ':' + st.setIdx + ':' + dmax + ':' + ln + ':' + bp + ':' + lk;
+  if (st.tfKey !== key) {
+    st.tf = liftFitTransform(c, dmax, ln, bp, lk, 12, 8, 276, 292); st.tfKey = key; st.trail = []; st.ghosts = [];
+    const note = document.getElementById('liftFormNote'); if (note) note.textContent = liftFormNoteFor(set);
+  }
+  const cur = liftAvatarSVG(ck, thigh, ln, bp, lk, st.tf);
   st.trail.push(cur.bar); if (st.trail.length > 26) st.trail.shift();       // bar-path history (all chars)
   st.ghosts.push(thigh); if (st.ghosts.length > 6) st.ghosts.shift();       // pose history for the stick trail
   const trailCol = c.neon || (c.glow ? c.skin : '#7fe0a0');
   let ghosts = '';
   if (c.line) {   // motion-ghosting for the stick: faint earlier poses behind the current one
     for (let g = 1; g <= 4 && st.ghosts.length - 1 - g >= 0; g++) {
-      const gh = liftAvatarSVG(ck, st.ghosts[st.ghosts.length - 1 - g], ln, bp, st.tf);
+      const gh = liftAvatarSVG(ck, st.ghosts[st.ghosts.length - 1 - g], ln, bp, lk, st.tf);
       ghosts += `<g opacity="${(0.24 - g * 0.045).toFixed(2)}">${gh.markup}</g>`;
     }
   }
@@ -7380,7 +7419,7 @@ function liftFormFrame(ts) {
     + liftCharDefs(c) + `</defs>`
     + `<rect width="300" height="320" rx="12" fill="url(#lfBg)"/>`
     + `<line x1="18" y1="300" x2="282" y2="300" stroke="#7fb069" stroke-opacity="0.25" stroke-width="2"/>`
-    + (() => { const mf = st.tf.T({ x: liftSkeleton(0, ln, bp).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<line x1="${mf}" y1="300" x2="${mf}" y2="20" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/>`; })()
+    + (() => { const mf = st.tf.T({ x: liftSkeleton(0, ln, bp, lk).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<line x1="${mf}" y1="300" x2="${mf}" y2="20" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/>`; })()
     + ghosts
     + liftTrailSVG(st.trail, trailCol)
     + cur.markup
@@ -7407,7 +7446,14 @@ function renderLiftForm(D) {
   const sets = D.strength.sets;
   const ck = liftFormCharKey();
   const chars = LIFT_CHARS.map(c => `<button class="lf-char ${c.key === ck ? 'on' : ''}" data-k="${c.key}" onclick="setLiftFormChar('${c.key}')">${c.name}</button>`).join('');
-  const setOpts = sets.map((s, i) => `<option value="${i}">Set ${i + 1} · ${s.barPosition === 'uncertain' ? '?' : s.barPosition} bar · ${s.depthTarget || 'depth ?'}</option>`).join('');
+  const setOpts = sets.map((s, i) => {
+    // High/low bar and full/parallel depth are squat concepts; a non-squat lift just names the lift.
+    const isSquat = !s.lift || s.lift === 'squat';
+    const detail = isSquat
+      ? `${s.lift ? 'squat · ' : ''}${s.barPosition === 'uncertain' || s.barPosition == null ? '?' : s.barPosition} bar · ${s.depthTarget || 'depth ?'}`
+      : s.lift;
+    return `<option value="${i}">Set ${i + 1} · ${detail}</option>`;
+  }).join('');
   document.getElementById('liftForm').innerHTML = `
     <div class="lf-head"><span class="lf-title">Spotter Cam</span>
       <select class="lf-set" onchange="setLiftFormSet(this.value)">${setOpts}</select></div>
@@ -7417,8 +7463,15 @@ function renderLiftForm(D) {
       <span class="lf-rep" id="liftFormRep">1 / 1</span>
       <span class="lf-chars">${chars}</span>
     </div>
-    <div class="lf-note">Depth, lean, and tempo are your set's real numbers; the bar tracks over midfoot.</div>`;
+    <div class="lf-note" id="liftFormNote">Depth, lean, and tempo are your set's real numbers; the bar tracks over midfoot.</div>`;
   liftFormStart();
+}
+/* Honest per-lift caption: squat and deadlift have real poses (squat descent, hip hinge with the bar in
+   hand); press/bench/curl have no dedicated pose yet, so the body is shown as a squat approximation. */
+function liftFormNoteFor(set) {
+  if (set.lift === 'deadlift') return 'Deadlift: hip hinge with the bar in your hands. Depth, lean, and tempo are your set\'s real numbers.';
+  if (set.lift && set.lift !== 'squat') return `${set.lift[0].toUpperCase() + set.lift.slice(1)}: form view approximates a squat for now (no dedicated pose yet). Reps and tempo are your set's real numbers.`;
+  return 'Depth, lean, and tempo are your set\'s real numbers; the bar tracks over midfoot.';
 }
 
 /* ---- Coach's read: a deterministic, on-device form read from the set facts (metric -> mechanism ->
@@ -9139,6 +9192,7 @@ function buildDigest(D, sport) {
     const disp = kg => kg == null ? null : +(liftUnit() === 'kg' ? kg : kg / KG_PER_LB).toFixed(1);
     const setRows = (D.strength.sets || []).map((set, i) => ({
       set: i + 1,
+      lift: set.lift || 'squat',
       bar_position: set.barPosition === 'uncertain' ? null : set.barPosition,
       depth_target: set.depthTarget,
       reps: set.reps,
@@ -12919,7 +12973,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '750cfb9 · 2026-07-09';
+const LOAM_BUILD = '1ec5de5 · 2026-07-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
