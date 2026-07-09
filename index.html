@@ -7062,11 +7062,62 @@ function hideAllSections() {
    avatar (a character squatting at depth), drawn as SVG so it rasterizes to a PNG for Strava exactly
    like the ride signature. Character switcher + Save mirror the ride card. ---- */
 const LIFT_CHARS = [
-  { key: 'cleaner', name: 'The Cleaner', skin: '#d9b48c', short: '#3a3f2e', limb: 15, hipW: 15, shoW: 21, beanie: '#6c7a3a', mustache: true },
-  { key: 'smash',   name: 'Smash',       skin: '#5fae4a', short: '#6a4aa0', limb: 30, hipW: 26, shoW: 40, brow: true },
+  { key: 'cleaner', name: 'The Cleaner', skin: '#d9b48c', short: '#3a3f2e', limb: 15, hipW: 15, shoW: 21, beanie: '#6c7a3a', mustache: true, shaded: true },
+  { key: 'smash',   name: 'Smash',       skin: '#5fae4a', short: '#6a4aa0', limb: 30, hipW: 26, shoW: 40, brow: true, glow: true },
   { key: 'golden',  name: 'Golden Era',  skin: '#c98a52', short: '#2a2d36', limb: 22, hipW: 15, shoW: 40, headband: '#d0483a', smile: true },
-  { key: 'stick',   name: 'Stick',       skin: '#a8d08a', short: null,      limb: 8,  hipW: 6,  shoW: 10, line: true },
+  { key: 'stick',   name: 'Stick',       skin: '#a8d08a', short: null,      limb: 8,  hipW: 6,  shoW: 10, line: true, glow: true, neon: '#b6f36a' },
 ];
+
+/* Shade a #rrggbb color: f>0 darkens toward black, f<0 lightens toward white. Used for the mannequin's
+   cylinder highlight/shadow sides and its ball-joint radial gradients. */
+function shade(col, f) {
+  const n = parseInt(col.slice(1), 16); let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const cl = v => Math.max(0, Math.min(255, Math.round(v)));
+  if (f >= 0) { r *= (1 - f); g *= (1 - f); b *= (1 - f); }
+  else { r += (255 - r) * -f; g += (255 - g) * -f; b += (255 - b) * -f; }
+  return `rgb(${cl(r)},${cl(g)},${cl(b)})`;
+}
+
+/* Fixed transform for a whole rep so the figure keeps one scale/position (no per-frame rescale jitter,
+   and a stable frame for the bar-path trail + motion ghosts). Union bbox over the rep extremes. */
+function liftFitTransform(c, dmax, ln, barPos, bx, by, bw, bh) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const th of [0, dmax * 0.5, dmax]) {
+    const s = liftSkeleton(th, ln, barPos);
+    const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
+    for (const p of [s.ankle, s.knee, s.hip, s.shoulder, s.head, s.bar, heel, toe]) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+  }
+  const pad = 48 + c.limb;
+  const sc = Math.min((bw - pad) / (maxX - minX || 1), (bh - pad) / (maxY - minY || 1));
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const T = p => ({ x: bx + bw / 2 + (p.x - cx) * sc, y: by + bh / 2 - (p.y - cy) * sc });
+  return { T, sc };
+}
+
+/* Per-character SVG defs. The shaded mannequin gets a radial gradient reused on every ball joint so
+   each reads as a lit sphere; colors track the character's skin. */
+function liftCharDefs(c) {
+  if (!c.shaded) return '';
+  return `<radialGradient id="ball_${c.key}" cx="38%" cy="32%" r="72%">`
+    + `<stop offset="0%" stop-color="${shade(c.skin, -0.34)}"/>`
+    + `<stop offset="55%" stop-color="${c.skin}"/>`
+    + `<stop offset="100%" stop-color="${shade(c.skin, 0.34)}"/></radialGradient>`;
+}
+
+/* Neon bar-path trail: the recent history of the bar point, fading toward the tail, wrapped in the
+   glow filter. Shown for every character (the lifting analog of a bar-path camera). */
+function liftTrailSVG(trail, col) {
+  if (trail.length < 2) return '';
+  let out = '';
+  for (let i = 1; i < trail.length; i++) {
+    const a = trail[i - 1], b = trail[i], op = (i / trail.length) * 0.9;
+    out += `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${col}" stroke-width="3" stroke-opacity="${op.toFixed(2)}" stroke-linecap="round"/>`;
+  }
+  const h = trail[trail.length - 1];
+  return `<g filter="url(#lfGlow)">${out}<circle cx="${h.x.toFixed(1)}" cy="${h.y.toFixed(1)}" r="4.5" fill="${col}"/></g>`;
+}
 
 /* Skeleton at a squat pose. World coords, y up, ankle planted over midfoot. thigh/lean in degrees;
    barPos 'high'|'low'. The shin leans forward only moderately with depth (ankle dorsiflexion is
@@ -7090,60 +7141,80 @@ function liftSkeleton(thighDeg, leanDeg, barPos) {
   return { ankle, knee, hip, shoulder, head, bar, td, headR: L.headR, foot: L.foot };
 }
 
-/* Draw the chosen character at the pose, fitted into [bx,by,bw,bh]. Returns SVG markup. */
-function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, bx, by, bw, bh) {
+/* Draw one character at one pose using a fixed transform `tf` ({T, sc}). Returns { markup, bar } with
+   the bar point in screen coords (so the caller can extend the bar-path trail). The stick gets a neon
+   glow; The Cleaner is a cylinder-shaded mannequin with ball joints; the slab bodies are unchanged. */
+function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, tf) {
   const c = LIFT_CHARS.find(x => x.key === charKey) || LIFT_CHARS[0];
   const s = liftSkeleton(thighDeg, leanDeg, barPos);
   const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
-  const pts = [s.ankle, s.knee, s.hip, s.shoulder, s.head, s.bar, heel, toe];
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
-  const pad = 40 + c.limb;
-  const sc = Math.min((bw - pad) / (maxX - minX || 1), (bh - pad) / (maxY - minY || 1));
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const T = p => ({ x: bx + bw / 2 + (p.x - cx) * sc, y: by + bh / 2 - (p.y - cy) * sc });   // flip y
+  const T = tf.T, sc = tf.sc;
   const A = T(s.ankle), K = T(s.knee), Hi = T(s.hip), Sh = T(s.shoulder), Hd = T(s.head), Ba = T(s.bar), He = T(heel), To = T(toe);
   const lw = c.limb * sc, plate = 15 * sc, hr = s.headR * sc;
   const seg = (a, b, w, col) => `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${col}" stroke-width="${w.toFixed(1)}" stroke-linecap="round"/>`;
-  const dark = (col, f) => { const n = parseInt(col.slice(1), 16); const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255; return `rgb(${Math.round(r * (1 - f))},${Math.round(g * (1 - f))},${Math.round(b * (1 - f))})`; };
+  // A rounded "limb" as a cylinder: base + a thin shadow line on the far side and a highlight on the lit
+  // (upper) side. Cheap volume without a per-limb gradient.
+  const cyl = (a, b, w, col) => {
+    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1, nx = -dy / L, ny = dx / L, off = w * 0.26;
+    return seg(a, b, w, col)
+      + seg({ x: a.x - nx * off, y: a.y - ny * off }, { x: b.x - nx * off, y: b.y - ny * off }, w * 0.34, shade(col, 0.30))
+      + seg({ x: a.x + nx * off, y: a.y + ny * off }, { x: b.x + nx * off, y: b.y + ny * off }, w * 0.30, shade(col, -0.42));
+  };
+  const ball = (p, r) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" fill="url(#ball_${c.key})"/>`;
   let out = '';
-  // midfoot reference line
-  const mid = T({ x: s.ankle.x + s.foot * 0.15, y: 0 });
-  out += `<line x1="${mid.x.toFixed(1)}" y1="${(by + bh - 6).toFixed(1)}" x2="${mid.x.toFixed(1)}" y2="${(by + 12).toFixed(1)}" stroke="#7fb069" stroke-opacity="0.28" stroke-width="1" stroke-dasharray="3 6"/>`;
-  out += seg(He, To, Math.max(4, lw * 0.6), c.line ? '#a8d08a' : c.skin);   // foot
+  out += seg(He, To, Math.max(4, lw * 0.6), c.line ? c.skin : c.skin);   // foot
   // barbell: a loaded plate (outer disc + collar hub) seen end-on behind the shoulder, plus the arm to it
   out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${(plate + 3).toFixed(1)}" fill="#0a0d07"/>`;
-  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${plate.toFixed(1)}" fill="${c.line ? '#5f6b58' : dark(c.skin, 0.5)}" stroke="${c.line ? '#a8d08a' : dark(c.skin, 0.62)}" stroke-width="${(2.5 * sc).toFixed(1)}"/>`;
-  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${(plate * 0.34).toFixed(1)}" fill="${c.line ? '#8fa07f' : dark(c.skin, 0.3)}"/>`;
-  out += seg(Sh, Ba, lw * 0.7, c.line ? '#a8d08a' : dark(c.skin, 0.08));   // arm to bar
+  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${plate.toFixed(1)}" fill="${c.line ? '#5f6b58' : shade(c.skin, 0.5)}" stroke="${c.line ? c.skin : shade(c.skin, 0.62)}" stroke-width="${(2.5 * sc).toFixed(1)}"/>`;
+  out += `<circle cx="${Ba.x.toFixed(1)}" cy="${Ba.y.toFixed(1)}" r="${(plate * 0.34).toFixed(1)}" fill="${c.line ? '#8fa07f' : shade(c.skin, 0.3)}"/>`;
+  // Near arm: from the shoulder down-and-back to a bent elbow, then the forearm up to grip the bar (a
+  // back squat holds the bar behind the shoulders). Drawn on top of the torso below, so it reads as the
+  // front arm; the elbow point is a fixed offset off the shoulder so it stays believable at any depth.
+  const elbow = { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc }, armW = lw * 0.6;
   if (c.line) {
-    out += seg(A, K, lw, '#a8d08a') + seg(K, Hi, lw, '#a8d08a') + seg(Hi, Sh, lw, '#a8d08a') + seg(Sh, Hd, lw * 0.8, '#a8d08a');
-    // Joint dots so the bends read as knee/hip joints, not sharp kinks (a bare stick zigzags otherwise).
+    const glow = c.neon || c.skin;
+    let fig = seg(A, K, lw, glow) + seg(K, Hi, lw, glow) + seg(Hi, Sh, lw, glow) + seg(Sh, Hd, lw * 0.8, glow);
+    fig += seg(Sh, elbow, lw * 0.8, glow) + seg(elbow, Ba, lw * 0.8, glow);   // upper arm + forearm to bar
+    // Joint dots so the bends read as knee/hip/elbow joints, not sharp kinks (a bare stick zigzags).
     const jr = Math.max(2.5, lw * 0.9);
-    for (const j of [A, K, Hi]) out += `<circle cx="${j.x.toFixed(1)}" cy="${j.y.toFixed(1)}" r="${jr.toFixed(1)}" fill="#12160d" stroke="#a8d08a" stroke-width="${(2.4 * sc).toFixed(1)}"/>`;
-    out += `<circle cx="${Hd.x.toFixed(1)}" cy="${Hd.y.toFixed(1)}" r="${hr.toFixed(1)}" fill="none" stroke="#a8d08a" stroke-width="${(4 * sc).toFixed(1)}"/>`;
-  } else {
-    // legs
-    out += seg(A, K, lw * 0.85, c.skin) + seg(K, Hi, lw, c.skin);
-    if (c.short) out += seg({ x: (K.x + Hi.x) / 2, y: (K.y + Hi.y) / 2 }, Hi, lw * 1.12, c.short);
-    // torso slab (hip->shoulder polygon)
-    const nx = -s.td.y, ny = s.td.x, hw = c.hipW * sc, sw = c.shoW * sc;
-    out += `<polygon points="${(Hi.x + nx * hw).toFixed(1)},${(Hi.y - ny * hw).toFixed(1)} ${(Sh.x + nx * sw).toFixed(1)},${(Sh.y - ny * sw).toFixed(1)} ${(Sh.x - nx * sw).toFixed(1)},${(Sh.y + ny * sw).toFixed(1)} ${(Hi.x - nx * hw).toFixed(1)},${(Hi.y + ny * hw).toFixed(1)}" fill="${c.skin}"/>`;
-    out += seg(Sh, Hd, lw * 0.7, c.skin);  // neck
-    out += `<circle cx="${Hd.x.toFixed(1)}" cy="${Hd.y.toFixed(1)}" r="${hr.toFixed(1)}" fill="${c.skin}"/>`;
-    // Features rotate with the torso. This is a PROFILE (the lifter faces forward, +x toward the toes),
-    // so it gets one eye and a nose bump on the forward side, not two eyes facing the viewer.
+    for (const j of [A, K, Hi, elbow]) fig += `<circle cx="${j.x.toFixed(1)}" cy="${j.y.toFixed(1)}" r="${jr.toFixed(1)}" fill="#12160d" stroke="${glow}" stroke-width="${(2.4 * sc).toFixed(1)}"/>`;
+    fig += `<circle cx="${Hd.x.toFixed(1)}" cy="${Hd.y.toFixed(1)}" r="${hr.toFixed(1)}" fill="none" stroke="${glow}" stroke-width="${(4 * sc).toFixed(1)}"/>`;
+    out += `<g filter="url(#lfGlow)">${fig}</g>`;
+  } else if (c.shaded) {
+    // Wooden-mannequin: cylinder-shaded limbs, ball joints, a segmented (chest + pelvis) torso.
+    out += cyl(A, K, lw * 0.85, c.skin) + cyl(K, Hi, lw, c.skin);
+    if (c.short) out += cyl({ x: (K.x + Hi.x) / 2, y: (K.y + Hi.y) / 2 }, Hi, lw * 1.12, c.short);
+    const midT = { x: (Hi.x + Sh.x) / 2, y: (Hi.y + Sh.y) / 2 }, hw = c.hipW * sc, sw = c.shoW * sc;
+    out += cyl(Hi, midT, hw * 1.7, c.skin) + cyl(midT, Sh, sw * 1.5, c.skin) + cyl(Sh, Hd, lw * 0.7, c.skin);
+    out += cyl(Sh, elbow, armW, c.skin) + cyl(elbow, Ba, armW * 0.9, c.skin) + ball(elbow, armW * 0.6);   // near arm to bar
+    out += ball(Hi, hw * 0.95) + ball(K, lw * 0.62) + ball(A, lw * 0.5) + ball(Sh, sw * 0.78) + ball(Hd, hr);
     const ang = -Math.atan2(s.td.x, s.td.y) * 180 / Math.PI;
     let feat = '';
-    if (c.brow) feat += `<rect x="${(hr * 0.05).toFixed(1)}" y="${(-hr * 0.4).toFixed(1)}" width="${(hr * 0.8).toFixed(1)}" height="${(hr * 0.2).toFixed(1)}" fill="${dark(c.skin, 0.5)}"/>`;
     if (c.beanie) feat += `<path d="M ${(-hr - 1).toFixed(1)} 0 A ${(hr + 1).toFixed(1)} ${(hr + 1).toFixed(1)} 0 0 1 ${(hr + 1).toFixed(1)} 0 Z" fill="${c.beanie}"/>`;
-    if (c.headband) feat += `<rect x="${(-hr - 1).toFixed(1)}" y="${(-hr * 0.55).toFixed(1)}" width="${(2 * (hr + 1)).toFixed(1)}" height="${(hr * 0.3).toFixed(1)}" fill="${c.headband}"/>`;
-    feat += `<path d="M ${(hr * 0.9).toFixed(1)} ${(hr * 0.02).toFixed(1)} l ${(hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} l ${(-hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} Z" fill="${c.skin}"/>`;   // nose (forward)
+    feat += `<path d="M ${(hr * 0.9).toFixed(1)} ${(hr * 0.02).toFixed(1)} l ${(hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} l ${(-hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} Z" fill="${shade(c.skin, 0.12)}"/>`;   // nose
     if (c.mustache) feat += `<rect x="${(hr * 0.2).toFixed(1)}" y="${(hr * 0.34).toFixed(1)}" width="${(hr * 0.7).toFixed(1)}" height="${(hr * 0.2).toFixed(1)}" fill="#3a2a20"/>`;
-    feat += `<circle cx="${(hr * 0.4).toFixed(1)}" cy="${(-hr * 0.05).toFixed(1)}" r="${(hr * 0.12).toFixed(1)}" fill="#111"/>`;   // single (forward) eye
+    feat += `<circle cx="${(hr * 0.4).toFixed(1)}" cy="${(-hr * 0.05).toFixed(1)}" r="${(hr * 0.12).toFixed(1)}" fill="#111"/>`;   // forward eye
     out += `<g transform="translate(${Hd.x.toFixed(1)} ${Hd.y.toFixed(1)}) rotate(${ang.toFixed(1)})">${feat}</g>`;
+  } else {
+    // slab body (Smash / Golden Era), optionally with a soft glow
+    let body = seg(A, K, lw * 0.85, c.skin) + seg(K, Hi, lw, c.skin);
+    if (c.short) body += seg({ x: (K.x + Hi.x) / 2, y: (K.y + Hi.y) / 2 }, Hi, lw * 1.12, c.short);
+    const nx = -s.td.y, ny = s.td.x, hw = c.hipW * sc, sw = c.shoW * sc;
+    body += `<polygon points="${(Hi.x + nx * hw).toFixed(1)},${(Hi.y - ny * hw).toFixed(1)} ${(Sh.x + nx * sw).toFixed(1)},${(Sh.y - ny * sw).toFixed(1)} ${(Sh.x - nx * sw).toFixed(1)},${(Sh.y + ny * sw).toFixed(1)} ${(Hi.x - nx * hw).toFixed(1)},${(Hi.y + ny * hw).toFixed(1)}" fill="${c.skin}"/>`;
+    body += seg(Sh, Hd, lw * 0.7, c.skin);
+    body += `<circle cx="${Hd.x.toFixed(1)}" cy="${Hd.y.toFixed(1)}" r="${hr.toFixed(1)}" fill="${c.skin}"/>`;
+    body += seg(Sh, elbow, armW, shade(c.skin, 0.08)) + seg(elbow, Ba, armW * 0.9, shade(c.skin, 0.08));   // near arm to bar
+    // PROFILE face (the lifter faces forward, +x toward the toes): one eye + a nose bump, not two eyes.
+    const ang = -Math.atan2(s.td.x, s.td.y) * 180 / Math.PI;
+    let feat = '';
+    if (c.brow) feat += `<rect x="${(hr * 0.05).toFixed(1)}" y="${(-hr * 0.4).toFixed(1)}" width="${(hr * 0.8).toFixed(1)}" height="${(hr * 0.2).toFixed(1)}" fill="${shade(c.skin, 0.5)}"/>`;
+    if (c.headband) feat += `<rect x="${(-hr - 1).toFixed(1)}" y="${(-hr * 0.55).toFixed(1)}" width="${(2 * (hr + 1)).toFixed(1)}" height="${(hr * 0.3).toFixed(1)}" fill="${c.headband}"/>`;
+    feat += `<path d="M ${(hr * 0.9).toFixed(1)} ${(hr * 0.02).toFixed(1)} l ${(hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} l ${(-hr * 0.34).toFixed(1)} ${(hr * 0.16).toFixed(1)} Z" fill="${c.skin}"/>`;
+    feat += `<circle cx="${(hr * 0.4).toFixed(1)}" cy="${(-hr * 0.05).toFixed(1)}" r="${(hr * 0.12).toFixed(1)}" fill="#111"/>`;
+    body += `<g transform="translate(${Hd.x.toFixed(1)} ${Hd.y.toFixed(1)}) rotate(${ang.toFixed(1)})">${feat}</g>`;
+    out += c.glow ? `<g filter="url(#lfGlowSoft)">${body}</g>` : body;
   }
-  return out;
+  return { markup: out, bar: Ba };
 }
 
 /* The lift's "signature" line: every rep as a dip in the bar path, laid out set by set (packed, not
@@ -7263,7 +7334,7 @@ function onLiftWeight(i, val) {
    by its real facts: depth (full vs parallel) sets how low the thigh goes, bar position sets the torso
    lean (low bar leans more to keep the bar over midfoot), and tempo sets the cycle time. The skeleton
    is solved bar-over-midfoot by liftSkeleton, so the pose is mechanically honest, not a canned loop. ---- */
-let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0 };
+let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', trail: [], ghosts: [] };
 function liftFormCharKey() { return localStorage.getItem('loam.liftChar') || 'cleaner'; }
 function liftDepthMaxDeg(set) { return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
 function liftLeanDeg(set) { return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
@@ -7285,12 +7356,34 @@ function liftFormFrame(ts) {
   else thigh = 0;                                                  // lockout pause
   const reps = Math.max(1, set.reps || 1);
   const repNo = (Math.floor(elapsed / T) % reps) + 1;
+  const ck = liftFormCharKey(), c = LIFT_CHARS.find(x => x.key === ck) || LIFT_CHARS[0], bp = liftBarPos(set);
+  // A fixed transform per (character, set, pose params) so the figure keeps one scale and the bar-path
+  // trail lives in a stable frame; recompute (and drop the trail/ghosts) only when any of those change.
+  const key = ck + ':' + st.setIdx + ':' + dmax + ':' + ln + ':' + bp;
+  if (st.tfKey !== key) { st.tf = liftFitTransform(c, dmax, ln, bp, 12, 8, 276, 292); st.tfKey = key; st.trail = []; st.ghosts = []; }
+  const cur = liftAvatarSVG(ck, thigh, ln, bp, st.tf);
+  st.trail.push(cur.bar); if (st.trail.length > 26) st.trail.shift();       // bar-path history (all chars)
+  st.ghosts.push(thigh); if (st.ghosts.length > 6) st.ghosts.shift();       // pose history for the stick trail
+  const trailCol = c.neon || (c.glow ? c.skin : '#7fe0a0');
+  let ghosts = '';
+  if (c.line) {   // motion-ghosting for the stick: faint earlier poses behind the current one
+    for (let g = 1; g <= 4 && st.ghosts.length - 1 - g >= 0; g++) {
+      const gh = liftAvatarSVG(ck, st.ghosts[st.ghosts.length - 1 - g], ln, bp, st.tf);
+      ghosts += `<g opacity="${(0.24 - g * 0.045).toFixed(2)}">${gh.markup}</g>`;
+    }
+  }
   const stage = document.getElementById('liftFormStage');
   if (stage) stage.innerHTML = `<svg viewBox="0 0 300 320" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">`
+    + `<defs><linearGradient id="lfBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#20291b"/><stop offset="100%" stop-color="#0a0d07"/></linearGradient>`
+    + `<filter id="lfGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
+    + `<filter id="lfGlowSoft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
+    + liftCharDefs(c) + `</defs>`
     + `<rect width="300" height="320" rx="12" fill="url(#lfBg)"/>`
-    + `<defs><linearGradient id="lfBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#20291b"/><stop offset="100%" stop-color="#0a0d07"/></linearGradient></defs>`
     + `<line x1="18" y1="300" x2="282" y2="300" stroke="#7fb069" stroke-opacity="0.25" stroke-width="2"/>`
-    + liftAvatarSVG(liftFormCharKey(), thigh, ln, liftBarPos(set), 12, 8, 276, 292)
+    + (() => { const mf = st.tf.T({ x: liftSkeleton(0, ln, bp).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<line x1="${mf}" y1="300" x2="${mf}" y2="20" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/>`; })()
+    + ghosts
+    + liftTrailSVG(st.trail, trailCol)
+    + cur.markup
     + `</svg>`;
   const rc = document.getElementById('liftFormRep');
   if (rc) rc.textContent = repNo + ' / ' + reps;
@@ -8633,7 +8726,10 @@ function renderRunStats(s, detection, mount) {
 
 function renderRunMap(loc, ride, segments) {
   _linkCursor = null;
-  setMapLegend('grade');
+  /* Only advertise "lift" in the legend when this ride actually has a detected lift/gondola segment.
+     Runs (and any lift-free ride) have none, so the swatch would be noise. */
+  const hasLift = Array.isArray(segments) && segments.some(s => s.kind === 'lift');
+  setMapLegend('grade', { hasLift });
   if (mapInstance) { mapInstance.remove(); mapInstance = null; }
   /* Drop the previous ride's MTB map state: mapOverlay belongs to the map just destroyed, and a
      stale _mapData would let focusSegment/showTurnsForRun draw the old ride onto this one. */
@@ -10182,7 +10278,7 @@ function linkTimelineToMap(loc, ride) {
 /* Sport-aware map legend. The overview map is shared by every sport but colors its track differently
    (MTB: speed with turn rings; foot/road/GPS: grade climb/descent/lift), so the legend is set by the
    map renderer instead of being static MTB HTML that rendered verbatim on runs and rides. */
-function setMapLegend(kind) {
+function setMapLegend(kind, opts = {}) {
   const body = document.getElementById('mapLegendBody');
   if (!body) return;
   const dot = (cls) => `<span class="lg ${cls}"></span>`;
@@ -10190,9 +10286,11 @@ function setMapLegend(kind) {
     body.innerHTML = `<span>turn ring = speed kept:</span>${dot('scrub')}scrubbed${dot('held')}held${dot('carry')}carried`
       + `<span style="opacity:0.6;">· track colour = speed · tap a run below to focus</span>`;
   } else {
-    /* Track colors match renderRunMap: climb green (.lg.carry), descent red (.lg.scrub), lift grey. */
-    const lift = `<span class="lg" style="background:#9aa2ad;"></span>`;
-    body.innerHTML = `<span>track colour = grade:</span>${dot('carry')}climb${dot('scrub')}descent${lift}lift`
+    /* Track colors match renderRunMap: climb green (.lg.carry), descent red (.lg.scrub), lift grey.
+       The lift swatch only appears when this ride has a detected lift/gondola segment; runs and
+       lift-free rides omit it entirely. */
+    const liftEntry = opts.hasLift ? `<span class="lg" style="background:#9aa2ad;"></span>lift` : '';
+    body.innerHTML = `<span>track colour = grade:</span>${dot('carry')}climb${dot('scrub')}descent${liftEntry}`
       + `<span style="opacity:0.6;">· start &amp; end marked · tap a segment below to focus</span>`;
   }
 }
@@ -12821,7 +12919,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '3b98e1e · 2026-07-09';
+const LOAM_BUILD = '750cfb9 · 2026-07-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
