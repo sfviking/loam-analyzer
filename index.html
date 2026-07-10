@@ -5612,6 +5612,16 @@ function sagittalAngles(gu) {
   return { aX, aY };
 }
 
+/* Min and max of an array in one pass, matching Math.min/Math.max on an empty input (Infinity /
+   -Infinity). Used instead of Math.max(...arr) on per-set 100 Hz slices: the argument spread throws
+   "Maximum call stack size exceeded" once a slice is very long, which a set window left open by a
+   missing End-set tap can be (it runs to the next Start tap or the end of the recording). */
+function extent(arr) {
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < arr.length; i++) { const v = arr[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  return [mn, mx];
+}
+
 /*
  * Count reps in one set from its sagittal-angle slice. Detrend to the set mean,
  * take the polarity whose extreme is larger (the bottom of the squat), and pick
@@ -5622,7 +5632,8 @@ function sagittalAngles(gu) {
 function countReps(slice, segT) {
   const mean = slice.reduce((s, v) => s + v, 0) / slice.length;
   const d = slice.map(v => v - mean);
-  const pos = Math.max(...d), neg = -Math.min(...d);
+  const [dMin, dMax] = extent(d);
+  const pos = dMax, neg = -dMin;
   if (pos + neg < MIN_REP_AMP_DEG) return { peakIdx: [], ampDeg: pos + neg };
   const s = pos >= neg ? d : d.map(v => -v);  // bottom = positive side
   const peakIdx = findPeaks(s, segT, MIN_REP_SEP_S, REP_PEAK_FRAC * Math.max(pos, neg));
@@ -5636,18 +5647,6 @@ function countReps(slice, segT) {
     swings.push(s[peakIdx[k]] - lo);
   }
   return { peakIdx, ampDeg: swings.length ? median(swings) : pos + neg };
-}
-
-/* Nearest row (by t) in a time-sorted array, or null when empty. */
-function sampleAt(rows, tt) {
-  if (!rows.length) return null;
-  let lo = 0, hi = rows.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (rows[mid].t < tt) lo = mid + 1; else hi = mid;
-  }
-  const a = rows[Math.max(0, lo - 1)], b = rows[lo];
-  return Math.abs(a.t - tt) <= Math.abs(b.t - tt) ? a : b;
 }
 
 /*
@@ -5797,7 +5796,7 @@ function countRepsWrist(wrist, tStart, tEnd) {
 
 function analyzeStrength(sensors, ride, opts = {}) {
   const grav = (sensors.gravity || []).filter(r => r.t >= ride.start && r.t <= ride.end);
-  if (grav.length < 100) throw new Error('Not enough gravity samples in lift window');
+  if (grav.length < 100) throw new Error('This lift recording has too little phone orientation data to analyze reps. Record with the phone in a pocket and Device Orientation enabled so Loam can read sets, reps, depth, and bar position.');
   const head = (sensors.headphone || []).filter(r => r.t >= ride.start && r.t <= ride.end);
   const wrist = (sensors.wrist || []).filter(r => r.t >= ride.start && r.t <= ride.end);
 
@@ -5854,8 +5853,9 @@ function analyzeStrength(sensors, ride, opts = {}) {
   for (const { a, b, win } of segments) {
     const segT = t.slice(a, b + 1);
     const sliceX = aX.slice(a, b + 1), sliceY = aY.slice(a, b + 1);
-    const rangeX = Math.max(...sliceX) - Math.min(...sliceX);
-    const rangeY = Math.max(...sliceY) - Math.min(...sliceY);
+    const [xMin, xMax] = extent(sliceX), [yMin, yMax] = extent(sliceY);
+    const rangeX = xMax - xMin;
+    const rangeY = yMax - yMin;
     const phone = countReps(rangeX >= rangeY ? sliceX : sliceY, segT);
 
     /* Reps prefer the wrist (bar) motion when the watch was worn: it counts
@@ -7315,6 +7315,7 @@ function liftSignatureSVG(D, charKey) {
     <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="#e0a458">A</tspan>M</text>
     <text x="38" y="72" font-size="11" letter-spacing="2.5" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${subtitle}</text>
     <text x="${W - 38}" y="50" text-anchor="end" font-size="11" letter-spacing="2" fill="#7c8b76" font-family="'JetBrains Mono',monospace">LIFT SIGNATURE</text>
+    <text x="${W - 38}" y="68" text-anchor="end" font-size="10" letter-spacing="1.5" fill="#e0a458" font-family="'JetBrains Mono',monospace">BETA · ESTIMATED</text>
     ${statCols}
   </svg>`;
 }
@@ -13023,7 +13024,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '2a3f782 · 2026-07-09';
+const LOAM_BUILD = '3da2fb2 · 2026-07-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
