@@ -9665,6 +9665,7 @@ Rules:
 - Ground every claim in the numbers provided. Never invent metrics that are not in the data.
 - If a "history" array is present (recent prior sessions, newest first), use it for trend: call out what is improving or regressing versus those sessions instead of treating this ride in isolation. Do not invent history that is not there.
 - If a "strava_history" block is present, it is the athlete's own Strava data: recent_activities (recent same-sport rides, for volume and trend), pr_efforts (segments where this ride set a personal record), and close_efforts (segments within a few seconds of a PR, where deltaToPRSeconds is the gap left to beat it, and effortCount is how many times they have ridden that segment). Celebrate the real PRs, name a close_effort as a concrete next target, use effortCount to frame progress by experience on the trail, and read recent_activities for training load. Cite the real segment names and times, and never invent efforts that are not listed. For runs it may also carry runQuality, recent runs with splitBalancePct (second-half vs first-half pace, negative means a faster finish), paceVariationPct (how even the splits were), decouplingPct (aerobic decoupling, the pace-to-heart-rate drift, higher means the heart climbed to hold pace), and read (an automatic one-line take). Use runQuality to coach pacing and aerobic fitness across runs (for example rising decoupling means going out too hard or a base that needs work); build on the read rather than contradicting it, and cite the real numbers.
+- If a "health_context" block is present, it is the athlete's own Apple Health vitals: a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, with a basis line naming the measurements used. Read it for recovery framing: when readiness is low or HRV is below baseline, bias next-session advice toward easy volume and recovery; when high, it supports pushing. Cite the real numbers, respect the basis (say so when there is no reading yet today), and never invent vitals.
 - Respect the data_caveats. If data is sparse or a mount/source is uncertain, say so and hedge rather than overclaiming.
 - The athlete is at ${level} level — pitch depth and vocabulary accordingly.
 - Be direct and encouraging, never fluffy. Do not restate the whole dataset.
@@ -9895,9 +9896,25 @@ function attachStravaContext(state) {
   } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
 }
 
+// Fold in the athlete's Apple Health vitals when the native app has them: today's readiness score
+// with its visible components plus HRV / resting-HR / training-load baselines, injected into
+// window.LOAM_HEALTH_CONTEXT by the iOS app. Purely on-device data, no Strava needed. Same
+// note-travels-with-data pattern as strava_history (so every sport's prompt gets the guidance), and
+// attached BEFORE the cache key is hashed for the same reason: a reply generated against
+// yesterday's readiness is not replayed today.
+function attachHealthContext(state) {
+  try {
+    const hc = window.LOAM_HEALTH_CONTEXT;
+    if (hc && typeof hc === 'object' && state.digest && !state.digest.health_context) {
+      state.digest.health_context = hc;
+      state.digest.health_context_note = "The athlete's own Apple Health vitals, computed on their phone. readinessScore is 0-100 with readinessBand green/amber/red: green means at or above their personal baseline (ready to push), amber somewhat below (keep quality but go easier), red well below baseline or a load spike (prioritize recovery). components list each visible input: HRV vs a 60-day personal baseline, resting HR vs baseline, and 7-day vs 28-day training load (loadRatio above about 1.3 is a sharp ramp). basis names the exact measurements the score used; respect it (if there is no reading yet today, say so rather than presenting the score as this morning's state). Use this for recovery framing of the next-session advice: low readiness or HRV below baseline biases toward easy volume and recovery, high readiness supports intensity. Cite the real numbers and never invent vitals not listed here.";
+    }
+  } catch (e) { /* best-effort; coach runs without health context on any error */ }
+}
+
 /* Cache key for the first turn. Shared by sendCoach (write) and restoreCachedCoach (read) so the two
    never disagree; folds in digest + level + model + system prompt so any of them changing yields a
-   fresh key. Callers must attach history (await digestReady) and Strava context first. */
+   fresh key. Callers must attach history (await digestReady) and the Strava/health context first. */
 function coachFirstTurnKey(state, level, model, text) {
   return analysisCacheKey([JSON.stringify(state.digest), level, model, coachSystemPrompt(state.sport, level), text].join('|'));
 }
@@ -9907,6 +9924,7 @@ function coachFirstTurnKey(state, level, model, text) {
    are shown, so this never spends money; generating a fresh insight still needs the Start button. */
 async function restoreCachedCoach(state, sport) {
   attachStravaContext(state);
+  attachHealthContext(state);
   try { await state.digestReady; } catch (e) { /* history is best-effort */ }
   if (coachState !== state || state.messages.length) return;   // panel re-rendered, or already active
   const level = coachGet('level', 'intermediate');
@@ -9943,6 +9961,7 @@ async function sendCoach(text) {
   const state = coachState;   /* a re-render replaces coachState; never write into the new one */
 
   attachStravaContext(state);
+  attachHealthContext(state);
 
   if (coachState.messages.length === 0) {
     /* History attaches asynchronously after render; wait for it so the digest is complete before
@@ -13033,7 +13052,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '7407b45 · 2026-07-10';
+const LOAM_BUILD = '75de1b1 · 2026-07-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
