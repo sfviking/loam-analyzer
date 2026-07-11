@@ -400,6 +400,15 @@
   #results.focus-mode .detail-chart { display: none; }
   #turnFilterTag { font-size: 11px; color: var(--accent); margin-left: auto; }
   #turnFilterTag a { cursor: pointer; text-decoration: underline; }
+  /* Play-by-play turn links: the numbered chip jumps to that turn on the map, the trailing "table"
+     link to its row in the turn-by-turn table. Chip numbers are ride-wide, matching both targets. */
+  .pbp-turn { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1px 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;
+    color: var(--text); cursor: pointer; }
+  .pbp-turn:hover { border-color: var(--accent); }
+  .pbp-row-link { cursor: pointer; color: var(--text-muted); font-size: 11px; text-decoration: underline; white-space: nowrap; }
+  .pbp-row-link:hover { color: var(--accent); }
+  .pbp-focus { margin-bottom: 8px; line-height: 1.7; }
   /* Focused-run chip in the map legend: names the segment the map is zoomed to and offers the way
      back out, since the turn table's own reset link sits far below the fold. */
   #mapFocusTag { color: var(--accent); margin-left: auto; }
@@ -1044,7 +1053,7 @@
       <div id="playByPlay" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
           Play-by-play
-          <span class="subtitle">turn-by-turn vs your fastest lap of the same trail</span>
+          <span class="subtitle">turn-by-turn vs your fastest lap of the same trail · tap a turn to see it on the map</span>
           <select id="pbpRun" style="margin-left:auto;"></select>
         </div>
         <div id="pbpBody"></div>
@@ -2900,6 +2909,16 @@ function showTurnsForRun(r, D) {
     document.getElementById('mapFocusReset').onclick = () => clearTurnFilter(D);
   }
   if (!isMtbFamily(D.sport)) return;
+  filterTurnTableToRun(r, D);
+  /* The point of tapping a run is to see it in place, so bring the map (which just zoomed to this
+     segment) into view rather than jumping down to the turn table; the table stays filtered for
+     when the rider scrolls to it. The legend chip names the focus and offers the way back out. */
+  const mapSec = document.getElementById('overviewSection');
+  if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+/* Filter the per-turn table to one run's window, with the filter tag naming the run and offering
+   the way back. Shared by the run-row focus above and the play-by-play's turn links. */
+function filterTurnTableToRun(r, D) {
   const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
   renderTurnTable(turns);
   const sec = document.getElementById('turnSection');
@@ -2907,15 +2926,11 @@ function showTurnsForRun(r, D) {
   /* Filtering to a run is an explicit request to see its turns, so open the (default-collapsed) table. */
   const det = document.getElementById('turnDetails');
   if (det) det.open = true;
+  const label = escapeHtml(runLabel(r.tStart) || r.label);
   const tag = document.getElementById('turnFilterTag');
   tag.classList.remove('hidden');
   tag.innerHTML = `Turn-by-turn: <strong>${label}</strong> · ${turns.length} turns · <a id="turnFilterReset">show full ride</a>`;
   document.getElementById('turnFilterReset').onclick = () => clearTurnFilter(D);
-  /* The point of tapping a run is to see it in place, so bring the map (which just zoomed to this
-     segment) into view rather than jumping down to the turn table; the table stays filtered for
-     when the rider scrolls to it. The legend chip names the focus and offers the way back out. */
-  const mapSec = document.getElementById('overviewSection');
-  if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 function clearTurnFilter(D) {
   renderTurnTable(D.turns || []);
@@ -2974,10 +2989,12 @@ function fastestSameSegmentPeer(run, runs, D) {
    (gated by runsSameSegment). Each turn note covers apex speed (braking / line) and exit drive. */
 /* Per-turn apex + exit speed for one lap, matched in order. The current ride's turns come from
    `runTurnsFromD` (D.turns windowed to the run); a cross-ride reference lap instead carries its own
-   `turns`, stored with each library descent, so the same delta math serves both. */
+   `turns`, stored with each library descent, so the same delta math serves both. `n` is the ride-wide
+   turn number (what the map markers and the turn-by-turn table display), kept so each play-by-play
+   line can link to that turn; stored cross-ride turns predate it and carry none. */
 function runTurnsFromD(run, D) {
   return (D.turns || []).filter(T => T.tPeak >= run.tStart && T.tPeak <= run.tEnd)
-    .map(T => ({ direction: T.direction, vPeak: T.vPeak, vExit: T.vExit }));
+    .map(T => ({ n: T.n, direction: T.direction, vPeak: T.vPeak, vExit: T.vExit }));
 }
 function pbpDeltasFromTurns(A, F) {
   const MPS = 2.23694, n = Math.min(A.length, F.length), out = [];
@@ -2985,6 +3002,7 @@ function pbpDeltasFromTurns(A, F) {
     const a = A[i], f = F[i];
     out.push({
       n: i + 1, dir: a.direction,
+      rideN: a.n != null ? a.n : null,   /* this lap's turn as numbered on the map/table */
       dApex: (a.vPeak - f.vPeak) * MPS,
       dExitGain: ((a.vExit - a.vPeak) - (f.vExit - f.vPeak)) * MPS,
     });
@@ -3011,10 +3029,17 @@ function pbpTurnDeltas(run, fastest, D) {
 }
 /* Turn-by-turn play-by-play against a normalized reference lap (built in setupPlayByPlay): either an
    in-ride peer or the fastest prior lap of the same tagged trail from the library. `ref` exposes
-   { label, turns, duration, crossRide, sameSegmentOK }. */
+   { label, turns, duration, crossRide, sameSegmentOK }.
+
+   Every turn is numbered ride-wide (rideN), the same number its marker on the map and its row in the
+   turn-by-turn table show, and rendered as a link: the chip jumps to the turn on the map, the
+   trailing "table" link to its row. Before, lines said "Turn 3" meaning "3rd turn of this lap",
+   which matched nothing else on the page and gave the reader nowhere to go with the insight. */
+let _pbpCtx = null;   /* { run, D } behind the rendered play-by-play, for its turn links */
 function renderPlayByPlay(run, ref, D) {
   const body = document.getElementById('pbpBody');
   if (!body) return;
+  _pbpCtx = { run, D };
   const labA = escapeHtml(runLabel(run.tStart) || run.label);
   const labF = escapeHtml(ref.label);
   if (!ref.sameSegmentOK) {
@@ -3036,19 +3061,82 @@ function renderPlayByPlay(run, ref, D) {
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across rides, lined up turn-for-turn on the same trail.</div>`;
   if (Math.abs(countA - countF) > 2)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These runs have different turn counts (${countA} vs ${countF}), so the turn-by-turn lines up best for repeated runs of the same segment.</div>`;
+  /* Speed deltas follow the Units toggle like the turn table (they used to hardcode mph). The delta
+     math stays in mph (pbpDeltasFromTurns, thresholds below); only the display converts. */
+  const spd = (mph) => `${U.speedNum(Math.abs(mph) / 2.23694).toFixed(1)} ${U.speedUnit()}`;
+  const chip = (d) => d.rideN != null
+    ? `<button type="button" class="pbp-turn" data-n="${d.rideN}" title="Show turn ${d.rideN} on the map">Turn ${d.rideN}<span class="dir-${d.dir}">${d.dir}</span></button>`
+    : `<strong>Turn ${d.n}${d.dir}</strong>`;
+  /* Lead with the action: the turn(s) that gave up the most speed vs the reference lap, so the list
+     below reads as detail, not as the assignment itself. */
+  const apexWorst = deltas.filter(d => d.dApex <= -1.0).sort((a, b) => a.dApex - b.dApex)[0] || null;
+  const exitWorst = deltas.filter(d => d.dExitGain <= -1.0).sort((a, b) => a.dExitGain - b.dExitGain)[0] || null;
+  if (apexWorst || exitWorst) {
+    const parts = [];
+    if (apexWorst) parts.push(`${chip(apexWorst)} ${spd(apexWorst.dApex)} slower at the apex${exitWorst === apexWorst ? ` and ${spd(apexWorst.dExitGain)} softer on exit` : ''}`);
+    if (exitWorst && exitWorst !== apexWorst) parts.push(`${chip(exitWorst)} ${spd(exitWorst.dExitGain)} softer on exit`);
+    html += `<div class="pbp-focus"><strong>Focus next lap:</strong> ${parts.join(' · ')}. The biggest speed give-ups on this lap.</div>`;
+  }
   const lines = [];
   for (const d of deltas) {
     const bits = [];
-    if (d.dApex <= -1.0) bits.push(`braked harder, <span style="color:var(--accent);">${Math.abs(d.dApex).toFixed(1)} mph slower at the apex</span>`);
-    else if (d.dApex >= 1.0) bits.push(`<span style="color:#7fb069;">carried ${d.dApex.toFixed(1)} mph more through the apex</span>`);
-    if (d.dExitGain >= 1.0) bits.push(`<span style="color:#7fb069;">drove out ${d.dExitGain.toFixed(1)} mph stronger</span>`);
-    else if (d.dExitGain <= -1.0) bits.push(`${Math.abs(d.dExitGain).toFixed(1)} mph softer on exit`);
-    if (bits.length) lines.push(`<li style="margin-bottom:5px;"><strong>Turn ${d.n}${d.dir}</strong>: ${bits.join(', ')}.</li>`);
+    if (d.dApex <= -1.0) bits.push(`braked harder, <span style="color:var(--accent);">${spd(d.dApex)} slower at the apex</span>`);
+    else if (d.dApex >= 1.0) bits.push(`<span style="color:#7fb069;">carried ${spd(d.dApex)} more through the apex</span>`);
+    if (d.dExitGain >= 1.0) bits.push(`<span style="color:#7fb069;">drove out ${spd(d.dExitGain)} stronger</span>`);
+    else if (d.dExitGain <= -1.0) bits.push(`${spd(d.dExitGain)} softer on exit`);
+    if (bits.length) lines.push(`<li style="margin-bottom:5px;">${chip(d)} ${bits.join(', ')}.`
+      + (d.rideN != null ? ` <a class="pbp-row-link" data-n="${d.rideN}" title="Show this turn's row in the turn-by-turn table">table ↓</a>` : '') + `</li>`);
   }
-  html += lines.length
-    ? `<ul style="margin:0; padding-left:18px; line-height:1.5;">${lines.join('')}</ul>`
-    : `<div class="dim">No notable turn-by-turn differences (within ~1 mph everywhere).</div>`;
+  if (!countA) {
+    /* No per-turn data for the selected run (turn detection is MTB body-frame only), so only the
+       total time above is comparable. Say that instead of "no differences", which reads as "you
+       matched the fastest lap everywhere". */
+    html += `<div class="dim">No per-turn data for this run, so only the total time is compared.</div>`;
+  } else {
+    html += lines.length
+      ? `<ul style="margin:0; padding-left:18px; line-height:1.5;">${lines.join('')}</ul>`
+      : `<div class="dim">No notable turn-by-turn differences (within ~${spd(1.0)} everywhere).</div>`;
+  }
   body.innerHTML = html;
+  body.querySelectorAll('.pbp-turn').forEach(b => { b.onclick = () => pbpShowTurnOnMap(+b.dataset.n); });
+  body.querySelectorAll('.pbp-row-link').forEach(a => { a.onclick = () => pbpShowTurnRow(+a.dataset.n); });
+}
+
+/* The play-by-play's two turn links. The map chip mirrors tapping the run's row in the Runs table
+   (zoom the map to this run so the marker exists, filter the turn table to match) and then singles
+   out the one turn: highlight ring + open tooltip on the map, highlighted row in the table. The
+   "table" link goes the other way, opening the turn-by-turn table at that turn's row. */
+function pbpShowTurnOnMap(n) {
+  if (!_pbpCtx) return;
+  const { run, D } = _pbpCtx;
+  if (!turnMarkers[n]) {
+    showTurnsForRun(run, D);
+    /* Keep the Runs table's focused-row highlight in sync, exactly as tapping the row does. */
+    document.querySelectorAll('#runsTable tbody tr').forEach(x => x.style.background = '');
+    const tr = document.querySelector(`#runsTable tbody tr[data-idx="${run.n - 1}"]`);
+    if (tr) tr.style.background = 'rgba(127,176,105,0.12)';
+  } else {
+    /* Marker already on the map (this run or the full ride is in focus): pan to it and bring the
+       map into view; no refit, so repeated clicks hop turn to turn without the zoom jumping. */
+    const mapSec = document.getElementById('overviewSection');
+    if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    focusMapOnMarker(turnMarkers[n]);
+  }
+  highlightTurn(n);
+  const m = turnMarkers[n];
+  if (m) { try { m.openTooltip(); } catch (e) {} }
+}
+function pbpShowTurnRow(n) {
+  if (!_pbpCtx) return;
+  const { run, D } = _pbpCtx;
+  /* The table may be filtered to a different run (its rows are a subset); re-filter to this one so
+     the target row exists and the surrounding rows are this lap's context. */
+  if (!document.querySelector(`#turnTable tbody tr[data-n="${n}"]`)) filterTurnTableToRun(run, D);
+  const det = document.getElementById('turnDetails');
+  if (det) det.open = true;
+  highlightTurn(n);
+  const row = document.querySelector(`#turnTable tbody tr[data-n="${n}"]`);
+  if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 async function setupPlayByPlay(runs, D) {
   const panel = document.getElementById('playByPlay');
@@ -13143,7 +13231,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '6de6863 · 2026-07-10';
+const LOAM_BUILD = '5dc509e · 2026-07-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
