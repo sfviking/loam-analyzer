@@ -6971,6 +6971,87 @@ async function enrichRidesMechanics(rides) {
     } catch (e) {}
   }));
 }
+/* Fitness / fatigue / form model (Performance Management Chart) from stored per-ride TSS. Vendored
+   from analyzer/sports/road/fitness-model.js; see it for the CTL/ATL/TSB definitions. */
+function pmcDayKey(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  return isNaN(dt) ? null : dt.toISOString().slice(0, 10);
+}
+function fitnessModel(entries, opts = {}) {
+  const ctlDays = opts.ctlDays ?? 42, atlDays = opts.atlDays ?? 7;
+  const byDay = new Map();
+  let minKey = null, maxKey = null;
+  for (const e of (entries || [])) {
+    if (e == null || e.tss == null || isNaN(e.tss)) continue;
+    const key = pmcDayKey(e.date);
+    if (!key) continue;
+    byDay.set(key, (byDay.get(key) || 0) + e.tss);
+    if (minKey == null || key < minKey) minKey = key;
+    if (maxKey == null || key > maxKey) maxKey = key;
+  }
+  if (minKey == null) return [];
+  const endKey = (opts.endDate != null && pmcDayKey(opts.endDate)) ? pmcDayKey(opts.endDate) : maxKey;
+  if (endKey < minKey) return [];
+  const kCtl = 1 - Math.exp(-1 / ctlDays), kAtl = 1 - Math.exp(-1 / atlDays);
+  const out = [];
+  let ctl = 0, atl = 0;
+  const cur = new Date(minKey + 'T00:00:00Z');
+  const end = new Date(endKey + 'T00:00:00Z');
+  while (cur <= end) {
+    const key = cur.toISOString().slice(0, 10);
+    const tss = byDay.get(key) || 0;
+    const tsb = +(ctl - atl).toFixed(1);
+    ctl = ctl + (tss - ctl) * kCtl;
+    atl = atl + (tss - atl) * kAtl;
+    out.push({ date: key, tss: Math.round(tss), ctl: +ctl.toFixed(1), atl: +atl.toFixed(1), tsb });
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
+}
+function fitnessInterpretation(tsb) {
+  if (tsb == null || isNaN(tsb)) return null;
+  if (tsb > 15) return { label: 'fresh', note: 'well rested, close to race-ready' };
+  if (tsb > 5) return { label: 'fresh', note: 'rested' };
+  if (tsb >= -10) return { label: 'neutral', note: 'balanced load and rest' };
+  if (tsb >= -30) return { label: 'building', note: 'productive training load' };
+  return { label: 'buried', note: 'heavy fatigue, ease off to absorb it' };
+}
+/* Fitness dashboard: today's CTL/ATL/TSB headline plus the CTL/ATL (left axis) and TSB (right axis)
+   curves over the whole library, the road analog of the MTB career trends. */
+function renderFitnessDashboard(pmc) {
+  const last = pmc[pmc.length - 1];
+  const interp = fitnessInterpretation(last.tsb);
+  const head = document.getElementById('fitnessHeadline');
+  if (head) {
+    const tsbColor = last.tsb > 5 ? '#3b7d5b' : last.tsb < -10 ? '#c0392b' : '#8a6d1a';
+    const nRides = pmc.filter(p => p.tss > 0).length;
+    head.innerHTML =
+      `<div style="display:flex; flex-wrap:wrap; gap:24px; align-items:baseline;">
+        <div><div style="font-size:12px; color:var(--text-muted);">FITNESS (CTL)</div><div style="font-size:26px; font-weight:600;">${Math.round(last.ctl)}</div></div>
+        <div><div style="font-size:12px; color:var(--text-muted);">FATIGUE (ATL)</div><div style="font-size:26px; font-weight:600;">${Math.round(last.atl)}</div></div>
+        <div><div style="font-size:12px; color:var(--text-muted);">FORM (TSB)</div><div style="font-size:26px; font-weight:600; color:${tsbColor};">${last.tsb > 0 ? '+' : ''}${Math.round(last.tsb)}</div></div>
+        <div style="align-self:center; color:var(--text-secondary); font-size:13px;">${interp ? '<strong>' + interp.label + '</strong> · ' + interp.note : ''}</div>
+      </div>
+      <div style="margin-top:8px; font-size:12px; color:var(--text-muted);">Fitness is a 42-day TSS average, fatigue a 7-day one, form the gap you carry into a ride. From ${nRides} training day${nRides === 1 ? '' : 's'} with power; the more history you save, the truer it gets.</div>`;
+  }
+  const x = pmc.map(p => p.date);
+  const traces = [
+    { x, y: pmc.map(p => p.ctl), name: 'Fitness (CTL)', type: 'scatter', mode: 'lines', line: { color: '#3d6fb0', width: 2 }, yaxis: 'y' },
+    { x, y: pmc.map(p => p.atl), name: 'Fatigue (ATL)', type: 'scatter', mode: 'lines', line: { color: '#a06cc0', width: 1.5 }, yaxis: 'y' },
+    { x, y: pmc.map(p => p.tsb), name: 'Form (TSB)', type: 'scatter', mode: 'lines', line: { color: '#c98a2b', width: 1.5 }, fill: 'tozeroy', fillcolor: 'rgba(201,138,43,0.10)', yaxis: 'y2' },
+  ];
+  const layout = {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 52, r: 52, t: 30, b: 44 },
+    title: { text: 'Fitness, fatigue and form', font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
+    xaxis: { type: 'date', gridcolor: '#e2e8f0' },
+    yaxis: { title: { text: 'CTL / ATL', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
+    yaxis2: { title: { text: 'TSB', font: { size: 11, color: '#c98a2b' } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#c98a2b' }, zeroline: true, zerolinecolor: '#cbd5e1' },
+    showlegend: true, legend: { x: 0, y: 1.14, orientation: 'h', font: { size: 10 } }, hovermode: 'x unified',
+  };
+  loamPlot('fitnessChart', traces, layout, PLOT_CFG);
+}
+
 async function renderProgress() {
   let rides = [];
   try { rides = await listRides(); } catch (e) {}
@@ -7002,11 +7083,21 @@ async function renderProgress() {
     + stat(totTurns, 'turns logged')
     + stat(totJumps, 'jumps logged')
     + `</div>`;
-  chartsHost.innerHTML = `
+  /* Fitness model (CTL/ATL/TSB) from every road ride's stored TSS. Only rendered when the library
+     holds power rides; MTB/running rides have no TSS and are simply absent from it. */
+  const tssEntries = rides.filter(r => r.summary && r.summary.tss != null && (r.recordedAt || r.savedAt))
+    .map(r => ({ date: r.recordedAt || r.savedAt, tss: r.summary.tss }));
+  const pmc = tssEntries.length ? fitnessModel(tssEntries, { endDate: new Date() }) : [];
+  const fitnessBlock = pmc.length
+    ? `<div class="panel" id="fitnessHeadline" style="padding:16px 20px; margin-bottom:14px;"></div>
+       <div class="chart" id="fitnessChart" style="height:300px; margin-bottom:20px;"></div>`
+    : '';
+  chartsHost.innerHTML = fitnessBlock + `
     <div class="chart" id="progDist" style="height:260px; margin-bottom:16px;"></div>
     <div class="chart" id="progSpeed" style="height:260px; margin-bottom:16px;"></div>
     <div class="chart detail-chart" id="progRadius" style="height:260px; margin-bottom:16px;"></div>
     <div class="chart detail-chart" id="progLean" style="height:260px; margin-bottom:16px;"></div>`;
+  if (pmc.length) renderFitnessDashboard(pmc);
   const x = dated.map(o => o.d.toISOString().slice(0, 10));
   const metric = (typeof U.metric === 'function') ? U.metric() : false;
   const line = (id, y, title, ytitle, color) => {
@@ -13052,7 +13143,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '75de1b1 · 2026-07-10';
+const LOAM_BUILD = '6de6863 · 2026-07-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
