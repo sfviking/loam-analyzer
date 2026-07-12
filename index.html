@@ -4528,19 +4528,20 @@ function drawRunsOverlay(runs, D) {
   const el = document.getElementById('runsOverlayChart');
   if (!el || !window.Plotly) return;
   const palette = ['#7fb069', '#e0a458', '#5b8fb0', '#c45d5d', '#9b7fb0', '#56a3a6', '#b0905b', '#7a8b99'];
+  /* Speed and distance follow the Units toggle (they used to hardcode mph and meters). */
   const traces = runs.map((r, i) => {
     const loc = D.sensors.location.filter(x => x.t >= r.tStart && x.t <= r.tEnd && x.speed != null);
     if (loc.length < 2) return null;
-    let d = 0; const xs = [0], ys = [loc[0].speed * 2.237];
-    for (let k = 1; k < loc.length; k++) { d += ((loc[k].speed + loc[k - 1].speed) / 2) * (loc[k].t - loc[k - 1].t); xs.push(d); ys.push(loc[k].speed * 2.237); }
+    let d = 0; const xs = [0], ys = [U.speedNum(loc[0].speed)];
+    for (let k = 1; k < loc.length; k++) { d += ((loc[k].speed + loc[k - 1].speed) / 2) * (loc[k].t - loc[k - 1].t); xs.push(U.smallNum(d)); ys.push(U.speedNum(loc[k].speed)); }
     return { x: xs, y: ys, type: 'scatter', mode: 'lines', line: { color: palette[i % palette.length], width: 1.5 }, name: `${r.n}. ${r.label}`.slice(0, 26) };
   }).filter(Boolean);
   loamPlot(el, traces, {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     title: { text: 'Speed vs distance into run (overlay to compare)', font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
     margin: { l: 48, r: 14, t: 32, b: 62 },
-    xaxis: { title: { text: 'distance (m)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: 'speed (mph)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    xaxis: { title: { text: `distance (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
     legend: { x: 0, y: -0.3, orientation: 'h', font: { size: 9 } }, hovermode: 'x unified',
   }, PLOT_CFG);
 }
@@ -6797,7 +6798,7 @@ function renderCrossRide({ perRide, clusters }) {
     section.innerHTML = `
       <div class="section-title">
         ${escapeHtml(title)}
-        <span class="subtitle">${members.length} rides · ${ref.distance.toFixed(0)}m reference distance · ${Math.round(haversineMeters(cluster.centroidLatStart, cluster.centroidLonStart, ref.latStart, ref.lonStart))}m start spread</span>
+        <span class="subtitle">${members.length} rides · ${U.dist(ref.distance)} reference distance · ${U.small(haversineMeters(cluster.centroidLatStart, cluster.centroidLonStart, ref.latStart, ref.lonStart))} start spread</span>
       </div>
       <div class="panel" style="padding:20px; margin-bottom:12px;">
         <div style="display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-bottom:8px;">
@@ -6832,9 +6833,9 @@ function renderCrossRide({ perRide, clusters }) {
         <td style="text-align:center;"><input type="checkbox" class="cmp-check" data-mi="${m._mi}" ${selectedMembers.has(m) ? 'checked' : ''} style="cursor:pointer;"></td>
         <td style="color:${m.color}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}${standingBadge(m)}</td>
         <td>${fmtDuration(m.duration)}</td>
-        <td>${m.distance.toFixed(0)} m${(m.distanceGps != null && Math.abs(m.distanceGps - m.distance) >= 5) ? ` <span style="color:var(--text-muted); font-size:10px;">(GPS ${m.distanceGps.toFixed(0)})</span>` : ''}</td>
-        <td>${(m.avgSpeed * 2.237).toFixed(1)} mph</td>
-        <td>${(m.maxSpeed * 2.237).toFixed(1)} mph</td>
+        <td>${U.dist(m.distance)}${(m.distanceGps != null && Math.abs(m.distanceGps - m.distance) >= 5) ? ` <span style="color:var(--text-muted); font-size:10px;">(GPS ${U.dist(m.distanceGps)})</span>` : ''}</td>
+        <td>${U.speed(m.avgSpeed)}</td>
+        <td>${U.speed(m.maxSpeed)}</td>
         <td>${m.gradeAvg.toFixed(1)}%</td>
       </tr>`;
     const cmpBody = section.querySelector(`#crossCmpBody_${ci}`);
@@ -6878,9 +6879,10 @@ function renderCrossRide({ perRide, clusters }) {
       const chartRef = selectedMembers.has(ref) ? ref : (selected[0] || null);
       const note = selected.length < members.length ? ` · ${selected.length} of ${members.length} selected` : '';
 
-      /* Speed-vs-distance overlay. */
+      /* Speed-vs-distance overlay. Speed and distance follow the Units toggle at the trace only
+         (distSeries stays meters for the DTW/painted-map math downstream). */
       const speedTraces = selected.map(m => ({
-        x: m.distSeries, y: m.locInWin.map(r => r.speed * 2.237),
+        x: m.distSeries.map(v => U.smallNum(v)), y: m.locInWin.map(r => U.speedNum(r.speed)),
         type: 'scatter', mode: 'lines',
         line: { color: m.color, width: 2 },
         name: m.tag,
@@ -6890,8 +6892,8 @@ function renderCrossRide({ perRide, clusters }) {
         font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
         title: { text: 'Speed vs distance into descent' + note, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
         margin: { l: 48, r: 14, t: 32, b: 64 },
-        xaxis: { title: { text: 'distance (m)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-        yaxis: { title: { text: 'speed (mph)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
+        xaxis: { title: { text: `distance (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
+        yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
         legend: { x: 0, y: -0.32, orientation: 'h', font: { size: 10 } },
         hovermode: 'x unified',
       }, PLOT_CFG);
@@ -8719,8 +8721,8 @@ function renderLeaderboardSummary(tag, members) {
       <td style="text-align:left; width:34px;">${rank}</td>
       <td style="text-align:left;">${escapeHtml(when)}${standing}</td>
       <td>${fmtDuration(m.duration)}</td>
-      <td>${(m.avgSpeed * 2.237).toFixed(1)} mph</td>
-      <td>${(m.maxSpeed * 2.237).toFixed(1)} mph</td>
+      <td>${U.speed(m.avgSpeed)}</td>
+      <td>${U.speed(m.maxSpeed)}</td>
       <td style="color:${i === 0 ? '#6b9e5f' : 'var(--text-muted)'}; font-weight:${i === 0 ? 600 : 400};">${i === 0 ? 'PR' : '+' + delta.toFixed(1) + 's'}</td>
     </tr>`;
   }).join('');
@@ -8741,12 +8743,6 @@ function renderDescentComparison(D) {
   const first = dtw.isFirstA ? A : B;
   const second = dtw.isFirstA ? B : A;
   const tbody = document.querySelector('#runCompareTable tbody');
-  const paceStr = (mps) => {
-    if (!mps) return '—';
-    const p = (1000 / mps) / 60;
-    const m = Math.floor(p), s = Math.round((p - m) * 60);
-    return `${m}:${String(s).padStart(2,'0')}/km`;
-  };
   const row = (label, a, b, fmt, betterIs) => {
     const aStr = fmt(a), bStr = fmt(b);
     /* Determine which is "better" for color: betterIs = 'lower' or 'higher' or null. */
@@ -8765,10 +8761,10 @@ function renderDescentComparison(D) {
   tbody.innerHTML =
     row('Window start', first.startT, second.startT, v => `${Math.round(v)}s`, null) +
     row('Duration', first.duration, second.duration, v => `${v.toFixed(1)}s`, 'lower') +
-    row('Distance', first.distance, second.distance, v => `${v.toFixed(0)} m`, 'higher') +
-    row('Avg pace', first.avgSpeed, second.avgSpeed, paceStr, 'higher') +
-    row('Avg speed', first.avgSpeed, second.avgSpeed, v => `${(v*2.237).toFixed(1)} mph`, 'higher') +
-    row('Max speed', first.maxSpeed, second.maxSpeed, v => `${(v*2.237).toFixed(1)} mph`, 'higher') +
+    row('Distance', first.distance, second.distance, v => U.dist(v), 'higher') +
+    row('Avg pace', first.avgSpeed, second.avgSpeed, v => U.pace(v), 'higher') +
+    row('Avg speed', first.avgSpeed, second.avgSpeed, v => U.speed(v), 'higher') +
+    row('Max speed', first.maxSpeed, second.maxSpeed, v => U.speed(v), 'higher') +
     row('Avg cadence', first.avgCadence, second.avgCadence, v => v ? `${v.toFixed(0)} SPM` : '—', null);
   const trimStr = (w) => w.trimmedSeconds && w.trimmedSeconds > 5 ? ` · trimmed ${w.trimmedSeconds.toFixed(0)}s standing` : '';
   document.getElementById('runCompareLabelA').textContent = `Descent 1 · "${first.startText.slice(0, 40)}${first.startText.length>40?'…':''}"${trimStr(first)}`;
@@ -8790,10 +8786,11 @@ function renderDescentComparison(D) {
     }
     return out;
   }
-  const distA = distSeries(A);
-  const distB = distSeries(B);
-  const speedA = A.speed.map(v => v != null ? v * 2.237 : null);
-  const speedB = B.speed.map(v => v != null ? v * 2.237 : null);
+  /* Speed and distance follow the Units toggle (they used to hardcode mph and meters). */
+  const distA = distSeries(A).map(v => U.smallNum(v));
+  const distB = distSeries(B).map(v => U.smallNum(v));
+  const speedA = A.speed.map(v => v != null ? U.speedNum(v) : null);
+  const speedB = B.speed.map(v => v != null ? U.speedNum(v) : null);
 
   const speedTraces = [
     { x: distA, y: speedA, type: 'scatter', mode: 'lines',
@@ -8805,8 +8802,8 @@ function renderDescentComparison(D) {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 24, t: 24, b: 44 },
-    xaxis: { title: { text: 'distance into descent (m)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: 'speed (mph)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    xaxis: { title: { text: `distance into descent (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
     showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
     hovermode: 'x unified',
   };
@@ -9051,9 +9048,10 @@ function renderRunTimeline(D) {
   const ride = D.ride;
   const loc = D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end);
   const t = loc.map(r => r.t - ride.start);
-  const speedMph = loc.map(r => r.speed * 2.237);
+  /* Speed and altitude follow the Units toggle (they used to hardcode mph and meters). */
+  const speedY = loc.map(r => U.speedNum(r.speed));
   const traces = [
-    { x: t, y: speedMph, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.5 }, name: 'Speed (mph)', yaxis: 'y' }
+    { x: t, y: speedY, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.5 }, name: `Speed (${U.speedUnit()})`, yaxis: 'y' }
   ];
   if (D.sensors.baro && D.sensors.baro.length) {
     const inB = D.sensors.baro.filter(r => r.t >= ride.start && r.t <= ride.end);
@@ -9061,9 +9059,9 @@ function renderRunTimeline(D) {
     const baseAlt = altRel.length ? altRel[0] : 0;
     traces.push({
       x: inB.map(r => r.t - ride.start),
-      y: altRel.map(a => a - baseAlt),
+      y: altRel.map(a => U.smallNum(a - baseAlt)),
       type: 'scatter', mode: 'lines', line: { color: '#d4a574', width: 1.2, dash: 'dot' },
-      name: 'Δ altitude (m)', yaxis: 'y2'
+      name: `Δ altitude (${U.smallUnit()})`, yaxis: 'y2'
     });
   }
   const shapes = D.running.segments.map(s => ({
@@ -9104,8 +9102,8 @@ function renderRunTimeline(D) {
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 56, t: 32, b: 50 },
     xaxis: { title: { text: 'time in run (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: 'speed (mph)', font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' } },
-    yaxis2: { title: { text: 'Δ alt (m)', font: { color: '#d4a574', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#d4a574' } },
+    yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' } },
+    yaxis2: { title: { text: `Δ alt (${U.smallUnit()})`, font: { color: '#d4a574', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#d4a574' } },
     showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
     shapes, annotations: annotationLabels, hovermode: 'x unified'
   };
@@ -9262,14 +9260,12 @@ function renderRunSegments(segments, opts) {
       <td class="${dirCls}">${dirLabel}</td>
       <td class="dim">${s.tStart.toFixed(0)}s</td>
       <td>${s.duration.toFixed(0)}s</td>
-      <td>${s.distance != null ? (s.distance).toFixed(0)+'m' : '—'}</td>
+      <td>${s.distance != null ? U.dist(s.distance) : '—'}</td>
       <td><strong>${s.gradeAvg > 0 ? '+' : ''}${s.gradeAvg.toFixed(1)}%</strong></td>`;
     if (motion) {
-      const paceStr = s.paceMinPerKm == null ? '—' : (() => {
-        const m = Math.floor(s.paceMinPerKm);
-        const sec = Math.round((s.paceMinPerKm - m) * 60);
-        return `${m}:${String(sec).padStart(2,'0')}/km`;
-      })();
+      /* Pace follows the Units toggle (paceMinPerKm is stored metric; U.pace takes m/s). */
+      const paceStr = (s.paceMinPerKm == null || s.paceMinPerKm <= 0) ? '—'
+        : U.pace(1000 / (s.paceMinPerKm * 60));
       tr.innerHTML = common
         + `<td>${s.cadAvg ? s.cadAvg.toFixed(0)+' spm' : '—'}</td>`
         + `<td>${s.oscAvg ? s.oscAvg.toFixed(1)+' cm' : '—'}</td>`
@@ -9420,7 +9416,7 @@ function mtbHighlights(D) {
     let dirNote = '';
     if (sk.L >= 2 * Math.max(1, sk.R)) dirNote = ' Most of your scrubbing was in left-handers.';
     else if (sk.R >= 2 * Math.max(1, sk.L)) dirNote = ' Most of your scrubbing was in right-handers.';
-    cands.push(`Hardest braking was turn <strong>T${w.turn}</strong> (${w.direction === 'L' ? 'left' : 'right'}, ${w.mph_scrubbed} mph scrubbed).${dirNote}`);
+    cands.push(`Hardest braking was turn <strong>T${w.turn}</strong> (${w.direction === 'L' ? 'left' : 'right'}, ${U.speedNum(w.mph_scrubbed / 2.23694).toFixed(1)} ${U.speedUnit()} scrubbed).${dirNote}`);
   }
   if (D.fitInRide && D.fitInRide.length) {
     const cp = cadPowerStats(D.fitInRide);
@@ -9435,13 +9431,15 @@ function runningHighlights(D) {
   const s = D.summary || {};
   const climbs = (D.running && D.running.climbs) || [];
   const c = [];
-  if (s.cadMedian) c.push(`<strong>${s.cadMedian.toFixed(0)} spm</strong> median cadence${s.distance ? ' over ' + (s.distance / 1000).toFixed(2) + ' km' : ''}.`);
+  /* Distance and elevation follow the Units toggle (they used to hardcode km/m). Oscillation stays
+     cm in both systems, the running-industry convention (Garmin/Stryd report cm to statute users). */
+  if (s.cadMedian) c.push(`<strong>${s.cadMedian.toFixed(0)} spm</strong> median cadence${s.distance ? ' over ' + U.dist(s.distance) : ''}.`);
   if (climbs.length) {
     const big = climbs.slice().sort((a, b) => (b.gain || 0) - (a.gain || 0))[0];
     c.push(`<strong>${climbs.length} climb${climbs.length > 1 ? 's' : ''}</strong>, biggest ${U.elev(big.gain)} at ${big.avgGrade.toFixed(0)}%${big.vam ? ` (VAM ${Math.round(U.smallNum(big.vam))} ${U.smallUnit()}/h)` : ''}.`);
   }
   if (s.oscMedian != null) c.push(`Vertical oscillation about <strong>${s.oscMedian.toFixed(1)} cm</strong> (head-bob proxy for hip motion).`);
-  if (s.altGain != null) c.push(`${s.altGain.toFixed(0)} m climbed${s.altLoss != null ? ', ' + s.altLoss.toFixed(0) + ' m descended' : ''}.`);
+  if (s.altGain != null) c.push(`${U.elev(s.altGain)} climbed${s.altLoss != null ? ', ' + U.elev(s.altLoss) + ' descended' : ''}.`);
   return c.slice(0, 3);
 }
 
@@ -10663,10 +10661,11 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
       iconSize: [26, 26], iconAnchor: [13, 13]
     });
     const m = L.marker([p.latitude, p.longitude], { icon }).addTo(mapOverlay);
-    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${(delta * 2.237).toFixed(1)})` : '';
+    /* Tooltip units follow the Units toggle (they used to hardcode mph and meters). */
+    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
     m.bindTooltip(
-      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : T.radius.toFixed(1) + 'm'} · ` +
-      `${hasV ? (T.vEntry * 2.237).toFixed(1) + ' → ' + (T.vExit * 2.237).toFixed(1) + ' mph' + dStr : ''}`, { direction: 'top' });
+      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : U.small(T.radius)} · ` +
+      `${hasV ? U.speedNum(T.vEntry).toFixed(1) + ' → ' + U.speedNum(T.vExit).toFixed(1) + ' ' + U.speedUnit() + dStr : ''}`, { direction: 'top' });
     turnMarkers[T.n] = m;
   }
 
@@ -10682,7 +10681,7 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
       });
       const m = L.marker([J.lat, J.lon], { icon, zIndexOffset: 800 }).addTo(mapOverlay);
       m.bindTooltip(
-        `Jump ${i+1}${J.hang != null ? ` · hang ${(J.hang*1000).toFixed(0)}ms` : ''}${J.speed_mps != null ? ` · ${(J.speed_mps*2.237).toFixed(1)}mph` : ''}${J.dist != null ? ` · ${(J.dist*3.28084).toFixed(1)}ft` : ''}`,
+        `Jump ${i+1}${J.hang != null ? ` · hang ${(J.hang*1000).toFixed(0)}ms` : ''}${J.speed_mps != null ? ` · ${U.speed(J.speed_mps)}` : ''}${J.dist != null ? ` · ${U.small(J.dist)}` : ''}`,
         { direction: 'top' });
       jumpMarkers[i+1] = m;
     }
@@ -11113,18 +11112,19 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps) {
   }
   const locInRide = loc.filter(r => r.t >= ride.start - 5 && r.t <= ride.end + 5);
   const tSpGps = locInRide.map(r => r.t - ride.start);
-  const ySpGps = locInRide.map(r => r.speed * 2.237);
+  /* Speeds follow the Units toggle (they used to hardcode mph). */
+  const ySpGps = locInRide.map(r => U.speedNum(r.speed));
 
   /* Hover: without a template Plotly prints raw floats, and traces sampled at different timestamps
      than the hovered point show as full-precision "(t, y)" tuples. Round to what a rider reads. */
   const traces = [
     { x: tSub, y: ySub, type: 'scatter', mode: 'lines', line: { color: '#e87b3d', width: 1.5 }, name: 'Yaw rate', yaxis: 'y', hovertemplate: '%{y:.0f}°/s' },
-    { x: tSpGps, y: ySpGps, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.2, dash: 'dot' }, name: (fitInRide && fitInRide.length) ? 'GPS speed' : 'GPS speed (est.)', yaxis: 'y2', opacity: 0.6, hovertemplate: '%{y:.1f} mph' },
+    { x: tSpGps, y: ySpGps, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.2, dash: 'dot' }, name: (fitInRide && fitInRide.length) ? 'GPS speed' : 'GPS speed (est.)', yaxis: 'y2', opacity: 0.6, hovertemplate: `%{y:.1f} ${U.speedUnit()}` },
   ];
   if (fitInRide && fitInRide.length) {
     const tFit = fitInRide.map(r => r.t_phone - ride.start);
-    const sFit = fitInRide.map(r => r.speed != null ? r.speed * 2.237 : null);
-    traces.push({ x: tFit, y: sFit, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 2 }, name: 'FIT wheel speed', yaxis: 'y2', hovertemplate: '%{y:.1f} mph' });
+    const sFit = fitInRide.map(r => r.speed != null ? U.speedNum(r.speed) : null);
+    traces.push({ x: tFit, y: sFit, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 2 }, name: 'FIT wheel speed', yaxis: 'y2', hovertemplate: `%{y:.1f} ${U.speedUnit()}` });
   }
 
   const shapes = turns.map(T => ({
@@ -11188,7 +11188,7 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps) {
       tickfont: { color: '#e87b3d' }, range: [-200, 200]
     },
     yaxis2: {
-      title: { text: 'speed (mph)', font: { color: '#6da7c4', size: 11 } },
+      title: { text: `speed (${U.speedUnit()})`, font: { color: '#6da7c4', size: 11 } },
       overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)',
       tickfont: { color: '#6da7c4' }
     },
@@ -11338,8 +11338,8 @@ function renderJumpsTable(jumps) {
       <td><strong>${i+1}</strong></td>
       <td class="dim">${hhmmss}Z · ride+${(J.t_phone).toFixed(1)}s</td>
       <td>${J.hang != null ? `<strong>${(J.hang*1000).toFixed(0)}</strong> ms` : '—'}</td>
-      <td>${J.dist != null ? `${(J.dist*3.28084).toFixed(1)} ft <span class="dim">(${J.dist.toFixed(2)}m)</span>` : '—'}</td>
-      <td>${J.speed_mps != null ? (J.speed_mps*2.237).toFixed(1) + ' mph' : '—'} <span class="dim">${J.speed_mps != null ? '('+J.speed_mps.toFixed(2)+'m/s)' : ''}</span></td>
+      <td>${J.dist != null ? `${U.small(J.dist)} <span class="dim">(${U.metric() ? (J.dist*3.28084).toFixed(1) + ' ft' : J.dist.toFixed(2) + ' m'})</span>` : '—'}</td>
+      <td>${J.speed_mps != null ? U.speed(J.speed_mps) : '—'} <span class="dim">${J.speed_mps != null ? '('+J.speed_mps.toFixed(2)+' m/s)' : ''}</span></td>
       <td class="dim">${J.lat != null ? J.lat.toFixed(5) : '—'}, ${J.lon != null ? J.lon.toFixed(5) : '—'}</td>
     `;
     const jn = i + 1;
@@ -12046,8 +12046,8 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   onProgress('rendering');
   hide('loading'); show('results');
   renderAllRoad(D);
-  const km = session && session.distance ? (session.distance / 1000).toFixed(1) + ' km' : '';
-  setStatus(`Road ride loaded (Garmin FIT${km ? ' · ' + km : ''})`, true);
+  const distStr = session && session.distance ? U.dist(session.distance) : '';
+  setStatus(`Road ride loaded (Garmin FIT${distStr ? ' · ' + distStr : ''})`, true);
 }
 
 function renderAllRoad(D) {
@@ -13394,7 +13394,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '3d40cfa · 2026-07-12';
+const LOAM_BUILD = '5f25e4f · 2026-07-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
