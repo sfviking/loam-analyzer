@@ -3045,16 +3045,17 @@ let _pbpCtx = null;   /* { run, D } behind the rendered play-by-play, for its tu
 function renderPlayByPlay(run, ref, D) {
   const body = document.getElementById('pbpBody');
   if (!body) return;
-  _pbpCtx = { run, D };
   const labA = escapeHtml(runLabel(run.tStart) || run.label);
   const labF = escapeHtml(ref.label);
   if (!ref.sameSegmentOK) {
+    _pbpCtx = null;   /* nothing actionable rendered, so leave no stale turn-link context behind */
     body.innerHTML = `<div class="dim" style="font-size:13px;">`
       + `<strong>${labA}</strong> and <strong>${labF}</strong> do not look like the same segment, `
       + `so a turn-by-turn comparison would not be meaningful. Pick two runs of the same trail `
       + `(laps, or marked runs of one descent).</div>`;
     return;
   }
+  _pbpCtx = { run, D };
   const A = runTurnsFromD(run, D);
   const { deltas, countA, countF } = pbpDeltasFromTurns(A, ref.turns || []);
   const dt = run.metrics.duration - ref.duration;
@@ -3065,8 +3066,8 @@ function renderPlayByPlay(run, ref, D) {
     + `<span style="color:${faster ? '#7fb069' : 'var(--accent)'};">${faster ? '' : '+'}${dt.toFixed(1)}s ${faster ? 'faster' : 'slower'}</span></div>`;
   if (ref.crossRide)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across rides, lined up turn-for-turn on the same trail.</div>`;
-  if (Math.abs(countA - countF) > 2)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These runs have different turn counts (${countA} vs ${countF}), so the turn-by-turn lines up best for repeated runs of the same segment.</div>`;
+  if (countA !== countF)
+    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These runs have different turn counts (${countA} vs ${countF}). The turns are lined up in order, so a missed or extra turn can shift the pairing; the per-turn notes below read best for repeated runs of the same segment.</div>`;
   /* Speed deltas follow the Units toggle like the turn table (they used to hardcode mph). The delta
      math stays in mph (pbpDeltasFromTurns, thresholds below); only the display converts. */
   const spd = (mph) => `${U.speedNum(Math.abs(mph) / 2.23694).toFixed(1)} ${U.speedUnit()}`;
@@ -7069,7 +7070,10 @@ async function enrichRidesMechanics(rides) {
    from analyzer/sports/road/fitness-model.js; see it for the CTL/ATL/TSB definitions. */
 function pmcDayKey(d) {
   const dt = (d instanceof Date) ? d : new Date(d);
-  return isNaN(dt) ? null : dt.toISOString().slice(0, 10);
+  if (isNaN(dt)) return null;
+  // Local calendar day, not UTC: an evening ride west of UTC must land on the day the rider
+  // actually rode, and "today" must be the viewer's today, not tomorrow in UTC.
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 function fitnessModel(entries, opts = {}) {
   const ctlDays = opts.ctlDays ?? 42, atlDays = opts.atlDays ?? 7;
@@ -7089,16 +7093,18 @@ function fitnessModel(entries, opts = {}) {
   const kCtl = 1 - Math.exp(-1 / ctlDays), kAtl = 1 - Math.exp(-1 / atlDays);
   const out = [];
   let ctl = 0, atl = 0;
-  const cur = new Date(minKey + 'T00:00:00Z');
-  const end = new Date(endKey + 'T00:00:00Z');
+  // Step local calendar days (parse as local midnight, advance with setDate) so the day grid lines
+  // up with the local-day keys above rather than drifting by a timezone offset.
+  const cur = new Date(minKey + 'T00:00:00');
+  const end = new Date(endKey + 'T00:00:00');
   while (cur <= end) {
-    const key = cur.toISOString().slice(0, 10);
+    const key = pmcDayKey(cur);
     const tss = byDay.get(key) || 0;
     const tsb = +(ctl - atl).toFixed(1);
     ctl = ctl + (tss - ctl) * kCtl;
     atl = atl + (tss - atl) * kAtl;
     out.push({ date: key, tss: Math.round(tss), ctl: +ctl.toFixed(1), atl: +atl.toFixed(1), tsb });
-    cur.setUTCDate(cur.getUTCDate() + 1);
+    cur.setDate(cur.getDate() + 1);
   }
   return out;
 }
@@ -7117,7 +7123,11 @@ function renderFitnessDashboard(pmc) {
   const interp = fitnessInterpretation(last.tsb);
   const head = document.getElementById('fitnessHeadline');
   if (head) {
-    const tsbColor = last.tsb > 5 ? '#3b7d5b' : last.tsb < -10 ? '#c0392b' : '#8a6d1a';
+    // Color off the same interpretation bands as the words, so a productive block ("building") is
+    // not painted the alarm-red of "buried". fresh = green, neutral = amber, building = blue
+    // (a good, productive load), buried = red.
+    const tsbColors = { fresh: '#3b7d5b', neutral: '#8a6d1a', building: '#2f6f9f', buried: '#c0392b' };
+    const tsbColor = (interp && tsbColors[interp.label]) || '#8a6d1a';
     const nRides = pmc.filter(p => p.tss > 0).length;
     head.innerHTML =
       `<div style="display:flex; flex-wrap:wrap; gap:24px; align-items:baseline;">
@@ -7208,10 +7218,10 @@ async function renderProgress() {
   };
   line('progDist', dated.map(o => o.r.summary && o.r.summary.distance != null ? +(o.r.summary.distance * (metric ? 0.001 : 0.000621371)).toFixed(2) : null),
     'Distance per ride', metric ? 'km' : 'mi', '#6da7c4');
-  line('progSpeed', dated.map(o => o.r.summary && o.r.summary.maxSpeed != null ? +(o.r.summary.maxSpeed * 2.23694).toFixed(1) : null),
-    'Top speed per ride', 'mph', '#e87b3d');
-  line('progRadius', dated.map(o => o.r.mechanics && o.r.mechanics.medianRadiusM != null ? +o.r.mechanics.medianRadiusM.toFixed(2) : null),
-    'Median apex radius (lower = tighter cornering)', 'm', '#8caa6d');
+  line('progSpeed', dated.map(o => o.r.summary && o.r.summary.maxSpeed != null ? +U.speedNum(o.r.summary.maxSpeed).toFixed(1) : null),
+    'Top speed per ride', U.speedUnit(), '#e87b3d');
+  line('progRadius', dated.map(o => o.r.mechanics && o.r.mechanics.medianRadiusM != null ? +U.smallNum(o.r.mechanics.medianRadiusM).toFixed(2) : null),
+    'Median apex radius (lower = tighter cornering)', U.smallUnit(), '#8caa6d');
   line('progLean', dated.map(o => o.r.mechanics && o.r.mechanics.leanGapDeg != null ? o.r.mechanics.leanGapDeg : null),
     'Left/right lean gap (lower = more symmetric)', 'deg', '#a78bd9');
   renderProgressTrails();
@@ -13238,7 +13248,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '3142199 · 2026-07-11';
+const LOAM_BUILD = '07cab58 · 2026-07-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
