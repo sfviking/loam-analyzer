@@ -1189,6 +1189,23 @@
     <div class="chart" id="runOscChart" style="height:260px;"></div>
   </section>
 
+  <section id="runClimbsSection" class="hidden">
+    <div class="section-title">
+      Climbs
+      <span class="subtitle"><span id="runClimbCountLabel">0</span> climbs · grade &gt; 3% sustained for 20s+ · GAP = grade-adjusted pace</span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table id="runClimbsTable">
+          <thead><tr>
+            <th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>VAM</th><th>Pace</th><th>GAP</th><th>Cadence</th><th>HR</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <section id="runSegmentsSection" class="hidden">
     <div class="section-title">
       Climb / descent segments
@@ -6285,6 +6302,13 @@ async function analyze(files) {
         running.cadMedian = spms[Math.floor(spms.length / 2)];
         running.cadMean = spms.reduce((a, b) => a + b, 0) / spms.length;
       }
+      /* Per-climb read from the up-segments (uses whatever cadSeries is current, so a walk gets its
+         walk-band cadence). Geometric gain/grade/VAM plus GPS pace, cadence and HR as context. */
+      running.climbs = analyzeRunningClimbs(
+        running.segments,
+        climbAltSeries(sensors.baro, sensors.location, ride),
+        running.cadSeries,
+        sensors.heartRate || []);
       const runSummary = computeRunSummary(sensors.location, sensors.baro, ride, running);
       onProgress('pairing annotation-based descents');
       const descents = pairDescentAnnotations(sensors.annotations || []);
@@ -7272,7 +7296,7 @@ let jumpMarkers = {};
 function hideAllSections() {
   formStop();
   liftFormStop();
-  ['strengthResults','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -7863,6 +7887,7 @@ function renderAllRunning(D) {
   renderRunTimeline(D);
   renderRunCadence(D.running.cadSeries);
   renderRunOsc(D.running.oscSeries);
+  renderRunClimbs(D.running.climbs || []);
   renderRunSegments(D.running.segments);
   renderRunParams(D);
   currentRide = D.ride;
@@ -9143,6 +9168,79 @@ function renderRunOsc(oscSeries) {
   loamPlot('runOscChart', traces, layout, PLOT_CFG);
 }
 
+/* ===== Running climbs =====================================================================
+   A dedicated per-climb read for a run or hike, built from the up-segments detectGradeSegments
+   already found. gain / average grade / VAM / pace come from the barometer (or GPS) altitude and
+   GPS pace, the same geometric sources the road climb cards and the GPS-lift path use. Grade-
+   adjusted pace (GAP) reprices the climb against flat effort with the published Minetti cost model.
+   Cadence and heart rate are supporting context from the same series the segments table shows, not
+   new gait inferences (running gait depth stays gated on ground-truth data, see CLAUDE.md). */
+
+/* Minetti et al. (2002) metabolic cost of running vs gradient i (rise/run, fraction), J/kg/m.
+   Clamped to +/-45% so an absurd grade cannot make the quintic explode. */
+function runningGradeCost(gradePct) {
+  const i = Math.max(-0.45, Math.min(0.45, (gradePct || 0) / 100));
+  return 155.4 * i ** 5 - 30.4 * i ** 4 - 43.3 * i ** 3 + 46.3 * i ** 2 + 19.5 * i + 3.6;
+}
+/* Flat-equivalent speed: the speed you would run on the flat at the same metabolic power, since
+   power = cost-per-metre x speed. Uphill costs more per metre, so the flat equivalent is faster. */
+function gradeAdjustedSpeed(speedMps, gradePct) {
+  if (!speedMps || speedMps <= 0) return null;
+  const cost = runningGradeCost(gradePct), flat = runningGradeCost(0);
+  return cost > 0 ? speedMps * (cost / flat) : null;
+}
+/* Altitude series used for climb gain, selected exactly like detectGradeSegments (baro
+   relativeAltitude when a usable baro stream is present, otherwise GPS altitude) so a climb's gain
+   agrees with the grade that opened it. */
+function climbAltSeries(baroRows, locRows, ride) {
+  const haveBaro = baroRows && baroRows.length > 10;
+  return haveBaro
+    ? baroRows.filter(r => r.t >= ride.start && r.t <= ride.end).map(r => ({ t: r.t, alt: r.relativeAltitude }))
+    : (locRows || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.altitude != null).map(r => ({ t: r.t, alt: r.altitude }));
+}
+/* One up-segment -> a climb card. Fade = last third minus first third (cadence dropping or heart
+   drifting through the climb). Gain falls back to grade x distance when altitude is too sparse. */
+function runningClimbMetrics(seg, alts, cadSeries, hrRows, index) {
+  const duration = seg.tEnd - seg.tStart;
+  const third = duration / 3;
+  const inAlt = (alts || []).filter(a => a.t >= seg.tStart && a.t <= seg.tEnd && a.alt != null).map(a => a.alt);
+  const gain = inAlt.length >= 2
+    ? Math.max(0, inAlt[inAlt.length - 1] - inAlt[0])
+    : Math.max(0, (seg.gradeAvg / 100) * (seg.distance || 0));
+  const cadIn = (cadSeries || []).filter(c => c.t >= seg.tStart && c.t <= seg.tEnd && c.conf > 0.05);
+  const firstCad = cadIn.filter(c => c.t <= seg.tStart + third).map(c => c.spm);
+  const lastCad = cadIn.filter(c => c.t >= seg.tEnd - third).map(c => c.spm);
+  const cadenceFade = firstCad.length && lastCad.length ? roadMean(lastCad) - roadMean(firstCad) : null;
+  const hrIn = (hrRows || []).filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.bpm != null);
+  const firstHr = hrIn.filter(r => r.t <= seg.tStart + third).map(r => r.bpm);
+  const lastHr = hrIn.filter(r => r.t >= seg.tEnd - third).map(r => r.bpm);
+  const avgHr = hrIn.length ? roadMean(hrIn.map(r => r.bpm)) : null;
+  const hrDrift = firstHr.length && lastHr.length ? roadMean(lastHr) - roadMean(firstHr) : null;
+  const gapSpeed = gradeAdjustedSpeed(seg.speedAvg, seg.gradeAvg);
+  return {
+    index: index + 1, tStart: seg.tStart, tEnd: seg.tEnd, duration, distance: seg.distance,
+    gain, avgGrade: seg.gradeAvg, vam: vam(gain, duration),
+    speedAvg: seg.speedAvg != null ? seg.speedAvg : null,
+    paceMinPerKm: seg.paceMinPerKm != null ? seg.paceMinPerKm : null,
+    gapSpeed, gapMinPerKm: gapSpeed ? (1000 / gapSpeed) / 60 : null,
+    avgCadence: seg.cadAvg != null ? seg.cadAvg : null, cadenceFade,
+    avgOsc: seg.oscAvg != null ? seg.oscAvg : null,
+    avgHr, hrDrift,
+  };
+}
+/* The climbs of a run/hike: every sustained up-segment carrying at least a 5 m gain, renumbered in
+   order. The gain floor drops the sub-metre bumps and near-stationary GPS-wander blips that clear the
+   grade-segment test but are not climbs worth a card (they still appear in the full climb/descent
+   segments table). */
+function analyzeRunningClimbs(segments, alts, cadSeries, hrRows) {
+  const MIN_GAIN_M = 5;
+  return (segments || [])
+    .filter(s => s.dir === 'up')
+    .map(seg => runningClimbMetrics(seg, alts, cadSeries, hrRows, 0))
+    .filter(c => c.gain >= MIN_GAIN_M)
+    .map((c, i) => { c.index = i + 1; return c; });
+}
+
 function renderRunSegments(segments, opts) {
   if (!segments.length) { hide('runSegmentsSection'); return; }
   show('runSegmentsSection');
@@ -9183,6 +9281,43 @@ function renderRunSegments(segments, opts) {
     tbody.appendChild(tr);
   });
   document.getElementById('runSegCountLabel').textContent = segments.length;
+}
+
+/* The Climbs panel: one row per sustained up-segment, with the climb-specific coaching read the flat
+   segments table does not give (gain, VAM, grade-adjusted pace, and whether cadence held / heart
+   drifted through the climb). All display honors the Units toggle. */
+function renderRunClimbs(climbs) {
+  if (!climbs || !climbs.length) { hide('runClimbsSection'); return; }
+  show('runClimbsSection');
+  const tbody = document.querySelector('#runClimbsTable tbody');
+  if (!tbody) return;
+  const fmtT = (sec) => { const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
+  const paceStr = (mps) => (mps && mps > 0) ? U.pace(mps) : '—';
+  /* Rounded signed delta with no "-0": a tiny negative fade should read 0, not -0. */
+  const signed = (v) => { const r = Math.round(v); return (r > 0 ? '+' : '') + (r === 0 ? 0 : r); };
+  tbody.innerHTML = climbs.map(c => {
+    const cadFade = c.cadenceFade == null ? ''
+      : ` <span class="dim" style="font-size:11px;${Math.round(c.cadenceFade) <= -4 ? 'color:#c0392b;' : ''}">${signed(c.cadenceFade)}</span>`;
+    const cad = c.avgCadence != null ? `${c.avgCadence.toFixed(0)} spm${cadFade}` : '—';
+    const hrDrift = c.hrDrift == null ? ''
+      : ` <span class="dim" style="font-size:11px;${Math.round(c.hrDrift) >= 8 ? 'color:#c0392b;' : ''}">${signed(c.hrDrift)}</span>`;
+    const hr = c.avgHr != null ? `${c.avgHr.toFixed(0)} bpm${hrDrift}` : '—';
+    const vamStr = c.vam != null ? `${U.smallNum(c.vam).toFixed(0)} ${U.smallUnit()}/h` : '—';
+    return `<tr>
+      <td><strong>${c.index}</strong></td>
+      <td>${fmtT(c.duration)}</td>
+      <td>${c.distance != null ? U.dist(c.distance) : '—'}</td>
+      <td>${U.elev(c.gain)}</td>
+      <td class="dir-up"><strong>+${c.avgGrade.toFixed(1)}%</strong></td>
+      <td>${vamStr}</td>
+      <td>${paceStr(c.speedAvg)}</td>
+      <td>${paceStr(c.gapSpeed)}</td>
+      <td>${cad}</td>
+      <td>${hr}</td>
+    </tr>`;
+  }).join('');
+  const label = document.getElementById('runClimbCountLabel');
+  if (label) label.textContent = climbs.length;
 }
 
 function renderRunParams(D) {
@@ -9298,8 +9433,13 @@ function mtbHighlights(D) {
 
 function runningHighlights(D) {
   const s = D.summary || {};
+  const climbs = (D.running && D.running.climbs) || [];
   const c = [];
   if (s.cadMedian) c.push(`<strong>${s.cadMedian.toFixed(0)} spm</strong> median cadence${s.distance ? ' over ' + (s.distance / 1000).toFixed(2) + ' km' : ''}.`);
+  if (climbs.length) {
+    const big = climbs.slice().sort((a, b) => (b.gain || 0) - (a.gain || 0))[0];
+    c.push(`<strong>${climbs.length} climb${climbs.length > 1 ? 's' : ''}</strong>, biggest ${U.elev(big.gain)} at ${big.avgGrade.toFixed(0)}%${big.vam ? ` (VAM ${Math.round(U.smallNum(big.vam))} ${U.smallUnit()}/h)` : ''}.`);
+  }
   if (s.oscMedian != null) c.push(`Vertical oscillation about <strong>${s.oscMedian.toFixed(1)} cm</strong> (head-bob proxy for hip motion).`);
   if (s.altGain != null) c.push(`${s.altGain.toFixed(0)} m climbed${s.altLoss != null ? ', ' + s.altLoss.toFixed(0) + ' m descended' : ''}.`);
   return c.slice(0, 3);
@@ -13254,7 +13394,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.1.0';
-const LOAM_BUILD = '823ddb0 · 2026-07-12';
+const LOAM_BUILD = '3d40cfa · 2026-07-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Earlier segment starts', 'drag a segment start above the auto-detected drop-in, up into the approach, so it begins where the trail really does.'],
