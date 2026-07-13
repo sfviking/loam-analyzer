@@ -846,13 +846,16 @@
   <p>Sensor Logger zip OR Combined CSV. For <strong>MTB</strong>: phone IMU + GPS, optional FIT
      unlocks wheel-sensor speed, motor power, HR, native jumps. For <strong>running</strong>:
      same file; gives cadence (FFT on accel), vertical oscillation (gravity-projected accel,
-     works phone-in-hand), pace, climb/descent segments. Everything runs in your browser.</p>
+     works phone-in-hand), pace, climb/descent segments. For <strong>road</strong>: drop the
+     head-unit FIT on its own for power analysis (NP/IF/TSS, climbs, descents, power curve);
+     a phone-only road ride is analyzed from its IMU + GPS. Everything runs in your browser.</p>
   <div class="sport-picker">
     <label>Sport</label>
     <select id="sportOverride">
       <option value="auto">Auto-detect</option>
       <option value="mtb">MTB</option>
       <option value="emtb">e-MTB</option>
+      <option value="road">Road</option>
       <option value="running">Running</option>
       <option value="walking">Walking</option>
       <option value="weightlifting">Weightlifting (beta)</option>
@@ -12756,7 +12759,12 @@ function resetToDropzone() {
 function renderCachedAnalysis(cached) {
   const d = cached.data;
   if (d && d.gpsOnly) { renderAllGps(d); return; }
-  if ((d && d.sport === 'road') || cached.sport === 'road') { renderAllRoad(d); return; }
+  /* Route to the road renderer only when the cached data actually carries the power-pipeline fields
+     (session/metrics/mmp). A phone recording merely tagged 'road' (Road picked, or LOAM_SPORT=road
+     from the capture app, but no head-unit FIT) is analyzed with the IMU pipeline and cached as an
+     MTB-shaped render, so keying on the sport tag alone would hand renderAllRoad an object missing
+     every field it reads and crash the reopen. Those fall through to the IMU renderer below. */
+  if (d && d.sport === 'road' && d.session) { renderAllRoad(d); return; }
   if (cached.sport === 'running' || cached.sport === 'walking') { renderAllRunning(d); return; }
   renderAll(d);
 }
@@ -12765,7 +12773,7 @@ function renderCachedAnalysis(cached) {
 function cachedSportNoun(cached) {
   const d = cached.data;
   if (d && d.gpsOnly) return d.gpsSport === 'run' ? 'run' : d.gpsSport === 'walk' ? 'walk' : 'ride';
-  if ((d && d.sport === 'road') || cached.sport === 'road') return 'road ride';
+  if (d && d.sport === 'road' && d.session) return 'road ride';
   return cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride';
 }
 
@@ -13394,7 +13402,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '640a5f8 · 2026-07-12';
+const LOAM_BUILD = '12766e0 · 2026-07-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
