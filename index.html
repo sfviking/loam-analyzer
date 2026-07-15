@@ -5517,8 +5517,8 @@ const LABELS = ['high bar', 'low bar', 'full depth', 'parallel'];
 // unlabeled set, for legacy recordings) gets the squat-only bar-position / depth reads; every other
 // label here is a non-squat lift, so those reads are skipped rather than mislabeling e.g. a row.
 const LIFT_LABELS = ['squat', 'deadlift', 'press', 'bench', 'curl', 'row', 'pull-up', 'chin-up',
-  'front squat', 'romanian deadlift', 'hip thrust', 'lunge', 'lateral raise', 'triceps extension',
-  'calf raise'];
+  'dips', 'front squat', 'romanian deadlift', 'hip thrust', 'lunge', 'lateral raise',
+  'triceps extension', 'calf raise', 'other'];
 
 function norm(s) { return (s || '').trim().toLowerCase(); }
 
@@ -5894,18 +5894,24 @@ function countRepsWrist(wrist, tStart, tEnd) {
     if (last && rep.t - last.t < WRIST_MIN_REP_SEP_S) { if (rep.amp > last.amp) merged[merged.length - 1] = rep; }
     else merged.push(rep);
   }
-  /* Drop a leading un-rack / walk-out. The first big movement of a racked lift (squat, rack pull) is
-     often lifting the bar off the pins and stepping back to get set, separated from the working reps by
-     a get-set pause. If the first gap is far larger than the rep cadence, that first "rep" is the
-     walk-out, not a rep. A deadlift/floor pull starts at the bar, so its first rep is part of the
-     cadence and kept; only a lone LEADING movement is dropped (validated across two labeled sessions:
-     squats 6->5 each, a 100 kg double 3->2, deadlift working sets untouched). */
+  /* Drop a lone leading un-rack and/or trailing re-rack. The walk-out to get set (un-rack a squat off
+     the pins, or pick up the dumbbells) and the walk-in to rack (or set the dumbbells down) are lone
+     movements separated from the working reps by a gap well above the rep cadence, so they read as an
+     extra rep at the start or end of the set. A steady working set has near-uniform interior gaps, so a
+     first / last gap far larger than the interior median marks a setup movement, not a rep. The
+     reference is the interior gaps only (the two end gaps are exactly what we are testing), and the
+     threshold is cadence-relative (1.7x, with a small 3 s floor) rather than a hard 6 s floor: a fast
+     dumbbell curl cadence (~2 s) puts the un-rack/re-rack gap at only ~4-5 s, which the old floor missed
+     and left as +2 reps. Deadlift/floor-pull working sets start at the bar and run at a uniform cadence,
+     so no end gap exceeds the threshold and none are dropped. Only lone END movements are trimmed. */
   if (merged.length >= 3) {
     const gaps = [];
     for (let k = 1; k < merged.length; k++) gaps.push(merged[k].t - merged[k - 1].t);
-    const rest = gaps.slice(1).slice().sort((a, b) => a - b);
-    const medRest = rest.length ? rest[rest.length >> 1] : gaps[0];
-    if (gaps[0] > Math.max(6, 1.8 * medRest)) merged.shift();
+    const inner = gaps.slice(1, -1).slice().sort((a, b) => a - b);
+    const ref = inner.length ? inner[inner.length >> 1] : Math.min(...gaps);   // rep cadence, not the end gaps
+    const thr = Math.max(3, 1.7 * ref);
+    if (gaps[gaps.length - 1] > thr) merged.pop();                              // trailing re-rack
+    if (merged.length >= 3 && gaps[0] > thr) merged.shift();                    // leading un-rack
   }
   if (!merged.length) return { reps: 0, repTimes: [], romMeters: null, concVelMps: null };
   return {
@@ -7390,34 +7396,43 @@ function liftTrailSVG(trail, col) {
    from a bar-over-midfoot balance constraint, which over-rotated the shin and threw the knee above and
    far ahead of the hip (a backward-looking knee). */
 function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
-  const L = { foot: 46, shank: 96, thigh: 96, torso: 120, neck: 16, headR: 16 };
+  const L = { foot: 46, shank: 96, thigh: 96, torso: 120, neck: 16, headR: 16, upperArm: 46, forearm: 44 };
   const R = Math.PI / 180, frac = barPos === 'low' ? 0.17 : 0.05, BARBACK = 15;
   const isDL = lift === 'deadlift';
-  // 'upright' (a lift with no dedicated pose) and the deadlift both hold the bar in the hands rather
-  // than racked behind the shoulders; upright adds no descent (thighDeg stays 0), so it reads as a
-  // plain standing hold.
-  const barInHands = isDL || lift === 'upright';
-  const shinDeg = Math.min(22, thighDeg * 0.24);       // shin forward lean, capped so the knee stays near the toe
+  const isCurl = lift === 'curl';
+  // 'upright' (a lift with no dedicated pose), the curl, and the deadlift all hold the bar in the hands
+  // rather than racked behind the shoulders. Upright adds no descent (thighDeg stays 0) so it reads as a
+  // plain standing hold; a curl also stands still, but its thighDeg param drives ELBOW FLEXION instead
+  // of a squat descent, so the legs stay straight (legDeg 0) and the forearm swings the bar up.
+  const barInHands = isDL || lift === 'upright' || isCurl;
+  const legDeg = isCurl ? 0 : thighDeg;                // a curl does not bend the legs; thighDeg is the arm
+  const shinDeg = Math.min(22, legDeg * 0.24);         // shin forward lean, capped so the knee stays near the toe
   // A deadlift is a hip hinge: the torso folds much more steeply with the pull than a squat's stays-tall
   // descent, so lean couples harder to the thigh angle and the torso is near-vertical at lockout.
-  const lean = leanDeg + thighDeg * (isDL ? 0.85 : 0.30);
+  const lean = leanDeg + legDeg * (isDL ? 0.85 : 0.30);
   const ankle = { x: 16, y: 14 };                      // planted over midfoot
   const knee = { x: ankle.x + L.shank * Math.sin(shinDeg * R), y: ankle.y + L.shank * Math.cos(shinDeg * R) };
-  const hip = { x: knee.x - L.thigh * Math.sin(thighDeg * R), y: knee.y + L.thigh * Math.cos(thighDeg * R) };
+  const hip = { x: knee.x - L.thigh * Math.sin(legDeg * R), y: knee.y + L.thigh * Math.cos(legDeg * R) };
   const td = { x: Math.sin(lean * R), y: Math.cos(lean * R) };
   const shoulder = { x: hip.x + L.torso * td.x, y: hip.y + L.torso * td.y };
   const head = { x: shoulder.x + (L.neck + L.headR) * td.x, y: shoulder.y + (L.neck + L.headR) * td.y };
-  // Squat/press: bar rides behind the shoulders (back rack). Deadlift: bar hangs in the hands, so it is
-  // straight below the shoulders (the arms hang vertical) and traces up the legs as the lifter stands.
-  let bar;
-  if (barInHands) {
+  // Squat/press: bar rides behind the shoulders (back rack). Deadlift / upright: bar hangs in the hands,
+  // straight below the shoulders. Curl: the upper arm hangs from the shoulder (slight forward set) and
+  // the forearm swings the bar up in front as the elbow flexes (thighDeg = flexion angle from down).
+  let bar, elbow;
+  if (isCurl) {
+    const down = { x: -td.x, y: -td.y };               // downward along the torso
+    elbow = { x: shoulder.x + L.upperArm * down.x + 5, y: shoulder.y + L.upperArm * down.y };
+    const a = thighDeg * R;                            // 0 = arm extended down, growing = curled up-front
+    bar = { x: elbow.x + L.forearm * Math.sin(a), y: elbow.y - L.forearm * Math.cos(a) };
+  } else if (barInHands) {
     bar = { x: shoulder.x, y: shoulder.y - L.torso * 0.85 };   // arms hang straight; bar in the hands
   } else {
     const bbase = { x: shoulder.x - frac * L.torso * td.x, y: shoulder.y - frac * L.torso * td.y };
     const nrm = { x: -td.y, y: td.x };
     bar = { x: bbase.x + BARBACK * nrm.x, y: bbase.y + BARBACK * nrm.y };
   }
-  return { ankle, knee, hip, shoulder, head, bar, td, headR: L.headR, foot: L.foot, deadlift: isDL, barInHands };
+  return { ankle, knee, hip, shoulder, head, bar, elbow, td, headR: L.headR, foot: L.foot, deadlift: isDL, barInHands, curl: isCurl };
 }
 
 /* Draw one character at one pose using a fixed transform `tf` ({T, sc}). Returns { markup, bar } with
@@ -7451,7 +7466,10 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf) {
   // front arm; the elbow point is a fixed offset off the shoulder so it stays believable at any depth.
   // Squat/press: the arm bends at the elbow back to the bar on the traps. Deadlift: the arm hangs
   // straight (bar in the hands), so the "elbow" sits on the shoulder->bar line and the arm reads straight.
-  const elbow = s.barInHands ? { x: (Sh.x + Ba.x) / 2, y: (Sh.y + Ba.y) / 2 } : { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc };
+  // A curl exposes its own elbow (upper arm hangs, forearm swings the bar up); other lifts place the
+  // elbow on the shoulder->bar line (bar in hands) or bent back to the traps (back rack).
+  const elbow = s.elbow ? T(s.elbow)
+    : (s.barInHands ? { x: (Sh.x + Ba.x) / 2, y: (Sh.y + Ba.y) / 2 } : { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc });
   const armW = lw * 0.6;
   if (c.line) {
     const glow = c.neon || c.skin;
@@ -7619,15 +7637,16 @@ function onLiftWeight(i, val) {
    is solved bar-over-midfoot by liftSkeleton, so the pose is mechanically honest, not a canned loop. ---- */
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', trail: [], ghosts: [] };
 function liftFormCharKey() { return localStorage.getItem('loam.liftChar') || 'cleaner'; }
-/* A lift with no dedicated pose (anything explicitly tapped that is not squat or deadlift: press,
-   bench, curl, row, ...) is drawn as a neutral upright standing hold, not a misleading squat: no
-   descent (dmax 0), a small upright lean, and the bar in the hands. An unlabeled set stays a squat
-   (the analyzer's default). Squat and deadlift keep their real, fact-driven poses. */
-function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift'; }
-function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
-function liftLeanDeg(set) { if (set.lift === 'deadlift') return 6; if (liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
+/* Squat, deadlift and curl have real, fact-driven poses (squat descent, hip hinge, elbow-flexion
+   curl). Any OTHER explicitly tapped lift (press, bench, dips, other, row, ...) has no dedicated pose
+   yet and is drawn as a neutral upright standing hold, not a misleading squat: no descent (dmax 0), a
+   small upright lean, and the bar in the hands. An unlabeled set stays a squat (the analyzer's default). */
+function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift' && set.lift !== 'curl'; }
+/* For a curl, dmax is the elbow-flexion sweep (degrees from arm-straight-down), not a squat depth. */
+function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; if (set.lift === 'curl') return 145; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
+function liftLeanDeg(set) { if (set.lift === 'deadlift') return 6; if (set.lift === 'curl' || liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
-function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
+function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : set.lift === 'curl' ? 'curl' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
 
 function liftFormFrame(ts) {
   const st = _liftForm;
@@ -7727,10 +7746,11 @@ function renderLiftForm(D) {
     <div class="lf-note" id="liftFormNote">Depth, lean, and tempo are your set's real numbers; the bar tracks over midfoot.</div>`;
   liftFormStart();
 }
-/* Honest per-lift caption: squat and deadlift have real poses (squat descent, hip hinge with the bar in
-   hand); press/bench/curl have no dedicated pose yet, so the body is shown as a neutral standing hold. */
+/* Honest per-lift caption: squat, deadlift and curl have real poses (squat descent, hip hinge, elbow
+   flexion); press/bench/dips/other have no dedicated pose yet, so the body is a neutral standing hold. */
 function liftFormNoteFor(set) {
   if (set.lift === 'deadlift') return 'Deadlift: hip hinge with the bar in your hands. Depth, lean, and tempo are your set\'s real numbers.';
+  if (set.lift === 'curl') return 'Curl: elbow flexion with the bar in your hands. Reps, tempo, and bar range of motion are your set\'s real numbers.';
   if (liftFormNoPose(set)) return `${set.lift[0].toUpperCase() + set.lift.slice(1)}: no dedicated form view yet, so this is a neutral standing hold, not the real ${set.lift} motion. Your reps and tempo are the real numbers.`;
   return 'Depth, lean, and tempo are your set\'s real numbers; the bar tracks over midfoot.';
 }
@@ -13424,7 +13444,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'f0c6819 · 2026-07-14';
+const LOAM_BUILD = 'ef6a29d · 2026-07-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
