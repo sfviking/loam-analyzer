@@ -925,6 +925,12 @@
   .lift-unit-toggle button.on { background: var(--accent, #e87b3d); color: #fff; }
   .wt-in { width: 72px; font: 600 13px 'JetBrains Mono', monospace; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border, #2a2e37); background: var(--surface-2, #eef2f6); color: var(--text, #1a202c); text-align: right; }
   .wt-in::placeholder { color: var(--text-muted, #94a3b8); }
+  /* Editable rep count (BETA counter override). Corrected cells get an accent border so a manual value reads as deliberate. */
+  .rep-in { width: 54px; font: 600 13px 'JetBrains Mono', monospace; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border, #2a2e37); background: var(--surface-2, #eef2f6); color: var(--text, #1a202c); text-align: right; }
+  .rep-in.rep-corr { border-color: var(--accent, #e87b3d); box-shadow: inset 0 0 0 1px var(--accent, #e87b3d); }
+  .th-hint { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted, #94a3b8); opacity: .8; }
+  .setblock-edit { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--accent, #e87b3d); margin-left: 4px; vertical-align: middle; }
+  .strength-tablenote { font-size: 12px; color: var(--text-muted, #94a3b8); padding: 8px 6px 4px; }
   /* Spotter Cam (form animation) + Coach's read */
   .lift-form-row { display: grid; grid-template-columns: minmax(240px, 340px) 1fr; gap: 16px; margin-bottom: 24px; }
   @media (max-width: 720px) { .lift-form-row { grid-template-columns: 1fr; } }
@@ -5522,6 +5528,11 @@ const LoamStrength = (function () {
  */
 
 const LABELS = ['high bar', 'low bar', 'full depth', 'parallel'];
+// Two "Start set" taps this close together, with no "End set" between them, are a fumbled double-tap /
+// re-start (the lifter tapped Start, fidgeted, then tapped Start again), not two real sets. No working
+// set completes in under this many seconds, so the earlier tap is dropped and the later one is the real
+// start. Guarded by "no End between": a genuine back-to-back set (no End chip) is longer than this.
+const DOUBLE_TAP_START_S = 10;
 // Every lift the capture app can stamp: the Squat / Deadlift / Press chips plus the "More" picker
 // exercises. Kept in sync with AnnotationPresets.liftChips + liftPicker (ios). Only 'squat' (or an
 // unlabeled set, for legacy recordings) gets the squat-only bar-position / depth reads; every other
@@ -5577,7 +5588,16 @@ function parseSetMarks(annotations, ride) {
   });
 
   /* Preferred: explicit "Start set" / "End set" chips. */
-  const opens = anns.filter(a => norm(a.text) === 'start set');
+  const allOpens = anns.filter(a => norm(a.text) === 'start set');
+  /* Drop a fumbled double-tap Start: a Start immediately superseded by another Start (with no End
+     between, and closer than a real set could last) is a mis-tap, so keep only the later one. Without
+     this, each stray Start opens its own tiny window and shows up as a phantom 1-rep set. */
+  const opens = allOpens.filter((o, i) => {
+    const next = allOpens[i + 1];
+    if (!next) return true;
+    const endBetween = anns.some(a => norm(a.text) === 'end set' && a.t > o.t && a.t < next.t);
+    return endBetween || (next.t - o.t) >= DOUBLE_TAP_START_S;
+  });
   if (opens.length) {
     const sets = [];
     for (let i = 0; i < opens.length; i++) {
@@ -5847,11 +5867,12 @@ const WRIST_MIN_REP_SEP_S = 2.0; // two bottoms closer than one squat rep are on
  * mean upward velocity out of the bottom (the VBT metric). Returns null when there
  * is too little wrist data in the window (caller falls back to the phone counter).
  *
- * NOTE: validated on one real labeled session (a 4x5 squat: recovers the 5-rep
- * train per set, down from the old 8/8/7/7). A trailing re-rack can still add one
- * rep on some sets; tightening that needs more labeled recordings (it is motionally
- * near-identical to a genuine last rep after a long pause), so treat the wrist rep
- * count as experimental until it is validated across several sessions.
+ * NOTE: validated on two real labeled sessions (a 4x5 squat: recovers the 5-rep
+ * train per set, down from the old 8/8/7/7; and the 2026-07-15 6-set squat session,
+ * where the trailing-re-rack trim below fixed set 1's 13->10). The remaining known
+ * misses are the shallow-parallel and light-fast-rep gate tradeoffs (they under-count,
+ * see the gate-boundary tests), so treat the wrist rep count as experimental until it
+ * is validated across more sessions.
  */
 function countRepsWrist(wrist, tStart, tEnd) {
   const seg = (wrist || []).filter(r => r.t >= tStart && r.t <= tEnd);
@@ -5922,6 +5943,26 @@ function countRepsWrist(wrist, tStart, tEnd) {
     const thr = Math.max(3, 1.7 * ref);
     if (gaps[gaps.length - 1] > thr) merged.pop();                              // trailing re-rack
     if (merged.length >= 3 && gaps[0] > thr) merged.shift();                    // leading un-rack
+  }
+  /* Drop a trailing re-rack CLUSTER. The lone-movement trim above pops at most one trailing rep, but
+     racking the bar can register as several short movements in a row, all separated from the working set
+     by a done-set pause. A re-rack barely moves the bar vertically, so truncate a trailing suffix only
+     when BOTH signals agree: a gap far larger than the rep cadence AND a shallow ROM (< half the set's
+     median). Validated on the 2026-07-15 ground-truth squat session: set 1 counts 13, the lone-pop trims
+     it to 12, and this cluster trim drops the two remaining shallow re-racks (ROM ~0.2 m vs ~0.7 m
+     working) to reach the true 10; the five other sets are untouched. */
+  if (merged.length >= 4) {
+    const gaps = [];
+    for (let k = 1; k < merged.length; k++) gaps.push(merged[k].t - merged[k - 1].t);
+    const interior = gaps.slice(1, -1);
+    const medRest = interior.length ? median(interior) : median(gaps);
+    const gapThr = Math.max(6, 1.8 * medRest);
+    const medRom = median(merged.map(r => r.rom));
+    let cut = merged.length;
+    for (let k = 1; k < merged.length; k++) {
+      if (gaps[k - 1] > gapThr && merged.slice(k).every(r => r.rom < 0.5 * medRom)) { cut = k; break; }
+    }
+    if (cut >= 2 && cut < merged.length) merged.length = cut;
   }
   if (!merged.length) return { reps: 0, repTimes: [], romMeters: null, concVelMps: null };
   return {
@@ -6382,7 +6423,16 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
-      renderStrength({ sensors, ride, strength, summary, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) });
+      const liftRender = { sensors, ride, strength, summary, sport, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      /* Cache + deep-link the lift like every other sport so it reopens instantly and is bookmarkable at
+         #/ride/<key> (this was the only branch that recomputed on every open and had no URL). The render
+         object is structured-cloneable (plain sensor/summary/strength data, no functions), so it round-
+         trips through the IndexedDB analysis cache. renderCachedAnalysis + cachedSportNoun carry a strength
+         branch so a replay routes to renderStrength, not the MTB renderer. Library listing is deliberately
+         left out for now: a lift has no GPS track or map thumbnail, so it does not belong in the ride
+         Library card grid yet (a product call, deferred). */
+      if (cacheKey) { putCachedAnalysis(cacheKey, sport, liftRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+      renderStrength(liftRender);
       setStatus(`Lift loaded (${summary.nSets} sets · ${summary.nReps} reps${summary.hasBarSpeed ? ' · ' + summary.meanBarSpeedMps + ' m/s' : ''})`, true);
       return;
     }
@@ -7624,7 +7674,8 @@ function saveLiftSignature() {
    content hash), drives volume now and the load-velocity 1RM later. Stored in kg; shown in the chosen
    unit (lb by default). ---- */
 const KG_PER_LB = 0.45359237;
-let _liftD = null;
+let _liftD = null;    // the raw analysis (auto rep counts), never mutated
+let _liftDc = null;   // the same analysis with the lifter's rep corrections layered on, for sub-renderers
 function liftUnit() { try { return localStorage.getItem('loam.liftUnit') || 'lb'; } catch (e) { return 'lb'; } }
 function setLiftUnitPref(u) { try { localStorage.setItem('loam.liftUnit', u); } catch (e) { /* private mode / quota; the toggle still applies for this render */ } if (_liftD) renderStrength(_liftD); }
 function liftWeightsKg(key) { try { return JSON.parse(localStorage.getItem('loam.liftW.' + key) || '[]'); } catch (e) { return []; } }
@@ -7636,9 +7687,36 @@ function onLiftWeight(i, val) {
   const key = _liftD.key || '';
   const w = liftWeightsKg(key); w[i] = dispToKg(val);
   try { localStorage.setItem('loam.liftW.' + key, JSON.stringify(w)); } catch (e) { /* private mode / quota; the value still drives this render */ }
-  const volKg = liftVolumeKg(_liftD);
+  const volKg = liftVolumeKg(_liftDc);   // corrected reps drive volume
   const el = document.getElementById('liftVolTile'); if (el) el.textContent = volKg > 0 ? fmtVol(volKg) : '—';
-  renderLiftSignature(_liftD);   // refresh the card's VOLUME stat
+  renderLiftSignature(_liftDc);   // refresh the card's VOLUME stat (with corrected reps)
+}
+
+/* ---- Per-set rep correction. The wrist rep counter is BETA and can miscount (racking the bar can
+   over-count; a shallow or fast rep can under-count), so the lifter can override any set's rep total.
+   Stored per session (keyed by the recording's content hash) and layered over the auto count at render
+   time, so the original count is never lost: clear the field to fall back to the counter. ---- */
+function liftRepsCorr(key) { try { return JSON.parse(localStorage.getItem('loam.liftReps.' + key) || '[]'); } catch (e) { return []; } }
+/* Return a copy of the analysis with corrections applied to per-set reps and the derived totals
+   (nReps, avgRepsPerSet), leaving D itself untouched. Sub-renderers (signature, Spotter Cam, coach)
+   take this copy so every surface shows the same, corrected reps. Returns D unchanged when there are
+   no corrections. */
+function liftApplyRepCorr(D) {
+  const corr = liftRepsCorr(D.key || '');
+  if (!corr.some(v => v != null)) return D;
+  const sets = (D.strength.sets || []).map((s, i) => corr[i] != null ? { ...s, reps: corr[i], repSource: 'manual' } : s);
+  const nReps = sets.reduce((a, s) => a + s.reps, 0);
+  const summary = { ...D.summary, nReps, avgRepsPerSet: sets.length ? +(nReps / sets.length).toFixed(1) : 0 };
+  return { ...D, strength: { ...D.strength, sets }, summary };
+}
+function onLiftReps(i, val) {
+  const key = _liftD.key || '';
+  const corr = liftRepsCorr(key);
+  const s = String(val == null ? '' : val).trim();
+  const v = s === '' ? null : Math.max(0, Math.round(+s));
+  corr[i] = (v == null || isNaN(v)) ? null : v;   // null = cleared -> fall back to the auto count
+  try { localStorage.setItem('loam.liftReps.' + key, JSON.stringify(corr)); } catch (e) { /* private mode / quota; still applies this render */ }
+  renderStrength(_liftD);   // full re-render so cards, tiles, table, signature, Spotter Cam and coach all agree
 }
 
 /* ---- Spotter Cam: the form animation. The chosen character squats through the selected set, driven
@@ -7812,8 +7890,12 @@ function liftCoachRead(D) {
    so no map/turns/jumps. Bar position + depth come from the lifter's taps; reps/tempo/ROM/bar-speed
    from the wrist. */
 function renderStrength(D) {
-  _liftD = D;
-  const sum = D.summary, sets = D.strength.sets;
+  _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
+  const Dc = liftApplyRepCorr(D);           // corrections layered on: every surface below renders from Dc
+  _liftDc = Dc;
+  const corr = liftRepsCorr(D.key || '');
+  const autoSets = D.strength.sets;         // raw per-set counts, for the corrected-value tooltip
+  const sum = Dc.summary, sets = Dc.strength.sets;
   const weights = liftWeightsKg(D.key || '');
   const volKg = sets.reduce((s, set, i) => s + (weights[i] != null ? weights[i] * set.reps : 0), 0);
   const HIGH = '#37c6b5', LOW = '#f0954f', UNC = '#9aa0aa';
@@ -7826,7 +7908,7 @@ function renderStrength(D) {
     const col = barColor(s.barPosition);
     const bs = barSpd(s);
     return `<div class="setblock" style="border-top:4px solid ${col}">
-      <div class="setblock-n">SET ${i + 1}</div>
+      <div class="setblock-n">SET ${i + 1}${corr[i] != null ? ' <span class="setblock-edit" title="Rep count corrected by you">edited</span>' : ''}</div>
       <div class="setblock-reps">${s.reps}<span>reps</span></div>
       <div class="setblock-bar" style="color:${col}">${(s.barPosition === 'uncertain' || s.barPosition == null) ? '? bar' : s.barPosition + ' bar'}</div>
       <div class="setblock-depth">${depthIcon(s.depthTarget)} ${s.depthTarget || 'depth ?'}</div>
@@ -7861,7 +7943,8 @@ function renderStrength(D) {
   const rows = sets.map((s, i) => {
     const bs = barSpd(s);
     return `<tr>
-      <td>${i + 1}</td><td>${s.reps}</td>
+      <td>${i + 1}</td>
+      <td><input class="rep-in${corr[i] != null ? ' rep-corr' : ''}" type="number" inputmode="numeric" min="0" step="1" value="${s.reps}" title="${corr[i] != null ? 'Corrected by you (auto counted ' + autoSets[i].reps + '). Clear the field to reset to the counter.' : 'Auto rep count. Edit to correct a miscount; clear to reset.'}" onchange="onLiftReps(${i}, this.value)"></td>
       <td><input class="wt-in" type="number" inputmode="decimal" min="0" step="any" value="${weights[i] != null ? kgToDisp(weights[i]) : ''}" placeholder="—" onchange="onLiftWeight(${i}, this.value)"></td>
       <td style="color:${barColor(s.barPosition)};text-transform:capitalize">${s.barPosition || '—'}</td>
       <td style="text-transform:capitalize">${s.depthTarget || '—'}</td>
@@ -7874,7 +7957,7 @@ function renderStrength(D) {
   const hasBar = sets.some(s => s.barPosition === 'high' || s.barPosition === 'low');
   const barArc = sets.map(s => (s.barPosition === 'uncertain' || s.barPosition == null) ? '?' : s.barPosition[0].toUpperCase()).join(' → ');
 
-  const readCards = liftCoachRead(D).map(c => `<div class="lc-card"><div class="lc-head">${escapeHtml(c.head)}</div><div class="lc-body">${escapeHtml(c.body)}</div></div>`).join('');
+  const readCards = liftCoachRead(Dc).map(c => `<div class="lc-card"><div class="lc-head">${escapeHtml(c.head)}</div><div class="lc-body">${escapeHtml(c.body)}</div></div>`).join('');
 
   document.getElementById('strengthResults').innerHTML = `
     <div class="section-title">Lift <span class="beta-badge">BETA</span> <span class="subtitle">${D.title || ''}</span></div>
@@ -7906,14 +7989,15 @@ function renderStrength(D) {
     </div>
     <div class="panel" style="padding:6px 12px;overflow-x:auto">
       <table class="strength-table"><thead><tr>
-        <th>Set</th><th>Reps</th><th>Weight (${liftUnit()})</th><th>Bar</th><th>Depth</th><th>Tempo</th><th title="Bar range of motion">ROM</th><th>Bar m/s</th><th>Miss</th>
+        <th>Set</th><th title="Auto-counted from wrist motion; edit any cell to correct a miscount">Reps <span class="th-hint">edit</span></th><th>Weight (${liftUnit()})</th><th>Bar</th><th>Depth</th><th>Tempo</th><th title="Bar range of motion">ROM</th><th>Bar m/s</th><th>Miss</th>
       </tr></thead><tbody>${rows}</tbody></table>
+      <div class="strength-tablenote">Counter off? Edit a set's <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.</div>
     </div>
     <div class="strength-caveat"><strong>Beta:</strong> lift analysis is validated on synthetic sessions only, not yet against a ground-truth recording, so treat rep counts, depth, bar position and bar speed as estimates. Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}The rep counter keys on vertical wrist travel, so support depends on the lift: squat and deadlift count reliably (checked against real sessions); overhead press counts cleanly but is unproven; standalone curls are noisier; bench press undercounts by about half; chin-ups and pull-ups do not count at all (the wrist is the anchor and never travels). Very slow near-max grinds can drop below the counting gate on any lift. Lift type is never auto-detected: it comes from your lift-chip taps, and a set without one is analyzed as a squat (high/low bar and depth are squat-only reads). A lift is stationary, so there is no GPS map, turns, or jumps.</div>
   `;
-  renderLiftSignature(D);
-  renderLiftForm(D);
-  renderCoachPanel(D, 'lift');
+  renderLiftSignature(Dc);
+  renderLiftForm(Dc);
+  renderCoachPanel(Dc, 'lift');
 }
 
 /* Module-level state for the descent-section interactions (tag, compare). */
@@ -9572,7 +9656,15 @@ function runningHighlights(D) {
     const big = climbs.slice().sort((a, b) => (b.gain || 0) - (a.gain || 0))[0];
     c.push(`<strong>${climbs.length} climb${climbs.length > 1 ? 's' : ''}</strong>, biggest ${U.elev(big.gain)} at ${big.avgGrade.toFixed(0)}%${big.vam ? ` (VAM ${Math.round(U.smallNum(big.vam))} ${U.smallUnit()}/h)` : ''}.`);
   }
-  if (s.oscMedian != null) c.push(`Vertical oscillation about <strong>${s.oscMedian.toFixed(1)} cm</strong> (head-bob proxy for hip motion).`);
+  /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
+     Match the stats card and params bar: prefix ~, mute the number, and caption "upper bound" instead
+     of asserting a bare figure here. */
+  if (s.oscMedian != null) {
+    const oscHand = !!(D.running && D.running.mount === 'hand');
+    c.push(oscHand
+      ? `Vertical oscillation up to <strong style="color:var(--text-muted);">~${s.oscMedian.toFixed(1)} cm</strong> (hand-carry upper bound, arm swing inflates it).`
+      : `Vertical oscillation about <strong>${s.oscMedian.toFixed(1)} cm</strong> (head-bob proxy for hip motion).`);
+  }
   if (s.altGain != null) c.push(`${U.elev(s.altGain)} climbed${s.altLoss != null ? ', ' + U.elev(s.altLoss) + ' descended' : ''}.`);
   return c.slice(0, 3);
 }
@@ -9871,6 +9963,7 @@ function buildDigest(D, sport) {
         grade_pct: r1(seg.gradeAvg), cadence_spm: r1(seg.cadAvg, 0), oscillation_cm: r1(seg.oscAvg)
       })),
       data_caveats: 'Cadence and oscillation are derived from AirPods/phone IMU; oscillation is head bob (a proxy for hip vertical motion). Phone mount detected as "' + run.mount + '" (confidence ' + r1(run.mountConfidence, 2) + ').'
+        + (run.mount === 'hand' ? ' The phone was HAND-CARRIED, so vertical_oscillation_cm is inflated by arm swing and is an UPPER BOUND, not a measurement; do not coach oscillation targets or read the number as real hip motion.' : '')
         + (sport === 'walking' ? ' This is a WALK: cadence is walking step rate (typical 100-120 spm); do not coach running form, pace zones, or oscillation targets.' : '')
     };
   }
@@ -12898,6 +12991,13 @@ function renderCachedAnalysis(cached) {
      every field it reads and crash the reopen. Those fall through to the IMU renderer below. */
   if (d && d.sport === 'road' && d.session) { renderAllRoad(d); return; }
   if (cached.sport === 'running' || cached.sport === 'walking') { renderAllRunning(d); return; }
+  /* A lift has none of the MTB render fields (turns/yawSeg/R), so it must route to renderStrength, which
+     unlike the other renderers does not manage its own section visibility. Set up the strength section
+     here exactly as the analyze() lift branch does before rendering. */
+  if (cached.sport === 'weightlifting' || cached.sport === 'strength') {
+    hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
+    renderStrength(d); return;
+  }
   renderAll(d);
 }
 
@@ -12906,6 +13006,7 @@ function cachedSportNoun(cached) {
   const d = cached.data;
   if (d && d.gpsOnly) return d.gpsSport === 'run' ? 'run' : d.gpsSport === 'walk' ? 'walk' : 'ride';
   if (d && d.sport === 'road' && d.session) return 'road ride';
+  if (cached.sport === 'weightlifting' || cached.sport === 'strength') return 'lift';
   return cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride';
 }
 
@@ -13534,7 +13635,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '085b6c5 · 2026-07-15';
+const LOAM_BUILD = 'd0ff37a · 2026-07-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
