@@ -433,6 +433,12 @@
     font-family: 'JetBrains Mono', monospace; font-size: 10px;
     color: var(--text-muted); font-weight: 400; text-transform: uppercase; letter-spacing: 0.15em;
   }
+  /* "smooth" checkbox tucked into a chart's subtitle; normal-case and clickable, unlike the caption. */
+  .section-title .subtitle .smooth-lbl {
+    text-transform: none; letter-spacing: normal; color: var(--text-dim);
+    margin-left: 10px; cursor: pointer; white-space: nowrap;
+  }
+  .section-title .subtitle .smooth-lbl input { vertical-align: -1px; margin-right: 3px; cursor: pointer; }
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; box-shadow: 0 1px 3px rgba(15,23,42,0.05); }
 
   /* Quick-nav: a sticky chip row that jumps to each visible section, so features (the lap
@@ -1179,7 +1185,9 @@
   <section id="runCadenceSection" class="hidden">
     <div class="section-title">
       Cadence
-      <span class="subtitle">10s windows · FFT peak on |accel| (rotation-invariant)</span>
+      <span class="subtitle">10s windows · FFT peak on |accel| (rotation-invariant)
+        <label class="smooth-lbl" title="Rolling median that suppresses the spikes from stops; also smooths oscillation and pace"><input type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> smooth</label>
+      </span>
     </div>
     <div class="chart" id="runCadenceChart" style="height:260px;"></div>
   </section>
@@ -1187,7 +1195,9 @@
   <section id="runOscSection" class="hidden">
     <div class="section-title">
       Vertical oscillation
-      <span class="subtitle">accel projected onto gravity · amplitude at cadence frequency</span>
+      <span class="subtitle">accel projected onto gravity · amplitude at cadence frequency
+        <label class="smooth-lbl" title="Rolling median that suppresses the spikes from stops; also smooths cadence and pace"><input type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> smooth</label>
+      </span>
     </div>
     <div class="chart" id="runOscChart" style="height:260px;"></div>
   </section>
@@ -8880,6 +8890,35 @@ function renderDescentComparison(D) {
    iOS Settings tab), else imperial. */
 function loamUnits() { return localStorage.getItem('loam_units') || (typeof window !== 'undefined' && window.LOAM_UNITS) || 'imperial'; }
 function setLoamUnits(u) { try { localStorage.setItem('loam_units', u); } catch (e) { /* private mode / quota; the toggle still applies for this page */ } }
+/* Chart smoothing for the noisy running metrics (cadence, vertical oscillation, pace). A centered
+   rolling median suppresses the spikes that a stop or a low-confidence window throws off, so the shape
+   over distance is readable without those outliers. Default on (the complaint is the noise); the raw
+   series stays faintly visible underneath and the per-section "smooth" toggle reveals raw-only. */
+function loamSmooth() { const v = localStorage.getItem('loam_smooth'); return v == null ? true : v === '1'; }
+function setLoamSmooth(on) { try { localStorage.setItem('loam_smooth', on ? '1' : '0'); } catch (e) { /* private mode / quota */ } }
+/* Centered rolling median over `win` points (ignoring null entries in the window, so masked stops /
+   junk simply do not contribute). A window with no valid point yields null, i.e. a gap in the line,
+   which is honest about where the metric dropped out rather than bridging across a stop. */
+function rollingMedianMasked(vals, win) {
+  const half = Math.floor(win / 2), out = new Array(vals.length).fill(null);
+  for (let i = 0; i < vals.length; i++) {
+    const w = [];
+    for (let j = Math.max(0, i - half); j <= Math.min(vals.length - 1, i + half); j++) {
+      const v = vals[j];
+      if (v != null && !isNaN(v)) w.push(v);
+    }
+    if (!w.length) continue;
+    w.sort((a, b) => a - b);
+    const mid = w.length >> 1;
+    out[i] = (w.length & 1) ? w[mid] : (w[mid - 1] + w[mid]) / 2;
+  }
+  return out;
+}
+/* The per-section "smooth" checkboxes all drive one shared preference; flipping either re-renders the
+   whole view (same path the units toggle uses) so cadence, oscillation, and the pace timeline update
+   together. syncSmoothToggles mirrors the stored preference back onto every checkbox on each render. */
+function onSmoothToggle(el) { setLoamSmooth(el.checked); rerenderUnits(); }
+function syncSmoothToggles() { document.querySelectorAll('.smoothToggle').forEach(cb => { cb.checked = loamSmooth(); }); }
 /* MTB calibration-window strategy. 'preride' (default) calibrates from the last sufficiently-still
    window before the ride, i.e. your final mount pose, which is more reliable when the phone moves
    between calibration and riding (pocket then backpack). 'quietest' is the original global-minimum-
@@ -9090,14 +9129,37 @@ function renderRunMap(loc, ride, segments) {
 
 function renderRunTimeline(D) {
   /* Speed + grade timeline with descent/climb segments shaded. */
+  syncSmoothToggles();
+  const smooth = loamSmooth();
   const ride = D.ride;
   const loc = D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end);
   const t = loc.map(r => r.t - ride.start);
-  /* Speed and altitude follow the Units toggle (they used to hardcode mph and meters). */
-  const speedY = loc.map(r => U.speedNum(r.speed));
-  const traces = [
-    { x: t, y: speedY, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.5 }, name: `Speed (${U.speedUnit()})`, yaxis: 'y' }
-  ];
+  /* Foot activities read in pace (min/mi or /km), not riding speed; bikes keep speed. */
+  const footSport = D.sport === 'running' || D.sport === 'walking' || D.gpsSport === 'run' || D.gpsSport === 'walk';
+  const traces = [];
+  if (footSport) {
+    /* Pace = time per distance. It blows up as speed approaches zero, so below the 1.0 m/s moving gate
+       (the same gate the cadence/oscillation windows use) the point is dropped to a gap rather than a
+       spike to infinity. Axis is reversed so faster (lower pace) sits at the top, matching the old
+       speed trace's "up = faster" reading. */
+    const paceMin = (mps) => (mps != null && !isNaN(mps) && mps >= 1.0) ? (U.metric() ? 1000 / mps : 1609.34 / mps) / 60 : null;
+    const fmtPace = (p) => { if (p == null) return ''; const m = Math.floor(p), s = Math.round((p - m) * 60); return `${m}:${String(s).padStart(2, '0')} ${U.metric() ? '/km' : '/mi'}`; };
+    const paceY = loc.map(r => paceMin(r.speed));
+    traces.push({ x: t, y: paceY, type: 'scatter', mode: 'lines',
+      line: { color: '#6da7c4', width: smooth ? 1 : 1.5 }, opacity: smooth ? 0.4 : 1,
+      name: `Pace (${U.metric() ? 'min/km' : 'min/mi'})`, yaxis: 'y', connectgaps: false,
+      text: paceY.map(fmtPace), hovertemplate: '%{text}<extra></extra>', hoverinfo: smooth ? 'skip' : 'all' });
+    if (smooth) {
+      const sm = rollingMedianMasked(paceY, 15);
+      traces.push({ x: t, y: sm, type: 'scatter', mode: 'lines', line: { color: '#4a86a6', width: 2.5 },
+        name: 'Pace (median)', yaxis: 'y', connectgaps: false,
+        text: sm.map(fmtPace), hovertemplate: '%{text}<extra></extra>' });
+    }
+  } else {
+    /* Speed and altitude follow the Units toggle (they used to hardcode mph and meters). */
+    const speedY = loc.map(r => U.speedNum(r.speed));
+    traces.push({ x: t, y: speedY, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.5 }, name: `Speed (${U.speedUnit()})`, yaxis: 'y' });
+  }
   if (D.sensors.baro && D.sensors.baro.length) {
     const inB = D.sensors.baro.filter(r => r.t >= ride.start && r.t <= ride.end);
     const altRel = inB.map(r => r.relativeAltitude);
@@ -9147,7 +9209,10 @@ function renderRunTimeline(D) {
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 56, t: 32, b: 50 },
     xaxis: { title: { text: 'time in run (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' } },
+    /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
+    yaxis: footSport
+      ? { title: { text: `pace (${U.metric() ? 'min/km' : 'min/mi'})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' }, autorange: 'reversed' }
+      : { title: { text: `speed (${U.speedUnit()})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' } },
     yaxis2: { title: { text: `Δ alt (${U.smallUnit()})`, font: { color: '#d4a574', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#d4a574' } },
     showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
     shapes, annotations: annotationLabels, hovermode: 'x unified'
@@ -9165,25 +9230,39 @@ function renderRunCadence(cadSeries) {
     document.getElementById('runCadenceChart').innerHTML = '<div style="padding:40px; text-align:center; color:#475569;">No cadence detected (run too short or noisy?)</div>';
     return;
   }
+  syncSmoothToggles();
+  const smooth = loamSmooth();
   const t0 = cadSeries[0].t;
   const x = cadSeries.map(c => c.t - t0);
   const y = cadSeries.map(c => c.spm);
   const conf = cadSeries.map(c => c.conf);
+  /* Raw points: prominent when smoothing is off; faint markers under the median line when it is on. */
   const traces = [
-    { x, y, type: 'scatter', mode: 'lines+markers',
+    { x, y, type: 'scatter', mode: smooth ? 'markers' : 'lines+markers',
       line: { color: '#e87b3d', width: 2 },
-      marker: { color: conf.map(c => c > 0.15 ? '#e87b3d' : '#94a3b8'), size: 6 },
-      name: 'Cadence (SPM)' }
+      marker: { color: conf.map(c => c > 0.15 ? (smooth ? 'rgba(232,123,61,0.28)' : '#e87b3d')
+                                              : (smooth ? 'rgba(148,163,184,0.28)' : '#94a3b8')), size: smooth ? 4 : 6 },
+      name: 'Cadence (SPM)', hoverinfo: smooth ? 'skip' : 'all' }
   ];
+  if (smooth) {
+    /* Mask the low-confidence windows (the stop / junk spikes) out of the median so the smoothed line
+       tracks real cadence and simply gaps across a stop instead of diving to it. */
+    const masked = cadSeries.map(c => c.conf > 0.15 ? c.spm : null);
+    const sm = rollingMedianMasked(masked, 11);
+    traces.push({ x, y: sm, type: 'scatter', mode: 'lines', line: { color: '#e87b3d', width: 3 },
+      name: 'Cadence (median)', connectgaps: false });
+  }
+  /* Range hugs real cadence (running ~150-190, walking ~100-120): base it on the confident windows so
+     the stop spikes do not blow out the axis, with the old [140,200] floor preserved. */
+  const yReal = cadSeries.filter(c => c.conf > 0.15).map(c => c.spm);
+  const yRange = yReal.length ? yReal : y;
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 24, t: 24, b: 44 },
     xaxis: { title: { text: 'time (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    /* Range hugs the data: running sits ~150-190, walking ~100-120; a fixed [140,200] cropped
-       walk cadence out of view entirely. */
     yaxis: { title: { text: 'cadence (SPM)', font: { size: 11 } }, gridcolor: '#e2e8f0',
-             range: [Math.min(140, Math.floor(Math.min(...y) - 10)), Math.max(200, Math.ceil(Math.max(...y) + 10))] },
+             range: [Math.min(140, Math.floor(Math.min(...yRange) - 10)), Math.max(200, Math.ceil(Math.max(...yRange) + 10))] },
     showlegend: false, hovermode: 'x unified'
   };
   loamPlot('runCadenceChart', traces, layout, PLOT_CFG);
@@ -9192,14 +9271,24 @@ function renderRunCadence(cadSeries) {
 function renderRunOsc(oscSeries) {
   if (!oscSeries.length) { hide('runOscSection'); return; }
   show('runOscSection');
+  syncSmoothToggles();
+  const smooth = loamSmooth();
   const t0 = oscSeries[0].t;
   const x = oscSeries.map(o => o.t - t0);
   const y = oscSeries.map(o => o.oscCm);
   const traces = [
-    { x, y, type: 'scatter', mode: 'lines+markers',
-      line: { color: '#8caa6d', width: 2 }, marker: { size: 6 },
-      name: 'Vertical oscillation (cm)' }
+    { x, y, type: 'scatter', mode: smooth ? 'markers' : 'lines+markers',
+      line: { color: '#8caa6d', width: 2 },
+      marker: { color: smooth ? 'rgba(140,170,109,0.30)' : '#8caa6d', size: smooth ? 4 : 6 },
+      name: 'Vertical oscillation (cm)', hoverinfo: smooth ? 'skip' : 'all' }
   ];
+  if (smooth) {
+    /* oscSeries already carries only moving, confident windows, so no masking is needed; the median
+       just tames the stride-to-stride noise the screenshot shows growing over distance. */
+    const sm = rollingMedianMasked(y, 11);
+    traces.push({ x, y: sm, type: 'scatter', mode: 'lines', line: { color: '#6f8f4f', width: 3 },
+      name: 'Oscillation (median)', connectgaps: false });
+  }
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
@@ -13444,7 +13533,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '5cda693 · 2026-07-15';
+const LOAM_BUILD = 'a00fd01 · 2026-07-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
