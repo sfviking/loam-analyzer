@@ -6182,12 +6182,20 @@ async function analyze(files) {
        must NOT vary by calibration strategy). cacheKey is the analysis-cache key: contentHash plus a
        strategy suffix, with the default 'quietest' suffix left empty so prior cache entries still hit. */
     const calibStrategy = loamCalibStrategy();
+    /* The declared sport (host LOAM_SPORT or the on-page selector) changes the whole analysis, so it is
+       part of the cache key. Without it, re-tagging a session's sport replays the stale render for the
+       old sport: a walk that auto-detected as a bike, then re-tagged to Walking, would keep showing the
+       ride because the cache check below runs before the sport override is read. Empty / 'auto' adds no
+       suffix, so existing auto-detected cache entries still hit. */
+    const declaredSportKey = ((typeof window !== 'undefined' && window.LOAM_SPORT)
+      || (document.getElementById('sportOverride') && document.getElementById('sportOverride').value) || '').toLowerCase();
+    const sportSuffix = (declaredSportKey && declaredSportKey !== 'auto') ? ':sport=' + declaredSportKey : '';
     let cacheKey = null, contentHash = null;
     if (!fitFile && /\.csv$/i.test(sensorFile.name)) {
       try { contentHash = await analysisCacheKeyForFile(sensorFile); }
       catch (e) { console.warn('analysis cache: hashing failed', e); contentHash = null; }
       if (superseded()) return;
-      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy));
+      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix);
       _currentRunKey = contentHash;
       if (cacheKey) {
         try {
@@ -7385,6 +7393,10 @@ function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
   const L = { foot: 46, shank: 96, thigh: 96, torso: 120, neck: 16, headR: 16 };
   const R = Math.PI / 180, frac = barPos === 'low' ? 0.17 : 0.05, BARBACK = 15;
   const isDL = lift === 'deadlift';
+  // 'upright' (a lift with no dedicated pose) and the deadlift both hold the bar in the hands rather
+  // than racked behind the shoulders; upright adds no descent (thighDeg stays 0), so it reads as a
+  // plain standing hold.
+  const barInHands = isDL || lift === 'upright';
   const shinDeg = Math.min(22, thighDeg * 0.24);       // shin forward lean, capped so the knee stays near the toe
   // A deadlift is a hip hinge: the torso folds much more steeply with the pull than a squat's stays-tall
   // descent, so lean couples harder to the thigh angle and the torso is near-vertical at lockout.
@@ -7398,14 +7410,14 @@ function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
   // Squat/press: bar rides behind the shoulders (back rack). Deadlift: bar hangs in the hands, so it is
   // straight below the shoulders (the arms hang vertical) and traces up the legs as the lifter stands.
   let bar;
-  if (isDL) {
-    bar = { x: shoulder.x, y: shoulder.y - L.torso * 0.85 };   // arms hang straight; bar rides knee->thigh through the pull
+  if (barInHands) {
+    bar = { x: shoulder.x, y: shoulder.y - L.torso * 0.85 };   // arms hang straight; bar in the hands
   } else {
     const bbase = { x: shoulder.x - frac * L.torso * td.x, y: shoulder.y - frac * L.torso * td.y };
     const nrm = { x: -td.y, y: td.x };
     bar = { x: bbase.x + BARBACK * nrm.x, y: bbase.y + BARBACK * nrm.y };
   }
-  return { ankle, knee, hip, shoulder, head, bar, td, headR: L.headR, foot: L.foot, deadlift: isDL };
+  return { ankle, knee, hip, shoulder, head, bar, td, headR: L.headR, foot: L.foot, deadlift: isDL, barInHands };
 }
 
 /* Draw one character at one pose using a fixed transform `tf` ({T, sc}). Returns { markup, bar } with
@@ -7439,7 +7451,7 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf) {
   // front arm; the elbow point is a fixed offset off the shoulder so it stays believable at any depth.
   // Squat/press: the arm bends at the elbow back to the bar on the traps. Deadlift: the arm hangs
   // straight (bar in the hands), so the "elbow" sits on the shoulder->bar line and the arm reads straight.
-  const elbow = s.deadlift ? { x: (Sh.x + Ba.x) / 2, y: (Sh.y + Ba.y) / 2 } : { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc };
+  const elbow = s.barInHands ? { x: (Sh.x + Ba.x) / 2, y: (Sh.y + Ba.y) / 2 } : { x: Sh.x - 16 * sc, y: Sh.y + 34 * sc };
   const armW = lw * 0.6;
   if (c.line) {
     const glow = c.neon || c.skin;
@@ -7607,12 +7619,15 @@ function onLiftWeight(i, val) {
    is solved bar-over-midfoot by liftSkeleton, so the pose is mechanically honest, not a canned loop. ---- */
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', trail: [], ghosts: [] };
 function liftFormCharKey() { return localStorage.getItem('loam.liftChar') || 'cleaner'; }
-function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
-function liftLeanDeg(set) { if (set.lift === 'deadlift') return 6; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
+/* A lift with no dedicated pose (anything explicitly tapped that is not squat or deadlift: press,
+   bench, curl, row, ...) is drawn as a neutral upright standing hold, not a misleading squat: no
+   descent (dmax 0), a small upright lean, and the bar in the hands. An unlabeled set stays a squat
+   (the analyzer's default). Squat and deadlift keep their real, fact-driven poses. */
+function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift'; }
+function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
+function liftLeanDeg(set) { if (set.lift === 'deadlift') return 6; if (liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
-/* The animation models a squat by default and a hip hinge for a deadlift (bar in the hands). Press,
-   bench and curls have no dedicated pose yet, so they fall back to the squat body as an approximation. */
-function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : 'squat'; }
+function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
 
 function liftFormFrame(ts) {
   const st = _liftForm;
@@ -7713,10 +7728,10 @@ function renderLiftForm(D) {
   liftFormStart();
 }
 /* Honest per-lift caption: squat and deadlift have real poses (squat descent, hip hinge with the bar in
-   hand); press/bench/curl have no dedicated pose yet, so the body is shown as a squat approximation. */
+   hand); press/bench/curl have no dedicated pose yet, so the body is shown as a neutral standing hold. */
 function liftFormNoteFor(set) {
   if (set.lift === 'deadlift') return 'Deadlift: hip hinge with the bar in your hands. Depth, lean, and tempo are your set\'s real numbers.';
-  if (set.lift && set.lift !== 'squat') return `${set.lift[0].toUpperCase() + set.lift.slice(1)}: form view approximates a squat for now (no dedicated pose yet). Reps and tempo are your set's real numbers.`;
+  if (liftFormNoPose(set)) return `${set.lift[0].toUpperCase() + set.lift.slice(1)}: no dedicated form view yet, so this is a neutral standing hold, not the real ${set.lift} motion. Your reps and tempo are the real numbers.`;
   return 'Depth, lean, and tempo are your set\'s real numbers; the bar tracks over midfoot.';
 }
 
@@ -13409,7 +13424,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'f1750b7 · 2026-07-14';
+const LOAM_BUILD = 'a38079d · 2026-07-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
