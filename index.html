@@ -882,6 +882,31 @@
 
 <div id="errorBox" class="error hidden"></div>
 
+<div id="miniSummary" class="hidden">
+  <div class="mini-head">
+    <div class="mini-badge">Recording summary</div>
+    <h2 class="mini-title">Too short for full analysis</h2>
+    <p class="mini-sub" id="miniSummaryNote"></p>
+  </div>
+  <div class="mini-stats" id="miniSummaryStats"></div>
+  <div class="mini-map" id="miniSummaryMap"></div>
+  <p class="mini-foot">Full metrics (cadence, turns, climbs) need a longer stretch of steady movement. Try a few minutes of continuous walking or riding, phone in a pocket.</p>
+</div>
+<style>
+  #miniSummary { max-width: 720px; margin: 0 auto; padding: 24px 20px 48px; }
+  .mini-head { text-align: center; margin-bottom: 18px; }
+  .mini-badge { display: inline-block; font: 600 11px 'JetBrains Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted, #94a3b8); }
+  .mini-title { font-size: 22px; font-weight: 700; margin: 6px 0 4px; color: var(--text, #1a202c); }
+  .mini-sub { font-size: 13px; color: var(--text-dim, #64748b); margin: 0; }
+  .mini-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+  .mini-stat { background: var(--surface-2, #eef2f6); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; padding: 14px 8px; text-align: center; }
+  .mini-stat-v { font-size: 24px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; color: var(--text, #1a202c); }
+  .mini-stat-l { font: 600 10px 'JetBrains Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted, #94a3b8); margin-top: 6px; }
+  .mini-map { height: 340px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border, #e2e8f0); position: relative; }
+  .mini-foot { font-size: 12px; color: var(--text-muted, #94a3b8); text-align: center; margin-top: 14px; }
+  @media (max-width: 520px) { .mini-stat-v { font-size: 19px; } }
+</style>
+
 <div id="strengthResults" class="hidden"></div>
 <style>
   #strengthResults { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
@@ -6201,6 +6226,68 @@ function computeStrengthSummary(sensors, ride, R) {
   return { parseSetMarks, analyzeStrength, classifyBarPositions, estimateConcentricVelocity, countRepsWrist, computeStrengthSummary };
 })();
 
+/* Graceful fallback for a recording too short or too slow to yield a moving window (a quick walk
+   around the block, an indoor shuffle): rather than a hard "could not detect a moving window" error,
+   show duration, GPS distance, and average speed over a map of the track. Only reached when there are
+   >= 2 positioned GPS rows; a genuinely empty recording still errors. Keeps the full-analysis path
+   untouched, so a real ride/run/walk is unaffected. */
+let _miniSummaryMap = null;
+function renderMinimalSummary(sensors, span, positioned) {
+  hide('loading'); hide('errorBox'); hide('dropzone'); hide('results');
+  hide('crossResults'); hide('progressResults'); hide('strengthResults');
+  show('miniSummary');
+  setStatus('Ready');
+
+  const dur = Math.max(0, span.end - span.start);
+  let dist = 0;
+  for (let i = 1; i < positioned.length; i++)
+    dist += haversineMeters(positioned[i-1].latitude, positioned[i-1].longitude,
+                            positioned[i].latitude, positioned[i].longitude);
+  const speed = dur > 0 ? dist / dur : 0;   // m/s, straight path-length average
+  const metric = loamUnits() === 'metric';
+
+  const distStr = metric
+    ? (dist >= 1000 ? (dist / 1000).toFixed(2) + ' km' : Math.round(dist) + ' m')
+    : (dist >= 1609.34 ? (dist / 1609.34).toFixed(2) + ' mi' : Math.round(dist * 3.28084) + ' ft');
+  const speedStr = metric
+    ? (speed * 3.6).toFixed(1) + ' km/h'
+    : (speed * 2.23694).toFixed(1) + ' mph';
+
+  const note = document.getElementById('miniSummaryNote');
+  if (note) note.textContent = 'We could not find a sustained moving stretch, but here is what was captured.';
+  const stats = document.getElementById('miniSummaryStats');
+  if (stats) {
+    const tile = (v, l) => `<div class="mini-stat"><div class="mini-stat-v">${v}</div><div class="mini-stat-l">${l}</div></div>`;
+    stats.innerHTML = tile(fmtDuration(dur), 'Duration') + tile(distStr, 'Distance') + tile(speedStr, 'Avg speed');
+  }
+
+  /* Draw the GPS track on its own Leaflet map (self-contained, like paintDeltaMap): fresh instance
+     each render, basemap, a casing + line polyline, fit to the track. invalidateSize after show since
+     the container was hidden when the map was built. */
+  const el = document.getElementById('miniSummaryMap');
+  if (el && typeof L !== 'undefined') {
+    if (_miniSummaryMap) { try { _miniSummaryMap.remove(); } catch (e) {} _miniSummaryMap = null; }
+    el.innerHTML = '';
+    try {
+      const map = L.map(el, { zoomControl: true, attributionControl: true });
+      _miniSummaryMap = map;
+      addBasemap(map);
+      const track = positioned.map(r => [r.latitude, r.longitude]);
+      if (track.length > 1) {
+        L.polyline(track, { color: '#0a0d07', weight: 5, opacity: 0.35 }).addTo(map);
+        L.polyline(track, { color: '#ffffff', weight: 2, opacity: 0.7 }).addTo(map);
+      }
+      L.circleMarker(track[0], { radius: 6, color: '#0a0d07', weight: 1, fillColor: '#16a34a', fillOpacity: 0.95 }).addTo(map).bindTooltip('Start', { direction: 'top' });
+      L.circleMarker(track[track.length-1], { radius: 6, color: '#0a0d07', weight: 1, fillColor: '#dc2626', fillOpacity: 0.95 }).addTo(map).bindTooltip('End', { direction: 'top' });
+      map.fitBounds(track, { padding: [40, 40] });
+      setTimeout(() => { try { map.invalidateSize(); map.fitBounds(track, { padding: [40, 40] }); } catch (e) {} }, 0);
+    } catch (e) {
+      console.warn('minimal summary map failed', e);
+      el.innerHTML = '<div style="padding:24px; color:var(--text-muted); font-size:12px;">Map unavailable.</div>';
+    }
+  }
+}
+
 async function analyze(files) {
   const gen = ++_analyzeGen;
   const superseded = () => gen !== _analyzeGen;
@@ -6211,7 +6298,7 @@ async function analyze(files) {
      backup (one ride or many) analyzes the sessions inside it instead of one empty "no moving window"
      ride. Show the loader first since reading a large backup takes a moment. */
   if (files.some(f => /\.zip$/i.test(f.name))) {
-    show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults');
+    show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary');
     document.getElementById('loadingText').textContent = 'reading archive';
     try { files = await explodeBackupZips(files, (m) => { document.getElementById('loadingText').textContent = m; }); }
     catch (e) { console.warn('backup explode failed', e); }
@@ -6222,7 +6309,7 @@ async function analyze(files) {
   if (sensorFiles.length >= 2) return analyzeMulti(sensorFiles);
   _currentRunKey = null;
 
-  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults');
+  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary');
   setStatus('Loading');
   const onProgress = (msg) => { document.getElementById('loadingText').textContent = msg; };
 
@@ -6331,7 +6418,14 @@ async function analyze(files) {
         throw new Error('No GPS in this recording. If it was a lift, pick Weightlifting (or tap Start set during the set) so it analyzes as a stationary session.');
       onProgress('detecting active window');
       ride = detectRidingWindow(sensors.location);
-      if (ride.start == null || ride.end == null) throw new Error('Could not detect a moving window in GPS data');
+      if (ride.start == null || ride.end == null) {
+        // Too short / too slow for a moving window, but we still have a GPS track. Show a minimal
+        // summary (duration, distance, avg speed, map) instead of a hard error, so a quick walk
+        // around the block shows something. Only error when there is not even enough GPS to map.
+        const positioned = sensors.location.filter(r => r.latitude != null && r.longitude != null);
+        if (positioned.length >= 2) { renderMinimalSummary(sensors, spanRide, positioned); return; }
+        throw new Error('Could not detect a moving window in GPS data');
+      }
     }
 
     onProgress('detecting sport');
@@ -6726,7 +6820,7 @@ function median(arr) {
 async function analyzeMulti(sensorFiles) {
   const gen = ++_analyzeGen;
   const superseded = () => gen !== _analyzeGen;
-  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults');
+  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary');
   setStatus('Loading');
   const onProgress = (msg) => { document.getElementById('loadingText').textContent = msg; };
 
@@ -13680,7 +13774,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '0ef0670 · 2026-07-15';
+const LOAM_BUILD = 'e9c3e4a · 2026-07-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
