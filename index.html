@@ -940,6 +940,8 @@
   .rep-set-head .rep-fade { color: #f0954f; }
   .rep-bars { display: block; width: 100%; height: 40px; }
   .rep-depths { font: 400 10px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); margin-top: 7px; font-variant-numeric: tabular-nums; }
+  .rep-tempo { font: 400 10px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .rep-tempo .rt-ecc { color: #6ab0f0; } .rep-tempo .rt-con { color: #37c6b5; }
   .strength-caveat { font-size: 12px; color: var(--text-dim, #9aa0aa); margin-top: 16px; max-width: 82ch; line-height: 1.6; }
   /* Supported-lift scope + labeling requirement, up top where the caveat at the bottom never lands.
      Amber-bordered like the beta badge so it reads as the view's honesty banner, not an error. */
@@ -5935,10 +5937,14 @@ function countRepsWrist(wrist, tStart, tEnd) {
   const vs = movAvg(v.map((x, i) => x - vBias[i]), Math.round(0.5 * WRIST_FS));
   /* Amplitude-gated velocity cycle: descent -> drive up = one rep. */
   const reps = [];
-  let state = 'idle', vMin = 0, tBottom = 0, romAcc = 0, upSum = 0, upN = 0;
+  let state = 'idle', vMin = 0, tBottom = 0, tDown = 0, romAcc = 0, upSum = 0, upN = 0;
+  /* Eccentric (lowering) time = descent start -> bottom; concentric (drive) time = bottom -> end of the
+     up phase. Both come free from the same state machine, so a set's tempo splits into down / up. */
+  const mkRep = (tEnd) => ({ t: tBottom, rom: romAcc, cv: upN ? upSum / upN : 0, amp: -vMin,
+    eccS: +Math.max(0, tBottom - tDown).toFixed(2), conS: +Math.max(0, tEnd - tBottom).toFixed(2) });
   for (let i = 0; i < n; i++) {
     if (state === 'idle') {
-      if (vs[i] < -WRIST_VEL_THR) { state = 'down'; vMin = vs[i]; tBottom = tu[i]; romAcc = 0; upSum = 0; upN = 0; }
+      if (vs[i] < -WRIST_VEL_THR) { state = 'down'; vMin = vs[i]; tBottom = tu[i]; tDown = tu[i]; romAcc = 0; upSum = 0; upN = 0; }
     } else if (state === 'down') {
       if (vs[i] < 0) romAcc += -vs[i] * dt;        // integrate the descent distance
       if (vs[i] < vMin) { vMin = vs[i]; tBottom = tu[i]; }
@@ -5946,12 +5952,12 @@ function countRepsWrist(wrist, tStart, tEnd) {
     } else {
       if (vs[i] > 0) { upSum += vs[i]; upN++; }
       if (vs[i] < WRIST_VEL_THR) {
-        if (romAcc > WRIST_MIN_ROM_M) reps.push({ t: tBottom, rom: romAcc, cv: upN ? upSum / upN : 0, amp: -vMin });
+        if (romAcc > WRIST_MIN_ROM_M) reps.push(mkRep(tu[i]));
         state = 'idle';
       }
     }
   }
-  if (state === 'up' && romAcc > WRIST_MIN_ROM_M) reps.push({ t: tBottom, rom: romAcc, cv: upN ? upSum / upN : 0, amp: -vMin });
+  if (state === 'up' && romAcc > WRIST_MIN_ROM_M) reps.push(mkRep(tu[n - 1]));
   /* Merge bottoms closer than one squat rep (a bounce), keeping the deeper swing. */
   const merged = [];
   for (const rep of reps) {
@@ -5998,15 +6004,18 @@ function countRepsWrist(wrist, tStart, tEnd) {
     }
     if (cut >= 2 && cut < merged.length) merged.length = cut;
   }
-  if (!merged.length) return { reps: 0, repTimes: [], romMeters: null, concVelMps: null, perRep: [] };
+  if (!merged.length) return { reps: 0, repTimes: [], romMeters: null, concVelMps: null, perRep: [], eccS: null, conS: null };
   return {
     reps: merged.length,
     repTimes: merged.map(r => +r.t.toFixed(2)),
     romMeters: +median(merged.map(r => r.rom)).toFixed(2),
     concVelMps: +median(merged.map(r => r.cv)).toFixed(2),
-    // Per-rep concentric velocity (m/s) and bar ROM / depth (m), in rep order, for the per-rep
-    // breakdown and the velocity-loss read. Medians above stay the headline; this is the detail.
-    perRep: merged.map(r => ({ cvMps: +r.cv.toFixed(2), romMeters: +r.rom.toFixed(2) })),
+    // Median eccentric (lowering) and concentric (drive) time per rep, seconds — the tempo split.
+    eccS: +median(merged.map(r => r.eccS)).toFixed(2),
+    conS: +median(merged.map(r => r.conS)).toFixed(2),
+    // Per-rep concentric velocity (m/s), bar ROM / depth (m), and phase times (s), in rep order, for the
+    // per-rep breakdown, velocity-loss, and tempo-split reads. Medians above stay the headline.
+    perRep: merged.map(r => ({ cvMps: +r.cv.toFixed(2), romMeters: +r.rom.toFixed(2), eccS: r.eccS, conS: r.conS })),
   };
 }
 
@@ -6112,6 +6121,8 @@ function analyzeStrength(sensors, ride, opts = {}) {
       tempoS: periods.length ? +median(periods).toFixed(2) : null,
       romMeters: useWrist ? wristRes.romMeters : null,   // bar ROM (depth) in m, wrist only
       repDepthsM: useWrist ? (wristRes.perRep || []).map(r => r.romMeters) : [],   // per-rep bar ROM, wrist only
+      eccS: useWrist ? wristRes.eccS : null,   // median eccentric (lowering) time per rep, seconds
+      conS: useWrist ? wristRes.conS : null,   // median concentric (drive) time per rep, seconds
       flexionProxyDeg: +phone.ampDeg.toFixed(1),          // pocket-tilt depth proxy (secondary)
       headPitchDeg,
       barSpeed,
@@ -8082,10 +8093,13 @@ function renderStrength(D) {
       return `<rect x="${(k * bw + 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${col}"><title>rep ${k + 1}: ${f(v)} m/s${dcm}</title></rect>`;
     }).join('');
     const depStr = dep.length ? dep.map(d => (d * 100).toFixed(0)).join(' · ') + ' cm' : '';
+    const tempoStr = (s.eccS != null && s.conS != null)
+      ? `<div class="rep-tempo">tempo ≈ ${f(s.eccS, 1)}s <span class="rt-ecc">down</span> · ${f(s.conS, 1)}s <span class="rt-con">up</span></div>` : '';
     return `<div class="rep-set">
       <div class="rep-set-head">Set ${i + 1} · ${s.reps} reps${vloss >= 8 ? ` · <span class="rep-fade">${vloss}% fade</span>` : ''}</div>
       <svg class="rep-bars" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bars}</svg>
       ${depStr ? `<div class="rep-depths">depth ${depStr}</div>` : ''}
+      ${tempoStr}
     </div>`;
   }).filter(Boolean).join('');
 
@@ -8129,7 +8143,7 @@ function renderStrength(D) {
       <div class="strength-tablenote">Counter off? Edit a set's <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.</div>
     </div>
     ${repBlocks ? `<div class="panel" style="padding:14px 16px">
-      <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Hover for depth.</span></div>
+      <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Hover for depth. Tempo split (down / up) is approximate.</span></div>
       <div class="rep-detail-grid">${repBlocks}</div>
     </div>` : ''}
     <div class="strength-caveat"><strong>Beta:</strong> lift analysis is validated on synthetic sessions only, not yet against a ground-truth recording, so treat rep counts, depth, bar position and bar speed as estimates. Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}The rep counter keys on vertical wrist travel, so support depends on the lift: squat and deadlift count reliably (checked against real sessions); overhead press counts cleanly but is unproven; standalone curls are noisier; bench press undercounts by about half; chin-ups and pull-ups do not count at all (the wrist is the anchor and never travels). Very slow near-max grinds can drop below the counting gate on any lift. Lift type is never auto-detected: it comes from your lift-chip taps, and a set without one is analyzed as a squat (high/low bar and depth are squat-only reads). A lift is stationary, so there is no GPS map, turns, or jumps.</div>
@@ -13774,7 +13788,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'e9c3e4a · 2026-07-16';
+const LOAM_BUILD = '3c17b5f · 2026-07-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
