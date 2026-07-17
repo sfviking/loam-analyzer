@@ -640,6 +640,31 @@
     .seg-map-col { position: static; }
     #segMap { height: 46vh; }
   }
+  /* Ledger vs-best column (segment page, when the ride has a faster lap of the same segment). */
+  .corner-ledger.has-delta .ledger-head, .corner-ledger.has-delta .ledger-row {
+    grid-template-columns: 64px 52px 1fr 150px 74px 84px;
+  }
+  .corner-ledger .delta { font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  .corner-ledger .delta.pos { color: var(--moss); }
+  .corner-ledger .delta.neg { color: var(--clay); }
+  @media (max-width: 640px) {
+    .corner-ledger.has-delta .ledger-head, .corner-ledger.has-delta .ledger-row { grid-template-columns: 52px 44px 1fr 90px; }
+    .corner-ledger .delta { display: none; }
+  }
+  /* Fade strip: one row per lap of this segment, apex-speed sparkline + time vs best. */
+  .seg-fade { margin-top: 18px; padding: 16px 18px 10px; }
+  .seg-fade .fade-head { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 10px; }
+  .seg-fade .fade-row { display: grid; grid-template-columns: 110px 1fr 150px; gap: 16px; align-items: center; padding: 8px 6px; border-bottom: 1px solid var(--surface-2); }
+  .seg-fade .fade-row:last-of-type { border-bottom: 0; }
+  .seg-fade .fade-row.me { background: var(--surface-2); border-radius: 6px; }
+  @media (max-width: 560px) { .seg-fade .fade-row { grid-template-columns: 90px 1fr 110px; } }
+  .seg-fade .lap { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); letter-spacing: 0.04em; white-space: nowrap; }
+  .seg-fade .lap b { color: var(--text); }
+  .seg-fade .fade-svg { width: 100%; height: 30px; display: block; }
+  .seg-fade .t { font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); white-space: nowrap; }
+  .seg-fade .t .d { margin-left: 8px; }
+  .seg-fade .t .d.best { color: var(--amber); }
+  .seg-fade .t .d.slow { color: var(--clay); }
   .ledger-more { display: block; width: 100%; padding: 9px 16px; border: 0; border-top: 1px solid var(--border);
     background: var(--surface-2); color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
     letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; }
@@ -1675,6 +1700,8 @@
     </div>
     <div class="panel corner-ledger" id="segLedger"></div>
   </div>
+  <!-- Fade strip: lap-over-lap read, shown only when this ride has 2+ laps of this segment. -->
+  <div class="panel seg-fade hidden" id="segFade"></div>
 </div>
 
 <div id="crossResults" class="hidden">
@@ -3248,7 +3275,25 @@ function openSegmentPage(r, D) {
   }
 
   _ledgerShowAll = false;
-  renderCornerLedger(turns, 'segLedger');
+  /* vs-best ledger column: when another lap of this segment was faster, each turn
+     carries its apex-speed delta against that lap (same in-order pbp matching as
+     Compare laps, keyed back to ride-wide turn numbers). pbp dApex is in mph; the
+     ledger cell formats with U.speedNum (m/s in), so convert back. The viewed run
+     matches by time window, not identity: segmentRuns rebuilds objects each call. */
+  let segDeltas = null;
+  try {
+    const { runs } = segmentRuns(D, _runsMode);
+    const me = (runs || []).find(o => o.tStart === r.tStart && o.tEnd === r.tEnd) || r;
+    const peer = fastestSameSegmentPeer(me, runs, D);
+    if (peer && peer.metrics.duration < me.metrics.duration) {
+      const { deltas } = pbpDeltasFromTurns(runTurnsFromD(me, D), runTurnsFromD(peer, D));
+      const map = {};
+      for (const d of (deltas || [])) if (d.rideN != null && isFinite(d.dApex)) map[d.rideN] = d.dApex / 2.23694;
+      if (Object.keys(map).length) segDeltas = map;
+    }
+  } catch (e) { segDeltas = null; }
+  renderCornerLedger(turns, 'segLedger', segDeltas);
+  renderSegFade(r, D);
   /* Leaflet cannot size itself inside a container that was display:none at init. */
   setTimeout(() => {
     try {
@@ -3257,6 +3302,75 @@ function openSegmentPage(r, D) {
     } catch (e) {}
   }, 60);
 }
+/* Fade strip: one row per lap of THIS segment in this ride (runsSameSegment gate),
+   time-ordered, each with an apex-speed sparkline (clay dots on scrubbed turns) and
+   the time delta vs the day's best lap; a verdict line names the fade mechanism when
+   the last lap gave back time through lower apex speeds. Hidden below 2 laps. */
+function renderSegFade(r, D) {
+  const host = document.getElementById('segFade');
+  if (!host) return;
+  const med = (arr) => { const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  /* `r` came from a previous segmentRuns call (drawRuns builds fresh objects each
+     time), so laps match by time window, never by object identity. */
+  const isMe = (o) => o.tStart === r.tStart && o.tEnd === r.tEnd;
+  let laps = [];
+  try {
+    const { runs } = segmentRuns(D, _runsMode);
+    laps = (runs || []).filter(o => isMe(o) || runsSameSegment(r, o, D));
+  } catch (e) { laps = []; }
+  if (laps.length < 2) { host.classList.add('hidden'); host.innerHTML = ''; return; }
+  laps = laps.slice().sort((a, b) => a.tStart - b.tStart);
+  const best = laps.reduce((a, b) => b.metrics.duration < a.metrics.duration ? b : a);
+  const lapTurns = laps.map(l => (D.turns || []).filter(T => T.tPeak >= l.tStart && T.tPeak <= l.tEnd));
+  const allApex = lapTurns.flat().map(T => T.vPeak).filter(v => v != null);
+  const vMin = Math.min(...allApex), vMax = Math.max(...allApex);
+  const spark = (turnsOfLap, isBest) => {
+    const vals = turnsOfLap.map(T => T.vPeak).filter(v => v != null);
+    if (vals.length < 2 || !(vMax > vMin)) return '<svg class="fade-svg"></svg>';
+    const W = 300, H = 30, pad = 3;
+    const pts = vals.map((v, i) => [pad + (i / (vals.length - 1)) * (W - pad * 2), H - pad - ((v - vMin) / (vMax - vMin)) * (H - pad * 2)]);
+    const d = 'M' + pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L');
+    const M = loamChartTheme();
+    const dots = pts.map((p, i) => {
+      const scrubbed = turnScrubMph(turnsOfLap[i]) >= 2.0;
+      return `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.4" fill="${scrubbed ? M['#c14e2e'] : M['#8caa6d']}"/>`;
+    }).join('');
+    return `<svg class="fade-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` +
+      `<path d="${d}" fill="none" stroke="${isBest ? M['#a06f24'] : M['#8caa6d']}" stroke-width="1.6" opacity="0.85"/>${dots}</svg>`;
+  };
+  const rows = laps.map((l, i) => {
+    const dt = l.metrics.duration - best.metrics.duration;
+    const dTxt = l === best ? 'best' : `+${dt.toFixed(1)}s`;
+    const dCls = l === best ? 'best' : dt >= 2.0 ? 'slow' : '';
+    const me = isMe(l);
+    return `<div class="fade-row${me ? ' me' : ''}"${me ? ' title="the lap you are viewing"' : ''}><span class="lap"><b>Lap ${i + 1}</b>${me ? ' · here' : ''}</span>` +
+      spark(lapTurns[i], l === best) +
+      `<span class="t">${fmtDuration(l.metrics.duration)}<span class="d ${dCls}">${dTxt}</span></span></div>`;
+  }).join('');
+  /* Verdict: the last lap vs the best, apex-speed medians naming the mechanism. */
+  let verdict = '';
+  const last = laps[laps.length - 1];
+  if (last !== best) {
+    const mLast = med(lapTurns[laps.length - 1].map(T => T.vPeak).filter(v => v != null));
+    const mBest = med(lapTurns[laps.indexOf(best)].map(T => T.vPeak).filter(v => v != null));
+    const dt = last.metrics.duration - best.metrics.duration;
+    if (mBest > 0 && dt >= 1.0) {
+      const dropPct = Math.round((1 - mLast / mBest) * 100);
+      const topHeld = last.metrics.maxSpeed >= best.metrics.maxSpeed * 0.97;
+      verdict = dropPct >= 4
+        ? `Lap ${laps.length} gave back ${dt.toFixed(1)}s vs your best; median apex speed fell ${dropPct}%` +
+          (topHeld ? ' while top speed held (braking earlier, not slower straights).' : '.')
+        : `Lap ${laps.length} was ${dt.toFixed(1)}s off your best, with apex speeds holding (${dropPct >= 0 ? '-' : '+'}${Math.abs(dropPct)}%).`;
+    }
+  } else if (laps.length >= 2) {
+    verdict = 'Your last lap was your best: no fade today.';
+  }
+  host.innerHTML =
+    `<div class="fade-head">Laps of this segment today · dots = corners (clay = scrubbed)</div>` + rows +
+    (verdict ? `<div class="do-slot" style="margin-top:12px;"><span class="do-badge">READ</span><span class="do-text">${verdict}</span></div>` : '');
+  host.classList.remove('hidden');
+}
+
 function closeSegmentPage() {
   hide('segmentPage'); show('results');
   if (_segCoachWasVisible) { const c = document.getElementById('coachSection'); if (c) c.classList.remove('hidden'); }
@@ -12135,11 +12249,14 @@ let _ledgerTurns = null;   /* last-rendered turn set, so the sort select can re-
 let _ledgerShowAll = false;   /* expander state; fresh views (new ride, run filter) re-collapse */
 const LEDGER_FOCUS_ROWS = 8;  /* the focused read: the 8 turns that matter for the current sort */
 /* Renders into #cornerLedger (the main Per-turn section) by default; the segment
-   page passes 'segLedger' and gets the same component wired to ITS map markers. */
-function renderCornerLedger(turns, hostId) {
+   page passes 'segLedger' and gets the same component wired to ITS map markers.
+   deltasByN (optional): ride-wide turn number -> apex-speed delta in m/s vs the
+   fastest lap of the same segment, adding the "vs best lap" column. */
+function renderCornerLedger(turns, hostId, deltasByN) {
   const host = document.getElementById(hostId || 'cornerLedger');
   const isSeg = hostId === 'segLedger';
   if (!host) return;
+  host.classList.toggle('has-delta', !!deltasByN);
   if (!isSeg) _ledgerTurns = turns;
   let usable = (turns || []).filter(T => T.vEntry != null && T.vEntry > 1.8);
   if (!usable.length) { host.classList.add('hidden'); host.innerHTML = ''; return; }
@@ -12167,6 +12284,12 @@ function renderCornerLedger(turns, hostId) {
     const keptPct = Math.round(kept * 100);
     const apex = T.vPeak != null ? T.vPeak : T.vExit;
     const cls = keptPct >= 85 ? 'hi' : keptPct < 65 ? 'lo' : '';
+    let deltaCell = '';
+    if (deltasByN) {
+      const d = deltasByN[T.n];
+      deltaCell = d == null ? `<span class="delta"></span>`
+        : `<span class="delta ${d >= 0 ? 'pos' : 'neg'}" title="apex speed vs the fastest lap of this segment">${d >= 0 ? '+' : ''}${U.speedNum(d).toFixed(1)} ${unit}</span>`;
+    }
     return `<div class="ledger-row" data-n="${T.n}" tabindex="0" role="button"
       aria-label="Turn ${T.n} ${T.direction === 'L' ? 'left' : 'right'}, kept ${keptPct}% of entry speed">
       <span class="tn"><b>T${T.n}</b> ${T.direction}</span>
@@ -12176,7 +12299,7 @@ function renderCornerLedger(turns, hostId) {
         <div class="bled" style="width:${100 - keptPct}%;"></div>
       </div>
       <span class="spd">${est ? '~' : ''}${U.speedNum(T.vEntry).toFixed(1)} → ${apex != null ? U.speedNum(apex).toFixed(1) : '—'}</span>
-      <span class="lg-kept ${cls}">${keptPct}%</span>
+      <span class="lg-kept ${cls}">${keptPct}%</span>${deltaCell}
     </div>`;
   }).join('');
   /* Symmetry read (Field Instrument): median peak lean per side from the same
@@ -12198,7 +12321,8 @@ function renderCornerLedger(turns, hostId) {
   } catch (e) { sym = ''; }
   host.innerHTML =
     `<div class="ledger-head"><span>Turn</span><span>Arc</span><span>Speed kept through the turn</span>` +
-    `<span style="text-align:right;">Entry → apex (${unit})</span><span class="lg-kept" style="text-align:right;">Kept</span></div>` +
+    `<span style="text-align:right;">Entry → apex (${unit})</span><span class="lg-kept" style="text-align:right;">Kept</span>` +
+    (deltasByN ? `<span class="delta">vs best</span>` : '') + `</div>` +
     `<div class="ledger-scroll">${rows}</div>` +
     `<div class="ledger-legend">` +
     `<span class="item"><span class="k" style="background:${M['#8caa6d']};"></span>kept</span>` +
@@ -14297,7 +14421,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'd535785 · 2026-07-17';
+const LOAM_BUILD = '322dc16 · 2026-07-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
