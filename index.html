@@ -3204,11 +3204,40 @@ function setRunLabel(tStart, name) {
    so the row-to-map connection is visible without scrolling. The map is a second Leaflet
    instance (same pattern as Form Replay's tile map) showing ONLY this segment's track and
    turn markers, in the exact visual language of the main map. */
-let _segMap = null, _segOverlay = null, _segReturnScroll = 0, _segCoachWasVisible = false;
+let _segMap = null, _segOverlay = null, _segMarkers = null, _segLoc = null, _segReturnScroll = 0, _segCoachWasVisible = false;
 let segTurnMarkers = {};
 function segFocusTurn(n) {
   const mk = segTurnMarkers[n];
   try { if (mk && _segMap && mk.getLatLng) _segMap.panTo(mk.getLatLng(), { animate: true }); } catch (e) {}
+}
+/* The segment map mirrors the corner ledger: markers only for the rows the
+   ledger is currently showing (the top scrubbers by default, the full set once
+   "Show all" is tapped), so the map stays as focused as the list beside it and
+   every marker has a matching row. Called by renderCornerLedger on every
+   segment-ledger render, including the Show all / Show fewer toggle. Marker
+   markup is identical divIcon + ring semantics to the main map's drawRideOverlay. */
+function syncSegTurnMarkers(shown) {
+  if (!_segMap || !_segMarkers || !_segLoc) return;
+  _segMarkers.clearLayers();
+  segTurnMarkers = {};
+  for (const T of (shown || [])) {
+    const ta = T.tPeak != null ? T.tPeak : (T.tStart + T.tEnd) / 2;
+    const p = nearestByTime(_segLoc, ta);
+    if (!p) continue;
+    const hasV = T.vExit != null && T.vEntry != null;
+    const delta = hasV ? T.vExit - T.vEntry : 0;
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnDeltaColor(delta)}; outline-offset:1px;">${T.n}</div>`,
+      iconSize: [26, 26], iconAnchor: [13, 13]
+    });
+    const mk = L.marker([p.latitude, p.longitude], { icon }).addTo(_segMarkers);
+    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
+    mk.bindTooltip(
+      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : U.small(T.radius)} · ` +
+      `${hasV ? U.speedNum(T.vEntry).toFixed(1) + ' → ' + U.speedNum(T.vExit).toFixed(1) + ' ' + U.speedUnit() + dStr : ''}`, { direction: 'top' });
+    segTurnMarkers[T.n] = mk;
+  }
 }
 function openSegmentPage(r, D) {
   const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
@@ -3216,7 +3245,7 @@ function openSegmentPage(r, D) {
   const m = r.metrics || {};
   document.getElementById('segTitle').textContent = label;
   document.getElementById('segSub').textContent =
-    `${turns.length} turn${turns.length === 1 ? '' : 's'} · worst scrubbers first · hover a row to light it on the map`;
+    `${turns.length} turn${turns.length === 1 ? '' : 's'} · worst scrubbers first · the map shows the turns listed below · hover a row to light it up`;
   const chips = [
     { l: 'Time', v: fmtDuration(m.duration) },
     { l: 'Top speed', v: U.speed(m.maxSpeed) },
@@ -3243,10 +3272,13 @@ function openSegmentPage(r, D) {
   }
   if (_segOverlay) _segOverlay.clearLayers();
   else _segOverlay = L.featureGroup().addTo(_segMap);
+  if (_segMarkers) _segMarkers.clearLayers();
+  else _segMarkers = L.featureGroup().addTo(_segMap);
   segTurnMarkers = {};
 
   const loc = (D.sensors.location || []).filter(p =>
     p.t >= r.tStart && p.t <= r.tEnd && p.latitude != null && p.longitude != null);
+  _segLoc = loc;
   const latlngs = loc.map(p => [p.latitude, p.longitude]);
   let maxS = 0; for (const p of loc) if ((p.speed || 0) > maxS) maxS = p.speed || 0;
   if (latlngs.length > 1) drawColoredTrack(latlngs, (i) => speedColor(loc[i].speed || 0, maxS || 1), _segOverlay);
@@ -3254,25 +3286,9 @@ function openSegmentPage(r, D) {
     L.circleMarker(latlngs[0], { radius: 6, color: '#1a202c', fillColor: '#8caa6d', fillOpacity: 1, weight: 2 }).addTo(_segOverlay).bindTooltip('Start');
     L.circleMarker(latlngs[latlngs.length - 1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 }).addTo(_segOverlay).bindTooltip('End');
   }
-  /* Turn markers: identical divIcon + ring semantics to the main map's drawRideOverlay. */
-  for (const T of turns) {
-    const ta = T.tPeak != null ? T.tPeak : (T.tStart + T.tEnd) / 2;
-    const p = nearestByTime(loc, ta);
-    if (!p) continue;
-    const hasV = T.vExit != null && T.vEntry != null;
-    const delta = hasV ? T.vExit - T.vEntry : 0;
-    const icon = L.divIcon({
-      className: '',
-      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnDeltaColor(delta)}; outline-offset:1px;">${T.n}</div>`,
-      iconSize: [26, 26], iconAnchor: [13, 13]
-    });
-    const mk = L.marker([p.latitude, p.longitude], { icon }).addTo(_segOverlay);
-    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
-    mk.bindTooltip(
-      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : U.small(T.radius)} · ` +
-      `${hasV ? U.speedNum(T.vEntry).toFixed(1) + ' → ' + U.speedNum(T.vExit).toFixed(1) + ' ' + U.speedUnit() + dStr : ''}`, { direction: 'top' });
-    segTurnMarkers[T.n] = mk;
-  }
+  /* Turn markers are NOT drawn here: the map mirrors the ledger, so
+     renderCornerLedger below calls syncSegTurnMarkers with exactly the rows
+     it shows (top scrubbers by default, everything once expanded). */
 
   _ledgerShowAll = false;
   /* vs-best ledger column: when another lap of this segment was faster, each turn
@@ -12336,7 +12352,7 @@ function renderCornerLedger(turns, hostId, deltasByN) {
           : `Show all ${total} turns`}</button>`
       : '') + sym;
   const moreBtn = host.querySelector('.ledger-more');
-  if (moreBtn) moreBtn.addEventListener('click', () => { _ledgerShowAll = !_ledgerShowAll; renderCornerLedger(turns, hostId); });
+  if (moreBtn) moreBtn.addEventListener('click', () => { _ledgerShowAll = !_ledgerShowAll; renderCornerLedger(turns, hostId, deltasByN); });
   host.querySelectorAll('.ledger-row').forEach(row => {
     const n = +row.dataset.n;
     row.addEventListener('mouseenter', () => highlightTurn(n));
@@ -12347,6 +12363,9 @@ function renderCornerLedger(turns, hostId, deltasByN) {
     });
     row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); } });
   });
+  /* The segment map carries only the turns listed here (syncSegTurnMarkers is
+     a no-op until openSegmentPage has set up the map and its location window). */
+  if (isSeg) syncSegTurnMarkers(shown);
 }
 
 function renderTurnTable(turns) {
@@ -14421,7 +14440,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '322dc16 · 2026-07-17';
+const LOAM_BUILD = 'a2a2868 · 2026-07-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
