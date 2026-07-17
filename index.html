@@ -623,6 +623,10 @@
     color: var(--amber); font-weight: 700; flex-shrink: 0; }
   .do-slot .do-text { font-size: 14px; color: var(--text); line-height: 1.5; }
   /* Ledger symmetry read: median peak lean per side, sky left / clay right. */
+  .ledger-more { display: block; width: 100%; padding: 9px 16px; border: 0; border-top: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; }
+  .ledger-more:hover { color: var(--accent); }
   .ledger-sym { display: flex; align-items: center; gap: 9px; padding: 10px 16px; border-top: 1px solid var(--border);
     font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); flex-wrap: wrap; }
   .ledger-sym .sym-l { background: var(--sky); border-radius: 3px 0 0 3px; height: 8px; display: inline-block; }
@@ -11983,6 +11987,8 @@ function cornerArcGlyph(dir, radius) {
     `<circle cx="${x1}" cy="6" r="2.4" fill="${color}"/></svg>`;
 }
 let _ledgerTurns = null;   /* last-rendered turn set, so the sort select can re-render in place */
+let _ledgerShowAll = false;   /* expander state; fresh views (new ride, run filter) re-collapse */
+const LEDGER_FOCUS_ROWS = 8;  /* the focused read: the 8 turns that matter for the current sort */
 function renderCornerLedger(turns) {
   const host = document.getElementById('cornerLedger');
   if (!host) return;
@@ -11997,9 +12003,15 @@ function renderCornerLedger(turns) {
   if (!sortSel || sortSel.value === 'scrub') {
     usable = usable.slice().sort((a, b) => turnScrubMph(b) - turnScrubMph(a));
   }
+  /* Focused by default: show only the top rows of the current sort (the worst
+     scrubbers, or the ride's opening turns in ride order); the expander below
+     reveals the full set. The symmetry footer always reads the FULL set so the
+     focused view never skews the per-side medians. */
+  const total = usable.length;
+  const shown = _ledgerShowAll ? usable : usable.slice(0, LEDGER_FOCUS_ROWS);
   const M = loamChartTheme();
   const unit = U.speedUnit();
-  const rows = usable.map(T => {
+  const rows = shown.map(T => {
     const est = T.speedSource !== 'fit';
     const vLow = Math.min(T.vExit != null ? T.vExit : T.vEntry, T.vPeak != null ? T.vPeak : T.vEntry);
     const kept = Math.max(0, Math.min(1, vLow / T.vEntry));
@@ -12044,7 +12056,14 @@ function renderCornerLedger(turns) {
     `<span class="item"><span class="k" style="background:${M['#c54b3c']};"></span>scrubbed</span>` +
     `<span class="item"><span class="k round" style="background:${M['#1f7ba6']};"></span>left arc</span>` +
     `<span class="item"><span class="k round" style="background:${M['#c14e2e']};"></span>right arc</span>` +
-    `</div>` + sym;
+    `</div>` +
+    (total > LEDGER_FOCUS_ROWS
+      ? `<button type="button" class="ledger-more" id="ledgerMoreBtn">${_ledgerShowAll
+          ? `Show the ${LEDGER_FOCUS_ROWS} that matter`
+          : `Show all ${total} turns`}</button>`
+      : '') + sym;
+  const moreBtn = document.getElementById('ledgerMoreBtn');
+  if (moreBtn) moreBtn.addEventListener('click', () => { _ledgerShowAll = !_ledgerShowAll; renderCornerLedger(_ledgerTurns); });
   host.querySelectorAll('.ledger-row').forEach(row => {
     const n = +row.dataset.n;
     row.addEventListener('mouseenter', () => highlightTurn(n));
@@ -12055,6 +12074,7 @@ function renderCornerLedger(turns) {
 }
 
 function renderTurnTable(turns) {
+  _ledgerShowAll = false;   /* a fresh view (new ride, run filter, filter clear) re-collapses to the focused read */
   renderCornerLedger(turns);
   const tbody = document.querySelector('#turnTable tbody');
   tbody.innerHTML = '';
@@ -14123,7 +14143,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '2357fcb · 2026-07-17';
+const LOAM_BUILD = '749cd9e · 2026-07-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
