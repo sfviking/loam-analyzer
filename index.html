@@ -3035,7 +3035,21 @@ function segmentRuns(D, mode) {
       const closer = best && (d.autoTag.matchDistance ?? Infinity) < (best.autoTag.matchDistance ?? Infinity);
       if (!best || frac > bestFrac + 1e-9 || (Math.abs(frac - bestFrac) <= 1e-9 && closer)) { best = d; bestFrac = frac; }
     }
-    return best ? { ...mark, label: (best.autoTag && best.autoTag.name) || mark.label || null, src: best } : mark;
+    if (!best) return mark;
+    /* A bracket that dwarfs its matched trail is almost always a late Run End tap
+       (or an early Start): the bracket then swallows the rest of the ride while
+       wearing the trail's name. The tag names the trail, so tighten the window to
+       the tagged descent plus a breathing allowance for approach and runout,
+       never widening beyond what was bracketed. Brackets within the allowance
+       keep their exact tapped bounds. */
+    const ALLOW = 45; /* seconds, same breathing room as SEG_LEAD_SEC tag lead-ins */
+    return {
+      ...mark,
+      tStart: Math.max(mark.tStart, best.tStart - ALLOW),
+      tEnd: Math.min(mark.tEnd, best.tEnd + ALLOW),
+      label: (best.autoTag && best.autoTag.name) || mark.label || null,
+      src: best,
+    };
   };
   let chosen = mode || 'auto', lapInfo = null;
   if (chosen === 'auto') chosen = marks.length ? 'marks' : descents.length ? 'descents' : 'laps';
@@ -8574,7 +8588,7 @@ function renderStrength(D) {
       <div class="strength-tablenote"><strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set (<span style="color:var(--text-muted, #7a808c)">ref</span>), not an absolute angle. Counter off? Edit a set's <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.</div>
     </div>
     ${repBlocks ? `<div class="panel" style="padding:14px 16px">
-      <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Hover for depth. Tempo split (down / up) is approximate.</span></div>
+      <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.</span></div>
       <div class="rep-detail-grid">${repBlocks}</div>
     </div>` : ''}
     <div class="strength-caveat"><strong>Beta:</strong> lift analysis is validated on synthetic sessions only, not yet against a ground-truth recording, so treat rep counts, depth, bar position and bar speed as estimates. Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}The rep counter keys on vertical wrist travel, so support depends on the lift: squat and deadlift count reliably (checked against real sessions); overhead press counts cleanly but is unproven; standalone curls are noisier; bench press undercounts by about half; chin-ups and pull-ups do not count at all (the wrist is the anchor and never travels). Very slow near-max grinds can drop below the counting gate on any lift. Lift type is never auto-detected: it comes from your lift-chip taps, and a set without one is analyzed as a squat (high/low bar and depth are squat-only reads). A lift is stationary, so there is no GPS map, turns, or jumps.</div>
@@ -14440,7 +14454,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'a2a2868 · 2026-07-17';
+const LOAM_BUILD = '29d7cea · 2026-07-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
