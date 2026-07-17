@@ -623,6 +623,23 @@
     color: var(--amber); font-weight: 700; flex-shrink: 0; }
   .do-slot .do-text { font-size: 14px; color: var(--text); line-height: 1.5; }
   /* Ledger symmetry read: median peak lean per side, sky left / clay right. */
+  /* Segment page: focused map beside the segment's corner ledger. The map column
+     is sticky on desktop so the connection survives scrolling the ledger. */
+  #segmentPage .seg-back { display: inline-flex; align-items: center; gap: 6px; padding: 9px 15px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--accent);
+    font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .seg-stats { display: flex; gap: 26px; flex-wrap: wrap; margin: 12px 0 18px; }
+  .seg-stats .stat .value { font-size: 24px; }
+  .seg-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+  .seg-map-col { position: sticky; top: 12px; }
+  #segMap { height: min(64vh, 560px); border-radius: 10px 10px 0 0; background: #1a1d22; }
+  #segmentPage .map-legend { border: 1px solid var(--border); border-top: 0; border-radius: 0 0 10px 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.04em; color: var(--text-muted); }
+  @media (max-width: 900px) {
+    .seg-grid { grid-template-columns: 1fr; }
+    .seg-map-col { position: static; }
+    #segMap { height: 46vh; }
+  }
   .ledger-more { display: block; width: 100%; padding: 9px 16px; border: 0; border-top: 1px solid var(--border);
     background: var(--surface-2); color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
     letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; }
@@ -1641,9 +1658,28 @@
   </div>
 </section>
 
+<!-- Segment page: a dedicated view for one run/descent, opened from a runs-table row (like the
+     cross-ride comparison page). The focused map and the segment's corner ledger sit side by side,
+     so hovering a corner lights it on a map that is actually on screen. -->
+<div id="segmentPage" class="hidden">
+  <button type="button" id="segBackBtn" class="seg-back" onclick="closeSegmentPage()">&larr; Back to ride</button>
+  <div class="section-title" style="margin-top: 16px;">
+    <span id="segTitle">Segment</span>
+    <span class="subtitle" id="segSub"></span>
+  </div>
+  <div class="seg-stats" id="segStats"></div>
+  <div class="seg-grid">
+    <div class="seg-map-col">
+      <div id="segMap"></div>
+      <div class="map-legend">turn ring = speed kept: <span class="lg scrub"></span>scrubbed <span class="lg held"></span>held <span class="lg carry"></span>carried · track colour = speed · hover a corner row</div>
+    </div>
+    <div class="panel corner-ledger" id="segLedger"></div>
+  </div>
+</div>
+
 <div id="crossResults" class="hidden">
   <button type="button" id="crossBackBtn" class="hidden" onclick="backToRideFromCross()"
-    style="display:inline-flex; align-items:center; gap:6px; margin-bottom:20px; padding:9px 15px; border:1px solid var(--border); border-radius:10px; background:#fff; color:var(--accent); font-size:14px; font-weight:600; cursor:pointer;">
+    style="display:inline-flex; align-items:center; gap:6px; margin-bottom:20px; padding:9px 15px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--accent); font-size:14px; font-weight:600; cursor:pointer;">
     &larr; Back to ride
   </button>
   <section>
@@ -3088,6 +3124,11 @@ function drawRuns() {
   document.querySelectorAll('#runsTable tbody tr').forEach(tr => {
     tr.onclick = () => {
       const r = runs[+tr.dataset.idx];
+      /* MTB runs with turns open the dedicated segment page (focused map beside the corner
+         ledger). Sports without body-frame turns keep the in-place map focus, where a page
+         with an empty ledger would read as broken. */
+      const segTurns = (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
+      if (isMtbFamily(D.sport) && segTurns) { openSegmentPage(r, D); return; }
       showTurnsForRun(r, D);
       document.querySelectorAll('#runsTable tbody tr').forEach(x => x.style.background = '');
       tr.style.background = 'rgba(127,176,105,0.12)';
@@ -3130,6 +3171,101 @@ function setRunLabel(tStart, name) {
 }
 
 /* Focus one run: zoom the map to its segment, and (MTB only) filter the per-turn table to it. */
+/* ---------- Segment page ----------
+   A dedicated view for one run/descent (opened from a runs-table row, like the cross-ride
+   comparison page): the segment's own focused map on the left, its corner ledger on the right,
+   so the row-to-map connection is visible without scrolling. The map is a second Leaflet
+   instance (same pattern as Form Replay's tile map) showing ONLY this segment's track and
+   turn markers, in the exact visual language of the main map. */
+let _segMap = null, _segOverlay = null, _segReturnScroll = 0, _segCoachWasVisible = false;
+let segTurnMarkers = {};
+function segFocusTurn(n) {
+  const mk = segTurnMarkers[n];
+  try { if (mk && _segMap && mk.getLatLng) _segMap.panTo(mk.getLatLng(), { animate: true }); } catch (e) {}
+}
+function openSegmentPage(r, D) {
+  const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
+  const label = runLabel(r.tStart) || r.label;
+  const m = r.metrics || {};
+  document.getElementById('segTitle').textContent = label;
+  document.getElementById('segSub').textContent =
+    `${turns.length} turn${turns.length === 1 ? '' : 's'} · worst scrubbers first · hover a row to light it on the map`;
+  const chips = [
+    { l: 'Time', v: fmtDuration(m.duration) },
+    { l: 'Top speed', v: U.speed(m.maxSpeed) },
+    { l: 'Turns', v: String(m.nTurns != null ? m.nTurns : turns.length), s: m.leftTurns != null ? `${m.leftTurns}L · ${m.rightTurns}R` : '' },
+    { l: 'Drop', v: m.drop != null ? U.elev(m.drop) : '—' },
+    { l: 'Distance', v: U.dist(m.distance) },
+  ];
+  document.getElementById('segStats').innerHTML = chips.map(c =>
+    `<div class="stat"><div class="label">${c.l}</div><div class="value">${c.v}</div>${c.s ? `<div class="sub">${c.s}</div>` : ''}</div>`).join('');
+
+  _segReturnScroll = window.scrollY;
+  hide('results'); show('segmentPage');
+  /* The coach panel is a top-level sibling of #results (it survives view switches),
+     so park it while the segment page is up and restore it on the way back. */
+  const coach = document.getElementById('coachSection');
+  _segCoachWasVisible = !!coach && !coach.classList.contains('hidden');
+  if (coach) coach.classList.add('hidden');
+  window.scrollTo(0, 0);
+  setStatus(`Segment: ${label}`, true);
+
+  if (!_segMap) {
+    _segMap = L.map('segMap', { zoomControl: true, attributionControl: true });
+    addBasemap(_segMap);
+  }
+  if (_segOverlay) _segOverlay.clearLayers();
+  else _segOverlay = L.featureGroup().addTo(_segMap);
+  segTurnMarkers = {};
+
+  const loc = (D.sensors.location || []).filter(p =>
+    p.t >= r.tStart && p.t <= r.tEnd && p.latitude != null && p.longitude != null);
+  const latlngs = loc.map(p => [p.latitude, p.longitude]);
+  let maxS = 0; for (const p of loc) if ((p.speed || 0) > maxS) maxS = p.speed || 0;
+  if (latlngs.length > 1) drawColoredTrack(latlngs, (i) => speedColor(loc[i].speed || 0, maxS || 1), _segOverlay);
+  if (latlngs.length) {
+    L.circleMarker(latlngs[0], { radius: 6, color: '#1a202c', fillColor: '#8caa6d', fillOpacity: 1, weight: 2 }).addTo(_segOverlay).bindTooltip('Start');
+    L.circleMarker(latlngs[latlngs.length - 1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 }).addTo(_segOverlay).bindTooltip('End');
+  }
+  /* Turn markers: identical divIcon + ring semantics to the main map's drawRideOverlay. */
+  for (const T of turns) {
+    const ta = T.tPeak != null ? T.tPeak : (T.tStart + T.tEnd) / 2;
+    const p = nearestByTime(loc, ta);
+    if (!p) continue;
+    const hasV = T.vExit != null && T.vEntry != null;
+    const delta = hasV ? T.vExit - T.vEntry : 0;
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnDeltaColor(delta)}; outline-offset:1px;">${T.n}</div>`,
+      iconSize: [26, 26], iconAnchor: [13, 13]
+    });
+    const mk = L.marker([p.latitude, p.longitude], { icon }).addTo(_segOverlay);
+    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
+    mk.bindTooltip(
+      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : U.small(T.radius)} · ` +
+      `${hasV ? U.speedNum(T.vEntry).toFixed(1) + ' → ' + U.speedNum(T.vExit).toFixed(1) + ' ' + U.speedUnit() + dStr : ''}`, { direction: 'top' });
+    segTurnMarkers[T.n] = mk;
+  }
+
+  _ledgerShowAll = false;
+  renderCornerLedger(turns, 'segLedger');
+  /* Leaflet cannot size itself inside a container that was display:none at init. */
+  setTimeout(() => {
+    try {
+      _segMap.invalidateSize();
+      if (latlngs.length) _segMap.fitBounds(latlngs, { padding: [30, 30] });
+    } catch (e) {}
+  }, 60);
+}
+function closeSegmentPage() {
+  hide('segmentPage'); show('results');
+  if (_segCoachWasVisible) { const c = document.getElementById('coachSection'); if (c) c.classList.remove('hidden'); }
+  segTurnMarkers = {};
+  setStatus('Back to ride', true);
+  setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (e) {} }, 60);
+  window.scrollTo(0, _segReturnScroll);
+}
+
 function showTurnsForRun(r, D) {
   focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline }, D.ride);
   /* Turn-by-turn is an MTB-only feature (needs body-frame turns). On running and GPS-only rides
@@ -7657,6 +7793,8 @@ let jumpMarkers = {};
 function hideAllSections() {
   formStop();
   liftFormStop();
+  /* A fresh render always lands on the main results view, never a stale segment page. */
+  try { const sp = document.getElementById('segmentPage'); if (sp) sp.classList.add('hidden'); segTurnMarkers = {}; } catch (e) {}
   ['strengthResults','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
@@ -8179,6 +8317,13 @@ function renderStrength(D) {
   const f = (x, d = 2) => (x == null || isNaN(x)) ? '—' : (+x).toFixed(d);
   const depthIcon = t => t === 'full' ? '●' : t === 'parallel' ? '◑' : '○';
   const barSpd = s => (s.barSpeed && s.barSpeed.available && s.barSpeed.meanMps != null) ? s.barSpeed.meanMps : null;
+  /* Lean is a RELATIVE read: forward torso lean measured against this session's most-upright set, not an
+     absolute torso angle (AirPods give head pitch, not trunk angle, so an absolute number would be a guess).
+     The baseline set(s) therefore read 0 by construction, so show them as "ref" rather than a bare 0 that
+     looks like "no lean," and prefix the rest with "+" to signal "this much more forward than your uprightest set". */
+  const leanCell = v => v == null ? '—'
+    : v <= 0.5 ? '<span style="color:var(--text-muted, #7a808c)" title="most upright set (baseline)">ref</span>'
+    : '+' + v.toFixed(0) + '°';
 
   const blocks = sets.map((s, i) => {
     const col = barColor(s.barPosition);
@@ -8227,7 +8372,7 @@ function renderStrength(D) {
       <td>${s.tempoS != null ? f(s.tempoS, 1) + 's' : '—'}</td>
       <td>${s.romMeters != null ? (s.romMeters * 100).toFixed(0) + ' cm' : '—'}</td>
       <td>${bs != null ? f(bs) : '—'}</td>
-      <td>${s.forwardLeanDeg != null ? s.forwardLeanDeg.toFixed(0) + '°' : '—'}</td>
+      <td>${leanCell(s.forwardLeanDeg)}</td>
       <td>${s.tutS != null ? s.tutS.toFixed(0) + 's' : '—'}</td>
       <td>${(s.misses && s.misses.length) || 0}</td></tr>`;
   }).join('');
@@ -8294,9 +8439,9 @@ function renderStrength(D) {
     </div>
     <div class="panel" style="padding:6px 12px;overflow-x:auto">
       <table class="strength-table"><thead><tr>
-        <th>Set</th><th title="Auto-counted from wrist motion; edit any cell to correct a miscount">Reps <span class="th-hint">edit</span></th><th>Weight (${liftUnit()})</th><th>Bar</th><th>Depth</th><th>Tempo</th><th title="Bar range of motion">ROM</th><th>Bar m/s</th><th title="Torso lean vs your most-upright set (squat)">Lean</th><th title="Time under tension (set span)">TUT</th><th>Miss</th>
+        <th>Set</th><th title="Auto-counted from wrist motion; edit any cell to correct a miscount">Reps <span class="th-hint">edit</span></th><th>Weight (${liftUnit()})</th><th>Bar</th><th>Depth</th><th>Tempo</th><th title="Bar range of motion">ROM</th><th>Bar m/s</th><th title="Forward torso lean relative to your most-upright set (squat). Not an absolute angle: 'ref' is the baseline set, '+N°' leans that much more forward.">Lean Δ</th><th title="Time under tension (set span)">TUT</th><th>Miss</th>
       </tr></thead><tbody>${rows}</tbody></table>
-      <div class="strength-tablenote">Counter off? Edit a set's <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.</div>
+      <div class="strength-tablenote"><strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set (<span style="color:var(--text-muted, #7a808c)">ref</span>), not an absolute angle. Counter off? Edit a set's <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.</div>
     </div>
     ${repBlocks ? `<div class="panel" style="padding:14px 16px">
       <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Hover for depth. Tempo split (down / up) is approximate.</span></div>
@@ -11989,18 +12134,22 @@ function cornerArcGlyph(dir, radius) {
 let _ledgerTurns = null;   /* last-rendered turn set, so the sort select can re-render in place */
 let _ledgerShowAll = false;   /* expander state; fresh views (new ride, run filter) re-collapse */
 const LEDGER_FOCUS_ROWS = 8;  /* the focused read: the 8 turns that matter for the current sort */
-function renderCornerLedger(turns) {
-  const host = document.getElementById('cornerLedger');
+/* Renders into #cornerLedger (the main Per-turn section) by default; the segment
+   page passes 'segLedger' and gets the same component wired to ITS map markers. */
+function renderCornerLedger(turns, hostId) {
+  const host = document.getElementById(hostId || 'cornerLedger');
+  const isSeg = hostId === 'segLedger';
   if (!host) return;
-  _ledgerTurns = turns;
+  if (!isSeg) _ledgerTurns = turns;
   let usable = (turns || []).filter(T => T.vEntry != null && T.vEntry > 1.8);
   if (!usable.length) { host.classList.add('hidden'); host.innerHTML = ''; return; }
   host.classList.remove('hidden');
   /* Default order is the coaching read: the turns where the most speed was
-     bled off first (the braking ledger). Ride order is one select away. */
+     bled off first (the braking ledger). Ride order is one select away on the
+     main page; the segment page always leads with the scrubbers. */
   const sortSel = document.getElementById('ledgerSortSel');
-  if (sortSel && !sortSel._wired) { sortSel._wired = true; sortSel.addEventListener('change', () => renderCornerLedger(_ledgerTurns)); }
-  if (!sortSel || sortSel.value === 'scrub') {
+  if (!isSeg && sortSel && !sortSel._wired) { sortSel._wired = true; sortSel.addEventListener('change', () => renderCornerLedger(_ledgerTurns)); }
+  if (isSeg || !sortSel || sortSel.value === 'scrub') {
     usable = usable.slice().sort((a, b) => turnScrubMph(b) - turnScrubMph(a));
   }
   /* Focused by default: show only the top rows of the current sort (the worst
@@ -12058,17 +12207,20 @@ function renderCornerLedger(turns) {
     `<span class="item"><span class="k round" style="background:${M['#c14e2e']};"></span>right arc</span>` +
     `</div>` +
     (total > LEDGER_FOCUS_ROWS
-      ? `<button type="button" class="ledger-more" id="ledgerMoreBtn">${_ledgerShowAll
+      ? `<button type="button" class="ledger-more">${_ledgerShowAll
           ? `Show the ${LEDGER_FOCUS_ROWS} that matter`
           : `Show all ${total} turns`}</button>`
       : '') + sym;
-  const moreBtn = document.getElementById('ledgerMoreBtn');
-  if (moreBtn) moreBtn.addEventListener('click', () => { _ledgerShowAll = !_ledgerShowAll; renderCornerLedger(_ledgerTurns); });
+  const moreBtn = host.querySelector('.ledger-more');
+  if (moreBtn) moreBtn.addEventListener('click', () => { _ledgerShowAll = !_ledgerShowAll; renderCornerLedger(turns, hostId); });
   host.querySelectorAll('.ledger-row').forEach(row => {
     const n = +row.dataset.n;
     row.addEventListener('mouseenter', () => highlightTurn(n));
     row.addEventListener('mouseleave', () => highlightTurn(null));
-    row.addEventListener('click', () => { highlightTurn(n); focusMapOnMarker(turnMarkers[n]); });
+    row.addEventListener('click', () => {
+      highlightTurn(n);
+      if (isSeg) segFocusTurn(n); else focusMapOnMarker(turnMarkers[n]);
+    });
     row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); } });
   });
 }
@@ -12130,15 +12282,17 @@ function focusMapOnMarker(marker) {
 
 function highlightTurn(n) {
   document.querySelectorAll('#turnTable tbody tr.highlight').forEach(r => r.classList.remove('highlight'));
-  document.querySelectorAll('#cornerLedger .ledger-row.highlight').forEach(r => r.classList.remove('highlight'));
+  document.querySelectorAll('.corner-ledger .ledger-row.highlight').forEach(r => r.classList.remove('highlight'));
   for (const k in turnMarkers) turnMarkers[k]._icon?.firstChild?.classList.remove('highlight');
+  for (const k in segTurnMarkers) segTurnMarkers[k]._icon?.firstChild?.classList.remove('highlight');
   if (n == null) return;
   const row = document.querySelector(`#turnTable tbody tr[data-n="${n}"]`);
   if (row) row.classList.add('highlight');
-  const lrow = document.querySelector(`#cornerLedger .ledger-row[data-n="${n}"]`);
-  if (lrow) lrow.classList.add('highlight');
+  document.querySelectorAll(`.corner-ledger .ledger-row[data-n="${n}"]`).forEach(r => r.classList.add('highlight'));
   const m = turnMarkers[n];
   if (m?._icon?.firstChild) m._icon.firstChild.classList.add('highlight');
+  const sm = segTurnMarkers[n];
+  if (sm?._icon?.firstChild) sm._icon.firstChild.classList.add('highlight');
 }
 function highlightJump(n) {
   document.querySelectorAll('#jumpsTable tbody tr.highlight').forEach(r => r.classList.remove('highlight'));
@@ -14143,7 +14297,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '749cd9e · 2026-07-17';
+const LOAM_BUILD = 'd535785 · 2026-07-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
