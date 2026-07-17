@@ -609,6 +609,25 @@
   .stat.accent2 { border-left-color: var(--accent-2); }
   .stat.accent3 { border-left-color: var(--accent-3); }
   .stat.accent4 { border-left-color: var(--accent-4); }
+  /* Hero tile (Field Instrument hierarchy): one numeral owns the stats panel,
+     spanning both columns at display scale; supporting tiles step down around it. */
+  .stat.hero { grid-column: 1 / -1; }
+  .stat.hero .value { font-size: 54px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .stat.hero .value .unit { font-size: 16px; }
+  /* The focus slot: the coach's one lead line, pinned to the top of the
+     highlights card with the amber rule (the DO slot from the design doc;
+     labeled FOCUS until the producers emit true drill sentences). */
+  .do-slot { display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; margin: 0 0 10px;
+    background: var(--surface); border-left: 3px solid var(--amber); border-radius: 0 8px 8px 0; }
+  .do-slot .do-badge { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.16em;
+    color: var(--amber); font-weight: 700; flex-shrink: 0; }
+  .do-slot .do-text { font-size: 14px; color: var(--text); line-height: 1.5; }
+  /* Ledger symmetry read: median peak lean per side, sky left / clay right. */
+  .ledger-sym { display: flex; align-items: center; gap: 9px; padding: 10px 16px; border-top: 1px solid var(--border);
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); flex-wrap: wrap; }
+  .ledger-sym .sym-l { background: var(--sky); border-radius: 3px 0 0 3px; height: 8px; display: inline-block; }
+  .ledger-sym .sym-r { background: var(--clay); border-radius: 0 3px 3px 0; height: 8px; display: inline-block; }
+  .ledger-sym b { color: var(--text); font-weight: 700; }
   /* Ride-highlights hero card: the local "what mattered" read, shown above the charts so the insight
      is the first thing seen, not the last. */
   .coach-highlights { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent), color-mix(in srgb, var(--accent) 2%, transparent)); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 12px; padding: 15px 20px; }
@@ -10108,7 +10127,13 @@ function renderCoachHighlights(D, sport) {
   const word = sport === 'running' ? 'Run' : sport === 'walking' ? 'Walk'
     : sport === 'gps' ? (D.gpsSport === 'run' ? 'Run' : D.gpsSport === 'walk' ? 'Walk' : 'Ride')
     : 'Ride';
-  card.innerHTML = `<h3>${word} highlights</h3><ul>${bullets.map(b => `<li>${b}</li>`).join('')}</ul>`
+  /* The lead insight gets the focus slot (the design doc's DO slot): one line,
+     amber rule, always in the same place. The producers put mechanics first, so
+     the most coachable read leads; the rest stay as the bullet list. */
+  const [lead, ...rest] = bullets;
+  card.innerHTML = `<h3>${word} highlights</h3>`
+    + `<div class="do-slot"><span class="do-badge">FOCUS</span><span class="do-text">${lead}</span></div>`
+    + (rest.length ? `<ul>${rest.map(b => `<li>${b}</li>`).join('')}</ul>` : '')
     + `<button class="ch-cta" type="button" onclick="scrollToCoach()">Ask the AI coach for the why and the drill &rarr;</button>`;
   sec.classList.remove('hidden');
 }
@@ -11144,6 +11169,11 @@ function renderStats(s, hasFit) {
       <div class="sub">${dropSub}</div>
     </div>` : '';
   document.getElementById('statsPanel').innerHTML = `
+    <div class="stat hero accent3">
+      <div class="label">Max speed</div>
+      <div class="value">${U.speed(s.maxSpeed)}</div>
+      <div class="sub">${U.metric() ? (s.maxSpeed*2.23694).toFixed(1)+' mph' : (s.maxSpeed*3.6).toFixed(1)+' km/h'} · fastest moment of the ride</div>
+    </div>
     <div class="stat accent">
       <div class="label">Turns</div>
       <div class="value">${s.nTurns}</div>
@@ -11153,11 +11183,6 @@ function renderStats(s, hasFit) {
       <div class="label">Median radius</div>
       <div class="value">${hasFit ? '' : '~'}${U.small(s.medianRadius)}</div>
       <div class="sub">${hasFit ? 'apex, r = v/ω · FIT speed' : 'apex · ~GPS-estimated'}</div>
-    </div>
-    <div class="stat accent3">
-      <div class="label">Max speed</div>
-      <div class="value">${U.speed(s.maxSpeed)}</div>
-      <div class="sub">${U.metric() ? (s.maxSpeed*2.23694).toFixed(1)+' mph' : (s.maxSpeed*3.6).toFixed(1)+' km/h'}</div>
     </div>
     <div class="stat">
       <div class="label">Duration</div>
@@ -11993,6 +12018,23 @@ function renderCornerLedger(turns) {
       <span class="lg-kept ${cls}">${keptPct}%</span>
     </div>`;
   }).join('');
+  /* Symmetry read (Field Instrument): median peak lean per side from the same
+     mechanics block the coach digest uses, over the currently shown turn set.
+     Hidden when there are not enough leaned turns per side. */
+  let sym = '';
+  try {
+    const mech = (typeof turnMechanics === 'function') ? turnMechanics({ turns: usable }) : null;
+    const la = mech && mech.lean_asymmetry;
+    if (la) {
+      const maxDeg = Math.max(la.left_median_deg, la.right_median_deg) || 1;
+      const wl = Math.max(6, Math.round(56 * la.left_median_deg / maxDeg));
+      const wr = Math.max(6, Math.round(56 * la.right_median_deg / maxDeg));
+      sym = `<div class="ledger-sym"><span>median lean</span>` +
+        `<span class="sym-l" style="width:${wl}px;"></span><b>L ${la.left_median_deg}°</b>` +
+        `<span>·</span><b>R ${la.right_median_deg}°</b><span class="sym-r" style="width:${wr}px;"></span>` +
+        `<span>gap ${la.gap_deg}° · weaker side: ${la.weaker_side} (leans less)</span></div>`;
+    }
+  } catch (e) { sym = ''; }
   host.innerHTML =
     `<div class="ledger-head"><span>Turn</span><span>Arc</span><span>Speed kept through the turn</span>` +
     `<span style="text-align:right;">Entry → apex (${unit})</span><span class="lg-kept" style="text-align:right;">Kept</span></div>` +
@@ -12002,7 +12044,7 @@ function renderCornerLedger(turns) {
     `<span class="item"><span class="k" style="background:${M['#c54b3c']};"></span>scrubbed</span>` +
     `<span class="item"><span class="k round" style="background:${M['#1f7ba6']};"></span>left arc</span>` +
     `<span class="item"><span class="k round" style="background:${M['#c14e2e']};"></span>right arc</span>` +
-    `</div>`;
+    `</div>` + sym;
   host.querySelectorAll('.ledger-row').forEach(row => {
     const n = +row.dataset.n;
     row.addEventListener('mouseenter', () => highlightTurn(n));
@@ -14081,7 +14123,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'ea1641b · 2026-07-16';
+const LOAM_BUILD = '2357fcb · 2026-07-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
