@@ -3220,6 +3220,7 @@ function setRunLabel(tStart, name) {
    instance (same pattern as Form Replay's tile map) showing ONLY this segment's track and
    turn markers, in the exact visual language of the main map. */
 let _segMap = null, _segOverlay = null, _segMarkers = null, _segLoc = null, _segReturnScroll = 0, _segCoachWasVisible = false;
+let _segFormHome = null;   /* original DOM slot of #formReplaySection, so the segment page can borrow it and Back can return it */
 let segTurnMarkers = {};
 function segFocusTurn(n) {
   const mk = segTurnMarkers[n];
@@ -3311,11 +3312,12 @@ function openSegmentPage(r, D) {
      Compare laps, keyed back to ride-wide turn numbers). pbp dApex is in mph; the
      ledger cell formats with U.speedNum (m/s in), so convert back. The viewed run
      matches by time window, not identity: segmentRuns rebuilds objects each call. */
+  let segRunsList = null;
+  try { segRunsList = segmentRuns(D, _runsMode).runs || null; } catch (e) { segRunsList = null; }
   let segDeltas = null;
   try {
-    const { runs } = segmentRuns(D, _runsMode);
-    const me = (runs || []).find(o => o.tStart === r.tStart && o.tEnd === r.tEnd) || r;
-    const peer = fastestSameSegmentPeer(me, runs, D);
+    const me = (segRunsList || []).find(o => o.tStart === r.tStart && o.tEnd === r.tEnd) || r;
+    const peer = fastestSameSegmentPeer(me, segRunsList || [], D);
     if (peer && peer.metrics.duration < me.metrics.duration) {
       const { deltas } = pbpDeltasFromTurns(runTurnsFromD(me, D), runTurnsFromD(peer, D));
       const map = {};
@@ -3325,6 +3327,28 @@ function openSegmentPage(r, D) {
   } catch (e) { segDeltas = null; }
   renderCornerLedger(turns, 'segLedger', segDeltas);
   renderSegFade(r, D);
+  /* Form replay rides along: the one replay instance (its ids stay unique) moves
+     into this page preloaded with THIS run's whole-segment replay, and Back
+     returns it home. Skipped when the ride has no clean lean signal (the
+     section is hidden). Selection waits a beat so the moved containers have
+     laid out before the tile map measures them. */
+  const formSec = document.getElementById('formReplaySection');
+  if (formSec && !formSec.classList.contains('hidden')) {
+    if (!_segFormHome) _segFormHome = { parent: formSec.parentNode, next: formSec.nextElementSibling };
+    document.getElementById('segmentPage').appendChild(formSec);
+    setTimeout(() => {
+      try {
+        /* Sync the dropdown to this run's whole-segment entry when one matches;
+           the dropdown is built from auto mode, so match by time window. */
+        const sel = document.getElementById('formTurn');
+        const autoRuns = _runsMode === 'auto' ? (segRunsList || []) : (segmentRuns(D, 'auto').runs || []);
+        const m = autoRuns.find(o => o.tStart === r.tStart && o.tEnd === r.tEnd);
+        if (m && sel) { const v = 'seg:' + m.n; if (Array.from(sel.options).some(o => o.value === v)) sel.value = v; }
+        formSelectSegment(D, r);
+        formArmAutoplay();
+      } catch (e) {}
+    }, 80);
+  }
   /* Leaflet cannot size itself inside a container that was display:none at init. */
   setTimeout(() => {
     try {
@@ -3405,9 +3429,21 @@ function renderSegFade(r, D) {
 function closeSegmentPage() {
   hide('segmentPage'); show('results');
   if (_segCoachWasVisible) { const c = document.getElementById('coachSection'); if (c) c.classList.remove('hidden'); }
+  /* Send the borrowed form replay home and pause it; keep its segment selection. */
+  if (_segFormHome) {
+    const formSec = document.getElementById('formReplaySection');
+    if (formSec && formSec.parentNode !== _segFormHome.parent) {
+      formStopAnim();
+      try { _segFormHome.parent.insertBefore(formSec, _segFormHome.next); } catch (e) {}
+    }
+  }
   segTurnMarkers = {};
   setStatus('Back to ride', true);
-  setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (e) {} }, 60);
+  setTimeout(() => {
+    try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    /* Re-frame the replay's tile map for the width it now lives at. */
+    try { if (_form && _form.S) formInitMap(_form.S); } catch (e) {}
+  }, 60);
   window.scrollTo(0, _segReturnScroll);
 }
 
@@ -4483,19 +4519,23 @@ function setupFormReplay(D) {
     formFrame();
   };
   pick();
+  formArmAutoplay();
+}
 
-  /* Auto-play the turn once when the section first scrolls into view, so the lean + map come alive
-     without the user hunting for Play. Re-armed on each setup; never loops. */
+/* Auto-play the current replay once when the section next scrolls into view, so the lean + map come
+   alive without the user hunting for Play. Re-armed on each setup and each time the section moves
+   onto the segment page; never loops. */
+function formArmAutoplay() {
   if (_formObserver) { try { _formObserver.disconnect(); } catch (e) {} _formObserver = null; }
-  if ('IntersectionObserver' in window) {
-    let played = false;
-    _formObserver = new IntersectionObserver((entries) => {
-      for (const en of entries) {
-        if (en.isIntersecting && !played && _form) { played = true; _form.tau = 0; formSetPlaying(true); }
-      }
-    }, { threshold: 0.4 });
-    _formObserver.observe(sec);
-  }
+  const sec = document.getElementById('formReplaySection');
+  if (!sec || !('IntersectionObserver' in window)) return;
+  let played = false;
+  _formObserver = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (en.isIntersecting && !played && _form) { played = true; _form.tau = 0; formSetPlaying(true); }
+    }
+  }, { threshold: 0.4 });
+  _formObserver.observe(sec);
 }
 
 function formSelectTurn(D, turn) {
@@ -7940,6 +7980,14 @@ function hideAllSections() {
   liftFormStop();
   /* A fresh render always lands on the main results view, never a stale segment page. */
   try { const sp = document.getElementById('segmentPage'); if (sp) sp.classList.add('hidden'); segTurnMarkers = {}; } catch (e) {}
+  /* If the form replay was riding along on the segment page, send it home first so
+     the fresh render sets it up in the results flow, not inside a hidden page. */
+  try {
+    if (_segFormHome) {
+      const fs = document.getElementById('formReplaySection');
+      if (fs && fs.parentNode !== _segFormHome.parent) _segFormHome.parent.insertBefore(fs, _segFormHome.next);
+    }
+  } catch (e) {}
   ['strengthResults','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
@@ -14455,7 +14503,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'dc1c0c6 · 2026-07-17';
+const LOAM_BUILD = 'cfa7077 · 2026-07-18';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
