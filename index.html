@@ -3345,6 +3345,8 @@ function openSegmentPage(r, D) {
         const m = autoRuns.find(o => o.tStart === r.tStart && o.tEnd === r.tEnd);
         if (m && sel) { const v = 'seg:' + m.n; if (Array.from(sel.options).some(o => o.value === v)) sel.value = v; }
         formSelectSegment(D, r);
+        /* Chips scope to this descent while its page is up: only its corners. */
+        formRenderScrubChips(D, turns, 'THIS SEGMENT');
         formArmAutoplay();
       } catch (e) {}
     }, 80);
@@ -3429,12 +3431,14 @@ function renderSegFade(r, D) {
 function closeSegmentPage() {
   hide('segmentPage'); show('results');
   if (_segCoachWasVisible) { const c = document.getElementById('coachSection'); if (c) c.classList.remove('hidden'); }
-  /* Send the borrowed form replay home and pause it; keep its segment selection. */
+  /* Send the borrowed form replay home and pause it; keep its segment selection.
+     The scrub chips widen back to the whole ride. */
   if (_segFormHome) {
     const formSec = document.getElementById('formReplaySection');
     if (formSec && formSec.parentNode !== _segFormHome.parent) {
       formStopAnim();
       try { _segFormHome.parent.insertBefore(formSec, _segFormHome.next); } catch (e) {}
+      try { if (_runsD) formRenderScrubChips(_runsD); } catch (e) {}
     }
   }
   segTurnMarkers = {};
@@ -4417,6 +4421,42 @@ function formCriticalTurns(D) {
     .filter(T => formTurnRollRange(D, T) <= 65);
 }
 
+function formMarkActiveChip(v) {
+  document.querySelectorAll('#formScrubPicks .scrub-chip').forEach(b =>
+    b.classList.toggle('active', b.dataset.turn === String(v)));
+}
+/* Quick-pick chips for the biggest scrubbers: click to load + play that turn's replay directly.
+   Renders from the whole ride by default; the segment page passes its windowed turns (and a label
+   suffix) so the chips only reference corners of the descent on screen, and Back restores the
+   ride-wide set. Same clean-lean gate and scrub floor as the dropdown's wave markers. */
+function formRenderScrubChips(D, subset, labelSuffix) {
+  const picksEl = document.getElementById('formScrubPicks');
+  if (!picksEl || !D) return;
+  const scrubFmt = (mph) => `${U.speedNum(mph / 2.23694).toFixed(1)} ${U.speedUnit()}`;
+  const pool = (subset || D.turns || []).filter(T => formTurnRollRange(D, T) <= 65);
+  const scrubRanked = pool.map(T => ({ T, mph: turnScrubMph(T) }))
+    .filter(o => o.mph >= FORM_SCRUB_MIN_MPH)
+    .sort((a, b) => b.mph - a.mph);
+  if (!scrubRanked.length) { picksEl.classList.add('hidden'); picksEl.innerHTML = ''; return; }
+  const chips = scrubRanked.slice(0, 6).map(o =>
+    `<button type="button" class="scrub-chip" data-turn="${o.T.n}" title="Turn ${o.T.n} ${o.T.direction}: scrubbed ${scrubFmt(o.mph)} of speed between entry and apex/exit">`
+    + `T${o.T.n} ${o.T.direction}<span class="sc-amt">-${scrubFmt(o.mph)}</span></button>`).join('');
+  picksEl.innerHTML = `<span class="scrub-label">MOST SCRUBBED${labelSuffix ? ' · ' + labelSuffix : ''}</span>${chips}`;
+  picksEl.classList.remove('hidden');
+  picksEl.querySelectorAll('.scrub-chip').forEach(b => {
+    b.onclick = () => {
+      const T = pool.find(x => x.n === +b.dataset.turn);
+      if (!T) return;
+      const sel = document.getElementById('formTurn');
+      if (sel) sel.value = String(T.n);
+      formMarkActiveChip(T.n);
+      formSelectTurn(D, T);
+      if (_form) { _form.tau = 0; formSetPlaying(true); }
+      try { const sec = document.getElementById('formReplaySection'); if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
+    };
+  });
+}
+
 /* Speed scrubbed through a turn: how much speed (mph) was bled from the entry to the slowest point of
    the corner (apex or exit). High scrub = braking into / sliding through the corner, the turns most
    worth re-watching. Uses the GPS-interpolated entry/apex/exit speeds already on the turn. Returns 0
@@ -4463,34 +4503,7 @@ function setupFormReplay(D) {
   /* Default to the most-scrubbed turn, the ride's most instructive corner, instead of the first
      chronological one (typically a trivial early bend). The dropdown stays chronological. */
   if (scrubRanked.length) sel.value = String(scrubRanked[0].T.n);
-  const formMarkActiveChip = (v) => {
-    document.querySelectorAll('#formScrubPicks .scrub-chip').forEach(b =>
-      b.classList.toggle('active', b.dataset.turn === String(v)));
-  };
-
-  /* Quick-pick chips for the biggest scrubbers: click to load + play that turn's replay directly. */
-  const picksEl = document.getElementById('formScrubPicks');
-  if (picksEl) {
-    if (!scrubRanked.length) { picksEl.classList.add('hidden'); picksEl.innerHTML = ''; }
-    else {
-      const chips = scrubRanked.slice(0, 6).map(o =>
-        `<button type="button" class="scrub-chip" data-turn="${o.T.n}" title="Turn ${o.T.n} ${o.T.direction}: scrubbed ${scrubFmt(o.mph)} of speed between entry and apex/exit">`
-        + `T${o.T.n} ${o.T.direction}<span class="sc-amt">-${scrubFmt(o.mph)}</span></button>`).join('');
-      picksEl.innerHTML = `<span class="scrub-label">MOST SCRUBBED</span>${chips}`;
-      picksEl.classList.remove('hidden');
-      picksEl.querySelectorAll('.scrub-chip').forEach(b => {
-        b.onclick = () => {
-          const T = ordered.find(x => x.n === +b.dataset.turn);
-          if (!T) return;
-          sel.value = String(T.n);
-          formMarkActiveChip(T.n);
-          formSelectTurn(D, T);
-          if (_form) { _form.tau = 0; formSetPlaying(true); }
-          try { sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
-        };
-      });
-    }
-  }
+  formRenderScrubChips(D);
   const pick = () => {
     const v = sel.value;
     formMarkActiveChip(v);
@@ -14503,7 +14516,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'cfa7077 · 2026-07-18';
+const LOAM_BUILD = 'd6bcc77 · 2026-07-18';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
