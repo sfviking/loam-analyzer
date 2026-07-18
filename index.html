@@ -3445,8 +3445,10 @@ function closeSegmentPage() {
   setStatus('Back to ride', true);
   setTimeout(() => {
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-    /* Re-frame the replay's tile map for the width it now lives at. */
-    try { if (_form && _form.S) formInitMap(_form.S); } catch (e) {}
+    /* Re-frame the replay's tile map for the width it now lives at, then repaint
+       the current frame so the marker, covered trail, and ghost dot are placed
+       (a fresh init leaves them untransformed at the SVG origin otherwise). */
+    try { if (_form && _form.S) { formInitMap(_form.S); formFrame(); } } catch (e) {}
   }, 60);
   window.scrollTo(0, _segReturnScroll);
 }
@@ -4335,9 +4337,28 @@ function formInitMap(S) {
     const sp = toSvg(S.locLat[0], S.locLon[0]), ep = toSvg(S.locLat[S.locLat.length - 1], S.locLon[S.locLon.length - 1]), ap = toSvg(apexLat, apexLon);
     const northDeg = -upB * 180 / Math.PI;   /* where true north ended up, relative to screen-up */
     const txt = `paint-order="stroke" stroke="#0a0d07" stroke-width="2.6" stroke-linejoin="round"`;
+    /* Ghost layers (whole-segment replays with a faster same-segment lap): a per-corner
+       delta dot at each turn's apex (green = this lap's apex was faster than the ghost's,
+       clay = slower; enlarged live while the playhead is inside that corner), and the
+       translucent dashed ghost dot itself, advanced each frame by formUpdateMap. */
+    const G = (_form && _form.ghost && S.segment) ? _form.ghost : null;
+    let ghostDots = '';
+    if (G) {
+      for (const T of G.turnWins) {
+        const d = G.deltasByN[T.n];
+        if (d == null) continue;
+        const la = formInterp(S.locT, S.locLat, T.tPeak), lo = formInterp(S.locT, S.locLon, T.tPeak);
+        if (la == null || lo == null) continue;
+        const p = toSvg(la, lo);
+        /* Light halo outline so both colors read over the track line (which is the
+           same green as a "faster" dot) and over the amber covered trail. */
+        ghostDots += `<circle id="fgd-${T.n}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${d >= 0 ? '#86c06b' : '#d95f38'}" stroke="#f1f5f9" stroke-width="1.3" opacity="0.9"/>`;
+      }
+    }
     el.innerHTML = `<svg viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" width="100%" height="100%" style="display:block;background:transparent;">`
       + seg(S.locT[0], S.tStart, '#9fc0d8') + seg(S.tStart, S.tEnd, '#86c06b') + seg(S.tEnd, S.locT[S.locT.length - 1], '#e8b25e')
-      + `<g id="formCovered"></g>`
+      + `<g id="formCovered"></g>` + ghostDots
+      + (G ? `<g id="formGhostDot"><circle r="5.5" fill="#f1f5f9" fill-opacity="0.3" stroke="#f1f5f9" stroke-width="1.6" stroke-dasharray="2.5 2.5"/></g>` : '')
       + `<circle cx="${ap[0].toFixed(1)}" cy="${ap[1].toFixed(1)}" r="7" fill="none" stroke="#e8b25e" stroke-width="2.5"/>`
       + `<circle cx="${sp[0].toFixed(1)}" cy="${sp[1].toFixed(1)}" r="3.5" fill="#8caa6d" stroke="#0a0d07" stroke-width="1.5"/>`
       + `<circle cx="${ep[0].toFixed(1)}" cy="${ep[1].toFixed(1)}" r="3.5" fill="#e8b25e" stroke="#0a0d07" stroke-width="1.5"/>`
@@ -4388,6 +4409,28 @@ function formUpdateMap(S, tNow) {
     let rel = 0;
     if (!(la2 === lat && lo2 === lon)) rel = formBearingDeg(lat, lon, la2, lo2) - upB * 180 / Math.PI;
     nav.setAttribute('transform', `translate(${here[0].toFixed(1)} ${here[1].toFixed(1)}) rotate(${rel.toFixed(1)})`);
+  }
+
+  /* Racing ghost: the fastest same-segment lap's position at the same elapsed time
+     on ITS OWN clock, so the two dots physically separate exactly where time is
+     gained or lost (same semantics as the ghost race). The per-corner delta dots
+     enlarge while the playhead is inside their turn window. */
+  const G = (_form && _form.ghost && _form.run) ? _form.ghost : null;
+  if (G) {
+    const gh = el.querySelector('#formGhostDot');
+    if (gh) {
+      const tauRun = Math.max(0, tNow - _form.run.tStart);
+      const at = ghostAt(G.gTrack, tauRun);
+      const p = toSvg(at.lat, at.lon);
+      gh.setAttribute('transform', `translate(${p[0].toFixed(1)} ${p[1].toFixed(1)})`);
+    }
+    for (const T of G.turnWins) {
+      const dot = el.querySelector('#fgd-' + T.n);
+      if (!dot) continue;
+      const act = tNow >= T.tStart && tNow <= T.tEnd;
+      dot.setAttribute('r', act ? '6' : '3.5');
+      dot.setAttribute('opacity', act ? '1' : '0.9');
+    }
   }
 }
 
@@ -4655,6 +4698,48 @@ function formSegmentSeries(D, run) {
   } catch (e) { console.warn('formSegmentSeries failed', e); return null; }
 }
 
+/* Ghost context for a whole-segment replay: the fastest OTHER lap of the same
+   segment (auto-mode runs, matched by time window so object identity never
+   matters), its GPS track for the racing ghost dot, and this lap's per-turn
+   apex deltas against it (the same in-order pbp pairing as the ledger's
+   vs-best column, keyed by ride-wide turn number, dApex in mph). Null when no
+   FASTER lap of this segment exists: the ghost only races you against a
+   genuinely faster reference, and the best lap of the day replays clean. */
+function formGhostContext(D, run) {
+  try {
+    const { runs } = segmentRuns(D, 'auto');
+    /* Exclude by TEMPORAL OVERLAP, not window equality: the viewed run may come
+       from a different segmentation mode (_runsMode) than these auto-mode
+       candidates, and the same physical lap then reappears under slightly
+       different tStart/tEnd. Any overlap in time means the same riding, never a
+       peer; two genuine laps of a segment can never overlap. */
+    const peers = (runs || []).filter(o =>
+      (Math.min(o.tEnd, run.tEnd) - Math.max(o.tStart, run.tStart)) <= 0 && runsSameSegment(run, o, D));
+    if (!peers.length) return null;
+    const peer = peers.reduce((a, b) => b.metrics.duration < a.metrics.duration ? b : a);
+    const myDur = (run.metrics && run.metrics.duration) || (run.tEnd - run.tStart);
+    if (!(peer.metrics.duration < myDur)) return null;
+    const gTrack = ghostTrack(peer, D);
+    const myTrack = ghostTrack(run, D);
+    if (!gTrack || !myTrack) return null;
+    /* Per-corner deltas pair the two laps' turns strictly in order, which is only
+       trustworthy when both laps detected the SAME number of corners; on a count
+       mismatch the pairing may be shifted, so the per-corner read (dots + tile)
+       is dropped entirely. The ghost dot and time gap are count-independent. */
+    const { deltas, countA, countF } = pbpDeltasFromTurns(runTurnsFromD(run, D), runTurnsFromD(peer, D));
+    const deltasByN = {};
+    if (countA === countF) {
+      for (const d of (deltas || [])) if (d.rideN != null && isFinite(d.dApex)) deltasByN[d.rideN] = d.dApex;
+    }
+    /* This lap's turn windows, for the live per-corner tile and the map dots.
+       est carries the certainty grammar: non-FIT apex speeds are GPS estimates. */
+    const turnWins = (D.turns || [])
+      .filter(T => T.tPeak >= run.tStart && T.tPeak <= run.tEnd)
+      .map(T => ({ n: T.n, tStart: T.tStart, tEnd: T.tEnd, tPeak: T.tPeak, direction: T.direction, est: T.speedSource !== 'fit' }));
+    return { peer, peerLabel: runLabel(peer.tStart) || peer.label, gTrack, myTrack, deltasByN, turnWins };
+  } catch (e) { return null; }
+}
+
 function formSelectSegment(D, run) {
   formStopAnim();
   _formZoomMult = 1;   /* each new segment starts framed to fit */
@@ -4669,13 +4754,21 @@ function formSelectSegment(D, run) {
     return;
   }
   _form = { D, turn: null, run, S, tau: 0, dur: S.dur, mult: +(document.getElementById('formSpeedSel').value || 0.5), playing: false, raf: null, lastTs: null };
+  _form.ghost = formGhostContext(D, run);
   formParkAtPeak();
   if (note) {
     const dot = (col) => `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col};margin-right:5px;vertical-align:middle;"></span>`;
     const chip = (label, on, col) => `<span style="margin-right:14px;white-space:nowrap;opacity:${on ? 1 : 0.5};">${dot(on ? col : '#5b6b7a')}${label}${on ? '' : ' · off'}</span>`;
+    const G = _form.ghost;
+    const dotsClause = (G && Object.keys(G.deltasByN).length)
+      ? `, and the corner dots mark each turn's apex vs that lap, matched in order (green = you were faster, clay = slower)`
+      : '';
+    const ghostLine = G
+      ? ` Racing the ghost of <strong>${escapeHtml(G.peerLabel)}</strong> (${fmtDuration(G.peer.metrics.duration)}), your fastest lap of this segment: the faded dot is where it was at this same moment${dotsClause}.`
+      : '';
     note.innerHTML = `<div style="margin-bottom:4px;font-size:12px;">`
       + chip('Lean · phone', true, '#e0a458') + chip('Hand · Watch', !!S.wristRoll, '#7fb0d0') + `</div>`
-      + `<span class="dim">Whole-segment replay: signed left/right lean through ${S.turnCount} turn${S.turnCount === 1 ? '' : 's'}. Per-turn gaze is shown when you pick a single turn.</span>`;
+      + `<span class="dim">Whole-segment replay: signed left/right lean through ${S.turnCount} turn${S.turnCount === 1 ? '' : 's'}.${ghostLine} Per-turn gaze is shown when you pick a single turn.</span>`;
   }
   const btn = document.getElementById('formPlay'); if (btn) btn.textContent = '▶ Play segment';
   formInitMap(S);
@@ -4983,6 +5076,7 @@ function formFrame() {
   const speedCard = speedNow == null ? '' : `<div class="form-metric"><div class="fm-label">Speed</div><div class="fm-value">${U.speedNum(speedNow).toFixed(1)}<span class="fm-unit">${U.speedUnit()}</span></div><div class="fm-sub">at this point</div></div>`;
   const leanCard = `<div class="form-metric"><div class="fm-label">${seg ? 'Lean now' : 'Lean into turn'}</div><div class="fm-value">${Math.abs(lean).toFixed(0)}<span class="fm-unit">° ${sideLetter}</span></div><div class="fm-sub">peak ${Math.abs(S.peakLean).toFixed(0)}° ${seg ? 'this segment' : 'this turn'}</div></div>`;
   let cards = speedCard + leanCard;
+  let ghostCornerTile = '';   /* built in the segment branch, appended last so it never reflows its neighbors */
   if (S.headRel) {
     const intoCls = headRel >= 8 ? 'into' : (headRel <= -8 && phase !== 'approach' ? 'late' : '');
     const lead = S.leadTime;
@@ -5007,6 +5101,38 @@ function formFrame() {
     const dirNow = lean >= 2 ? 'right' : (lean <= -2 ? 'left' : 'upright');
     cards += `<div class="form-metric"><div class="fm-label">Leaning</div><div class="fm-value" style="text-transform:capitalize;">${dirNow}</div><div class="fm-sub">${phase}</div></div>`;
     cards += `<div class="form-metric"><div class="fm-label">Segment peak lean</div><div class="fm-value">${Math.abs(S.peakLean).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">max either side</div></div>`;
+    /* Ghost tiles: the live time-at-distance gap to the fastest same-segment lap
+       (same math as the ghost race: how long the ghost needed to reach where you
+       are now on its own clock, vs your elapsed time; positive = behind), and,
+       while the playhead is inside a corner with a vs-best delta, that corner's
+       apex-speed read against the ghost's corner (matched in order). tauRun is
+       clamped to the GPS track's duration so the resting final frame reads the
+       true finish gap instead of inflating past the last fix (same clamp the
+       ghost race applies); near-even racing shows the word "even", not a signed
+       0.0 whose glyph flaps as the interpolation crosses zero. */
+    if (F.ghost && F.run) {
+      const G = F.ghost;
+      const tauRun = Math.min(G.myTrack.dur, Math.max(0, tNow - F.run.tStart));
+      const atMe = ghostAt(G.myTrack, tauRun);
+      const gapS = tauRun - ghostTimeAtDist(G.gTrack, atMe.dist);
+      const behind = gapS >= 0.05, ahead = gapS <= -0.05;
+      const gapVal = (behind || ahead)
+        ? `${gapS >= 0 ? '+' : '-'}${Math.abs(gapS).toFixed(1)}<span class="fm-unit">s</span>`
+        : 'even';
+      cards += `<div class="form-metric"><div class="fm-label">Vs best lap</div>`
+        + `<div class="fm-value ${ahead ? 'into' : (behind ? 'late' : '')}">${gapVal}</div>`
+        + `<div class="fm-sub">${behind ? 'behind the ghost here' : (ahead ? 'ahead of the ghost here' : 'with the ghost here')}</div></div>`;
+      const inTurn = G.turnWins.find(T => tNow >= T.tStart && tNow <= T.tEnd && G.deltasByN[T.n] != null);
+      if (inTurn) {
+        const d = G.deltasByN[inTurn.n];   /* mph, + = this lap's apex was faster */
+        /* Appended LAST (below) so this tile popping in/out at corner boundaries
+           never reflows the tiles beside it; moss/clay matches the map dots and
+           the ledger's vs-best grammar, ~ marks GPS-estimated apex speeds. */
+        ghostCornerTile = `<div class="form-metric"><div class="fm-label">This corner · T${inTurn.n}</div>`
+          + `<div class="fm-value" style="color:var(${d >= 0 ? '--moss' : '--clay'});">${inTurn.est ? '~' : ''}${d >= 0 ? '+' : ''}${U.speedNum(d / 2.23694).toFixed(1)}<span class="fm-unit">${U.speedUnit()} apex</span></div>`
+          + `<div class="fm-sub">vs the ghost's corner, matched in order</div></div>`;
+      }
+    }
   } else {
     /* Lean-only: make lean the whole story instead of two empty dashes. */
     const dir = F.turn.direction === 'L' ? 'left' : 'right';
@@ -5041,6 +5167,7 @@ function formFrame() {
     const hl = (on) => on ? 'color:#e0a458;' : '';
     cards += `<div class="form-metric"><div class="fm-label">Sides · median lean</div><div class="fm-value" style="font-size:18px;"><span style="${hl(here==='L')}">${S.medLeanL.toFixed(0)}°L</span> · <span style="${hl(here==='R')}">${S.medLeanR.toFixed(0)}°R</span></div><div class="fm-sub">${weaker}</div></div>`;
   }
+  cards += ghostCornerTile;
   const mEl = document.getElementById('formMetrics');
   if (mEl) mEl.innerHTML = cards;
 
@@ -14533,7 +14660,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '73f11b4 · 2026-07-18';
+const LOAM_BUILD = 'c446ba7 · 2026-07-18';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
