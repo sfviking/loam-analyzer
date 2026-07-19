@@ -5274,16 +5274,55 @@ function clusterDescents(allDescents, matchMeters = 75) {
    Returns the alignment path and per-second time-delta of the longer (B) vs
    the reference (A). Positive delta = B is later than A at that point. */
 function pairwiseDescentDTW(refD, otherD) {
-  const seqA = zNormalize(refD.speed.map(v => v == null ? 0 : v)).map(v => [v]);
-  const seqB = zNormalize(otherD.speed.map(v => v == null ? 0 : v)).map(v => [v]);
-  if (seqA.length < 4 || seqB.length < 4) return null;
+  const rawA = refD.speed.map(v => v == null ? 0 : v);
+  const rawB = otherD.speed.map(v => v == null ? 0 : v);
+  if (rawA.length < 4 || rawB.length < 4) return null;
+  /* Two features per second. (1) z-normalized speed, the shape DTW locks onto at
+     braking and corner-exit events. (2) position along the descent: the fraction of
+     the run's own total distance covered so far (cumulative 1 Hz speed). Both runs
+     ride the same physical segment, so equal fractions are the same spot on the
+     trail regardless of absolute path-length disagreement between the two days
+     (GPS wander, line choice). Speed shape alone left the warp unconstrained
+     across steady-speed stretches (a paved road at constant mph z-normalizes to a
+     featureless flat), where it could drift many seconds off the diagonal and snap
+     back at the next braking feature, painting phantom +/-15 s gained-then-lost
+     swings; the position ramp is the gradient that pins it there. */
+  const zA = zNormalize(rawA), zB = zNormalize(rawB);
+  const fracOf = raw => {
+    const cum = [];
+    let s = 0;
+    for (const v of raw) { s += Math.max(0, v); cum.push(s); }
+    const total = s || 1;
+    return cum.map(c => c / total);
+  };
+  /* A 2% position mismatch costs 0.12, well under a real braking-shape mismatch, so
+     shape still wins where it is informative; on a flat it is the only signal. */
+  const POS_WEIGHT = 6;
+  const fracA = fracOf(rawA), fracB = fracOf(rawB);
+  const seqA = zA.map((v, i) => [v, fracA[i] * POS_WEIGHT]);
+  const seqB = zB.map((v, i) => [v, fracB[i] * POS_WEIGHT]);
   const { path, totalCost } = dtw(seqA, seqB, 0.3);
   const aToB = new Array(seqA.length).fill(null);
   for (const [ia, ib] of path) {
     if (aToB[ia] == null || ib > aToB[ia]) aToB[ia] = ib;
   }
   const delta = aToB.map((ib, ia) => ib == null ? null : ib - ia);
-  return { path, totalCost, delta };
+  /* Per-second confidence: soft where BOTH runs are locally steady-speed (z-speed
+     standard deviation under 0.25 across a +/-5 s window), i.e. where the
+     alignment rests on the position ramp alone. The painted map fades those
+     markers so a steady road stretch does not assert precision it lacks. */
+  const localSd = (z, i) => {
+    const lo = Math.max(0, i - 5), hi = Math.min(z.length - 1, i + 5);
+    const n = hi - lo + 1;
+    let m = 0;
+    for (let k = lo; k <= hi; k++) m += z[k];
+    m /= n;
+    let v = 0;
+    for (let k = lo; k <= hi; k++) v += (z[k] - m) ** 2;
+    return Math.sqrt(v / n);
+  };
+  const soft = aToB.map((ib, ia) => ib == null ? false : (localSd(zA, ia) < 0.25 && localSd(zB, ib) < 0.25));
+  return { path, totalCost, delta, soft };
 }
 
 function computeRunSummary(loc, baro, ride, R) {
@@ -7796,17 +7835,18 @@ function renderCrossRide({ perRide, clusters }) {
       if (bestPaint && refLat.length > 1) {
         const { m, result } = bestPaint;
         const N = result.delta.length, L = refLat.length;
-        const lat = [], lon = [], col = [];
+        const lat = [], lon = [], col = [], soft = [];
         for (let i = 0; i < N; i++) {
           if (result.delta[i] == null) continue;
           const j = Math.round(i / (N - 1) * (L - 1));   // map ref-second i onto the ref track point
           lat.push(refLat[j]); lon.push(refLon[j]); col.push(result.delta[i]);
+          soft.push(!!(result.soft && result.soft[i]));
         }
         /* Scale the diverging color range to the actual delta spread (with a small floor) so a
            near-identical pair is not collapsed to flat yellow nor a tiny spread amplified to noise. */
         const maxAbsDelta = col.length ? Math.max(...col.map(Math.abs)) : 0;
         const cap = Math.max(0.5, maxAbsDelta);
-        paintDeltaMap(deltaMapEl, refLat, refLon, lat, lon, col, cap, m.tag, chartRef.tag, maxAbsDelta === 0);
+        paintDeltaMap(deltaMapEl, refLat, refLon, lat, lon, col, soft, cap, m.tag, chartRef.tag, maxAbsDelta === 0);
       } else if (deltaMapEl) {
         deltaMapEl.innerHTML = '<div style="padding:24px; color:var(--text-muted); font-size:12px;">Select two comparable runs to paint the gain/loss track.</div>';
       }
@@ -7834,8 +7874,10 @@ let _crossDeltaMaps = [];
 /* "Where did you gain or lose time?" as a real map instead of a bare lat/lon scatter: the reference
    track over the basemap (real tiles, via the same Leaflet path the ride map uses), with a marker at
    each aligned point coloured by the DTW time delta (green = the comparison was faster there, red =
-   slower). A custom HTML legend stands in for Plotly's colorbar. */
-function paintDeltaMap(el, refLat, refLon, lat, lon, col, cap, mTag, refTag, flat) {
+   slower). A custom HTML legend stands in for Plotly's colorbar. Markers flagged soft (steady-speed
+   stretches, where the alignment rests on the position ramp alone) are faded and their tooltip is
+   prefixed "~" so a constant-speed road section does not assert per-second precision it lacks. */
+function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTag, flat) {
   if (!el || typeof L === 'undefined') return;
   el.innerHTML = '';
   el.style.padding = '0'; el.style.overflow = 'hidden'; el.style.position = 'relative';
@@ -7854,8 +7896,9 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, cap, mTag, refTag, fla
       L.polyline(track, { color: '#ffffff', weight: 2, opacity: 0.7 }).addTo(map);
     }
     for (let i = 0; i < lat.length; i++) {
-      L.circleMarker([lat[i], lon[i]], { radius: 6, color: '#0a0d07', weight: 1, fillColor: rdylgnColor((col[i] + cap) / (2 * cap)), fillOpacity: 0.95 })
-        .addTo(map).bindTooltip(`${col[i] > 0 ? '+' : ''}${col[i].toFixed(1)} s`, { direction: 'top' });
+      const isSoft = !!(soft && soft[i]);
+      L.circleMarker([lat[i], lon[i]], { radius: isSoft ? 5 : 6, color: '#0a0d07', weight: 1, fillColor: rdylgnColor((col[i] + cap) / (2 * cap)), fillOpacity: isSoft ? 0.35 : 0.95 })
+        .addTo(map).bindTooltip(`${isSoft ? '~' : ''}${col[i] > 0 ? '+' : ''}${col[i].toFixed(1)} s${isSoft ? ' · steady-speed stretch, approximate' : ''}`, { direction: 'top' });
     }
     const fit = track.length > 1 ? track : lat.map((la, i) => [la, lon[i]]);
     if (fit.length > 1) map.fitBounds(fit, { padding: [30, 30] });
@@ -7875,7 +7918,9 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, cap, mTag, refTag, fla
         + '<div style="display:flex; align-items:center; gap:6px;"><span>faster</span>'
         + '<span style="display:inline-block; width:64px; height:9px; border-radius:3px; background:linear-gradient(to right,#1a9850,#91cf60,#ffffbf,#fc8d59,#d73027);"></span>'
         + '<span>slower</span></div>'
-        + `<div style="margin-top:2px; opacity:0.7;">&plusmn;${cap.toFixed(1)}s</div>`;
+        + `<div style="margin-top:2px; opacity:0.7;">&plusmn;${cap.toFixed(1)}s</div>`
+        + ((soft && soft.some(Boolean))
+            ? '<div style="margin-top:2px; opacity:0.7;">faded = steady speed, approximate</div>' : '');
       el.appendChild(legend);
     }
     setTimeout(() => { try { map.invalidateSize(); if (fit.length > 1) map.fitBounds(fit, { padding: [30, 30] }); } catch (e) {} }, 0);
@@ -14685,7 +14730,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '5a29628 · 2026-07-19';
+const LOAM_BUILD = 'a24827f · 2026-07-19';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
