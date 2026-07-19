@@ -1228,7 +1228,7 @@
   <section id="rideSignatureSection" class="hidden">
     <div class="ride-sig-wrap">
       <div id="rideSignature"></div>
-      <button id="rideSigSave" class="ride-sig-save" title="Save this card as an image">Save card</button>
+      <button id="rideSigSave" class="ride-sig-save" title="Share this card with friends">Share card</button>
     </div>
   </section>
 
@@ -8425,11 +8425,9 @@ function saveLiftSignature() {
   img.onload = () => {
     const cv = document.createElement('canvas'); cv.width = 1600; cv.height = 920;
     const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, 1600, 920);
-    cv.toBlob(b => {
-      const url = URL.createObjectURL(b), a = document.createElement('a');
-      a.href = url; a.download = 'loam-lift-signature.png'; a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }, 'image/png');
+    /* Share sheet (app + web) rather than a bare download; the old <a download> silently vanished
+       inside the iOS WKWebView, so the lift card never left the phone there. */
+    loamShareImage(cv.toDataURL('image/png'), 'loam-lift-card.png', 'My lift, analyzed with Loam.');
   };
   img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
@@ -8768,7 +8766,7 @@ function renderStrength(D) {
       <span class="lift-unit-toggle" title="Weight units">
         <button class="${liftUnit() === 'lb' ? 'on' : ''}" onclick="setLiftUnitPref('lb')">lb</button><button class="${liftUnit() === 'kg' ? 'on' : ''}" onclick="setLiftUnitPref('kg')">kg</button>
       </span>
-      <button class="lift-sig-save" onclick="saveLiftSignature()">Save card</button>
+      <button class="lift-sig-save" onclick="saveLiftSignature()" title="Share this card with friends">Share card</button>
     </div>
     <div class="lift-form-row">
       <div id="liftForm" class="panel lift-form"></div>
@@ -9865,6 +9863,36 @@ function loamSaveChart(gd) {
   } else if (window.Plotly && Plotly.downloadImage) {
     Plotly.downloadImage(gd, { format: 'png', scale: 2, filename: 'loam-chart' });
   }
+}
+
+/* Share a rendered card (Ride Signature, Lift Signature) as a PNG, nudging the user toward sending it
+   to friends rather than just filing it away. Three delivery paths:
+   - iOS app (WKWebView): hand the PNG (+ a caption) to the native `loam` bridge, which presents the
+     system share sheet (Messages, Instagram, Save to Photos, ...).
+   - Web with the Web Share API: open the OS share sheet with the image file so it reaches the same
+     messaging/social targets. A user cancel (AbortError) is respected, not silently downloaded.
+   - Web without share support (most desktops): fall back to a plain download.
+   TODO (deferred, per product): once a public download page exists, append its URL to `caption` so a
+   shared card carries an install link. Intentionally omitted for now. */
+async function loamShareImage(dataURL, filename, caption) {
+  const text = caption || '';
+  const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
+    && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam;
+  if (embedded) {
+    try { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename, text }); } catch (e) {}
+    return;
+  }
+  try {
+    if (navigator.canShare && typeof fetch === 'function') {
+      const blob = await (await fetch(dataURL)).blob();
+      const file = new File([blob], filename, { type: 'image/png' });
+      if (navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], text }); return; }
+        catch (err) { if (err && err.name === 'AbortError') return; /* user canceled; do not also download */ }
+      }
+    }
+  } catch (e) { /* Web Share / File unsupported here: fall through to a download */ }
+  const a = document.createElement('a'); a.href = dataURL; a.download = filename; a.click();
 }
 
 /* Plotly config used by every chart: a mode bar exposing just a "save snapshot" (PNG, 2x) button, so
@@ -12162,10 +12190,7 @@ function rideSigDeliver(canvas) {
     if (canvas._loamRetried || !_rideSig) { console.warn('ride card export failed', e); return; }
     rideSigCompose({ skipTerrain: true }); return;
   }
-  const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
-    && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam;
-  if (embedded) { try { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL: png, filename: 'loam-ride-card.png' }); } catch (e) {} }
-  else { const a = document.createElement('a'); a.href = png; a.download = 'loam-ride-card.png'; a.click(); }
+  loamShareImage(png, 'loam-ride-card.png', 'My ride, analyzed with Loam.');
 }
 
 /* Compose the card on a canvas: dark gradient base, terrain tiles (clipped to the track panel), then
@@ -14660,7 +14685,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'c446ba7 · 2026-07-18';
+const LOAM_BUILD = '5a29628 · 2026-07-19';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
