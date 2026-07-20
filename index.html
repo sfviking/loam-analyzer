@@ -5653,9 +5653,9 @@ function estimateRenderBytes(data) {
      estimate only feeds the entry/total caps, and a quota bound is safe when it errs high (skip/evict a
      bit early) and unsafe when it errs low (a ride the estimator called cacheable still blows the quota),
      so round the weights up rather than down. */
-  n += (len(s.accel) + len(s.gravity) + len(s.gyro)) * 64;   /* {t,x,y,z} objects */
-  n += len(s.location) * 160;                                /* richer GPS fix objects (~10 numeric fields) */
-  n += (len(s.baro) + len(s.headphones) + len(s.wrist) + len(s.hr)) * 64;
+  n += (len(s.accel) + len(s.gravity) + len(s.gyro)) * 64;              /* {t,x,y,z} objects */
+  n += (len(s.location) + len(s.wrist) + len(s.headphone)) * 160;      /* richer objects (7 to 10 numeric fields each) */
+  n += (len(s.baro) + len(s.heartRate)) * 64;                          /* {t, value} objects */
   n += (len(data.t) + len(data.yawSeg) + len(data.rollSmooth)) * 16;  /* flat float series */
   return n;
 }
@@ -5744,13 +5744,23 @@ async function evictCoaching(max) {
   try {
     const db = await openLibrary();
     const store = _tx(db, 'coaching', 'readwrite');
-    const oldestFirst = await new Promise((res, rej) => {
-      const keys = [];
-      const c = store.index('savedAt').openKeyCursor();   /* ascending savedAt = oldest first */
-      c.onsuccess = e => { const cur = e.target.result; if (cur) { keys.push(cur.primaryKey); cur.continue(); } else res(keys); };
+    /* Delete DURING the cursor walk with cur.delete(), not after awaiting a collected keys array. An
+       IndexedDB transaction auto-commits once iteration settles with no pending request, so deleting in
+       the await continuation runs after the tx may have gone inactive: on WebKit (this analyzer's own
+       in-app WKWebView) that throws TransactionInactiveError, the bound is never enforced, and the
+       coaching store grows unchecked against the shared origin quota. Same fix as evictAnalyses. */
+    await new Promise((res, rej) => {
+      let kept = 0;
+      const c = store.index('savedAt').openCursor(null, 'prev');   /* descending savedAt = newest first */
+      c.onsuccess = e => {
+        const cur = e.target.result;
+        if (!cur) { res(); return; }
+        kept += 1;
+        if (kept > max) cur.delete();
+        cur.continue();
+      };
       c.onerror = () => rej(c.error);
     });
-    for (let i = 0; i < oldestFirst.length - max; i++) store.delete(oldestFirst[i]);
   } catch (e) { console.warn('coaching cache evict failed:', e); }
 }
 
@@ -7559,6 +7569,11 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
        maxSpeed line above already filters nulls for the same reason). */
     if (inRide[i].speed == null || inRide[i-1].speed == null) continue;
     const dt = inRide[i].t - inRide[i-1].t;
+    /* Also skip a segment that spans a long GPS gap. GPS is ~1 Hz, so a dt of several seconds means the
+       fixes bracket a dropout; when both fixes happen to keep a nonzero speed (a fix pause/resume, not a
+       nulled dropout), integrating that speed across the whole gap inflates distance by avgSpeed*gap.
+       Leave the gap uncounted, matching the null-skip above. */
+    if (dt > 5) continue;
     const v = (inRide[i].speed + inRide[i-1].speed) / 2;
     distance += v * dt;
   }
@@ -8810,6 +8825,19 @@ function renderStrength(D) {
   const corr = liftRepsCorr(D.key || '');
   const autoSets = D.strength.sets;         // raw per-set counts, for the corrected-value tooltip
   const sum = Dc.summary, sets = Dc.strength.sets;
+  /* Weightlifting was declared but no set survived segmentation: the lifter never tapped "Start set" and
+     the motion auto-segmenter found nothing (a quiet or very short recording). Without this guard the
+     view paints a bare "0 reps · 0 sets" with an empty Set Map and no explanation. Show a real empty
+     state that points at the fix instead. */
+  if (!sets.length) {
+    document.getElementById('strengthResults').innerHTML = `
+      <div class="section-title">Lift <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+      <div class="panel" style="padding:24px;text-align:center">
+        <div class="s-big">No sets detected</div>
+        <div class="strength-scope" style="margin-top:10px">This recording was tagged as a lift, but no sets were found. Tap <strong>Start set</strong> at the top of each working set when you record (the analyzer segments sets from those taps), otherwise the motion was too quiet or short to auto-segment. Reps count from wrist vertical travel, so wear the watch for the fullest read.</div>
+      </div>`;
+    return;
+  }
   const weights = liftWeightsKg(D.key || '');
   const volKg = sets.reduce((s, set, i) => s + (weights[i] != null ? weights[i] * set.reps : 0), 0);
   const HIGH = '#37c6b5', LOW = '#f0954f', UNC = '#9aa0aa';
@@ -14224,13 +14252,6 @@ function renderCachedAnalysis(cached) {
      every field it reads and crash the reopen. Those fall through to the IMU renderer below. */
   if (d && d.sport === 'road' && d.session) { renderAllRoad(d); return; }
   if (cached.sport === 'running' || cached.sport === 'walking') { renderAllRunning(d); return; }
-  /* A lift has none of the MTB render fields (turns/yawSeg/R), so it must route to renderStrength, which
-     unlike the other renderers does not manage its own section visibility. Set up the strength section
-     here exactly as the analyze() lift branch does before rendering. */
-  if (isLiftSport(cached.sport)) {
-    hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
-    renderStrength(d); return;
-  }
   renderAll(d);
 }
 
@@ -14240,7 +14261,6 @@ function cachedSportNoun(cached) {
   if (isLiftSport(cached.sport)) return 'lift';
   if (d && d.gpsOnly) return d.gpsSport === 'run' ? 'run' : d.gpsSport === 'walk' ? 'walk' : 'ride';
   if (d && d.sport === 'road' && d.session) return 'road ride';
-  if (isLiftSport(cached.sport)) return 'lift';
   return cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride';
 }
 
@@ -14873,7 +14893,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '5e49ba0 · 2026-07-20';
+const LOAM_BUILD = '539941a · 2026-07-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
