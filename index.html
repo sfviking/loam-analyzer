@@ -496,6 +496,10 @@
     margin-left: 10px; cursor: pointer; white-space: nowrap;
   }
   .section-title .subtitle .smooth-lbl input { vertical-align: -1px; margin-right: 3px; cursor: pointer; }
+  /* "all turns" toggle in the Per-turn header, beside the sort select. */
+  .ledger-all-lbl { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim);
+    margin-left: 10px; cursor: pointer; white-space: nowrap; text-transform: none; letter-spacing: normal; }
+  .ledger-all-lbl input { vertical-align: -1px; margin-right: 3px; cursor: pointer; }
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; box-shadow: 0 1px 3px rgba(15,23,42,0.05); }
 
   /* Quick-nav: a sticky chip row that jumps to each visible section, so features (the lap
@@ -1368,6 +1372,7 @@
         <option value="scrub">Most scrubbed first</option>
         <option value="ride">Ride order</option>
       </select>
+      <label id="ledgerAllToggle" class="ledger-all-lbl hidden" title="Show every turn on the map and in the ledger, not just the ones that matter most"><input type="checkbox" id="ledgerAllChk"> all turns</label>
     </div>
     <div class="panel corner-ledger" id="cornerLedger"></div>
     <details class="panel jumps-details" id="turnDetails">
@@ -2204,10 +2209,16 @@ const SPORT_LEX = {
   ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'grade' },   /* GPS-only generic */
   lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', legend: 'sets' },
 };
+/* One predicate for "is this a weightlifting session". Two identifiers legitimately reach here: a
+   declared/tapped lift is tagged 'weightlifting' (the sport picker's value), while an AUTO-detected lift
+   carries 'strength' (detectStrength's return), and either can be persisted in an older cached entry. So
+   every lift branch must accept both; routing them through this helper keeps a new call site from
+   silently checking only one and mis-routing half the lifts. */
+function isLiftSport(sport) { return sport === 'weightlifting' || sport === 'strength'; }
 function normalizeSport(sport) {
   if (sport === 'running') return 'run';
   if (sport === 'walking') return 'walk';
-  if (sport === 'weightlifting' || sport === 'strength') return 'lift';
+  if (isLiftSport(sport)) return 'lift';
   if (SPORT_LEX[sport]) return sport;
   return 'ride';
 }
@@ -3244,7 +3255,7 @@ function syncSegTurnMarkers(shown) {
     const delta = hasV ? T.vExit - T.vEntry : 0;
     const icon = L.divIcon({
       className: '',
-      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnDeltaColor(delta)}; outline-offset:1px;">${T.n}</div>`,
+      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnRingColor(T)}; outline-offset:1px;">${T.n}</div>`,
       iconSize: [26, 26], iconAnchor: [13, 13]
     });
     const mk = L.marker([p.latitude, p.longitude], { icon }).addTo(_segMarkers);
@@ -5383,8 +5394,15 @@ function computeRunSummary(loc, baro, ride, R) {
 
 const DB_NAME = 'loam-library';
 const DB_VERSION = 4;  // v4: 'sources' store (FIT bytes for re-openable GPS rides)
-const ANALYSIS_CACHE_VERSION = 8;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels)
+const ANALYSIS_CACHE_VERSION = 9;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
+/* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
+   100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
+   thread serializing itself in and then blow the IndexedDB quota for every other ride: skip caching a
+   single render estimated above the per-entry cap (it stays re-openable by re-dropping the file, same
+   as an evicted or FIT ride), and evict oldest-first until the whole store is under the total budget. */
+const ANALYSIS_CACHE_ENTRY_MAX_BYTES = 60 * 1024 * 1024;
+const ANALYSIS_CACHE_TOTAL_MAX_BYTES = 250 * 1024 * 1024;
 const COACHING_CACHE_VERSION = 1;  // bump to invalidate cached AI coaching when the coach prompt/system changes
 const COACHING_CACHE_MAX = 24;     // keep the N most recent first-analysis coaching replies; evict oldest
 
@@ -5608,27 +5626,80 @@ async function getCachedAnalysis(hash) {
   } catch (e) { console.warn('analysis cache read failed:', e); }
   return null;
 }
+/* Rough structured-clone size of a cached render, from the sensor/series sample counts (the arrays
+   that dominate; scalars and small per-turn arrays are noise next to a 100 Hz IMU stream). Used only
+   to bound the store, so a coarse per-sample byte estimate is fine. */
+function estimateRenderBytes(data) {
+  if (!data || typeof data !== 'object') return 0;
+  const len = a => (Array.isArray(a) ? a.length : 0);
+  const s = data.sensors || {};
+  let n = 0;
+  /* Per-sample byte weights deliberately OVERSHOOT the true IndexedDB structured-clone size (an
+     {t,x,y,z} object serializes to roughly its four 8-byte doubles plus key/structure overhead). The
+     estimate only feeds the entry/total caps, and a quota bound is safe when it errs high (skip/evict a
+     bit early) and unsafe when it errs low (a ride the estimator called cacheable still blows the quota),
+     so round the weights up rather than down. */
+  n += (len(s.accel) + len(s.gravity) + len(s.gyro)) * 64;   /* {t,x,y,z} objects */
+  n += len(s.location) * 160;                                /* richer GPS fix objects (~10 numeric fields) */
+  n += (len(s.baro) + len(s.headphones) + len(s.wrist) + len(s.hr)) * 64;
+  n += (len(data.t) + len(data.yawSeg) + len(data.rollSmooth)) * 16;  /* flat float series */
+  return n;
+}
 async function putCachedAnalysis(hash, sport, data) {
+  if (!hash) return;
+  const bytes = estimateRenderBytes(data);
+  if (bytes > ANALYSIS_CACHE_ENTRY_MAX_BYTES) {
+    /* Too big to cache without risking the quota for everything else; the ride still re-opens by
+       re-dropping the file. Not a warning: this is the designed fallback, not a failure. */
+    console.info('analysis cache: render too large to store (' + Math.round(bytes / 1048576) + ' MB), will re-open by re-drop');
+    return;
+  }
+  const record = { hash, cacheVersion: ANALYSIS_CACHE_VERSION, sport, data, bytes, savedAt: new Date().toISOString() };
   try {
     const db = await openLibrary();
-    await _req(_tx(db, 'analyses', 'readwrite').put({
-      hash, cacheVersion: ANALYSIS_CACHE_VERSION, sport, data,
-      savedAt: new Date().toISOString(),
-    }));
+    await _req(_tx(db, 'analyses', 'readwrite').put(record));
     evictAnalyses(ANALYSIS_CACHE_MAX);
-  } catch (e) { console.warn('analysis cache write failed:', e); }
+  } catch (e) {
+    /* A quota error here means the store is already full of big rides. Hard-evict down to a couple of
+       the newest and retry once so at least the current ride caches, rather than silently caching none. */
+    if (e && (e.name === 'QuotaExceededError' || (e.message || '').indexOf('quota') >= 0)) {
+      try {
+        await evictAnalyses(2);
+        const db2 = await openLibrary();
+        await _req(_tx(db2, 'analyses', 'readwrite').put(record));
+        return;
+      } catch (e2) { console.warn('analysis cache write failed after evict:', e2); return; }
+    }
+    console.warn('analysis cache write failed:', e);
+  }
 }
+/* Evict oldest-first until the store satisfies BOTH bounds: at most `max` entries AND at most
+   ANALYSIS_CACHE_TOTAL_MAX_BYTES total. Walks newest-first keeping a running count and byte total,
+   then deletes everything past the point either budget is exceeded. Records saved before v9 carry no
+   `bytes`; treat those as zero so the count cap still governs them. */
 async function evictAnalyses(max) {
   try {
     const db = await openLibrary();
     const store = _tx(db, 'analyses', 'readwrite');
-    const oldestFirst = await new Promise((res, rej) => {
-      const keys = [];
-      const c = store.index('savedAt').openKeyCursor();   /* ascending savedAt = oldest first */
-      c.onsuccess = e => { const cur = e.target.result; if (cur) { keys.push(cur.primaryKey); cur.continue(); } else res(keys); };
+    /* Delete DURING the cursor walk with cur.delete(), not after awaiting a keys array. An IndexedDB
+       transaction auto-commits once iteration settles with no pending request against it, so collecting
+       keys in a Promise and deleting in the await continuation runs the deletes after the tx may have
+       gone inactive: on WebKit (this analyzer's own in-app WKWebView) that throws TransactionInactiveError,
+       the bounds are never enforced, and the store grows unchecked (also defeating the quota-retry in
+       putCachedAnalysis). Deleting inline keeps every request inside the live transaction. */
+    await new Promise((res, rej) => {
+      let kept = 0, keptBytes = 0;
+      const c = store.index('savedAt').openCursor(null, 'prev');  /* descending savedAt = newest first */
+      c.onsuccess = e => {
+        const cur = e.target.result;
+        if (!cur) { res(); return; }
+        const rec = cur.value || {};
+        kept += 1; keptBytes += (rec.bytes || 0);
+        if (kept > max || keptBytes > ANALYSIS_CACHE_TOTAL_MAX_BYTES) cur.delete();
+        cur.continue();
+      };
       c.onerror = () => rej(c.error);
     });
-    for (let i = 0; i < oldestFirst.length - max; i++) store.delete(oldestFirst[i]);
   } catch (e) { console.warn('analysis cache evict failed:', e); }
 }
 
@@ -5724,7 +5795,7 @@ function descentPolyline(sensors, descent) {
    data (decimated polyline + 1Hz speed). Heavy raw IMU stays out. Also runs
    tag matching so the saved record carries autoTag hints. Returns the inserted
    ride id (Number) so the UI can refer to it for future tagging actions. */
-async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt }) {
+async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey }) {
   /* Build descent list with polylines + speed for every recording, not just
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
      net-drop floor; running keeps every graded segment (hill repeats are short). */
@@ -5789,6 +5860,11 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
        composite of the ride window + distance. saveRide upserts on this so a
        recording analyzed more than once updates its row instead of duplicating. */
     dedupKey: contentKey || `${filename}|${Math.round(ride.start)}|${Math.round(ride.end)}|${Math.round((summary && summary.distance) || 0)}`,
+    /* The exact key this ride's render was cached under (dedupKey plus the calibration/sport suffix).
+       The bare dedupKey is NOT that key when a non-default calibration or a declared sport is in play,
+       so the Library/switcher must look the analysis up by this stored key, not by dedupKey, or every
+       such ride falls back to "drop file to view". Null for uncached rides (FIT, cross-ride bulk). */
+    analysisKey: analysisKey || null,
     /* Explicit recordedAt wins when the caller has a better clock than the filename (a FIT-only
        ride reads it from the FIT records, which are absolute UTC). Otherwise: the filename's UTC
        stamp (app sessions and Sensor Logger exports both carry one); save time is only the
@@ -7023,7 +7099,9 @@ async function analyze(files) {
        in-app path); FIT-augmented and zip inputs always recompute. */
     /* contentHash identifies the recording (drives run labels, carry, and library dedup, all of which
        must NOT vary by calibration strategy). cacheKey is the analysis-cache key: contentHash plus a
-       strategy suffix, with the default 'quietest' suffix left empty so prior cache entries still hit. */
+       calibration/sport suffix (empty only for the legacy 'quietest' calibration). The default 'preride'
+       calibration DOES produce a suffixed key, so the ride record stores this exact cacheKey as its
+       analysisKey and the Library/switcher look the render up by that, not by the bare dedupKey. */
     const calibStrategy = loamCalibStrategy();
     /* The declared sport (host LOAM_SPORT or the on-page selector) changes the whole analysis, so it is
        part of the cache key. Without it, re-tagging a session's sport replays the stale render for the
@@ -7187,7 +7265,7 @@ async function analyze(files) {
       }
       onProgress('saving to library');
       const saved = await saveRideToLibrary({
-        filename: sensorFile.name, sport, sensors, ride, summary: runSummary, contentKey: contentHash,
+        filename: sensorFile.name, sport, sensors, ride, summary: runSummary, contentKey: contentHash, analysisKey: cacheKey,
       });
       if (superseded()) return;
       onProgress('rendering');
@@ -7208,7 +7286,7 @@ async function analyze(files) {
     /* Weightlifting path — stationary barbell session, no map/turns/jumps. Sets come from the
        lifter's "Set" taps (annotations); reps/depth/bar-speed from the wrist, bar position + depth
        from the taps. Renders its own view (Set Map hero + tiles + table), not the MTB surfaces. */
-    if (sport === 'weightlifting' || sport === 'strength') {
+    if (isLiftSport(sport)) {
       onProgress('analyzing sets');
       const setWindows = LoamStrength.parseSetMarks(sensors.annotations || [], ride);
       const strength = LoamStrength.analyzeStrength(sensors, ride, { setWindows });
@@ -7346,7 +7424,7 @@ async function analyze(files) {
     onProgress('saving to library');
     const saved = await saveRideToLibrary({
       filename: sensorFile.name, sport, sensors, ride, summary,
-      turnCount: turns.length, jumpCount: ridingJumps.length, contentKey: contentHash, turns,
+      turnCount: turns.length, jumpCount: ridingJumps.length, contentKey: contentHash, turns, analysisKey: cacheKey,
     });
     if (superseded()) return;
     onProgress('rendering');
@@ -7392,18 +7470,25 @@ async function analyze(files) {
 const STANDARD_G = 9.80665;
 function detectAirtime(sensors, ride) {
   const acc = sensors.accel, grav = sensors.gravity;
-  if (!acc || !grav || acc.length < 200 || acc.length !== grav.length) return { jumps: [], status: 'unavailable' };
+  if (!acc || !grav || acc.length < 200 || grav.length < 2) return { jumps: [], status: 'unavailable' };
   const idx = [];
   for (let i = 0; i < acc.length; i++) if (acc[i].t >= ride.start && acc[i].t <= ride.end) idx.push(i);
   if (idx.length < 200) return { jumps: [], status: 'unavailable' };
+  // Pair gravity to each accel sample by TIME, not by array index. On the Combined CSV both channels
+  // share one clock and index i is the same instant, so nearest-by-time returns exactly grav[i] and the
+  // output is unchanged. On the zip path accel and gravity come from two independent Sensor Logger CSVs
+  // with independent clocks and sample counts: index-pairing is wrong there, and an unequal length used
+  // to bail the whole jumps feature to 'unavailable'. Both channels are time-ascending.
+  const gravAt = tq => { let lo = 0, hi = grav.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (grav[m].t <= tq) lo = m; else hi = m; } return Math.abs(grav[hi].t - tq) < Math.abs(grav[lo].t - tq) ? grav[hi] : grav[lo]; };
   const mid = a => { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
   const pctl = (a, p) => { const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
-  const gMed = mid(idx.map(i => Math.hypot(grav[i].x, grav[i].y, grav[i].z))) || STANDARD_G;
+  const gMed = mid(idx.map(i => { const g = gravAt(acc[i].t); return Math.hypot(g.x, g.y, g.z); })) || STANDARD_G;
   const aP99 = pctl(idx.map(i => Math.hypot(acc[i].x, acc[i].y, acc[i].z)), 0.99);
   const scale = (gMed > 5 && aP99 < 2.5) ? STANDARD_G : 1;   // heal legacy g-unit accel against m/s² gravity
   const t = [], rg = [];
   for (const i of idx) {
-    const rx = acc[i].x * scale + grav[i].x, ry = acc[i].y * scale + grav[i].y, rz = acc[i].z * scale + grav[i].z;
+    const g = gravAt(acc[i].t);
+    const rx = acc[i].x * scale + g.x, ry = acc[i].y * scale + g.y, rz = acc[i].z * scale + g.z;
     t.push(acc[i].t); rg.push(Math.hypot(rx, ry, rz) / gMed);   // specific force in g units: ~1 riding, ~0 freefall
   }
   const n = rg.length, loc = sensors.location || [];
@@ -7455,6 +7540,10 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
   let distance = 0;
   for (let i = 1; i < inRide.length; i++) {
+    /* Skip a segment whose either endpoint has no reported speed. A null coerces to 0 in the average,
+       which silently drags total distance DOWN on GPS gaps rather than leaving the gap uncounted (the
+       maxSpeed line above already filters nulls for the same reason). */
+    if (inRide[i].speed == null || inRide[i-1].speed == null) continue;
     const dt = inRide[i].t - inRide[i-1].t;
     const v = (inRide[i].speed + inRide[i-1].speed) / 2;
     distance += v * dt;
@@ -7961,7 +8050,7 @@ async function enrichRidesMechanics(rides) {
   await Promise.all(rides.map(async r => {
     if (r.mechanics || !isMtbFamily(r.sport) || !r.dedupKey) return;
     try {
-      const c = await getCachedAnalysis(r.dedupKey);
+      const c = await getCachedAnalysis(r.analysisKey || r.dedupKey);
       const D = c && c.data;
       if (!D || !Array.isArray(D.turns) || !D.turns.length) return;
       const mech = (typeof turnMechanics === 'function') ? turnMechanics({ turns: D.turns }) : null;
@@ -8698,6 +8787,10 @@ function liftCoachRead(D) {
    from the wrist. */
 function renderStrength(D) {
   _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
+  /* Register for the header Units toggle (rerenderUnits), same as every other renderer. Without this,
+     changing units on a Lift session re-runs the PREVIOUS ride's renderer, which hides the Lift view
+     and paints a stale ride into a hidden container (blank page below the header). */
+  _lastRender = { fn: renderStrength, D };
   const Dc = liftApplyRepCorr(D);           // corrections layered on: every surface below renders from Dc
   _liftDc = Dc;
   const corr = liftRepsCorr(D.key || '');
@@ -8803,7 +8896,7 @@ function renderStrength(D) {
   const readCards = liftCoachRead(Dc).map(c => `<div class="lc-card"><div class="lc-head">${escapeHtml(c.head)}</div><div class="lc-body">${escapeHtml(c.body)}</div></div>`).join('');
 
   document.getElementById('strengthResults').innerHTML = `
-    <div class="section-title">Lift <span class="beta-badge">BETA</span> <span class="subtitle">${D.title || ''}</span></div>
+    <div class="section-title">Lift <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
     <div class="strength-scope">Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; overhead press counts but is unproven, curls are noisy, bench press undercounts, and pull-ups do not register. Tap the lift at each set (Squat / Deadlift / Press chips, or "More" for other lifts); an unlabeled set is read as a squat.</div>
     <div id="liftSignature" class="lift-sig"></div>
     <div class="lift-sig-bar">
@@ -9862,8 +9955,9 @@ function syncSmoothToggles() { document.querySelectorAll('.smoothToggle').forEac
 /* MTB calibration-window strategy. 'preride' (default) calibrates from the last sufficiently-still
    window before the ride, i.e. your final mount pose, which is more reliable when the phone moves
    between calibration and riding (pocket then backpack). 'quietest' is the original global-minimum-
-   noise selection, kept as an opt-out. The cache suffix is empty only for the legacy 'quietest'
-   value, so pre-existing quietest cache entries still hit under an explicit 'quietest' selection.
+   noise selection, kept as an opt-out. The analysis-cache suffix is empty only for the legacy 'quietest'
+   value; the default 'preride' produces a suffixed cache key, which the ride record stores as its
+   analysisKey so the Library/switcher can still find the render (they must not assume the bare dedupKey).
    See findCalibWithWindow. Persisted in localStorage; takes effect by re-running the current ride. */
 function loamCalibStrategy() { return localStorage.getItem('loam_calib') === 'quietest' ? 'quietest' : 'preride'; }
 function setLoamCalibStrategy(s) { try { localStorage.setItem('loam_calib', s === 'preride' ? 'preride' : 'quietest'); } catch (e) { /* private mode / quota */ } }
@@ -10717,7 +10811,7 @@ function buildDigest(D, sport) {
      tempo and bar speed (VBT), all per set. Everything here is what the lift view shows, and the
      caveats (experimental bar speed / rep count, relative high-low read) are stated so the coach does
      not overclaim precision. */
-  if (sport === 'lift' || sport === 'weightlifting' || sport === 'strength') {
+  if (sport === 'lift' || isLiftSport(sport)) {
     const weightsKg = liftWeightsKg(D.key || '');
     const disp = kg => kg == null ? null : +(liftUnit() === 'kg' ? kg : kg / KG_PER_LB).toFixed(1);
     const setRows = (D.strength.sets || []).map((set, i) => ({
@@ -11060,7 +11154,7 @@ async function attachCoachDescentHistory(D, sport) {
 
 function coachSystemPrompt(sport, level) {
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
-  if (sport === 'lift' || sport === 'weightlifting' || sport === 'strength') {
+  if (sport === 'lift' || isLiftSport(sport)) {
     return `You are Loam, an expert strength coach for the barbell back squat. This session was captured with an Apple Watch (wrist tracks the bar), AirPods (torso/head pitch), and a pocketed phone: you have per-set reps, tempo, bar range of motion, and mean concentric bar speed, plus the lifter's own Set-tap labels for bar position (high/low) and depth target (full/parallel), and optional entered load.
 
 Be honest about the instrument. Bar position and depth are the lifter's LABELS, not measurements. The wrist rep count and bar speed are EXPERIMENTAL: the rep count can over-count a trailing re-rack, and bar-speed magnitude is not yet calibrated (use it for RELATIVE fade within a session, not absolute numbers). High-vs-low bar is a relative torso-lean read within this one session. Never invent data you were not given (no bar path, no joint angles, no EMG), and do not state a metric as precise when the digest flags it experimental.
@@ -11800,13 +11894,20 @@ function nearestByTime(arr, t) {
   return (t - arr[lo].t <= arr[hi].t - t) ? arr[lo] : arr[hi];
 }
 
-/* Color a turn marker's ring by the speed carried through it (exit minus entry): green = carried or
-   gained speed, amber = held, red = scrubbed (where you bled the most speed). Clamped at +/-3 m/s. */
-function turnDeltaColor(deltaMps) {
-  const x = Math.max(-1, Math.min(1, deltaMps / 3));
-  const amber = [224, 164, 88], green = [168, 208, 138], red = [217, 95, 56];
-  const mix = (a, b, k) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * k)).join(',')})`;
-  return x >= 0 ? mix(amber, green, x) : mix(amber, red, -x);
+/* Discrete "speed kept" color for a turn's ring, matching the three-bucket legend and the ledger's
+   kept-vs-scrubbed bar (both keyed on the slowest of apex/exit versus entry, via turnScrubMph):
+     green  = carried  (little bled and exited at least as fast as entry, i.e. speed kept or gained),
+     red    = scrubbed (bled at least FORM_SCRUB_MIN_MPH, real braking / sliding),
+     amber  = held     (a mild loss in between).
+   Discrete rather than a gradient so a corner where speed was kept or gained reads unambiguously green,
+   not a faint near-amber tint: the old gradient clamped exit-minus-entry to +/-3 m/s, so a real but
+   small gain (e.g. +0.7 mph) landed ~10% toward green and showed as gold. Keys on the same
+   turnScrubMph the bar and the "most scrubbed" picks use, so the ring, the bar, and the chips agree. */
+function turnRingColor(T) {
+  const amber = 'rgb(224,164,88)', green = 'rgb(168,208,138)', red = 'rgb(217,95,56)';
+  if (!T || T.vExit == null || T.vEntry == null) return amber;
+  if (turnScrubMph(T) >= FORM_SCRUB_MIN_MPH) return red;
+  return T.vExit >= T.vEntry ? green : amber;
 }
 
 /* Draw (or redraw) the speed-colored track + turn/jump markers for a time window onto a clearable
@@ -11835,7 +11936,7 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
     if (!p) continue;
     const hasV = T.vExit != null && T.vEntry != null;
     const delta = hasV ? T.vExit - T.vEntry : 0;
-    const ring = turnDeltaColor(delta);
+    const ring = turnRingColor(T);
     const icon = L.divIcon({
       className: '',
       html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${ring}; outline-offset:1px;">${T.n}</div>`,
@@ -12580,6 +12681,21 @@ function renderCornerLedger(turns, hostId, deltasByN) {
      reveals the full set. The symmetry footer always reads the FULL set so the
      focused view never skews the per-side medians. */
   const total = usable.length;
+  /* Header "all turns" toggle (main page only): a discoverable twin of the bottom expander, so seeing
+     every turn (on the map and in the ledger) is an option next to the default most-scrubbed focus.
+     Only meaningful when there are more turns than the focused view shows. */
+  if (!isSeg) {
+    const allToggle = document.getElementById('ledgerAllToggle');
+    const allChk = document.getElementById('ledgerAllChk');
+    if (allToggle) allToggle.classList.toggle('hidden', total <= LEDGER_FOCUS_ROWS);
+    if (allChk) {
+      allChk.checked = _ledgerShowAll;
+      if (!allChk._wired) {
+        allChk._wired = true;
+        allChk.addEventListener('change', () => { _ledgerShowAll = allChk.checked; renderCornerLedger(_ledgerTurns); });
+      }
+    }
+  }
   const shown = _ledgerShowAll ? usable : usable.slice(0, LEDGER_FOCUS_ROWS);
   const M = loamChartTheme();
   const unit = U.speedUnit();
@@ -14078,6 +14194,14 @@ function resetToDropzone() {
    the analysis cache today, so this also future-proofs the day one of those paths starts caching. */
 function renderCachedAnalysis(cached) {
   const d = cached.data;
+  /* A weightlifting session renders into its own section (#strengthResults), so it must switch sections
+     itself: the callers (early cache-hit, Library replay) show the generic #results, which the Lift view
+     does not use. Owning the switch here means both reopen paths land on the Lift view, not a blank one. */
+  if (isLiftSport(cached.sport)) {
+    hideAllSections(); hide('results'); show('strengthResults');
+    renderStrength(d);
+    return;
+  }
   if (d && d.gpsOnly) { renderAllGps(d); return; }
   /* Route to the road renderer only when the cached data actually carries the power-pipeline fields
      (session/metrics/mmp). A phone recording merely tagged 'road' (Road picked, or LOAM_SPORT=road
@@ -14089,7 +14213,7 @@ function renderCachedAnalysis(cached) {
   /* A lift has none of the MTB render fields (turns/yawSeg/R), so it must route to renderStrength, which
      unlike the other renderers does not manage its own section visibility. Set up the strength section
      here exactly as the analyze() lift branch does before rendering. */
-  if (cached.sport === 'weightlifting' || cached.sport === 'strength') {
+  if (isLiftSport(cached.sport)) {
     hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
     renderStrength(d); return;
   }
@@ -14099,9 +14223,10 @@ function renderCachedAnalysis(cached) {
 /* Human noun for the load-status line, matching the render path chosen above. */
 function cachedSportNoun(cached) {
   const d = cached.data;
+  if (isLiftSport(cached.sport)) return 'lift';
   if (d && d.gpsOnly) return d.gpsSport === 'run' ? 'run' : d.gpsSport === 'walk' ? 'walk' : 'ride';
   if (d && d.sport === 'road' && d.session) return 'road ride';
-  if (cached.sport === 'weightlifting' || cached.sport === 'strength') return 'lift';
+  if (isLiftSport(cached.sport)) return 'lift';
   return cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride';
 }
 
@@ -14118,7 +14243,11 @@ function replayCachedAnalysis(cached, dedupKey) {
   hide('dropzone'); hide('crossResults'); hide('progressResults'); hide('errorBox'); hide('loading'); show('results');
   renderCachedAnalysis(cached);
   setStatus('Loaded from library (' + cachedSportNoun(cached) + ')', true);
-  if (dedupKey) setViewHash('#/ride/' + encodeURIComponent(dedupKey));
+  /* Deep-link to the key the render is actually stored under (cached.hash = the analysisKey, dedupKey
+     plus any calibration/sport suffix), not the bare dedupKey, so a reload of this URL resolves back to
+     the cache instead of dumping the user on the dropzone. _currentRunKey stays the bare content identity. */
+  const viewKey = (cached && cached.hash) || dedupKey;
+  if (viewKey) setViewHash('#/ride/' + encodeURIComponent(viewKey));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -14206,7 +14335,7 @@ async function renderRideSwitcher() {
   const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
     if (!r.dedupKey) return;
-    try { const c = await getCachedAnalysis(r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); } catch (e) {}
+    try { const c = await getCachedAnalysis(r.analysisKey || r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); } catch (e) {}
     try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
   list.innerHTML = rides.map(r => {
@@ -14249,7 +14378,7 @@ async function renderRecentRides() {
   const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
     if (!r.dedupKey) return;
-    try { const c = await getCachedAnalysis(r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); } catch (e) {}
+    try { const c = await getCachedAnalysis(r.analysisKey || r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); } catch (e) {}
     /* Stored source bytes (FIT rides) make a row openable even with no cached render. */
     try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
@@ -14559,7 +14688,7 @@ async function renderLibraryContents() {
   const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
     if (!r.dedupKey) return;
-    try { const c = await getCachedAnalysis(r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); }
+    try { const c = await getCachedAnalysis(r.analysisKey || r.dedupKey); if (c && c.data) cachedByRide.set(r.id, c); }
     catch (e) {}
     try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
@@ -14730,7 +14859,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'a24827f · 2026-07-19';
+const LOAM_BUILD = 'e8c3fe9 · 2026-07-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
