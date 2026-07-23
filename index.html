@@ -1053,7 +1053,7 @@
   </div>
   <div class="or">— or —</div>
   <button id="fileBtn">Choose files</button>
-  <input type="file" id="fileInput" accept=".zip,.csv,.fit" multiple style="display:none">
+  <input type="file" id="fileInput" accept=".zip,.csv,.gz,.fit" multiple style="display:none">
   <div id="pendingFiles" class="pending-files"></div>
   <div id="recentRides" class="recent-rides hidden"></div>
 </div>
@@ -1066,6 +1066,14 @@
 
 <div id="errorBox" class="error hidden"></div>
 
+<!-- Sample-rate guard banner. Lives OUTSIDE #results so it can show for every sport view,
+     including strength (which hides #results entirely and shows #strengthResults instead). -->
+<section id="sampleRateNotice" class="hidden" style="max-width:1100px; margin:0 auto; padding:12px 20px 0;">
+  <div class="mount-notice">
+    <strong>Unexpected motion sample rate.</strong>
+    <span id="sampleRateNoticeBody"></span>
+  </div>
+</section>
 <div id="miniSummary" class="hidden">
   <div class="mini-head">
     <div class="mini-badge">Recording summary</div>
@@ -1192,6 +1200,13 @@
   .lf-set { font: 500 12px 'JetBrains Mono', monospace; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--border, #2a2e37); background: var(--surface-2, #eef2f6); color: var(--text, #1a202c); }
   .lf-stage { width: 100%; border-radius: 12px; overflow: hidden; line-height: 0; }
   .lf-stage svg { display: block; width: 100%; height: auto; }
+  /* Shown in place of the animation for a lift we have no proven pose for, instead of a stand-in body. */
+  .lf-nopose { aspect-ratio: 300 / 320; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; text-align: center; padding: 24px; line-height: 1.5;
+    background: linear-gradient(#20291b, #0a0d07); border-radius: 12px; }
+  .lf-nopose-icon { font-size: 30px; opacity: 0.55; }
+  .lf-nopose-title { font: 600 13px 'JetBrains Mono', monospace; color: #c8d0c0; }
+  .lf-nopose-sub { font: 11px 'JetBrains Mono', monospace; color: #8a9482; max-width: 240px; }
   .lf-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
   .lf-play { font: 600 12px 'JetBrains Mono', monospace; padding: 6px 12px; border-radius: 8px; border: none; background: var(--accent, #e87b3d); color: #fff; cursor: pointer; }
   .lf-rep { font: 700 15px 'Bricolage Grotesque', sans-serif; color: var(--text, #1a202c); font-variant-numeric: tabular-nums; }
@@ -1208,7 +1223,7 @@
 
 <div id="dropOverlay" aria-hidden="true">
   <div class="drop-inner">Drop to analyze
-    <div class="drop-sub">Sensor Logger .zip · Loam Capture .csv · .fit (companion, or alone for a GPS-only ride)</div>
+    <div class="drop-sub">Sensor Logger .zip · Loam Capture .csv / .csv.gz · .fit (companion, or alone for a GPS-only ride)</div>
   </div>
 </div>
 
@@ -1934,8 +1949,28 @@ function extractFitData(messages) {
 /* ========== Sensor file ingestion ========== */
 async function loadSensorFile(file, onProgress) {
   if (file.name.toLowerCase().endsWith('.zip')) return loadSensorZip(file, onProgress);
+  if (file.name.toLowerCase().endsWith('.csv.gz')) return loadCombinedCSV(await gunzipFile(file, onProgress), onProgress);
   if (file.name.toLowerCase().endsWith('.csv')) return loadCombinedCSV(file, onProgress);
   throw new Error('Unknown sensor file type: ' + file.name);
+}
+
+/* Gunzip a Blob (a dropped .csv.gz, or a .csv.gz entry pulled out of a backup zip). Loam Capture
+   stores recordings gzipped at rest, so this is the decode half of that contract. Buffers the
+   decompressed bytes into a Blob, matching the memory profile of the Sensor Logger zip path;
+   PapaParse then streams from the Blob as usual. DecompressionStream ships in every browser the
+   analyzer targets (Safari 16.4+, the iOS 17 in-app WebView, Chrome 80+); without it, say so
+   instead of failing weird. */
+async function gunzipBlob(blob) {
+  if (typeof DecompressionStream === 'undefined')
+    throw new Error('This browser cannot decompress .gz files. Use a current Safari/Chrome, or gunzip the file first.');
+  return await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).blob();
+}
+/* Wrap a dropped .csv.gz as the plain-CSV File the rest of the pipeline expects, keeping the
+   UTC-stamped basename so parseUTCFromFilename and the FIT time sync are unaffected. */
+async function gunzipFile(file, onProgress) {
+  if (onProgress) onProgress('decompressing ' + file.name);
+  const blob = await gunzipBlob(file);
+  return new File([blob], file.name.replace(/\.gz$/i, ''), { type: 'text/csv' });
 }
 async function loadSensorZip(file, onProgress) {
   onProgress('unpacking archive');
@@ -1959,7 +1994,7 @@ async function loadSensorZip(file, onProgress) {
    expects per-SENSOR CSVs, so a backup used to look like one empty recording ("no moving window").
    Detect a backup and explode it into one Combined-CSV File per session (pairing each session's FIT),
    so dropping a backup analyzes every ride inside it (and cross-compares when there are several). */
-const SESSION_CSV_RE = /(^|\/)(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.csv$/i;
+const SESSION_CSV_RE = /(^|\/)(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.csv(\.gz)?$/i;
 async function explodeBackupZips(files, onProgress) {
   const out = [];
   for (const f of files) {
@@ -1972,10 +2007,14 @@ async function explodeBackupZips(files, onProgress) {
     if (!looksBackup) { out.push(f); continue; }   /* not a backup -> leave for the Sensor Logger zip path */
     if (onProgress) onProgress(`unpacking backup (${sessionCsvs.length} session${sessionCsvs.length > 1 ? 's' : ''})`);
     for (const n of sessionCsvs) {
-      const sess = n.split('/').pop();
-      const text = await zip.files[n].async('string');
+      /* Sessions in a backup may be plain .csv (legacy) or .csv.gz (compressed at rest); either
+         way the exploded File is a plain CSV with the UTC-stamped basename. */
+      const sess = n.split('/').pop().replace(/\.gz$/i, '');
+      const text = /\.gz$/i.test(n)
+        ? await (await gunzipBlob(new Blob([await zip.files[n].async('uint8array')]))).text()
+        : await zip.files[n].async('string');
       out.push(new File([text], sess, { type: 'text/csv' }));
-      const fitName = n.replace(/\.csv$/i, '.fit');
+      const fitName = n.replace(/\.csv(\.gz)?$/i, '.fit');
       if (zip.files[fitName]) {
         const buf = await zip.files[fitName].async('arraybuffer');
         out.push(new File([buf], sess.replace(/\.csv$/i, '.fit'), { type: 'application/octet-stream' }));
@@ -2086,6 +2125,35 @@ function extractFromZip(zipData) {
   }
   if (zipData.HeartRate) out.heartRate = normT(zipData.HeartRate).map(r => ({ t: r.t, bpm: r.bpm || r.heartRate_bpm }));
   return out;
+}
+
+/* Sample-rate guard. The whole pipeline assumes 100 Hz phone motion (the Butterworth coefficients
+   are precomputed for fs=100, and the turn detector integrates duration / heading change over
+   SAMPLE COUNTS with fs hardcoded to 100), so a recording captured at another rate parses fine and
+   then silently mis-scales every time-based metric. detectImuRateHz reads the median spacing of an
+   IMU row array (the median shrugs off grid jitter, dropped cells, and recording gaps);
+   imuRateWarning turns an off-rate into the user-facing warning text, null when the rate is fine
+   or unknown. Extracted to analyzer/core/parsers/sample-rate.js; a drift guard pins the copies. */
+function detectImuRateHz(rows) {
+  if (!rows || rows.length < 50) return null;
+  const dts = [];
+  for (let i = 1; i < rows.length; i++) {
+    const dt = rows[i].t - rows[i - 1].t;
+    if (dt > 0) dts.push(dt);
+  }
+  if (dts.length < 25) return null;
+  dts.sort((a, b) => a - b);
+  const dt = dts[dts.length >> 1];
+  return dt > 0 ? 1 / dt : null;
+}
+function imuRateWarning(hz) {
+  /* 100 Hz expected; 15% tolerance keeps real 100 Hz recordings (grid jitter, dropped cells)
+     quiet while catching every other rate Sensor Logger offers (1, 10, 50, 200 Hz). */
+  if (hz == null || !isFinite(hz)) return null;
+  if (Math.abs(hz - 100) <= 100 * 0.15) return null;
+  return 'This recording\'s phone motion is ~' + Math.round(hz) + ' Hz, but the analysis assumes 100 Hz, '
+    + 'so time-based metrics are scaled wrong (turn durations and heading change especially). '
+    + 'Record at 100 Hz: Loam Capture always does; in Sensor Logger set the sampling frequency to 100 Hz.';
 }
 
 /* ========== Calibration & rotation ========== */
@@ -5476,7 +5544,7 @@ function computeRunSummary(loc, baro, ride, R) {
 
 const DB_NAME = 'loam-library';
 const DB_VERSION = 4;  // v4: 'sources' store (FIT bytes for re-openable GPS rides)
-const ANALYSIS_CACHE_VERSION = 9;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota)
+const ANALYSIS_CACHE_VERSION = 10;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -6414,7 +6482,7 @@ const DOUBLE_TAP_START_S = 10;
 // exercises. Kept in sync with AnnotationPresets.liftChips + liftPicker (ios). Only 'squat' (or an
 // unlabeled set, for legacy recordings) gets the squat-only bar-position / depth reads; every other
 // label here is a non-squat lift, so those reads are skipped rather than mislabeling e.g. a row.
-const LIFT_LABELS = ['squat', 'deadlift', 'press', 'bench', 'curl', 'row', 'pull-up', 'chin-up',
+const LIFT_LABELS = ['squat', 'deadlift', 'press', 'bench', 'curl', 'clean', 'row', 'pull-up', 'chin-up',
   'dips', 'front squat', 'romanian deadlift', 'hip thrust', 'lunge', 'lateral raise',
   'triceps extension', 'calf raise', 'other'];
 
@@ -7647,7 +7715,7 @@ async function analyze(files) {
     if (superseded()) return;
   }
   /* Dispatcher: if the user dropped ≥2 sensor files, route to cross-ride. */
-  const sensorFiles = files.filter(f => /\.(zip|csv)$/i.test(f.name) && !/\.fit$/i.test(f.name));
+  const sensorFiles = files.filter(f => /(\.zip|\.csv|\.csv\.gz)$/i.test(f.name) && !/\.fit$/i.test(f.name));
   if (sensorFiles.length >= 2) return analyzeMulti(sensorFiles);
   _currentRunKey = null;
 
@@ -7656,7 +7724,7 @@ async function analyze(files) {
   const onProgress = (msg) => { document.getElementById('loadingText').textContent = msg; };
 
   try {
-    const sensorFile = files.find(f => /\.(zip|csv)$/i.test(f.name) && !/\.fit$/i.test(f.name));
+    const sensorFile = files.find(f => /(\.zip|\.csv|\.csv\.gz)$/i.test(f.name) && !/\.fit$/i.test(f.name));
     const fitFile = files.find(f => /\.fit$/i.test(f.name));
     /* A bare .fit with no phone recording analyzes on its own. Route by content: a power meter (road
        cycling, or an e-bike motor) goes to the road power analysis (NP/IF/TSS, climbs, balance); a
@@ -7732,6 +7800,11 @@ async function analyze(files) {
     if (superseded()) return;
     onProgress('extracting sensors');
     const sensors = loaded.sensors ? loaded.sensors : (loaded.format === 'combined' ? extractFromCombined(loaded.data) : extractFromZip(loaded.data));
+
+    /* Guard the 100 Hz assumption before any sport path runs (see detectImuRateHz). Prefer the
+       gyro (the densest phone channel every sport consumes), falling back to accel then gravity
+       for partial exports. Carried on each render payload so cached replays keep the warning. */
+    const imuRateHz = detectImuRateHz(sensors.gyro.length ? sensors.gyro : (sensors.accel.length ? sensors.accel : sensors.gravity));
 
     /* A weightlifting session is stationary and records NO GPS by design, so the GPS guard and the
        GPS-based ride-window detection below do not apply to it. Decide up front whether this is a lift,
@@ -7862,7 +7935,7 @@ async function analyze(files) {
       onProgress('rendering');
       hide('loading'); show('results');
       const runRender = {
-        sensors, ride, running, gait, summary: runSummary, detection, sport,
+        sensors, ride, running, gait, summary: runSummary, detection, sport, imuRateHz,
         descents, comparison, libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
         title: sensorFile && sensorFile.name,
       };
@@ -7885,7 +7958,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
-      const liftRender = { sensors, ride, strength, summary, sport, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const liftRender = { sensors, ride, strength, summary, sport, imuRateHz, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link the lift like every other sport so it reopens instantly and is bookmarkable at
          #/ride/<key> (this was the only branch that recomputed on every open and had no URL). The render
          object is structured-cloneable (plain sensor/summary/strength data, no functions), so it round-
@@ -7909,7 +7982,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('golfResults');
-      const golfRender = { sensors, ride, golf, summary, sport, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const golfRender = { sensors, ride, golf, summary, sport, imuRateHz, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link like every other sport so it reopens instantly at #/ride/<key>. The render
          object is structured-cloneable (plain data, no functions), so it round-trips through the
          IndexedDB analysis cache; renderCachedAnalysis + cachedSportNoun carry a golf branch. */
@@ -8044,7 +8117,7 @@ async function analyze(files) {
     hide('loading'); show('results');
     const mtbRender = {
       sensors, t, yawSeg, rollSmooth, R,
-      ride, turns, summary, calibWin, sport,
+      ride, turns, summary, calibWin, sport, imuRateHz,
       fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
@@ -8639,8 +8712,10 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTa
 
 function fmtDuration(sec) {
   const total = Math.round(sec);
-  const m = Math.floor(total / 60);
-  const s = total - m * 60;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
   return `${m}m ${String(s).padStart(2,'0')}s`;
 }
 
@@ -8897,7 +8972,7 @@ function hideAllSections() {
       if (fs && fs.parentNode !== _segFormHome.parent) _segFormHome.parent.insertBefore(fs, _segFormHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -9254,6 +9329,16 @@ function liftFormFrame(ts) {
   const st = _liftForm;
   if (!st.D || !st.D.strength.sets.length) return;
   const set = st.D.strength.sets[st.setIdx] || st.D.strength.sets[0];
+  // Only animate lifts with a proven, fact-driven pose (squat, deadlift, curl). For anything else the
+  // figure would be a neutral stand-in, not the real movement, so show nothing rather than a body we
+  // cannot honestly animate. Stops the loop for this set; picking a squat/deadlift/curl set resumes it.
+  const controls = document.getElementById('liftFormControls');
+  if (liftFormNoPose(set)) {
+    if (controls) controls.style.display = 'none';
+    liftFormShowNoPose(set);
+    return;
+  }
+  if (controls) controls.style.display = '';
   const T = Math.max(1.6, set.tempoS || 3.0) * 1000;   // ms per rep
   if (!st.t0) st.t0 = ts;
   const elapsed = ts - st.t0;
@@ -9302,6 +9387,21 @@ function liftFormFrame(ts) {
   if (rc) rc.textContent = repNo + ' / ' + reps;
   if (st.playing) st.raf = requestAnimationFrame(liftFormFrame);
 }
+/* No animation for a lift we cannot pose honestly (press, bench, dips, ...): a static, clearly-labeled
+   placeholder in the stage, not a stand-in body pretending to be the movement. The set's reps, tempo,
+   and bar speed above are still real; only the moving figure is withheld until that lift gets a pose. */
+function liftFormShowNoPose(set) {
+  const stage = document.getElementById('liftFormStage');
+  const name = set.lift ? set.lift[0].toUpperCase() + set.lift.slice(1) : 'This lift';
+  if (stage) stage.innerHTML =
+    `<div class="lf-nopose">
+       <div class="lf-nopose-icon">🏋️</div>
+       <div class="lf-nopose-title">No form view for ${escapeHtml(name)} yet</div>
+       <div class="lf-nopose-sub">We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.</div>
+     </div>`;
+  const note = document.getElementById('liftFormNote'); if (note) note.textContent = '';
+  const rc = document.getElementById('liftFormRep'); if (rc) rc.textContent = '';
+}
 function liftFormStart() {
   cancelAnimationFrame(_liftForm.raf);
   _liftForm.t0 = 0; _liftForm.playing = true;
@@ -9340,7 +9440,7 @@ function renderLiftForm(D) {
     <div class="lf-head"><span class="lf-title">Spotter Cam</span>
       <select class="lf-set" onchange="setLiftFormSet(this.value)">${setOpts}</select></div>
     <div id="liftFormStage" class="lf-stage"></div>
-    <div class="lf-bar">
+    <div class="lf-bar" id="liftFormControls">
       <button id="liftFormPlay" class="lf-play" onclick="toggleLiftFormPlay()">❙❙ Pause</button>
       <span class="lf-rep" id="liftFormRep">1 / 1</span>
       <span class="lf-chars">${chars}</span>
@@ -9495,6 +9595,7 @@ function golfTipsSection() {
  */
 function renderGolf(D) {
   _lastRender = { fn: renderGolf, D };
+  renderSampleRateNotice(D);
   const g = D.golf || {}, s = D.summary || {}, con = g.consistency || {};
   const el = document.getElementById('golfResults');
   if (!g.nSwings) {
@@ -9570,6 +9671,7 @@ function renderGolf(D) {
 
 function renderStrength(D) {
   _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
+  renderSampleRateNotice(D);
   /* Register for the header Units toggle (rerenderUnits), same as every other renderer. Without this,
      changing units on a Lift session re-runs the PREVIOUS ride's renderer, which hides the Lift view
      and paints a stale ride into a hidden container (blank page below the header). */
@@ -9756,6 +9858,7 @@ function renderAllRunning(D) {
   const sport = D.sport === 'walking' ? 'walking' : 'running';
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
+  renderSampleRateNotice(D);
   renderRideSignature(D, sport);
   renderRunStats(D.summary, D.detection, D.running && D.running.mount);
   /* Walking gets the highlights card too (coach parity); the empty-guard hides it if no bullets. */
@@ -12497,6 +12600,19 @@ async function sendCoach(text) {
   });
 }
 
+/* Sample-rate warning banner. Fed by detectImuRateHz / imuRateWarning (computed once in analyze
+   and carried on the render payload, so cached replays keep the warning). All three sport renders
+   call this, since every sport consumes the 100 Hz phone-motion assumption somewhere. */
+function renderSampleRateNotice(D) {
+  const sec = document.getElementById('sampleRateNotice');
+  if (!sec) return;
+  const warn = imuRateWarning(D && D.imuRateHz);
+  if (!warn) { sec.classList.add('hidden'); return; }
+  const body = document.getElementById('sampleRateNoticeBody');
+  if (body) body.textContent = ' ' + warn;
+  sec.classList.remove('hidden');
+}
+
 /* Calibration pose-mismatch warning. The body frame comes from the quietest still window in the
    recording, which is usually before you roll out. If the phone moved between that window and the
    ride (pocket then backpack is the common one), lean and turn metrics are computed in the wrong
@@ -12613,6 +12729,7 @@ function renderAll(D) {
   show('turnSection'); show('radiusSection');
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'yaw rate + speed · turns shaded · jump airtime shaded';
+  renderSampleRateNotice(D);
   renderCalibNotice(D);
   renderRideSignature(D, 'mtb');
   renderStats(D.summary, D.hasFit);
@@ -14957,6 +15074,7 @@ function showError(msg, detail) {
     (acts.length ? `<div class="err-actions">${acts.join('')}</div>` : '') +
     (detail ? `<details class="err-detail"><summary>Show technical details</summary><pre>${escapeHtml((detail || '') + '')}</pre></details>` : '');
   show('errorBox');
+  hide('sampleRateNotice');   /* top-level banner (outside #results), so clear it explicitly on error */
   const box = document.getElementById('errorBox');
   const runBtn = box.querySelector('[data-act="run"]');
   if (runBtn) runBtn.onclick = () => {
@@ -15346,12 +15464,12 @@ function loamToast(msg, ms = 4500) {
    the Attach FIT button. Unsupported types get feedback instead of the old silent skip. */
 function routeDroppedFiles(files) {
   if (!files.length) return;
-  const supported = files.filter(f => /\.(zip|csv|fit)$/i.test(f.name));
-  const skipped = files.filter(f => !/\.(zip|csv|fit)$/i.test(f.name));
+  const supported = files.filter(f => /(\.zip|\.csv|\.csv\.gz|\.fit)$/i.test(f.name));
+  const skipped = files.filter(f => !/(\.zip|\.csv|\.csv\.gz|\.fit)$/i.test(f.name));
   if (skipped.length) {
     const names = skipped.map(f => f.name).join(', ');
     if (!supported.length) {
-      showError(`Unsupported file type: ${names}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv, and a .fit (companion or standalone).`);
+      showError(`Unsupported file type: ${names}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv (or .csv.gz), and a .fit (companion or standalone).`);
       return;
     }
     /* Toast, not setStatus: analyze() overwrites the status line in the same tick. */
@@ -15359,7 +15477,7 @@ function routeDroppedFiles(files) {
   }
   const dzVisible = !document.getElementById('dropzone').classList.contains('hidden');
   if (dzVisible) { addFiles(supported); return; }
-  const sensors = supported.filter(f => /\.(zip|csv)$/i.test(f.name));
+  const sensors = supported.filter(f => /(\.zip|\.csv|\.csv\.gz)$/i.test(f.name));
   const fit = supported.find(f => /\.fit$/i.test(f.name)) || null;
   if (sensors.length) {
     /* All sensor files go through: analyze() dispatches 2+ to the cross-ride compare, matching
@@ -15720,7 +15838,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'a362c3e · 2026-07-22';
+const LOAM_BUILD = 'cd06c80 · 2026-07-23';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
