@@ -1192,6 +1192,13 @@
   .sc-facts { font: 12px/1.65 'JetBrains Mono', monospace; color: var(--text-dim, #4a5261); }
   .sc-facts b { font-variant-numeric: tabular-nums; }
   .sc-facts .row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px dashed var(--border, #e2e8f0); }
+  .golf-def { display: grid; grid-template-columns: minmax(120px, 168px) 1fr; gap: 10px 16px; padding: 15px; border: 1px solid var(--border, #e2e8f0); border-top: none; border-radius: 0 0 10px 10px; }
+  @media (max-width: 560px) { .golf-def { grid-template-columns: 1fr; gap: 4px 0; } .golf-def dd { margin-bottom: 10px; } }
+  .golf-def dt { font: 700 12px 'JetBrains Mono', monospace; color: var(--text, #1a202c); }
+  .golf-def dd { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-dim, #9aa0aa); }
+  .golf-def dd em { color: var(--text, #1a202c); font-style: normal; font-weight: 600; }
+  .golf-def .cant { grid-column: 1 / -1; font-size: 12px; line-height: 1.55; color: var(--text-dim, #9aa0aa); border-top: 1px dashed var(--border, #e2e8f0); padding-top: 10px; }
+  .golf-def .cant strong { color: var(--accent, #e87b3d); }
   .golf-tips { margin: 14px 0 22px; }
   .golf-tips > summary { cursor: pointer; font: 700 12px 'JetBrains Mono', monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--accent, #e87b3d); padding: 11px 13px; background: var(--surface-2, #eef2f6); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; list-style: none; display: flex; align-items: center; gap: 8px; }
   .golf-tips > summary::-webkit-details-marker { display: none; }
@@ -7389,13 +7396,17 @@ const LoamGolf = (function () {
     const byClub = {};
     for (const s of swings) {
       const c = s.club || 'unlabeled';
-      if (!byClub[c]) byClub[c] = { n: 0, tempos: [] };
+      if (!byClub[c]) byClub[c] = { n: 0, tempos: [], tops: [] };
       byClub[c].n++;
       if (s.tempoRatio != null) byClub[c].tempos.push(s.tempoRatio);
+      if (s.path && s.path.deg && s.path.deg.length) byClub[c].tops.push(Math.max(...s.path.deg));
     }
     const clubs = Object.keys(byClub).map(c => ({
       club: c, n: byClub[c].n,
       medianTempoRatio: byClub[c].tempos.length ? +median(byClub[c].tempos).toFixed(2) : null,
+      /* Backswing length per club: a wedge should go back less than a driver, so grouping by the tapped
+         club is the only way this number means anything across a mixed bucket. */
+      medianRotationToTopDeg: byClub[c].tops.length ? Math.round(median(byClub[c].tops)) : null,
     }));
 
     /* Heart rate, when the watch logged it into the recording. */
@@ -7417,6 +7428,7 @@ const LoamGolf = (function () {
       const sd = Math.sqrt(a.reduce((s, v) => s + (v - mean) ** 2, 0) / (a.length - 1));
       return { lo: +Math.min(...a).toFixed(2), hi: +Math.max(...a).toFixed(2), cvPct: mean ? +(100 * sd / mean).toFixed(1) : null };
     };
+    const tops = swings.map(s => (s.path && s.path.deg && s.path.deg.length) ? Math.max(...s.path.deg) : null).filter(v => v != null);
     const downs = swings.map(s => s.downswingS).filter(v => v != null);
     const backs = swings.map(s => s.backswingS).filter(v => v != null);
 
@@ -7432,6 +7444,8 @@ const LoamGolf = (function () {
       medianPeakOmega: peaks.length ? +median(peaks).toFixed(1) : null,
       /* Measured spreads (real units) lead the consistency read; see the note above `spread`. */
       swingPlaneSpread: gSwingPlaneSpread(swings),
+      medianRotationToTopDeg: tops.length ? Math.round(median(tops)) : null,
+      rotationToTopSpread: spread(tops),
       tempoSpread: spread(tempos),
       downswingSpread: spread(downs),
       backswingSpread: spread(backs),
@@ -9502,6 +9516,7 @@ function saveLiftSignature() {
    content hash), drives volume now and the load-velocity 1RM later. Stored in kg; shown in the chosen
    unit (lb by default). ---- */
 const KG_PER_LB = 0.45359237;
+let _golfD = null;    // the rendered range session, for the self-reported swing-count control
 let _liftD = null;    // the raw analysis (auto rep counts), never mutated
 let _liftDc = null;   // the same analysis with the lifter's rep corrections layered on, for sub-renderers
 function liftUnit() { try { return localStorage.getItem('loam.liftUnit') || 'lb'; } catch (e) { return 'lb'; } }
@@ -9742,6 +9757,73 @@ function liftCoachRead(D) {
    Cam form animation, the Coach's read, then the Set Map + tiles and a per-set table. Stationary sport,
    so no map/turns/jumps. Bar position + depth come from the lifter's taps; reps/tempo/ROM/bar-speed
    from the wrist. */
+/* Per-club breakdown. computeGolfSummary has always grouped swings by the tapped club and handed the
+   result to the coach, but the Range view never showed it, so a mixed bucket (wedges then driver) was
+   averaged into one tempo the golfer could not act on. Backswing length in particular is only
+   comparable within a club: a wedge SHOULD go back less than a driver. Hidden when every swing carries
+   the same label, since a one-row table says nothing the tiles do not. */
+function golfClubBreakdown(s) {
+  const clubs = (s.clubs || []).filter(c => c.n > 0);
+  if (clubs.length < 2) return '';
+  const rows = clubs.sort((a, b) => b.n - a.n).map(c => `<tr>
+      <td style="text-transform:capitalize">${escapeHtml(c.club)}</td>
+      <td>${c.n}</td>
+      <td>${c.medianTempoRatio != null ? '&#8776; ' + c.medianTempoRatio.toFixed(1) + ' : 1' : '&mdash;'}</td>
+      <td>${c.medianRotationToTopDeg != null ? c.medianRotationToTopDeg + '&deg;' : '&mdash;'}</td>
+    </tr>`).join('');
+  return `<div class="golf-card" style="margin-bottom:20px">
+      <h4>By club</h4>
+      <table class="strength-table">
+        <thead><tr><th>club</th><th>swings</th><th>median tempo</th><th>backswing to the top</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="golf-tablenote">Tempo and backswing length only compare within a club, so they are grouped by the club you tapped. Untapped swings inherit the last club you marked.</div>
+    </div>`;
+}
+
+/* ---- Self-reported swing count. The detector can only ever report swings it SAW: a swing it missed
+   leaves no trace to correct, so unlike the lift's per-set rep fix this does not change any number. It
+   records what the golfer actually hit, shows the gap plainly, and tells the coach the count may be
+   short. That is the point: the one miss on the first real range session was caught exactly this way
+   (nine detected, ten hit), and a session with a logged truth count is the ground truth golf needs to
+   leave BETA. Stored per recording, like the lift's rep corrections and per-set weights. ---- */
+function golfTruthCount(key) {
+  try { const v = localStorage.getItem('loam.golfSwings.' + key); return v == null || v === '' ? null : +v; } catch (e) { return null; }
+}
+function onGolfTruthCount(val) {
+  const key = (_golfD && _golfD.key) || '';
+  const s = String(val == null ? '' : val).trim();
+  const v = s === '' ? null : Math.max(0, Math.round(+s));
+  try {
+    if (v == null || isNaN(v)) localStorage.removeItem('loam.golfSwings.' + key);
+    else localStorage.setItem('loam.golfSwings.' + key, String(v));
+  } catch (e) { /* private mode / quota; the note below still reflects this render */ }
+  const note = document.getElementById('golfTruthNote');
+  if (note) note.innerHTML = golfTruthNoteHtml(_golfD, (v == null || isNaN(v)) ? null : v);
+}
+function golfTruthNoteHtml(D, truth) {
+  const n = (D && D.summary && D.summary.nSwings) || 0;
+  if (truth == null) return 'Detected <b>' + n + '</b>. Logging what you actually hit turns this session into ground truth, and flags a miss.';
+  const d = truth - n;
+  if (d === 0) return 'Detected <b>' + n + '</b> of <b>' + truth + '</b> &mdash; every swing found.';
+  if (d > 0) return 'Detected <b>' + n + '</b> of <b>' + truth + '</b> &mdash; <b>' + d + '</b> swing' + (d > 1 ? 's' : '') + ' not found. A swing that never cleared the detector leaves nothing to measure, so the numbers above cover the ' + n + ' it saw.';
+  return 'Detected <b>' + n + '</b> but you logged <b>' + truth + '</b> &mdash; ' + (-d) + ' more found than hit, so something else (a waggle, a practice swing) was counted.';
+}
+function golfTruthSection(D) {
+  const truth = golfTruthCount(D.key || '');
+  return `<div class="golf-card" style="margin-bottom:20px">
+      <h4>Swing count</h4>
+      <div class="sc-controls" style="margin-top:0">
+        <label style="font:12px 'JetBrains Mono',monospace;color:var(--text-dim,#4a5261)">How many did you actually hit?
+          <input id="golfTruthIn" type="number" inputmode="numeric" min="0" step="1" value="${truth != null ? truth : ''}" placeholder="&mdash;"
+                 style="width:74px;margin-left:8px;font:12px 'JetBrains Mono',monospace;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#e2e8f0);background:var(--surface-2,#eef2f6);color:var(--text,#1a1f26)"
+                 onchange="onGolfTruthCount(this.value)">
+        </label>
+      </div>
+      <div class="golf-tablenote" id="golfTruthNote" style="margin-top:8px">${golfTruthNoteHtml(D, truth)}</div>
+    </div>`;
+}
+
 /* ================= Swing Cam =================
    The golf analog of the lift's Spotter Cam, and the same honesty contract: the CLUB ANGLE is measured
    (gClubAngleTrace, from the watch's attitude quaternion), the TIMING is measured (the detector's own
@@ -10036,6 +10118,32 @@ function golfPoseSVG(clubDeg, leanDeg) {
 /* A beginner "Before you swing" primer for the Range view: how to wear the sensors for a good Loam
    capture, plus the golf fundamentals a first-timer needs, each with a small schematic illustration.
    Static content (no data), rendered collapsible and open by default so a new golfer sees it. */
+/* The numbers, explained. The setup tips above cover how to swing; this covers how to READ what came
+   back, which was the gap: a tile saying "56 deg head turn" or a table cell saying "lower leads" is
+   jargon with no reference attached, and a golfer cannot act on it. Every entry says what the number
+   is, where it physically comes from, and how much weight to put on it, and the closing note states
+   the hard limit (no ball, no clubface) so the view never implies a launch monitor. Kept collapsed:
+   it is reference material, read once and then occasionally. */
+function golfMetricsGuide(D) {
+  const s = (D && D.summary) || {};
+  const def = (term, body) => `<dt>${term}</dt><dd>${body}</dd>`;
+  return `<details class="golf-tips">
+    <summary>&#128207; What these numbers mean</summary>
+    <dl class="golf-def">
+      ${def('swings', 'Each one is a burst of wrist rotation big enough to be a real swing: practice waggles and putts are deliberately not counted. A swing it never saw leaves nothing to measure, which is why you can log the count you actually hit and see the gap.')}
+      ${def('tempo', 'Your backswing time divided by your downswing time. Many tour players sit near <em>3:1</em>, but that is a reference, not a target. What is worth chasing is <em>the same ratio every swing</em>: yours drifting through a session usually means tension or fatigue, not a swing fault.')}
+      ${def('backswing to the top', 'How far your lead hand rotated from address to the top, in degrees. It tracks how long your backswing was, but it is hand rotation, not clubhead travel, and there is no reference for a correct value. Only compare it <em>within one club</em>: a wedge should go back less than a driver.')}
+      ${def('head turn', 'How many degrees your head rotated between address and impact, measured directly by the AirPods. A quieter head usually means a steadier swing center and better contact. Judge it against <em>your own</em> swings, not an absolute: there is no published number that says what yours should be.')}
+      ${def('hip turn', 'How far your pelvis rotated, from the phone in your pocket. A pocket is a rough proxy for a pelvis, so treat this as the softest number on the page.')}
+      ${def('sequence', '<em>Lower leads</em> means your hips started down before your hands, the efficient order. <em>Arms lead</em> suggests casting or coming over the top. <em>Unclear</em> means the two were within 40 ms, too close for us to call. Same caveat as hip turn: it is a hint from a pocketed phone, not a verdict.')}
+      ${def('consistency', 'Instead of a score, you get the actual spread: the range your downswing time and tempo covered, and how tightly you repeated your swing plane (in degrees). Tighter is more repeatable. There is no grade out of 100 because nothing anywhere establishes what a repeatable swing should score, and a made-up number would read as a verdict.')}
+      ${def('outlier swings', 'The swings whose overall shape differed most from your most representative swing of the session. It is a relative comparison against yourself, so an outlier is not automatically a bad shot.')}
+      ${def('quality', 'Your own Good / Mishit taps, carried through unchanged. Nothing here can tell a pure strike from a thin one on its own.')}
+      <div class="cant"><strong>What this cannot tell you:</strong> clubhead speed, ball speed, carry distance, spin, face angle, or club path. Those need a launch monitor or a camera; a watch measures how your body moved, not what happened to the ball. Everything above is an estimate, and golf is still BETA${s.nSwings ? ' (this session: ' + s.nSwings + ' swing' + (s.nSwings === 1 ? '' : 's') + ')' : ''}.</div>
+    </dl>
+  </details>`;
+}
+
 function golfTipsSection() {
   const S = 'stroke="var(--text, #46506a)" stroke-width="2" fill="none" stroke-linecap="round"';
   const svgSetup = `<svg viewBox="0 0 66 54"><g ${S}><circle cx="33" cy="12" r="6"/><line x1="33" y1="18" x2="33" y2="37"/><line x1="33" y1="23" x2="20" y2="31"/><line x1="33" y1="23" x2="46" y2="31"/><line x1="33" y1="37" x2="26" y2="50"/><line x1="33" y1="37" x2="40" y2="50"/></g><circle cx="39" cy="9" r="2.6" fill="var(--accent, #e87b3d)"/><circle cx="20" cy="31" r="3" fill="#37a2c6"/><circle cx="28" cy="34" r="3" fill="var(--accent, #e87b3d)"/></svg>`;
@@ -10073,6 +10181,7 @@ function golfTipsSection() {
  */
 function renderGolf(D) {
   _lastRender = { fn: renderGolf, D };
+  _golfD = D;   // the swing-count control writes against this session's key
   renderSampleRateNotice(D);
   const g = D.golf || {}, s = D.summary || {}, con = g.consistency || {};
   const el = document.getElementById('golfResults');
@@ -10097,7 +10206,12 @@ function renderGolf(D) {
   /* Built before the template so the Swing Cam can claim its state; empty string when this recording
      has no wrist attitude, in which case the static phase schematic below stands in. */
   const swingCam = golfSwingCamSection(D);
-  const seqLabel = q => q === 'lower-body-leads' ? 'lower leads' : q === 'arms-lead' ? 'arms lead' : (q || '—');
+  /* Short label for the cell, with the full reading on hover / long-press (the guide below spells it
+     out properly). "lower leads" alone is jargon to anyone who has not read a golf-instruction book. */
+  const seqLabel = q => q === 'lower-body-leads' ? '<span title="Your hips started down before your hands: the efficient downswing order.">lower leads</span>'
+    : q === 'arms-lead' ? '<span title="Your hands started down before your hips, which suggests casting or coming over the top.">arms lead</span>'
+    : q === 'unclear' ? '<span title="Hips and hands were within 40 ms, too close to call.">unclear</span>'
+    : (q || '—');
   const outSet = new Set((con.perSwing || []).filter(p => p.isOutlier).map(p => p.index));
   const rows = g.swings.map(sw => {
     const flags = (outSet.has(sw.index) ? ' <span class="golf-outlier" title="consistency outlier">&#9670;</span>' : '')
@@ -10132,6 +10246,8 @@ function renderGolf(D) {
       </div>
     </div>
     <div class="golf-tiles" style="margin-bottom:20px">${tiles}</div>
+    ${golfClubBreakdown(s)}
+    ${golfTruthSection(D)}
     ${swingCam || `<div class="golf-card" style="margin-bottom:20px">
       <h4>Swing shape (address &middot; top &middot; impact &middot; finish)</h4>
       <div class="golf-poses">
@@ -10142,8 +10258,14 @@ function renderGolf(D) {
       </div>
       <div class="golf-tablenote">A schematic of the phases (side view). The animated Swing Cam needs Apple Watch attitude, which this recording does not carry.</div>
     </div>`}
+    ${golfMetricsGuide(D)}
     <table class="strength-table">
-      <thead><tr><th>#</th><th>club</th><th>tempo</th><th>head turn</th><th>hip turn</th><th>sequence</th><th>quality</th></tr></thead>
+      <thead><tr><th>#</th><th>club</th>
+        <th title="Backswing time divided by downswing time. Tour players sit near 3:1; consistency matters more than the number.">tempo</th>
+        <th title="Degrees your head rotated between address and impact, measured by the AirPods. Quieter is usually steadier.">head turn</th>
+        <th title="Degrees your pelvis rotated, from the phone in your pocket. The softest number here.">hip turn</th>
+        <th title="Lower leads = hips started down before the hands (efficient). Arms lead = casting or over the top. Unclear = within 40 ms.">sequence</th>
+        <th title="Your own Good / Mishit taps.">quality</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="strength-caveat"><strong>Beta:</strong> golf is new and unvalidated. Swings are detected from wrist angular speed (Apple Watch); at 50 Hz a downswing is only about 12 samples, so swing count and timing are usable but there is no club-head speed or ball data. Tempo (backswing : downswing) is good to about one decimal. Head turn is a direct AirPods attitude range; head sway (in the coach digest) is a double-integration upper bound, not a measurement. Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone and are the most speculative read. Consistency is a relative swing-to-swing score, honest without any absolute reference. Promotion past BETA needs ground truth: a slow-motion swing video for count and tempo, and a stationary non-swing recording to measure false positives.</div>
@@ -12205,15 +12327,23 @@ function buildDigest(D, sport) {
       hip_turn_deg: r1(sw.hipTurnDeg, 0),
       sequence: sw.sequence || null,
       peak_wrist_rad_s: r1(sw.peakOmega, 1),
+      /* Backswing LENGTH, as lead-hand rotation from address to the top (the Swing Cam animates this
+         same curve). Hand rotation, not clubhead travel: a proxy for how far back the club went. */
+      club_rotation_to_top_deg: sw.path ? Math.round(Math.max(...sw.path.deg)) : null,
     }));
     return {
       sport: 'golf (driving range)',
       duration_min: r1(gs.duration / 60),
       total_swings: gs.nSwings,
+      /* What the golfer says they actually hit, when they logged it (golfTruthSection). Only ever a
+         self-report, so it is labeled as one; it exists so the coach does not present a short count as
+         the whole session. */
+      swings_reported_by_golfer: (() => { try { return golfTruthCount((D && D.key) || ''); } catch (e) { return null; } })(),
       mishits_tapped: gs.nMishits,
       median_tempo_ratio: r1(gs.medianTempoRatio, 1),
       median_head_turn_deg: r1(gs.medianHeadTurnDeg, 0),
       median_hip_turn_deg: r1(gs.medianHipTurnDeg, 0),
+      median_club_rotation_to_top_deg: r1(gs.medianRotationToTopDeg, 0),
       /* Measured consistency, in real units. The DTW repeatability score is deliberately absent: it is
          uncalibrated, and when it was in the digest the coach led with "Repeatability 33/100, this is
          the headline, and it's low" on a session whose downswings held to within 8%. */
@@ -12233,6 +12363,7 @@ function buildDigest(D, sport) {
         'BETA, estimate-only: no golf ground truth yet, so every number is an estimate. Swings come from wrist angular speed (Apple Watch); at 50 Hz a downswing is ~12 samples, so swing count and timing are usable but there is NO club-head speed or ball data (that needs a launch monitor). '
         + 'Tempo is the backswing:downswing ratio (tour swings run near 3:1 as a reference, not a target), good to about one decimal. Head turn is a direct AirPods attitude range; head sway is a raw double-integration UPPER BOUND in cm, not a measurement. '
         + (gs.hasPelvis ? 'Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone body frame and are the most speculative read; treat the sequence as a hint. ' : 'Hip turn and kinematic sequence are unavailable (no pocket-phone still window this session). ')
+        + 'If swings_reported_by_golfer is present and higher than total_swings, the detector MISSED that many swings: say so plainly once, treat every metric here as covering only the swings it found, and never present the totals as the whole session. If it is absent, do not speculate about missed swings. '
         + 'Consistency is reported as MEASURED SPREAD, not a score: downswing_seconds_spread and tempo_ratio_spread give the low, high, and coefficient of variation (percent) across the session. There is deliberately no 0-100 repeatability grade, because nothing calibrates what value a repeatable swing should produce; do not invent one or imply the golfer scored badly. outlier_swing_numbers names the swings whose SHAPE diverged most from reference_swing (a relative DTW read, no absolute meaning).',
     };
   }
@@ -12594,6 +12725,8 @@ Method - for every point, follow "metric -> mechanism -> action":
 Golf reference points:
 - Tempo: the backswing:downswing time ratio. Many tour players sit near 3:1; it is a reference, not a target, and consistency of tempo matters more than an exact number. A ratio that drifts across the session can mean fatigue or tension.
 - Head stability: head turn is degrees of head rotation through the swing; a quieter head generally means a more stable center and better contact. Head sway is an UPPER BOUND (see data_caveats), so speak to it only as "no more than" that much.
+- Backswing length: club_rotation_to_top_deg is how far the lead HAND rotated from address to the top, a proxy for backswing length (it is not clubhead travel, and there is no shaft-parallel reference to grade it against). Its CONSISTENCY across swings is the coachable part: a backswing that grows through the session usually means the golfer is reaching for distance, and one that shrinks late often means fatigue. Do not call an absolute value long or short.
+- Swing plane: swing_plane_spread_deg is how tightly the golfer repeated the plane their hand rotated in, in degrees, measured from wrist attitude. A few degrees is a repeatable plane; tens means it wandered. It says nothing about whether the plane is correct, only whether it was the same each time.
 - Kinematic sequence (only when pelvis_data_available): "lower body leads" is the efficient downswing order; "arms lead" suggests casting or an over-the-top move. It is a hedged hint, not a verdict.
 - Repeatability is the most valuable read for a range session, and it is reported as MEASURED SPREAD, never as a score. Coach downswing_seconds_spread and tempo_ratio_spread (low, high, and cvPct = coefficient of variation): a tight downswing spread means the golfer is delivering the club the same way each time, and a wide one is the highest-value thing to fix, more than any single-swing number. There is NO 0-100 repeatability grade in this data on purpose, because nothing calibrates one; never invent a score, a percentage "repeatable", or a pass/fail verdict, and never tell the golfer their consistency is "low" on the strength of a number that is not there. Name the actual outlier swings (outlier_swing_numbers) against reference_swing instead: that is a relative shape comparison and is honest.
 - Never invent a metric that is not in the data. There is no club-head speed, ball flight, face angle, or club path here (that needs a launch monitor); if the golfer would want those, say so at most once and move on.
@@ -16374,7 +16507,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '64d1652 · 2026-07-24';
+const LOAM_BUILD = 'b12536a · 2026-07-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
