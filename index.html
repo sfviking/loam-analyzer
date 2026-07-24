@@ -1180,6 +1180,18 @@
   .golf-poses svg { display: block; width: 100%; height: auto; background: var(--surface, #f7fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 8px; }
   .golf-poses figcaption { font: 9px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); text-transform: uppercase; letter-spacing: .08em; margin-top: 3px; }
   /* Beginner tips (Before you swing) */
+  /* Swing Cam: the club angle is measured (wrist attitude), the body is a schematic. */
+  .sc-wrap { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 720px) { .sc-wrap { grid-template-columns: 1fr; } }
+  .sc-stage { background: var(--surface, #f7fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; overflow: hidden; }
+  .sc-stage svg { display: block; width: 100%; height: auto; }
+  .sc-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .sc-controls button, .sc-controls select { font: 12px 'JetBrains Mono', monospace; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
+  .sc-controls button.on { border-color: var(--accent, #e87b3d); color: var(--accent, #e87b3d); }
+  .sc-phase { font: 700 11px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--accent, #e87b3d); min-width: 108px; }
+  .sc-facts { font: 12px/1.65 'JetBrains Mono', monospace; color: var(--text-dim, #4a5261); }
+  .sc-facts b { font-variant-numeric: tabular-nums; }
+  .sc-facts .row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px dashed var(--border, #e2e8f0); }
   .golf-tips { margin: 14px 0 22px; }
   .golf-tips > summary { cursor: pointer; font: 700 12px 'JetBrains Mono', monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--accent, #e87b3d); padding: 11px 13px; background: var(--surface-2, #eef2f6); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; list-style: none; display: flex; align-items: center; gap: 8px; }
   .golf-tips > summary::-webkit-details-marker { display: none; }
@@ -1736,7 +1748,9 @@
     </div>
     <div class="coach-chips hidden" id="coachChips"></div>
     <div class="coach-compose hidden" id="coachCompose">
-      <input type="text" id="coachInput" placeholder="Ask a follow-up… (e.g. drills for my weaker turn direction)" autocomplete="off">
+      <!-- Placeholder is sport-specific and set by renderCoachPanel (coachInputPlaceholder); this
+           static one is the neutral pre-render default, never an MTB example. -->
+      <input type="text" id="coachInput" placeholder="Ask a follow-up…" autocomplete="off">
       <button id="coachSend">Send</button>
       <button id="coachStop" class="hidden">Stop</button>
     </div>
@@ -2078,12 +2092,17 @@ function addCombinedRow(out, r) {
   /* Apple Watch wrist motion (only present in rides recorded with the watch companion). Attitude
      feeds Form Replay (hand/braking posture); acceleration + gravity (both in g) feed airtime
      detection as the landing-impact channel; rotationRate (rad/s) is the wrist angular-speed channel
-     golf swing detection keys on. Absent rides simply leave sensors.wrist empty. */
+     golf swing detection keys on. The attitude QUATERNION is the world-referenced pose: Euler angles
+     wrap and the body-frame rotation rate flips sign as the arm turns over, so the golf swing path
+     (gClubAngleTrace) needs the quaternion to trace a club angle that stays continuous through a
+     200-degree backswing and past impact. The watch has always exported it; it was simply dropped
+     here. Absent rides simply leave sensors.wrist empty. */
   if (r.wristMotion_pitch != null || r.wristMotion_roll != null || r.wristMotion_yaw != null || r.wristMotion_accelerationX != null)
     out.wrist.push({ t, pitch: r.wristMotion_pitch, roll: r.wristMotion_roll, yaw: r.wristMotion_yaw,
       ax: r.wristMotion_accelerationX, ay: r.wristMotion_accelerationY, az: r.wristMotion_accelerationZ,
       gx: r.wristMotion_gravityX, gy: r.wristMotion_gravityY, gz: r.wristMotion_gravityZ,
-      rx: r.wristMotion_rotationRateX, ry: r.wristMotion_rotationRateY, rz: r.wristMotion_rotationRateZ });
+      rx: r.wristMotion_rotationRateX, ry: r.wristMotion_rotationRateY, rz: r.wristMotion_rotationRateZ,
+      qw: r.wristMotion_quaternionW, qx: r.wristMotion_quaternionX, qy: r.wristMotion_quaternionY, qz: r.wristMotion_quaternionZ });
   if (r.annotation_text != null && String(r.annotation_text).trim() !== '')
     out.annotations.push({ t, text: String(r.annotation_text).trim() });
   if (r.heartRate_bpm != null)
@@ -5826,9 +5845,18 @@ function estimateRenderBytes(data) {
      bit early) and unsafe when it errs low (a ride the estimator called cacheable still blows the quota),
      so round the weights up rather than down. */
   n += (len(s.accel) + len(s.gravity) + len(s.gyro)) * 64;              /* {t,x,y,z} objects */
-  n += (len(s.location) + len(s.wrist) + len(s.headphone)) * 160;      /* richer objects (7 to 10 numeric fields each) */
+  n += (len(s.location) + len(s.headphone)) * 160;                     /* richer objects (7 to 10 numeric fields each) */
+  /* A wrist row is the fattest sample in the set: 17 numeric fields since the attitude quaternion was
+     added for the golf Swing Cam (t, euler x3, accel x3, gravity x3, rotation rate x3, quaternion x4).
+     It sat on the 160-byte line with the 7-to-10-field objects, which after the quaternion undershoots
+     the real clone size, and undershooting is the direction this estimate must never err in. */
+  n += len(s.wrist) * 288;
   n += (len(s.baro) + len(s.heartRate)) * 64;                          /* {t, value} objects */
   n += (len(data.t) + len(data.yawSeg) + len(data.rollSmooth)) * 16;  /* flat float series */
+  /* Golf caches no raw sensors (see the golf branch in analyze), so without this a range session
+     weighed in at zero and never counted against the total-bytes bound. Its real weight is per-swing:
+     the DTW shape trace plus the Swing Cam's club-angle path, 64 floats each, rounded up. */
+  n += len(data.golf && data.golf.swings) * 1024;
   return n;
 }
 async function putCachedAnalysis(hash, sport, data) {
@@ -7378,6 +7406,20 @@ const LoamGolf = (function () {
       hrMax = Math.max(...hr.map(r => r.bpm));
     }
 
+    /* Measured consistency, the honest half of the repeatability read. The DTW score below is
+       unit-free and UNCALIBRATED (nothing establishes what cost a repeatable swing should produce), so
+       these direct timing spreads carry the headline instead: they are seconds and ratios the detector
+       measured, and a golfer can act on them. Spread is expressed as a coefficient of variation
+       (stddev / mean, percent), which is comparable across swings of any speed. */
+    const spread = (a) => {
+      if (a.length < 3) return { lo: null, hi: null, cvPct: null };
+      const mean = a.reduce((x, y) => x + y, 0) / a.length;
+      const sd = Math.sqrt(a.reduce((s, v) => s + (v - mean) ** 2, 0) / (a.length - 1));
+      return { lo: +Math.min(...a).toFixed(2), hi: +Math.max(...a).toFixed(2), cvPct: mean ? +(100 * sd / mean).toFixed(1) : null };
+    };
+    const downs = swings.map(s => s.downswingS).filter(v => v != null);
+    const backs = swings.map(s => s.backswingS).filter(v => v != null);
+
     const con = R.consistency || {};
     return {
       duration: ride.end - ride.start,
@@ -7388,12 +7430,139 @@ const LoamGolf = (function () {
       medianHeadSwayCm: sways.length ? +median(sways).toFixed(1) : null,
       medianHipTurnDeg: hips.length ? +median(hips).toFixed(1) : null,
       medianPeakOmega: peaks.length ? +median(peaks).toFixed(1) : null,
+      /* Measured spreads (real units) lead the consistency read; see the note above `spread`. */
+      swingPlaneSpread: gSwingPlaneSpread(swings),
+      tempoSpread: spread(tempos),
+      downswingSpread: spread(downs),
+      backswingSpread: spread(backs),
+      /* The DTW read, kept for what it honestly supports: WHICH swings diverged from the golfer's most
+         representative one, and by what relative cost. repeatabilityScore is deliberately NOT surfaced
+         in the UI or the coach digest: it is an uncalibrated 0-100 with no reference for what a
+         repeatable swing scores, and presenting it as a grade read as a verdict on the golfer (the
+         first real session scored 33/100 while its downswings held to within 8%). It stays here so
+         tests and any future calibration work can reach it. */
       repeatabilityScore: con.repeatabilityScore != null ? con.repeatabilityScore : null,
       nOutliers: con.nOutliers || 0,
+      outlierSwings: (con.perSwing || []).filter(p => p.isOutlier).map(p => p.index),
       referenceSwing: con.reference != null ? con.reference : null,
       hasHeadphone: R.hasHeadphone,
       hasPelvis: R.hasPelvis,
       clubs, hrAvg, hrMax,
+    };
+  }
+
+  /* ---- ported from analyzer/sports/golf/swing-path.js ---- */
+  const GP_N = 64;            // samples in a stored club-angle trace
+  const GP_RAD2DEG = 180 / Math.PI;
+
+  /* Hamilton product. */
+  function gqMul(a, b) {
+    return {
+      w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+      x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+      y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+      z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    };
+  }
+
+  /* Unwrap a degree series so the +/-180 seam does not chop the swing into pieces. */
+  function gpUnwrap(a) {
+    const out = a.slice();
+    for (let i = 1; i < out.length; i++) {
+      let d = out[i] - out[i - 1];
+      while (d > 180) { out[i] -= 360; d -= 360; }
+      while (d < -180) { out[i] += 360; d += 360; }
+    }
+    return out;
+  }
+
+  /*
+   * Club angle through one swing, in degrees, sampled on a uniform grid of GP_N
+   * points spanning [tStart, tEnd]. Zero is the address pose; the backswing is
+   * positive by construction (the watch can sit either way round on either wrist,
+   * so the axis is flipped when needed to make it so, rather than assuming a
+   * handedness). Returns null when the recording carries no wrist attitude, which
+   * is every pre-watch session and every Sensor Logger export.
+   */
+  function gClubAngleTrace(wrist, swing) {
+    const seg = (wrist || []).filter(r => r.t >= swing.tStart && r.t <= swing.tEnd && r.qw != null && r.qx != null && r.qy != null && r.qz != null);
+    if (seg.length < 8) return null;
+    const q0 = { w: seg[0].qw, x: -seg[0].qx, y: -seg[0].qy, z: -seg[0].qz };   // conjugate of the address pose
+    /* Rotation from address to each sample, held in the hemisphere nearest the identity so the
+       quaternion double cover (q and -q are the same rotation) does not inject 360-degree jumps. */
+    const rel = seg.map(r => {
+      const p = gqMul({ w: r.qw, x: r.qx, y: r.qy, z: r.qz }, q0);
+      const s = p.w < 0 ? -1 : 1;
+      return { t: r.t, w: s * p.w, x: s * p.x, y: s * p.y, z: s * p.z };
+    });
+    /* The swing plane: the axis of the largest rotation reached by the top of the backswing. Taken at
+       the top rather than averaged over the swing because that is where the rotation is largest and the
+       axis best determined; on the reference session the axis repeated to within 5-9 degrees per swing. */
+    let best = null;
+    for (const r of rel) {
+      if (r.t > swing.tTop) break;
+      const vn = Math.hypot(r.x, r.y, r.z);
+      if (vn < 1e-6) continue;
+      const ang = 2 * Math.atan2(vn, r.w);
+      if (!best || ang > best.ang) best = { ang, axis: [r.x / vn, r.y / vn, r.z / vn] };
+    }
+    if (!best) return null;
+    let axis = best.axis;
+    const project = r => 2 * Math.atan2(r.x * axis[0] + r.y * axis[1] + r.z * axis[2], r.w) * GP_RAD2DEG;
+    /* Orient the axis so the backswing reads positive, sampling mid-backswing (the top itself can sit
+       past the +/-180 seam on a long swing, which would pick the sign from a wrapped value). */
+    const mid = rel.find(r => r.t >= (swing.tStart + swing.tTop) / 2);
+    if (mid && project(mid) < 0) axis = [-axis[0], -axis[1], -axis[2]];
+    const deg = gpUnwrap(rel.map(project));
+
+    /* Resample onto a uniform grid so every stored trace is the same length (the animation interpolates
+       within it, and a fixed length keeps the cached analysis payload bounded). */
+    const t0 = rel[0].t, t1 = rel[rel.length - 1].t;
+    const out = new Array(GP_N);
+    let j = 0;
+    for (let i = 0; i < GP_N; i++) {
+      const tt = t0 + (t1 - t0) * (i / (GP_N - 1));
+      while (j + 1 < rel.length && rel[j + 1].t < tt) j++;
+      const j1 = Math.min(j + 1, rel.length - 1);
+      const f = rel[j1].t > rel[j].t ? (tt - rel[j].t) / (rel[j1].t - rel[j].t) : 0;
+      const v = +(deg[j] + (deg[j1] - deg[j]) * f).toFixed(1);
+      out[i] = v === 0 ? 0 : v;   // collapse -0, which reads as a negative angle to callers and tests
+    }
+    /* Phase fractions so the animation can mark the top and impact without re-deriving them. */
+    const frac = tt => (t1 > t0 ? Math.max(0, Math.min(1, (tt - t0) / (t1 - t0))) : 0);
+    return {
+      deg: out,
+      axis: axis.map(v => +v.toFixed(4)),
+      topFrac: +frac(swing.tTop).toFixed(3),
+      impactFrac: +frac(swing.tImpact).toFixed(3),
+      durationS: +(t1 - t0).toFixed(3),
+    };
+  }
+
+  /*
+   * Swing-plane repeatability: the angle between each swing's plane axis and the
+   * session's median axis, in degrees. A golfer who repeats their plane returns a
+   * few degrees; a wandering plane returns tens. Returns nulls when fewer than
+   * three swings carry a path. Unlike the DTW shape cost this has real units, so
+   * it can be shown to the golfer as a number rather than a score.
+   */
+  function gSwingPlaneSpread(swings) {
+    const axes = (swings || []).map(s => s.path && s.path.axis).filter(a => Array.isArray(a) && a.length === 3);
+    if (axes.length < 3) return { medianDeg: null, maxDeg: null, n: axes.length };
+    /* Mean axis, then the spread about it. Axes are already sign-canonical (backswing positive), so a
+       plain mean is safe: they cannot be antiparallel copies of each other. */
+    const m = [0, 0, 0];
+    for (const a of axes) { m[0] += a[0]; m[1] += a[1]; m[2] += a[2]; }
+    const mn = Math.hypot(m[0], m[1], m[2]) || 1;
+    const mean = [m[0] / mn, m[1] / mn, m[2] / mn];
+    const devs = axes.map(a => {
+      const d = Math.max(-1, Math.min(1, a[0] * mean[0] + a[1] * mean[1] + a[2] * mean[2]));
+      return Math.acos(d) * GP_RAD2DEG;
+    }).sort((x, y) => x - y);
+    return {
+      medianDeg: +devs[devs.length >> 1].toFixed(1),
+      maxDeg: +devs[devs.length - 1].toFixed(1),
+      n: axes.length,
     };
   }
 
@@ -7441,6 +7610,16 @@ const LoamGolf = (function () {
   const G_PEAKINESS = 1.8;    // the impact peak must exceed this multiple of the burst mean (rejects walking)
   const G_SMOOTH_S = 0.04;    // light smoothing window of |omega| (kept small so the tempo trough stays sharp)
   const G_QUIET_S = 0.2;      // a still stretch this long marks address / rest (a brief transition dip does not)
+  /* How far the address / follow-through search may reach from impact. A swing's backswing runs ~1 s and
+     its follow-through settles within ~1 s, so anything further out is a waggle, a regrip, or a long hold
+     at the finish, not part of the swing. Without these clamps the window absorbed that surrounding motion
+     and blew past G_MAX_SWING_S, silently dropping a real swing: on the first ground-truth range session
+     (10 x 3-iron, 2026-07-24) the 7th swing measured a 3.16 s window and was rejected even though its
+     impact peak (19.2 rad/s) and peakiness (3.41) were the strongest of the ten. The clamps bound the
+     SEARCH only; the duration gate below still requires that at least one side actually found stillness,
+     since G_MAX_PRE_S + G_MAX_POST_S exceeds G_MAX_SWING_S. */
+  const G_MAX_PRE_S = 2.0;
+  const G_MAX_POST_S = 1.2;
 
   const RAD2DEG = 180 / Math.PI;
 
@@ -7526,18 +7705,21 @@ const LoamGolf = (function () {
       const p = impacts[idx];
       const prevImpact = idx > 0 ? impacts[idx - 1] : -1;
       const nextImpact = idx + 1 < impacts.length ? impacts[idx + 1] : n;
+      /* Search bounds: the neighbouring impact, or the physiological clamp, whichever is nearer. */
+      const leftLimit = Math.max(prevImpact, p - Math.round(G_MAX_PRE_S * G_FS));
+      const rightLimit = Math.min(nextImpact, p + Math.round(G_MAX_POST_S * G_FS));
       /* Takeaway: walk left from impact to the address, the last SUSTAINED still stretch before the swing
          (a brief transition dip at the top of the backswing is too short to count, so the whole backswing
          stays inside the window). startI is the first moving sample after that still stretch. */
-      let startI = prevImpact + 1, run = 0;
-      for (let i = p; i > prevImpact; i--) {
+      let startI = leftLimit + 1, run = 0;
+      for (let i = p; i > leftLimit; i--) {
         if (s[i] < G_ONSET) { run++; if (run >= quietN) { startI = i + run; break; } }
         else run = 0;
       }
       /* Follow-through: walk right from impact to the next sustained still stretch; endI is the last
-         moving sample before it. */
-      let endI = Math.min(nextImpact - 1, n - 1); run = 0;
-      for (let i = p; i < nextImpact && i < n; i++) {
+         moving sample before it, or the clamp when the finish is held longer than that. */
+      let endI = Math.min(rightLimit - 1, n - 1); run = 0;
+      for (let i = p; i < rightLimit && i < n; i++) {
         if (s[i] < G_ONSET) { run++; if (run >= quietN) { endI = i - run; break; } }
         else run = 0;
       }
@@ -7663,6 +7845,9 @@ const LoamGolf = (function () {
         club: marks.clubOf ? marks.clubOf(sw.tImpact) : null,
         quality: marks.qualityOf ? marks.qualityOf(sw.tImpact) : null,
         trace: gSwingTrace(det, sw),
+        /* Measured club angle through the swing, for the Swing Cam. Null on any recording without wrist
+           attitude, so the animation is simply not offered there. */
+        path: gClubAngleTrace(wrist, sw),
       };
     });
     return {
@@ -7672,7 +7857,7 @@ const LoamGolf = (function () {
     };
   }
 
-  return { parseSwingMarks, analyzeGolf, detectSwings, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace };
+  return { parseSwingMarks, analyzeGolf, detectSwings, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread };
 })();
 
 /* Graceful fallback for a recording too short or too slow to yield a moving window (a quick walk
@@ -8024,11 +8209,25 @@ async function analyze(files) {
       const golfRender = { sensors, ride, golf, summary, sport, imuRateHz, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link like every other sport so it reopens instantly at #/ride/<key>. The render
          object is structured-cloneable (plain data, no functions), so it round-trips through the
-         IndexedDB analysis cache; renderCachedAnalysis + cachedSportNoun carry a golf branch. */
-      if (cacheKey) { putCachedAnalysis(cacheKey, sport, golfRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+         IndexedDB analysis cache; renderCachedAnalysis + cachedSportNoun carry a golf branch.
+
+         The RAW SENSORS ARE DROPPED from the cached copy. renderGolf never reads them (the whole view
+         is built from golf + summary, and the Swing Cam animates the club-angle trace analyzeGolf
+         already derived and stored per swing), so a range session was paying tens of megabytes of dead
+         weight for a reopen, and every wrist row got heavier when the attitude quaternion landed. A
+         cached entry over ANALYSIS_CACHE_ENTRY_MAX_BYTES is not stored at all, which is how an hour at
+         the range would have quietly lost its ability to reopen. Nothing is lost: the derived path is
+         what the animation needs, and re-deriving anything new from raw motion means re-dropping the
+         recording, exactly as it does for a ride whose render was too big to cache. */
+      if (cacheKey) {
+        const { sensors: _rawSensors, ...golfCacheable } = golfRender;
+        putCachedAnalysis(cacheKey, sport, golfCacheable);
+        setViewHash('#/ride/' + encodeURIComponent(cacheKey));
+      }
       renderGolf(golfRender);
       const tempoStr = summary.medianTempoRatio != null ? ` · tempo ≈ ${summary.medianTempoRatio.toFixed(1)}:1` : '';
-      const repStr = summary.repeatabilityScore != null ? ` · ${summary.repeatabilityScore}% repeatable` : '';
+      /* Measured spread, not the uncalibrated 0-100 score (see golfConsistencyHeadline). */
+      const repStr = summary.downswingSpread && summary.downswingSpread.cvPct != null ? ` · downswing ±${Math.round(summary.downswingSpread.cvPct)}%` : '';
       setStatus(`Range session loaded (${summary.nSwings} swings${tempoStr}${repStr})`, true);
       return;
     }
@@ -9001,6 +9200,7 @@ let jumpMarkers = {};
 function hideAllSections() {
   formStop();
   liftFormStop();
+  swingCamStop();
   /* A fresh render always lands on the main results view, never a stale segment page. */
   try { const sp = document.getElementById('segmentPage'); if (sp) sp.classList.add('hidden'); segTurnMarkers = {}; } catch (e) {}
   /* If the form replay was riding along on the segment page, send it home first so
@@ -9542,6 +9742,245 @@ function liftCoachRead(D) {
    Cam form animation, the Coach's read, then the Set Map + tiles and a per-set table. Stationary sport,
    so no map/turns/jumps. Bar position + depth come from the lifter's taps; reps/tempo/ROM/bar-speed
    from the wrist. */
+/* ================= Swing Cam =================
+   The golf analog of the lift's Spotter Cam, and the same honesty contract: the CLUB ANGLE is measured
+   (gClubAngleTrace, from the watch's attitude quaternion), the TIMING is measured (the detector's own
+   address / top / impact stamps, so a rushed transition looks rushed), the head and hip turn MAGNITUDES
+   are measured (AirPods and pocket phone), and everything else, the body itself, is a schematic drawn
+   around those numbers. There is no clubhead position, no face angle, and no ball, because nothing here
+   can measure them; the caption says so rather than letting a pretty drawing imply otherwise.
+
+   View is face-on (the golfer facing the camera, ball at their feet), because that is the view where a
+   single measured rotation angle in the swing plane reads correctly: the club sweeps a real arc. Turn of
+   the shoulders and hips is drawn as foreshortening (a bar of width w*cos(turn)), which is the honest 2D
+   projection of a line rotating away from the viewer. */
+const _swingCam = { swings: [], idx: 0, ref: null, playing: false, raf: 0, t0: 0, speed: 0.25, ghost: true };
+
+/* Club angle in degrees at phase u (0..1) of a swing, interpolated from the measured trace. */
+function scAngleAt(path, u) {
+  const d = path.deg, n = d.length;
+  const x = Math.max(0, Math.min(1, u)) * (n - 1);
+  const i = Math.floor(x), f = x - i;
+  return i + 1 < n ? d[i] + (d[i + 1] - d[i]) * f : d[n - 1];
+}
+
+/* Where the clubhead sits for a given club angle, in stage coordinates. The shaft leaves the hands
+   pointing down at the ball (angle 0) and rotates by the measured angle; screen y grows downward, so a
+   positive (backswing) angle lifts the club up and behind the golfer. */
+function scClubHead(hands, angleDeg, shaft) {
+  const a = (angleDeg - 90) * Math.PI / 180;
+  return { x: hands.x - shaft * Math.cos(a), y: hands.y - shaft * Math.sin(a) };
+}
+
+/* One frame of the animation: a schematic golfer with the measured club. `u` is the phase 0..1. */
+function swingCamSVG(sw, u, ghostSw) {
+  const W = 460, H = 340;
+  const groundY = 302, cx = W * 0.52;
+  /* Address geometry: the hands sit ahead of the chest and the shaft reaches the ball on the ground, so
+     the measured angle sweeps the arc a golfer would recognize instead of a stick spinning in mid-air. */
+  const hands = { x: cx + 6, y: 178 }, shaft = groundY - 6 - 178;
+  const ang = scAngleAt(sw.path, u);
+
+  /* Turn magnitudes are measured; their SHAPE through the swing is inferred from the club angle (we
+     measure how far the hips and head turned, not their per-sample trace), so both are tied to the same
+     normalized club rotation and labelled as schematic in the caption. Turn is drawn as foreshortening,
+     w * cos(turn), which is what a rotating line actually does when seen face-on. */
+  const peak = Math.max(1, Math.max(...sw.path.deg));
+  const turnPhase = Math.max(-1, Math.min(1, ang / peak));
+  const hipTurn = (sw.hipTurnDeg || 0) * turnPhase;
+  const headTurn = (sw.headTurnDeg || 0) * turnPhase * 0.45;
+  const shoW = 74 * (0.34 + 0.66 * Math.cos(Math.min(1.15, Math.abs(turnPhase) * 1.0)));
+  const hipW = 52 * (0.55 + 0.45 * Math.cos(Math.abs(hipTurn) * Math.PI / 180));
+
+  const shoY = 152, hipY = 218, headY = 122;
+  const shoL = { x: cx - shoW / 2, y: shoY }, shoR = { x: cx + shoW / 2, y: shoY };
+  const hipL = { x: cx - hipW / 2, y: hipY }, hipR = { x: cx + hipW / 2, y: hipY };
+  const skin = '#c8925e', kit = '#3f4a2d', shoe = '#2c2119', accent = 'var(--accent, #e87b3d)';
+  const line = (a, b, w, col, op = 1) => `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${col}" stroke-width="${w}" stroke-linecap="round" opacity="${op}"/>`;
+  const poly = (pts, fill) => `<polygon points="${pts.map(p => p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ')}" fill="${fill}"/>`;
+
+  /* Clubhead trail: the measured arc travelled so far, the golf analog of the lift's bar path. */
+  let trail = '';
+  const steps = 60;
+  for (let i = 1; i <= steps; i++) {
+    const a0 = scClubHead(hands, scAngleAt(sw.path, u * ((i - 1) / steps)), shaft);
+    const a1 = scClubHead(hands, scAngleAt(sw.path, u * (i / steps)), shaft);
+    trail += `<line x1="${a0.x.toFixed(1)}" y1="${a0.y.toFixed(1)}" x2="${a1.x.toFixed(1)}" y2="${a1.y.toFixed(1)}" stroke="${accent}" stroke-width="2.6" stroke-opacity="${(0.08 + 0.52 * (i / steps)).toFixed(2)}" stroke-linecap="round"/>`;
+  }
+
+  /* The reference swing at the same phase: the DTW comparison made visible. */
+  let ghost = '';
+  if (ghostSw && ghostSw !== sw && ghostSw.path) {
+    const gh = scClubHead(hands, scAngleAt(ghostSw.path, u), shaft);
+    ghost = line(hands, gh, 3, 'var(--text-muted, #9aa0aa)', 0.3)
+      + `<circle cx="${gh.x.toFixed(1)}" cy="${gh.y.toFixed(1)}" r="4.5" fill="var(--text-muted, #9aa0aa)" opacity="0.3"/>`;
+  }
+
+  const club = scClubHead(hands, ang, shaft);
+  /* Legs: knees flexed and feet planted wider than the hips, the athletic address a golfer holds. */
+  const kneeL = { x: cx - hipW / 2 - 5, y: 262 }, kneeR = { x: cx + hipW / 2 + 5, y: 262 };
+  const footL = { x: cx - 34, y: groundY }, footR = { x: cx + 34, y: groundY };
+  const body =
+      line(hipL, kneeL, 13, kit) + line(kneeL, footL, 11, kit)
+    + line(hipR, kneeR, 13, kit) + line(kneeR, footR, 11, kit)
+    + line({ x: footL.x - 7, y: groundY }, { x: footL.x + 7, y: groundY }, 6, shoe)
+    + line({ x: footR.x - 7, y: groundY }, { x: footR.x + 7, y: groundY }, 6, shoe)
+    + poly([hipL, hipR, shoR, shoL], kit)                                   // torso, narrowing as it turns
+    + line(shoL, shoR, 12, kit)
+    /* The arm triangle: both arms run to the single grip point, which is how a golfer's arms actually
+       hang, and it stays readable when the shoulders foreshorten to nothing at the top. */
+    + poly([shoL, shoR, hands], skin) + line(shoL, hands, 7, skin) + line(shoR, hands, 7, skin)
+    + `<circle cx="${cx}" cy="${headY}" r="16.5" fill="${skin}"/>`
+    + `<path d="M ${cx - 16} ${headY - 4} a 16.5 16.5 0 0 1 33 0 z" fill="${kit}"/>`   // cap
+    + `<circle cx="${(cx + 11 * Math.sin(headTurn * Math.PI / 180)).toFixed(1)}" cy="${headY + 4}" r="2.6" fill="#2c2119"/>`;
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Animated golf swing">
+    <rect width="${W}" height="${H}" fill="var(--surface, #f7fafc)"/>
+    <line x1="0" y1="${groundY}" x2="${W}" y2="${groundY}" stroke="var(--border, #e2e8f0)" stroke-width="2"/>
+    ${trail}${ghost}${body}
+    <circle cx="${hands.x.toFixed(1)}" cy="${(groundY - 5).toFixed(1)}" r="5" fill="#ffffff" stroke="var(--text-muted, #9aa0aa)" stroke-width="1.4"/>
+    ${line(hands, club, 4, '#2c2119')}
+    <circle cx="${club.x.toFixed(1)}" cy="${club.y.toFixed(1)}" r="6" fill="${accent}"/>
+    <circle cx="${hands.x}" cy="${hands.y}" r="7.5" fill="${skin}"/>
+  </svg>`;
+}
+
+function scPhaseLabel(sw, u) {
+  const p = sw.path;
+  if (u < p.topFrac * 0.55) return 'takeaway';
+  if (u < p.topFrac * 0.98) return 'backswing';
+  if (u < p.topFrac * 1.06) return 'transition';
+  if (u < p.impactFrac * 0.99) return 'downswing';
+  if (u < p.impactFrac * 1.06) return 'impact';
+  return 'follow-through';
+}
+
+/* The animation loop. Real seconds are stretched by _swingCam.speed so a 0.4 s downswing is watchable;
+   the RATIO of backswing to downswing on screen is the measured one, which is the whole point. */
+function swingCamFrame(ts) {
+  const st = _swingCam;
+  const sw = st.swings[st.idx];
+  if (!sw || !sw.path) { st.playing = false; return; }
+  if (!st.t0) st.t0 = ts;
+  const span = (sw.path.durationS / st.speed) * 1000 + 700;     // + a beat held at the finish
+  let u = (ts - st.t0) / span;
+  if (u >= 1) { st.t0 = ts; u = 0; }
+  const uu = Math.min(1, u * (span / (span - 700)));
+  const stage = document.getElementById('swingCamStage');
+  if (!stage) { st.playing = false; return; }
+  stage.innerHTML = swingCamSVG(sw, uu, st.ghost ? st.swings.find(s => s.index === st.ref) : null);
+  const ph = document.getElementById('swingCamPhase');
+  if (ph) ph.textContent = scPhaseLabel(sw, uu);
+  if (st.playing) st.raf = requestAnimationFrame(swingCamFrame);
+}
+
+function swingCamStart() {
+  cancelAnimationFrame(_swingCam.raf);
+  _swingCam.t0 = 0; _swingCam.playing = true;
+  _swingCam.raf = requestAnimationFrame(swingCamFrame);
+}
+/* Release the loop when the Range view goes away, mirroring liftFormStop: without it the RAF keeps
+   rebuilding SVG into a hidden stage forever. */
+function swingCamStop() {
+  cancelAnimationFrame(_swingCam.raf);
+  _swingCam.raf = 0; _swingCam.playing = false; _swingCam.swings = [];
+}
+function toggleSwingCamPlay() {
+  _swingCam.playing = !_swingCam.playing;
+  const b = document.getElementById('swingCamPlay');
+  if (b) b.textContent = _swingCam.playing ? '❙❙ Pause' : '▶ Play';
+  if (_swingCam.playing) swingCamStart(); else cancelAnimationFrame(_swingCam.raf);
+}
+function setSwingCamSwing(i) { _swingCam.idx = +i; renderSwingCamFacts(); swingCamStart(); }
+function setSwingCamSpeed(v) {
+  _swingCam.speed = +v;
+  document.querySelectorAll('.sc-speed').forEach(b => b.classList.toggle('on', +b.dataset.v === +v));
+  swingCamStart();
+}
+function toggleSwingCamGhost() {
+  _swingCam.ghost = !_swingCam.ghost;
+  const b = document.getElementById('swingCamGhost');
+  if (b) b.classList.toggle('on', _swingCam.ghost);
+  swingCamStart();
+}
+
+/* The numbers beside the animation: everything shown is measured, so each row can name its source. */
+function renderSwingCamFacts() {
+  const el = document.getElementById('swingCamFacts');
+  const sw = _swingCam.swings[_swingCam.idx];
+  if (!el || !sw) return;
+  const row = (k, v) => `<div class="row"><span>${k}</span><b>${v}</b></div>`;
+  const top = Math.round(Math.max(...sw.path.deg));
+  el.innerHTML =
+      row('backswing', sw.backswingS != null ? sw.backswingS.toFixed(2) + ' s' : '—')
+    + row('downswing', sw.downswingS != null ? sw.downswingS.toFixed(2) + ' s' : '—')
+    + row('tempo', sw.tempoRatio != null ? '≈ ' + sw.tempoRatio.toFixed(1) + ' : 1' : '—')
+    + row('club rotation to the top', top + '°')
+    + row('head turn', sw.headTurnDeg != null ? Math.round(sw.headTurnDeg) + '°' : '—')
+    + row('hip turn', sw.hipTurnDeg != null ? Math.round(sw.hipTurnDeg) + '°' : '—')
+    + row('club', sw.club || 'unlabeled')
+    + (sw.index === _swingCam.ref ? row('', 'your reference swing') : '');
+}
+
+/* The Swing Cam card. Returns '' when no swing carries a measured path (any recording without watch
+   attitude: pre-watch sessions, Sensor Logger exports), so the card is simply absent rather than
+   inventing a canned animation. */
+function golfSwingCamSection(D) {
+  const swings = ((D.golf && D.golf.swings) || []).filter(s => s.path && s.path.deg && s.path.deg.length);
+  if (!swings.length) return '';
+  const ref = (D.golf.consistency && D.golf.consistency.reference) || swings[0].index;
+  _swingCam.swings = swings;
+  _swingCam.ref = ref;
+  _swingCam.idx = Math.max(0, swings.findIndex(s => s.index === ref));
+  const opts = swings.map((s, i) => `<option value="${i}" ${i === _swingCam.idx ? 'selected' : ''}>Swing ${s.index}${s.index === ref ? ' (reference)' : ''}${s.quality === 'mishit' ? ' · mishit' : ''}</option>`).join('');
+  const speeds = [[0.5, '½×'], [0.25, '¼×'], [0.12, '⅛×']].map(([v, l]) =>
+    `<button class="sc-speed ${v === _swingCam.speed ? 'on' : ''}" data-v="${v}" onclick="setSwingCamSpeed(${v})">${l}</button>`).join('');
+  return `
+    <div class="golf-card" style="margin-bottom:20px">
+      <h4>Swing Cam</h4>
+      <div class="sc-wrap">
+        <div>
+          <div class="sc-stage" id="swingCamStage"></div>
+          <div class="sc-controls">
+            <button id="swingCamPlay" onclick="toggleSwingCamPlay()">❙❙ Pause</button>
+            <select onchange="setSwingCamSwing(this.value)">${opts}</select>
+            ${speeds}
+            <button id="swingCamGhost" class="${_swingCam.ghost ? 'on' : ''}" onclick="toggleSwingCamGhost()">ghost</button>
+            <span class="sc-phase" id="swingCamPhase"></span>
+          </div>
+        </div>
+        <div>
+          <div class="sc-facts" id="swingCamFacts"></div>
+          <div class="golf-tablenote" style="margin-top:10px">The club angle and the timing are <strong>measured</strong> from your watch, sample by sample, which is why the transition pauses where yours did. Head and hip turn are measured too; the body around them is a schematic. There is no clubhead speed, face angle, or ball flight here, and the grey ghost is your reference swing at the same point.</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* The Consistency card's headline. This used to be the DTW repeatability score printed as "33 / 100
+   repeatable", which was the one number a golfer read as a verdict, and it could not carry that weight:
+   the score is 100*exp(-meanDTWcost/3), unit-free and with no reference anywhere for what cost a
+   repeatable swing produces. On the first real range session it read 33/100 while the same swings held
+   their downswing to within 8% and the outlier detector flagged nobody. So the card now leads with what
+   was actually MEASURED (the spread of the downswing and of tempo, in real units) and reports the DTW
+   read as what it honestly supports: WHICH swings diverged from the golfer's most representative one.
+   No grade, because there is nothing to grade against yet. Once there is session history, a relative
+   read ("your tightest session yet") becomes honest and can lead instead. */
+function golfConsistencyHeadline(s, con) {
+  const ds = s.downswingSpread || {}, ts = s.tempoSpread || {};
+  const pct = v => v == null ? null : (v < 1 ? v.toFixed(1) : Math.round(v));
+  const headline = ds.cvPct != null
+    ? `<div class="golf-score" style="font-size:34px">&plusmn;${pct(ds.cvPct)}%<small> downswing spread</small></div>`
+      + `<div class="golf-tablenote" style="margin-top:6px">Your downswing ran ${ds.lo}&ndash;${ds.hi}s across ${s.nSwings} swings`
+      + (ts.cvPct != null ? `, tempo ${ts.lo}&ndash;${ts.hi}:1 (&plusmn;${pct(ts.cvPct)}%)` : '') + '.</div>'
+    : `<div class="golf-tablenote">Need at least three timed swings to measure consistency.</div>`;
+  const outliers = (s.outlierSwings || []).length
+    ? `Swing${s.outlierSwings.length > 1 ? 's' : ''} ${s.outlierSwings.map(i => '#' + i).join(', ')} diverged most in shape (&#9670;).`
+    : 'No swing diverged enough in shape to stand out.';
+  const ref = con.reference != null ? ` Your most representative swing was #${con.reference}.` : '';
+  return headline + `<div class="golf-tablenote" style="margin-top:6px">${outliers}${ref}</div>`;
+}
+
 /* Overlay every swing's time-aligned wrist-speed trace: tight overlap reads as a repeatable swing,
    the reference (medoid) swing is highlighted blue and consistency outliers are drawn in the accent. */
 function golfTraceSVG(swings, con) {
@@ -9650,9 +10089,14 @@ function renderGolf(D) {
     tile(s.medianTempoRatio != null ? '≈' + s.medianTempoRatio.toFixed(1) + ':1' : '—', 'tempo'),
     tile(s.medianHeadTurnDeg != null ? f0(s.medianHeadTurnDeg) + '°' : '—', 'head turn'),
     s.hasPelvis ? tile(s.medianHipTurnDeg != null ? f0(s.medianHipTurnDeg) + '°' : '—', 'hip turn') : tile('—', 'hip turn (phone)'),
+    /* Measured from the wrist attitude: how tightly the golfer repeated their swing PLANE. */
+    s.swingPlaneSpread && s.swingPlaneSpread.medianDeg != null ? tile('±' + f0(s.swingPlaneSpread.medianDeg) + '°', 'plane repeat') : '',
     tile(s.nMishits || 0, 'mishits'),
     s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max') : '',
   ].filter(Boolean).join('');
+  /* Built before the template so the Swing Cam can claim its state; empty string when this recording
+     has no wrist attitude, in which case the static phase schematic below stands in. */
+  const swingCam = golfSwingCamSection(D);
   const seqLabel = q => q === 'lower-body-leads' ? 'lower leads' : q === 'arms-lead' ? 'arms lead' : (q || '—');
   const outSet = new Set((con.perSwing || []).filter(p => p.isOutlier).map(p => p.index));
   const rows = g.swings.map(sw => {
@@ -9676,8 +10120,7 @@ function renderGolf(D) {
     <div class="golf-hero">
       <div class="golf-card">
         <h4>Consistency</h4>
-        <div class="golf-score">${s.repeatabilityScore != null ? s.repeatabilityScore : '—'}<small> / 100 repeatable</small></div>
-        <div class="golf-tablenote" style="margin-top:6px">${con.reference != null ? 'Reference swing #' + con.reference + '. ' : ''}${s.nOutliers ? s.nOutliers + ' outlier swing' + (s.nOutliers > 1 ? 's' : '') + ' (&#9670;).' : 'No outlier swings.'}</div>
+        ${golfConsistencyHeadline(s, con)}
         <div class="golf-trace" style="margin-top:8px">${golfTraceSVG(g.swings, con)}</div>
         <div class="golf-tablenote">Each line is one swing's wrist speed, time-aligned. Tight overlap means a repeatable swing; the accent lines diverged most.</div>
       </div>
@@ -9689,7 +10132,7 @@ function renderGolf(D) {
       </div>
     </div>
     <div class="golf-tiles" style="margin-bottom:20px">${tiles}</div>
-    <div class="golf-card" style="margin-bottom:20px">
+    ${swingCam || `<div class="golf-card" style="margin-bottom:20px">
       <h4>Swing shape (address &middot; top &middot; impact &middot; finish)</h4>
       <div class="golf-poses">
         <figure>${golfPoseSVG(65, 18)}<figcaption>address</figcaption></figure>
@@ -9697,14 +10140,16 @@ function renderGolf(D) {
         <figure>${golfPoseSVG(72, 16)}<figcaption>impact</figcaption></figure>
         <figure>${golfPoseSVG(-52, -12)}<figcaption>finish</figcaption></figure>
       </div>
-      <div class="golf-tablenote">A schematic of the phases (side view). A Spotter Cam posed from your lean and tempo is a follow-up.</div>
-    </div>
+      <div class="golf-tablenote">A schematic of the phases (side view). The animated Swing Cam needs Apple Watch attitude, which this recording does not carry.</div>
+    </div>`}
     <table class="strength-table">
       <thead><tr><th>#</th><th>club</th><th>tempo</th><th>head turn</th><th>hip turn</th><th>sequence</th><th>quality</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="strength-caveat"><strong>Beta:</strong> golf is new and unvalidated. Swings are detected from wrist angular speed (Apple Watch); at 50 Hz a downswing is only about 12 samples, so swing count and timing are usable but there is no club-head speed or ball data. Tempo (backswing : downswing) is good to about one decimal. Head turn is a direct AirPods attitude range; head sway (in the coach digest) is a double-integration upper bound, not a measurement. Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone and are the most speculative read. Consistency is a relative swing-to-swing score, honest without any absolute reference. Promotion past BETA needs ground truth: a slow-motion swing video for count and tempo, and a stationary non-swing recording to measure false positives.</div>
   `;
+  /* Start the Swing Cam once its stage is in the DOM (the section markup is built above). */
+  if (swingCam) { renderSwingCamFacts(); swingCamStart(); }
   renderCoachPanel(D, 'golf');
 }
 
@@ -11769,8 +12214,14 @@ function buildDigest(D, sport) {
       median_tempo_ratio: r1(gs.medianTempoRatio, 1),
       median_head_turn_deg: r1(gs.medianHeadTurnDeg, 0),
       median_hip_turn_deg: r1(gs.medianHipTurnDeg, 0),
-      repeatability_score_0_100: gs.repeatabilityScore,
+      /* Measured consistency, in real units. The DTW repeatability score is deliberately absent: it is
+         uncalibrated, and when it was in the digest the coach led with "Repeatability 33/100, this is
+         the headline, and it's low" on a session whose downswings held to within 8%. */
+      downswing_seconds_spread: gs.downswingSpread,
+      swing_plane_spread_deg: gs.swingPlaneSpread,
+      tempo_ratio_spread: gs.tempoSpread,
       outlier_swings: gs.nOutliers,
+      outlier_swing_numbers: gs.outlierSwings,
       reference_swing: gs.referenceSwing,
       per_club: gs.clubs,
       heart_rate_avg: gs.hrAvg,
@@ -11782,7 +12233,7 @@ function buildDigest(D, sport) {
         'BETA, estimate-only: no golf ground truth yet, so every number is an estimate. Swings come from wrist angular speed (Apple Watch); at 50 Hz a downswing is ~12 samples, so swing count and timing are usable but there is NO club-head speed or ball data (that needs a launch monitor). '
         + 'Tempo is the backswing:downswing ratio (tour swings run near 3:1 as a reference, not a target), good to about one decimal. Head turn is a direct AirPods attitude range; head sway is a raw double-integration UPPER BOUND in cm, not a measurement. '
         + (gs.hasPelvis ? 'Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone body frame and are the most speculative read; treat the sequence as a hint. ' : 'Hip turn and kinematic sequence are unavailable (no pocket-phone still window this session). ')
-        + 'Repeatability is a RELATIVE swing-to-swing consistency score (each swing vs your most representative swing), honest without any absolute reference; outliers are the swings whose shape diverged most.',
+        + 'Consistency is reported as MEASURED SPREAD, not a score: downswing_seconds_spread and tempo_ratio_spread give the low, high, and coefficient of variation (percent) across the session. There is deliberately no 0-100 repeatability grade, because nothing calibrates what value a repeatable swing should produce; do not invent one or imply the golfer scored badly. outlier_swing_numbers names the swings whose SHAPE diverged most from reference_swing (a relative DTW read, no absolute meaning).',
     };
   }
   /* Weightlifting: a stationary barbell session. The coach's currency is reps, depth, bar position,
@@ -12144,7 +12595,7 @@ Golf reference points:
 - Tempo: the backswing:downswing time ratio. Many tour players sit near 3:1; it is a reference, not a target, and consistency of tempo matters more than an exact number. A ratio that drifts across the session can mean fatigue or tension.
 - Head stability: head turn is degrees of head rotation through the swing; a quieter head generally means a more stable center and better contact. Head sway is an UPPER BOUND (see data_caveats), so speak to it only as "no more than" that much.
 - Kinematic sequence (only when pelvis_data_available): "lower body leads" is the efficient downswing order; "arms lead" suggests casting or an over-the-top move. It is a hedged hint, not a verdict.
-- Repeatability: the swing-to-swing consistency score is the headline for a range session. Improving repeatability (fewer outliers, a tighter score) is usually the highest-value goal for an amateur, more than any single-swing number.
+- Repeatability is the most valuable read for a range session, and it is reported as MEASURED SPREAD, never as a score. Coach downswing_seconds_spread and tempo_ratio_spread (low, high, and cvPct = coefficient of variation): a tight downswing spread means the golfer is delivering the club the same way each time, and a wide one is the highest-value thing to fix, more than any single-swing number. There is NO 0-100 repeatability grade in this data on purpose, because nothing calibrates one; never invent a score, a percentage "repeatable", or a pass/fail verdict, and never tell the golfer their consistency is "low" on the strength of a number that is not there. Name the actual outlier swings (outlier_swing_numbers) against reference_swing instead: that is a relative shape comparison and is honest.
 - Never invent a metric that is not in the data. There is no club-head speed, ball flight, face angle, or club path here (that needs a launch monitor); if the golfer would want those, say so at most once and move on.
 
 Rules:
@@ -12393,6 +12844,41 @@ function promptCoachKey() {
   renderCoachKeyStatus();
 }
 
+/* Every user-facing string in the coach panel is a function of the sport, never an MTB literal (the
+   "sport is a parameter, never a fork" principle; see unified-sport-ux.md). The panel is shared by
+   nine sport ids: mtb/emtb, running, walking, the GPS-only run/walk/ride, road, lift and golf, so a
+   hard-coded corner-drill chip shows up on a driving-range session. Each list is scoped to what that
+   sport's digest and system prompt can actually answer. isMtbFamily/isLiftSport/isGolfSport are
+   explicit here so an unrecognized sport lands on the neutral fallback instead of inheriting MTB's. */
+function coachChips(sport) {
+  if (isGolfSport(sport)) return ['How do I make my swings repeat?', 'Is my tempo consistent?', 'What should I work on next range session?'];
+  if (sport === 'lift' || isLiftSport(sport)) return ['Where did my bar speed fade?', 'Was my depth consistent?', 'High bar vs low bar for my goals?'];
+  if (sport === 'running') return ['How do I lower my vertical oscillation?', 'Cadence drills for me', 'Pacing advice for the climbs'];
+  if (sport === 'walking') return ['How was my pacing on the climbs?', 'How can walks like this build fitness?', 'What should I try on my next hike?'];
+  if (sport === 'run' || sport === 'walk') return ['How was my pacing on the climbs?', 'Where did I fade?', `What should I focus on next ${sport === 'walk' ? 'hike' : 'run'}?`];
+  if (sport === 'ride') return ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?'];
+  if (sport === 'road') return ['How was my climb pacing?', 'What does my L/R balance say?', 'How do I descend with more confidence?'];
+  if (isMtbFamily(sport)) return ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
+  return ['What stands out in this session?', 'Where did I fade?', 'What should I focus on next session?'];
+}
+
+/* The follow-up box's example question, same rule as the chips: it used to name a turn drill on every
+   sport, which reads as the wrong coach entirely on a range or a lift session. */
+function coachInputPlaceholder(sport) {
+  /* 'running'/'walking' are phone-motion sessions (cadence and oscillation exist); 'run'/'walk' are
+     GPS-only imports where the system prompt forbids coaching cadence, so their example asks about
+     pacing instead of a metric the coach would have to refuse. */
+  const eg = isGolfSport(sport) ? 'a drill for a steadier tempo'
+    : (sport === 'lift' || isLiftSport(sport)) ? 'how do I hold depth when I fatigue?'
+    : sport === 'running' ? 'cadence drills for me'
+    : (sport === 'walking' || sport === 'run' || sport === 'walk') ? 'how should I pace the climbs?'
+    : sport === 'road' ? 'how do I pace a long climb?'
+    : sport === 'ride' ? 'how do I carry more speed on the descents?'
+    : isMtbFamily(sport) ? 'drills for my weaker turn direction'
+    : 'what should I focus on next session?';
+  return `Ask a follow-up… (e.g. ${eg})`;
+}
+
 function renderCoachPanel(D, sport) {
   const sec = document.getElementById('coachSection');
   if (!sec) return;
@@ -12427,25 +12913,15 @@ function renderCoachPanel(D, sport) {
   compose.classList.add('hidden');
   if (chips) chips.classList.add('hidden');
 
-  /* One-tap follow-ups so "what should I work on" is not a typed question. Sport-specific; sendCoach
-     guards against firing while a reply is still streaming. */
-  const chipText = sport === 'lift'
-    ? ['Where did my bar speed fade?', 'Was my depth consistent?', 'High bar vs low bar for my goals?']
-    : sport === 'running'
-    ? ['How do I lower my vertical oscillation?', 'Cadence drills for me', 'Pacing advice for the climbs']
-    : sport === 'walking'
-    ? ['How was my pacing on the climbs?', 'How can walks like this build fitness?', 'What should I try on my next hike?']
-    : (sport === 'run' || sport === 'walk')
-    ? ['How was my pacing on the climbs?', 'Where did I fade?', `What should I focus on next ${sport === 'walk' ? 'hike' : 'run'}?`]
-    : sport === 'ride'
-    ? ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?']
-    : sport === 'road'
-    ? ['How was my climb pacing?', 'What does my L/R balance say?', 'How do I descend with more confidence?']
-    : ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
+  /* One-tap follow-ups so "what should I work on" is not a typed question. sendCoach guards against
+     firing while a reply is still streaming. */
+  const chipText = coachChips(sport);
   if (chips) {
     chips.innerHTML = chipText.map(t => `<button class="coach-chip">${escapeHtml(t)}</button>`).join('');
     chips.querySelectorAll('.coach-chip').forEach((b, i) => { b.onclick = () => sendCoach(chipText[i]); });
   }
+  const inputEl = document.getElementById('coachInput');
+  if (inputEl) inputEl.placeholder = coachInputPlaceholder(sport);
 
   document.getElementById('coachStart').onclick = () => {
     if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
@@ -12494,7 +12970,12 @@ function setCoachSending(on) {
    can be found and replayed. Shared by the Start button and the auto-restore path so both build
    byte-identical text (any drift would miss the cache). */
 function coachAnalyzePrompt(sport) {
-  const noun = sport === 'lift' ? 'lift session' : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
+  /* Golf and lift come first: without them a range session opened with "Analyze this ride", which is
+     the one line the athlete always sees. 'range session' matches cachedSportNoun's wording for golf.
+     The existing nouns are left byte-identical so cached replies from earlier rides still key-match. */
+  const noun = isGolfSport(sport) ? 'range session'
+    : (sport === 'lift' || isLiftSport(sport)) ? 'lift session'
+    : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
   return `Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`;
 }
 
@@ -15893,7 +16374,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'd30e1e8 · 2026-07-24';
+const LOAM_BUILD = '64d1652 · 2026-07-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
