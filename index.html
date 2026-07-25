@@ -1824,6 +1824,23 @@
 <script>
 'use strict';
 
+/* ========== Debug logging ==========
+   The pipeline logs a handful of diagnostics that are genuinely useful when a recording analyzes
+   as the wrong sport or picks an odd active window, but they have no business in the console of a
+   shipped page (the hosted mirror) or the iOS WKWebView. They are gated behind an opt-in flag
+   rather than deleted, since deleting them just means re-adding them next time a ride misreads.
+
+   Turn them on with ?debug=1 on the URL, or `localStorage.loamDebug = '1'` to keep it across
+   reloads. The flag is read once at load; `dbg` is a function declaration, so it hoists and is
+   callable from every function defined above it. */
+const LOAM_DEBUG = (() => {
+  try {
+    if (new URLSearchParams(location.search).get('debug') === '1') return true;
+    return localStorage.getItem('loamDebug') === '1';
+  } catch (e) { return false; }   // private mode / opaque origin: no storage, no debug
+})();
+function dbg(...args) { if (LOAM_DEBUG) console.log(...args); }
+
 /* ========== Butterworth IIR coefficients (4th-order, fs=100Hz) ========== */
 const FILTERS = {
   LP_06: { b: [1.2023116209e-07,4.8092464836e-07,7.2138697254e-07,4.8092464836e-07,1.2023116209e-07], a: [1.0,-3.9014903026,5.7092940018,-3.7139799222,0.9061781468] },
@@ -2319,7 +2336,7 @@ function detectRidingWindow(locRows) {
   if (win.start == null || win.end == null) {
     const walk = detectRidingWindowAtThreshold(sorted, 1.0);
     if (walk.start != null && walk.end != null) {
-      console.log('[active window] no run/ride-speed window; using walking threshold (1.0 m/s)');
+      dbg('[active window] no run/ride-speed window; using walking threshold (1.0 m/s)');
       return walk;
     }
   }
@@ -3098,13 +3115,23 @@ function extractRideDescents(sensors, ride, fileLabel, minDropM) {
 
 /* Pair "Segment Start" / "Segment End" capture chips into run windows. The older "Run Start" /
    "Run End" wording (chips before they were renamed to Segment) is still matched so recordings made
-   with the old chips keep segmenting. */
-function pairRunMarks(annotations) {
-  const runs = []; let start = null;
+   with the old chips keep segmenting.
+   `tActivityStart` (D.ride.start) rescues the common miss: tapping only Segment End, having forgotten
+   the opening tap. That used to discard the segment entirely; it now opens at the previous segment's
+   end, or at the start of the activity for the first one, flagged impliedStart so the panel can say
+   the bound was assumed. */
+function pairRunMarks(annotations, tActivityStart) {
+  const runs = []; let start = null, lastEnd = null;
   for (const a of (annotations || [])) {
     const s = String(a.text || '').toLowerCase().trim();
     if (s.includes('segment start') || s.includes('run start') || s === 'start' || s === 'lap') { if (!start) start = a; }
-    else if ((s.includes('segment end') || s.includes('run end') || s === 'end' || s === 'stop') && start) { runs.push({ tStart: start.t, tEnd: a.t }); start = null; }
+    else if (s.includes('segment end') || s.includes('run end') || s === 'end' || s === 'stop') {
+      if (start) { runs.push({ tStart: start.t, tEnd: a.t }); lastEnd = a.t; start = null; }
+      else if (tActivityStart != null) {
+        const t0 = lastEnd != null ? lastEnd : tActivityStart;
+        if (a.t > t0) { runs.push({ tStart: t0, tEnd: a.t, impliedStart: true }); lastEnd = a.t; }
+      }
+    }
   }
   return runs;
 }
@@ -3195,7 +3222,8 @@ function runMetrics(run, D) {
    ('auto' | 'descents' | 'marks' | 'laps'). */
 function segmentRuns(D, mode) {
   const sensors = D.sensors;
-  const marks = pairRunMarks(sensors.annotations);
+  /* D.ride.start lets a lone Segment End (the opening tap forgotten) still bound a segment. */
+  const marks = pairRunMarks(sensors.annotations, D.ride && D.ride.start);
   /* Carry the source savedDescent on each descent-derived run (src) so a run row can offer the
      library actions (tag / compare past laps / retag) that used to live in a separate Descents
      section. Marks and laps have no backing descent, so src stays null there. */
@@ -3247,6 +3275,8 @@ function segmentRuns(D, mode) {
     polyline: r.polyline || windowPolyline(sensors.location, r.tStart, r.tEnd),
     metrics: runMetrics(r, D),
     src: r.src || null,
+    /* True when only the closing tap existed, so tStart was assumed (see pairRunMarks). */
+    impliedStart: !!r.impliedStart,
   }));
   return { mode: chosen, runs, lapInfo };
 }
@@ -3328,6 +3358,13 @@ function drawRuns() {
     const badge = r.src && r.src.autoTag && r.src.autoTag.name !== label
       ? ` <span class="tag-badge" title="auto-matched ${r.src.autoTag.matchDistance != null ? r.src.autoTag.matchDistance.toFixed(0) + 'm' : ''}">${escapeHtml(r.src.autoTag.name)}</span>`
       : '';
+    /* Only the closing tap existed, so this row's start was assumed (see pairRunMarks). Label it,
+       muted, the same way every other inferred number on this page is labeled: an assumed bound must
+       never read as a tapped one. */
+    const impliedBadge = r.impliedStart
+      ? ` <span class="tag-badge" style="background:rgba(127,176,105,0.10);color:var(--text-muted);"
+           title="No Segment Start tap, so this ${nounSingular} starts ${r.tStart <= D.ride.start + 0.5 ? 'at the beginning of the recording' : 'where the previous segment ended'}">start assumed</span>`
+      : '';
     let actions = '';
     if (r.src) {
       actions = r.src.autoTag
@@ -3346,7 +3383,7 @@ function drawRuns() {
     /* The classes + data-n/data-l attributes drive the phone card reflow (max-width 700px CSS):
        data-n prefixes the name with the run number, data-l becomes each metric tile's label. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
-      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;">${escapeHtml(label)}${badge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this run">✎</span>${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
+      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;">${escapeHtml(label)}${badge}${impliedBadge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this run">✎</span>${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
       <td data-l="Time" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist">${U.dist(m.distance)}</td>
       <td data-l="Top" ${m.maxSpeed === bestTop ? hi : ''}>${U.speed(m.maxSpeed)}</td>
@@ -5686,7 +5723,7 @@ function dedupeRides() {
       if (toDelete.length) {
         const store = _tx(db, 'rides', 'readwrite');
         for (const id of toDelete) store.delete(id);
-        console.log(`[library] removed ${toDelete.length} duplicate ride record(s)`);
+        dbg(`[library] removed ${toDelete.length} duplicate ride record(s)`);
       }
       return toDelete.length;
     } catch (e) { console.warn('library dedupe failed:', e); return 0; }
@@ -8055,15 +8092,38 @@ async function analyze(files) {
       if (arr && arr.length) { spanT.push(arr[0].t, arr[arr.length - 1].t); }
     }
     const spanRide = spanT.length ? { start: Math.min(...spanT), end: Math.max(...spanT) } : { start: null, end: null };
-    const declaredSport = ((typeof window !== 'undefined' && window.LOAM_SPORT)
-      || (document.getElementById('sportOverride') && document.getElementById('sportOverride').value) || '').toLowerCase();
-    const isLift = /^(weightlifting|strength|lifting)$/.test(declaredSport)
-      || (spanRide.start != null && LoamStrength.parseSetMarks(sensors.annotations || [], spanRide).length >= 1);
+
+    /* Resolve the sport the USER asked for before anything reads the annotations, because that
+       answer decides the ride window (a stationary sport takes the whole recording span; every
+       other sport takes the GPS-detected moving window) and the window decision is not recoverable
+       later. The host (iOS Loam Capture) can pre-declare the recording-screen pick as
+       window.LOAM_SPORT; honor it by seeding the selector, but only while the selector is still on
+       Auto (a manual pick on the page wins) and only for a value that is a real option, so an
+       unknown or garbled host value falls back to auto-detection. */
+    const sportSel = document.getElementById('sportOverride');
+    const hostSport = (typeof window !== 'undefined' && window.LOAM_SPORT) || null;
+    if (hostSport && /^[a-z]+$/.test(hostSport) && sportSel && sportSel.value === 'auto'
+        && sportSel.querySelector('option[value="' + hostSport + '"]')) {
+      sportSel.value = hostSport;
+    }
+    const userSport = ((sportSel && sportSel.value) || 'auto').toLowerCase();
+    /* Annotations may INFER a stationary sport only while the selector is on Auto. Inferring one
+       over an explicit pick used to force `ride = spanRide` roughly forty lines before the pick was
+       ever read, so a single stray marker in a GPS ride silently replaced its riding window with
+       the entire recording span (calibration could then land on the drive to the trailhead, and
+       turn detection ran over the drive itself) while the analysis still ran as the picked sport. */
+    const autoSport = userSport === 'auto';
+    const canInfer = autoSport && spanRide.start != null;
+    const isLift = /^(weightlifting|strength|lifting)$/.test(userSport)
+      || (canInfer && LoamStrength.parseSetMarks(sensors.annotations || [], spanRide).length >= 1);
     /* Golf is stationary like a lift (a driving-range session records no GPS route), so it takes the
-       same span-based window instead of GPS ride-window detection. Declared 'golf' or club-tagged
-       annotations (Driver / Iron / Wedge / Good / Mishit) route it here. */
-    const isGolf = /^golf$/.test(declaredSport)
-      || (spanRide.start != null && LoamGolf.parseSwingMarks(sensors.annotations || [], spanRide).marks.length >= 1);
+       same span-based window instead of GPS ride-window detection. Inference requires a CLUB tap
+       (Driver / Iron / Wedge): the other two golf chips, Good and Mishit, are ordinary English words
+       and plausible free text in a non-golf recording, so a lone quality tap is too thin a signal to
+       spend a ride's window on. clubOf(end) is the last club tap in the span, or null for none. */
+    const golfSwingMarks = canInfer ? LoamGolf.parseSwingMarks(sensors.annotations || [], spanRide) : null;
+    const isGolf = /^golf$/.test(userSport)
+      || (golfSwingMarks != null && golfSwingMarks.clubOf(spanRide.end) != null);
 
     const phoneStartUTC = parseUTCFromFilename(sensorFile.name);
 
@@ -8075,7 +8135,7 @@ async function analyze(files) {
     } else {
       if (!sensors.accel.length) throw new Error('Missing motion data');
       if (!sensors.location.length)
-        throw new Error('No GPS in this recording. If it was a lift or golf, pick Weightlifting or Golf (or tap a Set / club marker during it) so it analyzes as a stationary session.');
+        throw new Error('No GPS in this recording. If it was a lift or golf, pick Weightlifting or Golf in the sport selector so it analyzes as a stationary session.');
       onProgress('detecting active window');
       ride = detectRidingWindow(sensors.location);
       if (ride.start == null || ride.end == null) {
@@ -8089,26 +8149,15 @@ async function analyze(files) {
     }
 
     onProgress('detecting sport');
-    /* The host (iOS Loam Capture) can pre-declare the sport the user picked on the recording screen
-       as window.LOAM_SPORT. Honor it as the selector override so a capture-time choice, not just
-       auto-detect, drives the sport-specific analysis and coaching. Only seed while the selector is
-       still on Auto (a manual pick in the on-page selector still wins), and validate the value
-       against the real options so an unknown/garbled value falls back to auto-detection. */
-    const sportSel = document.getElementById('sportOverride');
-    const hostSport = (typeof window !== 'undefined' && window.LOAM_SPORT) || null;
-    if (hostSport && /^[a-z]+$/.test(hostSport) && sportSel && sportSel.value === 'auto'
-        && sportSel.querySelector('option[value="' + hostSport + '"]')) {
-      sportSel.value = hostSport;
-    }
-    const userSport = (sportSel && sportSel.value) || 'auto';
     /* detectSport reads GPS speed, which a lift does not have; a lift is already known from isLift
-       (declared or Set-tap-labeled), so skip detection and label it directly. */
+       (declared or Set-tap-labeled), so skip detection and label it directly. The selector was
+       already resolved into userSport above, where it had to be, since it gates the ride window. */
     const detection = isGolf
       ? { sport: 'golf', confidence: 1, reasons: ['declared or club-tagged golf'] }
       : isLift
       ? { sport: 'weightlifting', confidence: 1, reasons: ['declared or Set-tap-labeled lift'] }
       : detectSport(sensors, ride);
-    /* Auto: prefer detected sport. If unknown, default to running — MTB needs a stable
+    /* Auto: prefer detected sport. If unknown, default to running, since MTB needs a stable
        body-frame, which would silently produce garbage on a non-MTB recording, while the
        running pipeline degrades gracefully (no body frame needed, missing gyro is OK). */
     let sport;
@@ -8121,7 +8170,7 @@ async function analyze(files) {
     } else {
       sport = detection.sport === 'unknown' ? 'running' : detection.sport;
     }
-    console.log('[sport detect]', JSON.stringify(detection), '→ using:', sport);
+    dbg('[sport detect]', JSON.stringify(detection), '→ using:', sport);
     /* Tell the iOS host the detected sport so it can auto-label the session's activity type. */
     if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
       try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
@@ -8137,7 +8186,7 @@ async function analyze(files) {
          the unknown -> running fallback), so this is where the walk label is decided. */
       if (userSport === 'auto' && gait.activity === 'walking') {
         sport = 'walking';
-        console.log('[gait] walk fraction', gait.walkFrac != null ? (gait.walkFrac * 100).toFixed(0) + '%' : '?', '-> walking');
+        dbg('[gait] walk fraction', gait.walkFrac != null ? (gait.walkFrac * 100).toFixed(0) + '%' : '?', '-> walking');
         if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
           try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
         }
@@ -8312,7 +8361,7 @@ async function analyze(files) {
        Ride segments and uploads as an e-bike ride. Manual "e-MTB"/"MTB" picks are left as chosen. */
     if (userSport === 'auto' && sport === 'mtb' && fitInRide && fitInRide.filter(r => r.power != null && r.power > 0).length >= 20) {
       sport = 'emtb';
-      console.log('[sport detect] FIT has motor power -> emtb');
+      dbg('[sport detect] FIT has motor power -> emtb');
       if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
         try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
       }
@@ -11637,7 +11686,7 @@ function carrySet(v) { if (!_currentRunKey) return; if (v) localStorage.setItem(
 function renderGeekStats(D, sport) {
   if (!document.getElementById('geekStatsSection')) return;
   let dg;
-  try { dg = buildDigest(D, sport); } catch (e) { hide('geekStatsSection'); return; }
+  try { dg = buildDigest(D, sport, U.metric()); } catch (e) { hide('geekStatsSection'); return; }
   const rows = [];
   const human = k => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   const walk = (obj, prefix) => {
@@ -11654,10 +11703,13 @@ function renderGeekStats(D, sport) {
      as a caption above the table instead; everything else still walks into the raw rows. */
   const { sport: sportDesc, data_caveats: caveat, ...metrics } = dg;
   walk(metrics, '');
-  if (sport === 'running' && dg.distance_km && dg.cadence_spm_median && dg.duration_min) {
+  /* Distance comes off the summary, not the digest: the digest's distance key now follows the Units
+     toggle (distance_km vs distance_mi), and U.small formats the stride from raw meters anyway. */
+  const distM = (D.summary || {}).distance;
+  if (sport === 'running' && distM && dg.cadence_spm_median && dg.duration_min) {
     const steps = dg.cadence_spm_median * dg.duration_min;
     rows.push(['Est Steps', Math.round(steps).toString()]);
-    rows.push(['Stride Length', U.small((dg.distance_km * 1000) / steps)]);
+    rows.push(['Stride Length', U.small(distM / steps)]);
   }
   { const cap = document.getElementById('geekStatsCaption');
     if (cap) cap.innerHTML =
@@ -12128,7 +12180,8 @@ function coachHasOwnKey() { return !!localStorage.getItem(COACH_LS.key); }
 /* Compact, LLM-friendly summary of the session. Numbers only — no raw signals. */
 /* Ride-wide turn mechanics for the coach + highlights: left/right lean symmetry (median peak body lean
    per side) and where speed was scrubbed (braking/sliding). Null when there is not enough signal. */
-function turnMechanics(D) {
+function turnMechanics(D, metric) {
+  const u = digestUnits(metric);
   const turns = D.turns || [];
   if (!turns.length) return null;
   const leanL = [], leanR = [];
@@ -12152,7 +12205,9 @@ function turnMechanics(D) {
     for (const o of scrubbed) byDir[o.dir]++;
     out.braking = {
       scrubbed_turns: scrubbed.length, by_direction: byDir,
-      worst: scrubbed.slice(0, 5).map(o => ({ turn: o.n, direction: o.dir, mph_scrubbed: +o.mph.toFixed(1) })),
+      /* The 2 mph selection threshold above stays in mph so the toggle never changes WHICH turns
+         count as scrubbed; only the reported number follows the athlete's units. */
+      worst: scrubbed.slice(0, 5).map(o => ({ turn: o.n, direction: o.dir, ...u.speed('scrubbed', o.mph / 2.23694) })),
       note: 'Speed bled off mid-corner (entry to the slowest of apex/exit), a proxy for braking or sliding through the turn.',
     };
   }
@@ -12166,7 +12221,7 @@ function scrollToCoach() { const c = document.getElementById('coachSection'); if
    first (the differentiators), then headline turn / jump / e-bike facts. */
 function mtbHighlights(D) {
   const s = D.summary || {};
-  const mech = turnMechanics(D);
+  const mech = turnMechanics(D, U.metric());
   const cands = [];
   if (mech && mech.lean_asymmetry && mech.lean_asymmetry.gap_deg >= 3) {
     const la = mech.lean_asymmetry;
@@ -12181,7 +12236,9 @@ function mtbHighlights(D) {
     let dirNote = '';
     if (sk.L >= 2 * Math.max(1, sk.R)) dirNote = ' Most of your scrubbing was in left-handers.';
     else if (sk.R >= 2 * Math.max(1, sk.L)) dirNote = ' Most of your scrubbing was in right-handers.';
-    cands.push(`Hardest braking was turn <strong>T${w.turn}</strong> (${w.direction === 'L' ? 'left' : 'right'}, ${U.speedNum(w.mph_scrubbed / 2.23694).toFixed(1)} ${U.speedUnit()} scrubbed).${dirNote}`);
+    /* turnMechanics already reported this in the active units (the key names which). */
+    const scrubbed = U.metric() ? w.scrubbed_kmh : w.scrubbed_mph;
+    cands.push(`Hardest braking was turn <strong>T${w.turn}</strong> (${w.direction === 'L' ? 'left' : 'right'}, ${scrubbed.toFixed(1)} ${U.speedUnit()} scrubbed).${dirNote}`);
   }
   if (D.fitInRide && D.fitInRide.length) {
     const cp = cadPowerStats(D.fitInRide);
@@ -12309,8 +12366,50 @@ function renderCoachHighlights(D, sport) {
   sec.classList.remove('hidden');
 }
 
-function buildDigest(D, sport) {
+/* ---------- Coach digest units ----------
+   Every panel renders through `U` (the Units toggle), but the AI coach's digest used to hardcode a mix
+   of km, mph, and meters, so the coach answered in kilometers to a rider whose whole page said miles.
+   These helpers convert a raw SI value into the selected system and name the unit IN THE KEY
+   (distance_km vs distance_mi), so the model reads the unit off the field name and never has to
+   convert. Each returns a one-key object to spread into the digest literal, and keeps its key with a
+   null value when the metric is missing, exactly as the fixed keys did.
+
+   Two deliberate limits. Thresholds stay in SI: only the reported value follows the toggle, never
+   which turns, descents, or climbs qualify. And centimetre-scale form numbers (running vertical
+   oscillation, golf head sway), bar speed in m/s, and W/kg stay metric in both systems, matching the
+   panels and the Garmin / Stryd / VBT convention for statute users. */
+function digestUnits(metric) {
+  const M = !!metric;
+  const FT = 3.28084, MI = 1609.34, MPH = 2.23694, KMH = 3.6;
+  const num = (x, f, n) => (x == null || isNaN(x)) ? null : +(+x * f).toFixed(n);
+  const one = (name, suffix, v) => { const o = {}; o[name + '_' + suffix] = v; return o; };
+  return {
+    metric: M,
+    /* Session distance: km or mi. */
+    dist: (name, m, n = 2) => one(name, M ? 'km' : 'mi', num(m, M ? 1 / 1000 : 1 / MI, n)),
+    /* Speed: km/h or mph. */
+    speed: (name, mps, n = 1) => one(name, M ? 'kmh' : 'mph', num(mps, M ? KMH : MPH, n)),
+    /* Elevation gain / loss / drop: whole m or ft. */
+    elev: (name, m, n = 0) => one(name, M ? 'm' : 'ft', num(m, M ? 1 : FT, n)),
+    /* Short lengths (turn radius, jump distance, segment length): m or ft. */
+    len: (name, m, n = 1) => one(name, M ? 'm' : 'ft', num(m, M ? 1 : FT, n)),
+    lenList: (name, arr, n = 1) => one(name, M ? 'm' : 'ft', (arr || []).map(v => num(v, M ? 1 : FT, n))),
+    /* Foot pace from speed: minutes per km or per mile. */
+    pace: (name, mps, n = 2) => one(name, M ? 'min_per_km' : 'min_per_mi', (mps == null || isNaN(mps) || mps <= 0) ? null : +(((M ? 1000 : MI) / mps) / 60).toFixed(n)),
+    /* Foot pace from an already-computed min/km. */
+    paceMin: (name, minPerKm, n = 2) => one(name, M ? 'min_per_km' : 'min_per_mi', num(minPerKm, M ? 1 : MI / 1000, n)),
+    /* Climbing rate (VAM): vertical m/h or ft/h. */
+    vam: (name, mPerH, n = 0) => one(name, M ? 'm_per_h' : 'ft_per_h', num(mPerH, M ? 1 : FT, n)),
+    /* Air temperature: C or F. */
+    temp: (name, c, n = 0) => one(name, M ? 'c' : 'f', (c == null || isNaN(c)) ? null : +(M ? +c : +c * 9 / 5 + 32).toFixed(n)),
+  };
+}
+
+/* `metric` is the athlete's Units toggle (U.metric()); every distance, speed, pace, and elevation
+   below is emitted in that system via digestUnits, so the coach speaks the units the athlete reads. */
+function buildDigest(D, sport, metric) {
   const s = D.summary || {};
+  const u = digestUnits(metric);
   const r1 = (x, n = 1) => (x == null || isNaN(x)) ? null : +(+x).toFixed(n);
   /* Golf: a stationary driving-range session. The coach's currency is tempo, head stability, a
      pelvis/kinematic-sequence hint, and swing-to-swing consistency. BETA / estimate-only, and there is
@@ -12382,7 +12481,8 @@ function buildDigest(D, sport) {
       reps: set.reps,
       weight: weightsKg[i] != null ? disp(weightsKg[i]) : null,
       tempo_s_per_rep: r1(set.tempoS),
-      bar_rom_m: r1(set.romMeters, 2),
+      /* cm in both systems (the industry convention for this scale), matching the per-set table. */
+      bar_rom_cm: set.romMeters != null ? r1(set.romMeters * 100, 0) : null,
       mean_bar_speed_mps: (set.barSpeed && set.barSpeed.available) ? r1(set.barSpeed.meanMps, 2) : null,
       forward_lean_deg_vs_most_upright_set: r1(set.forwardLeanDeg),
       misses: (set.misses && set.misses.length) || 0,
@@ -12406,25 +12506,24 @@ function buildDigest(D, sport) {
      rider sees. */
   if (sport === 'road') {
     const m = D.metrics || {}, ses = D.session || {};
-    const mph = (v) => v == null ? null : r1(v * 2.23694);
     const temps = (D.fitInRide || []).map(r => r.temp).filter(v => v != null);
     const mmpBy = {};
     for (const e of (D.mmp || [])) mmpBy[e.duration] = Math.round(e.watts);
     const descentRow = (d) => ({
       n: d.index, lap: d.group ? d.group + '-' + d.lap : null,
-      duration_s: r1(d.duration, 0), drop_m: r1(d.drop, 0), avg_grade_pct: r1(d.avgGrade),
-      max_speed_mph: mph(d.maxSpeed), corners: d.corners.length,
-      tightest_radius_m: r1(d.minRadius, 0), avg_corner_apex_mph: mph(d.avgApexSpeed),
+      duration_s: r1(d.duration, 0), ...u.elev('drop', d.drop), avg_grade_pct: r1(d.avgGrade),
+      ...u.speed('max_speed', d.maxSpeed), corners: d.corners.length,
+      ...u.len('tightest_radius', d.minRadius, 0), ...u.speed('avg_corner_apex', d.avgApexSpeed),
     });
     return {
       sport: 'road cycling (head-unit FIT import with a power meter; watts are RIDER power, not motor assist)',
       duration_min: r1((D.ride.end - D.ride.start) / 60),
       moving_min: r1((D.movingTime || 0) / 60),
-      distance_km: ses.distance != null ? r1(ses.distance / 1000, 2) : null,
-      avg_moving_speed_mph: ses.distance != null && D.movingTime ? mph(ses.distance / D.movingTime) : null,
-      max_speed_mph: mph(D.maxSpeed),
-      elevation_gain_m: r1(ses.totalAscent, 0),
-      elevation_loss_m: r1(ses.totalDescent, 0),
+      ...u.dist('distance', ses.distance),
+      ...u.speed('avg_moving_speed', ses.distance != null && D.movingTime ? ses.distance / D.movingTime : null),
+      ...u.speed('max_speed', D.maxSpeed),
+      ...u.elev('elevation_gain', ses.totalAscent),
+      ...u.elev('elevation_loss', ses.totalDescent),
       power: {
         normalized_w: r1(m.np, 0), average_w: r1(m.avg, 0),
         variability_index: r1(m.vi, 2), intensity_factor: r1(m.if, 2), tss: r1(m.tss, 0),
@@ -12454,10 +12553,10 @@ function buildDigest(D, sport) {
       cadence_rpm_avg: ses.avgCadence ?? null,
       heart_rate_bpm: ses.avgHr != null ? { avg: ses.avgHr, max: ses.maxHr } : null,
       total_pedal_strokes: ses.totalStrokes ?? (totalPedalStrokes(D.fitInRide) > 0 ? Math.round(totalPedalStrokes(D.fitInRide)) : null),
-      temperature_c: temps.length ? { avg: r1(temps.reduce((a, b) => a + b, 0) / temps.length, 0), max: Math.max(...temps) } : null,
+      temperature: temps.length ? { ...u.temp('avg', temps.reduce((a, b) => a + b, 0) / temps.length), ...u.temp('max', Math.max(...temps)) } : null,
       climbs: (D.climbs || []).map(c => ({
-        n: c.index, duration_s: r1(c.duration, 0), distance_m: r1(c.distance, 0), gain_m: r1(c.gain, 0),
-        avg_grade_pct: r1(c.avgGrade), vam_m_per_h: r1(c.vam, 0),
+        n: c.index, duration_s: r1(c.duration, 0), ...u.len('distance', c.distance, 0), ...u.elev('gain', c.gain),
+        avg_grade_pct: r1(c.avgGrade), ...u.vam('vam', c.vam),
         avg_power_w: r1(c.avgPower, 0), w_per_kg: r1(c.wattsPerKg, 1), np_w: r1(c.normalizedPower, 0), cadence_rpm: r1(c.avgCadence, 0),
         hr_drift_bpm: r1(c.hrDrift, 0), pacing_fade_pct: c.pacingFade != null ? r1(c.pacingFade * 100, 0) : null,
       })),
@@ -12474,9 +12573,9 @@ function buildDigest(D, sport) {
         note: 'the SAME descent compared across the rider\'s saved rides (a ghost race). A time slower than the best is usually lower corner apex speed (braking earlier, less commitment when tired), not straight-line speed; that is a skill and confidence read, not fitness.',
       })) : null,
       device_laps: (D.laps || []).map((l, i) => ({
-        n: i + 1, timer_s: r1(l.timerTime ?? l.elapsedTime, 0), distance_m: r1(l.distance, 0),
+        n: i + 1, timer_s: r1(l.timerTime ?? l.elapsedTime, 0), ...u.len('distance', l.distance, 0),
         avg_power_w: l.avgPower ?? null, np_w: l.normalizedPower ?? null, avg_hr: l.avgHr ?? null,
-        cadence_rpm: l.avgCadence ?? null, ascent_m: l.totalAscent ?? null,
+        cadence_rpm: l.avgCadence ?? null, ...u.elev('ascent', l.totalAscent ?? null),
         balance: l.balance ? r1(l.balance.left, 0) + '/' + r1(l.balance.right, 0) : null,
       })),
       data_caveats: 'Head-unit FIT only (no phone motion data). Corners come from 1 Hz GPS heading geometry: counts, radii, and apex speeds cover sweeping corners only (a floor, not a census) and carry no lean or braking mechanics. pacing_fade_pct is last-third vs first-third power on a climb (strongly negative = started too hot). The left/right balance flag convention is unverified against Garmin Connect, so treat balance side labels as provisional.',
@@ -12488,21 +12587,26 @@ function buildDigest(D, sport) {
     const foot = sport === 'run' || sport === 'walk';
     const loc = (D.sensors && D.sensors.location) || [];
     const baro = (D.sensors && D.sensors.baro) || [];
+    /* Kept separate from segStats so the MIN_DESCENT_DROP_M gate below stays in meters: which
+       descents count must not change when the athlete flips the Units toggle. */
+    const segDropM = (seg) => {
+      const b = baro.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
+      return b.length > 1 ? Math.abs(b[b.length - 1].relativeAltitude - b[0].relativeAltitude) : null;
+    };
     const segStats = (seg) => {
       const rows = loc.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.speed != null);
       let d = 0; for (let i = 1; i < rows.length; i++) d += ((rows[i].speed + rows[i - 1].speed) / 2) * (rows[i].t - rows[i - 1].t);
       const spd = rows.map(r => r.speed);
-      const b = baro.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
-      const vert = b.length > 1 ? Math.abs(b[b.length - 1].relativeAltitude - b[0].relativeAltitude) : null;
       return {
-        duration_s: r1(seg.duration, 0), distance_m: r1(d, 0), grade_pct: r1(seg.gradeAvg),
-        vertical_m: r1(vert, 0),
-        avg_speed_mph: spd.length ? r1((d / Math.max(1, seg.duration)) * 2.23694) : null,
-        max_speed_mph: spd.length ? r1(Math.max(...spd) * 2.23694) : null,
+        duration_s: r1(seg.duration, 0), ...u.len('distance', d, 0), grade_pct: r1(seg.gradeAvg),
+        ...u.elev('vertical', segDropM(seg)),
+        ...u.speed('avg_speed', spd.length ? d / Math.max(1, seg.duration) : null),
+        ...u.speed('max_speed', spd.length ? Math.max(...spd) : null),
       };
     };
     const downs = (D.segments || []).filter(x => x.dir === 'down')
-      .map(segStats).filter(d => d.vertical_m == null || d.vertical_m >= MIN_DESCENT_DROP_M);
+      .filter(seg => { const v = segDropM(seg); return v == null || v >= MIN_DESCENT_DROP_M; })
+      .map(segStats);
     const label = sport === 'run' ? 'run (GPS-only FIT import, no phone motion data)'
       : sport === 'walk' ? 'walk or hike (GPS-only FIT import, no phone motion data)'
       : D.eBike ? 'e-MTB ride (GPS-only FIT import, e.g. bike-park or lift-served day; motor-assisted)'
@@ -12514,28 +12618,28 @@ function buildDigest(D, sport) {
       duration_min: r1(s.duration / 60),
       moving_min: r1(s.movingTime / 60),
       stopped_min: r1(s.stoppedTime / 60),
-      distance_km: r1((foot ? s.distance : s.riddenDistance) / 1000, 2),
-      [foot ? 'avg_speed_mph' : 'avg_riding_speed_mph']: r1(s.avgSpeed * 2.23694),
-      avg_pace_min_per_km: (foot && s.avgSpeed > 0) ? r1((1000 / s.avgSpeed) / 60, 2) : null,
-      max_speed_mph: r1(s.maxSpeed * 2.23694),
-      best_30s_mph: r1(s.peak30 * 2.23694),
-      elevation_gain_m: r1(s.altGain, 0),
-      elevation_loss_m: r1(s.altLoss, 0),
+      ...u.dist('distance', foot ? s.distance : s.riddenDistance),
+      ...u.speed(foot ? 'avg_speed' : 'avg_riding_speed', s.avgSpeed),
+      ...u.pace('avg_pace', foot ? s.avgSpeed : null),
+      ...u.speed('max_speed', s.maxSpeed),
+      ...u.speed('best_30s', s.peak30),
+      ...u.elev('elevation_gain', s.altGain),
+      ...u.elev('elevation_loss', s.altLoss),
       /* Foot activities have no lifts (detection is skipped); the block only appears for bike rides. */
       lifts: (!foot && s.liftCount) ? {
-        count: s.liftCount, distance_km: r1(s.liftDistance / 1000, 2),
-        time_min: r1(s.liftTime / 60), ascent_m: r1(s.liftAscent, 0),
+        count: s.liftCount, ...u.dist('distance', s.liftDistance),
+        time_min: r1(s.liftTime / 60), ...u.elev('ascent', s.liftAscent),
         note: 'Auto-detected lift/gondola rides, already excluded from the riding stats above.'
       } : null,
-      vam_pedaled_climbs_m_per_h: r1(s.vamPedaled, 0),
+      ...u.vam('vam_pedaled_climbs', s.vamPedaled),
       descents: downs,
       /* Sweeping-corner geometry per descent (bike GPS rides only; foot rides carry descents:[]). */
       corners: (D.descents && D.descents.length) ? {
         note: 'Sweeping corners from 1 Hz GPS heading geometry: a floor, not a census (tight singletrack turns are invisible at 1 Hz), with no lean or braking mechanics.',
         per_descent: D.descents.map(d => ({
           n: d.index, lap: d.group ? d.group + '-' + d.lap : null, corners: d.corners.length,
-          tightest_radius_m: r1(d.minRadius, 0),
-          avg_corner_apex_mph: d.avgApexSpeed != null ? r1(d.avgApexSpeed * 2.23694) : null,
+          ...u.len('tightest_radius', d.minRadius, 0),
+          ...u.speed('avg_corner_apex', d.avgApexSpeed),
         })),
         repeated_descents: (D.descentGroups || []).map(g => ({ group: g.group, descent_numbers: g.indexes, note: 'same descent ridden multiple times, in ride order' })),
       } : null,
@@ -12556,18 +12660,18 @@ function buildDigest(D, sport) {
         walk_breaks: (D.gait.breaks || []).map(b => ({ at_min: +((b.t0 - D.ride.start) / 60).toFixed(1), duration_s: Math.round(b.t1 - b.t0) })),
       } : null,
       duration_min: r1(s.duration / 60),
-      distance_km: r1(s.distance / 1000, 2),
-      avg_pace_min_per_km: r1(s.paceMinPerKm, 2),
-      avg_speed_mph: r1(s.avgSpeed * 2.23694),
+      ...u.dist('distance', s.distance),
+      ...u.paceMin('avg_pace', s.paceMinPerKm),
+      ...u.speed('avg_speed', s.avgSpeed),
       cadence_spm_median: r1(s.cadMedian, 0),
       cadence_spm_mean: r1(s.cadMean, 0),
       vertical_oscillation_cm_median: r1(s.oscMedian),
-      elevation_gain_m: r1(s.altGain),
-      elevation_loss_m: r1(s.altLoss),
+      ...u.elev('elevation_gain', s.altGain),
+      ...u.elev('elevation_loss', s.altLoss),
       phone_mount: run.mount,
       mount_confidence: r1(run.mountConfidence, 2),
       segments: (run.segments || []).map(seg => ({
-        type: seg.dir, duration_s: r1(seg.duration), distance_m: r1(seg.distance, 0),
+        type: seg.dir, duration_s: r1(seg.duration), ...u.len('distance', seg.distance, 0),
         grade_pct: r1(seg.gradeAvg), cadence_spm: r1(seg.cadAvg, 0), oscillation_cm: r1(seg.oscAvg)
       })),
       data_caveats: 'Cadence and oscillation are derived from AirPods/phone IMU; oscillation is head bob (a proxy for hip vertical motion). Phone mount detected as "' + run.mount + '" (confidence ' + r1(run.mountConfidence, 2) + ').'
@@ -12584,21 +12688,21 @@ function buildDigest(D, sport) {
   const digest = {
     sport: 'mtb',
     duration_min: r1(s.duration / 60),
-    distance_km: r1(s.distance / 1000, 2),
-    max_speed_mph: r1(s.maxSpeed * 2.23694),
-    elevation_drop_m: r1(s.altDrop),
+    ...u.dist('distance', s.distance),
+    ...u.speed('max_speed', s.maxSpeed),
+    ...u.elev('elevation_drop', s.altDrop),
     turns: {
       total: s.nTurns, left: s.leftTurns, right: s.rightTurns,
-      median_apex_radius_m: r1(s.medianRadius),
-      tightest_radius_m: radii.length ? r1(Math.min(...radii)) : null,
-      radius_distribution_m: radii.map(x => r1(x))
+      ...u.len('median_apex_radius', s.medianRadius),
+      ...u.len('tightest_radius', radii.length ? Math.min(...radii) : null),
+      ...u.lenList('radius_distribution', radii)
     },
     jumps: {
       count: s.nJumps || 0,
       total_airtime_s: r1(s.totalAirtime),
       max_airtime_s: r1(s.maxAirtime, 2),
       detail: jumps.filter(j => j.hang != null).map(j => ({
-        hang_ms: r1(j.hang * 1000, 0), takeoff_mph: j.speed_mps != null ? r1(j.speed_mps * 2.23694) : null, distance_m: r1(j.dist)
+        hang_ms: r1(j.hang * 1000, 0), ...u.speed('takeoff', j.speed_mps), ...u.len('distance', j.dist)
       })),
       source: D.hasFit ? 'Specialized FIT (ground truth)' : 'none'
     },
@@ -12606,7 +12710,7 @@ function buildDigest(D, sport) {
   };
   /* Turn mechanics the coach could not see before: left/right lean symmetry and where speed was
      scrubbed. These are the body-motion signals that separate Loam from a GPS tracker. */
-  const mech = turnMechanics(D);
+  const mech = turnMechanics(D, metric);
   if (mech) digest.mechanics = mech;
   if (cp) {
     digest.ebike = {
@@ -12616,7 +12720,7 @@ function buildDigest(D, sport) {
       motor_energy_wh: r1(cp.energyWh, 0),
       lugging_on_climbs_pct: cp.lugPct,
       climbs: (cp.climbs || []).slice().sort((a, b) => (b.gain || 0) - (a.gain || 0)).slice(0, 5).map(c => ({
-        gain_m: r1(c.gain), avg_grade_pct: r1(c.avgGrade), duration_s: r1(c.duration, 0),
+        ...u.elev('gain', c.gain), avg_grade_pct: r1(c.avgGrade), duration_s: r1(c.duration, 0),
         cadence_rpm: c.avgCad != null ? r1(c.avgCad, 0) : null, assist_w: c.avgAssist != null ? r1(c.avgAssist, 0) : null,
         lugging_pct: c.lugPct,
       })),
@@ -12674,6 +12778,7 @@ async function attachCoachDescentHistory(D, sport) {
     const [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]);
     const seen = new Set();
     const out = [];
+    const u = digestUnits(U.metric());   /* lap speeds in the athlete's units, like the rest of the digest */
     for (const d of tagged) {
       const tagId = d.autoTag.taggedSegmentId;
       if (seen.has(tagId)) continue;
@@ -12684,8 +12789,8 @@ async function attachCoachDescentHistory(D, sport) {
       if (members.length < 2) continue;   /* no progression to coach with a single lap */
       const laps = members.map(m => ({
         sec: m.duration,
-        mph: m.avgSpeed != null ? +(m.avgSpeed * 2.23694).toFixed(1) : null,
-        max: m.maxSpeed != null ? +(m.maxSpeed * 2.23694).toFixed(1) : null,
+        avg: u.speed('avg_speed', m.avgSpeed),
+        max: u.speed('max_speed', m.maxSpeed),
         date: memberDate(m),
       }));
       const dated = laps.filter(l => l.date && !isNaN(l.date)).sort((a, b) => a.date - b.date);
@@ -12701,7 +12806,7 @@ async function attachCoachDescentHistory(D, sport) {
         attempts: dated.slice(-6).map(l => ({
           date: l.date.toISOString().slice(0, 10),
           time_s: l.sec != null ? +l.sec.toFixed(1) : null,
-          avg_speed_mph: l.mph, max_speed_mph: l.max,
+          ...l.avg, ...l.max,
         })),
       });
     }
@@ -12712,7 +12817,20 @@ async function attachCoachDescentHistory(D, sport) {
   } catch (e) { /* best-effort */ }
 }
 
-function coachSystemPrompt(sport, level) {
+/* The athlete's Units toggle, restated for the model. buildDigest already hands it every distance,
+   speed, pace, and elevation in the selected system with the unit in the field name; this rule governs
+   the PROSE, which used to answer "you covered 8.4 km" to a rider whose whole page said miles (and
+   sometimes convert a number itself, badly). Folded into the cache key with the rest of the prompt, so
+   flipping the toggle re-asks rather than replaying a reply written in the other system. */
+function coachUnitsRule(metric) {
+  const sys = metric
+    ? 'Units: this athlete reads METRIC. Every distance, speed, pace, and elevation you are given is already metric and its field name says which unit (km, km/h, minutes per km, meters). Cite those numbers as given, write every unit metric, and never convert to miles, mph, or feet.'
+    : 'Units: this athlete reads IMPERIAL. Every distance, speed, pace, and elevation you are given is already imperial and its field name says which unit (mi, mph, minutes per mile, feet). Cite those numbers as given, write every unit imperial, and never convert to kilometers, km/h, or meters.';
+  return sys + ' Cadence (spm/rpm), power (W), W/kg, heart rate (bpm), grades (%), angles (degrees), bar speed (m/s), and centimetre-scale form numbers (vertical oscillation, head sway) are unit-neutral by convention and stay exactly as given.';
+}
+
+function coachSystemPrompt(sport, level, metric) {
+  const units = coachUnitsRule(metric);
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
   if (isGolfSport(sport)) {
     return `You are Loam, an expert golf coach reading sensor-derived metrics from a single driving-range session (Apple Watch on the lead wrist, AirPods in, phone in a pocket). Turn them into specific, honest, actionable coaching.
@@ -12733,6 +12851,7 @@ Golf reference points:
 
 Rules:
 - Ground every claim in the numbers provided. Respect the data_caveats and hedge when a read is an upper bound, relative, or a proxy.
+- ${units}
 - The athlete is at ${level} level - pitch depth and vocabulary accordingly.
 - Be direct and encouraging, never fluffy. Do not restate the whole dataset.
 
@@ -12751,6 +12870,8 @@ Method — for every point, follow "metric -> mechanism -> action":
 1. Metric: cite the actual number from the data (e.g. "bar speed dropped 22% from set 1 to set 4").
 2. Mechanism: explain what it means physically (fatigue, depth creep, the high/low bar tradeoff, velocity-based autoregulation).
 3. Action: one specific, doable change for next time.
+
+${units} Loads and total volume are in the weight unit the lifter picked in the Lift view, given as the digest's "units" field; use that unit and do not convert it either.
 
 Coach the ${level} lifter: ${level === 'beginner' ? 'keep it simple and encouraging, prioritize consistent depth and control over load.' : level === 'advanced' ? 'assume they know the lifts; talk autoregulation, velocity loss thresholds, and programming nuance.' : 'balance fundamentals with the useful details.'} Be concise, specific, and warm. Do not pad. Prefer 2-4 tight points over a wall of text.`;
   }
@@ -12771,6 +12892,7 @@ What GPS can honestly show, and how to coach it:
 - Consistency across segments; on a ${act}, steady effort-adjusted pace is usually the goal.
 - Respect the data_caveats; pace/speed may be GPS-derived and approximate, so avoid overprecise claims. Do NOT coach cadence or form (there is no motion data for it).
 - At most once in the whole conversation, note that recording with the Loam Capture phone app (or AirPods) would add cadence, oscillation, and form coaching; do not repeat this or make it the headline.
+- ${units}
 
 The athlete is at ${level} level — pitch depth and vocabulary accordingly.
 Be direct and encouraging, never fluffy. Do not restate the whole dataset.
@@ -12803,6 +12925,7 @@ Road reference points:
 - Trend and bests: a history array (the rider's recent saved road rides, newest first, with NP/TSS/IF) lets you compare this ride to recent form instead of coaching it in isolation. power_bests_set_today lists the durations where this ride beat the rider's best across all their saved rides; call those out specifically and celebrate them, they are the "fitness is arriving" moments. Never invent history or bests that are not in the data.
 - Descents and corners: counts, radii, and apex speeds are GPS geometry for sweeping corners only, a floor, not a census. repeated_descents lists laps of the same descent WITHIN this ride; descent_ghost compares the same descent ACROSS the rider's saved rides (today's time, rank, and seconds off their best). For both, a slower time via lower apex speeds means braking earlier when tired, a skill and confidence read, not fitness; celebrate a descent_ghost personal best. Never invent lean or braking data.
 - Respect data_caveats. Do not coach motor assist: these are rider watts.
+- ${units}
 
 The athlete is at ${level} level — pitch depth and vocabulary accordingly.
 Be direct and encouraging, never fluffy. Do not restate the whole dataset.
@@ -12831,6 +12954,7 @@ What GPS can honestly show, and how to coach it:
 - Climbing (when pedaled climbs exist): VAM and climb grades.
 - Respect the data_caveats; speeds may be GPS-derived and approximate, so avoid overprecise claims.
 - At most once in the whole conversation, note that recording with the Loam Capture phone app on the same ride would add turn, jump, and body-motion coaching; do not repeat this or make it the headline.
+- ${units}
 
 The athlete is at ${level} level — pitch depth and vocabulary accordingly.
 Be direct and encouraging, never fluffy. Do not restate the whole dataset.
@@ -12870,6 +12994,7 @@ Rules:
 - If a "strava_history" block is present, it is the athlete's own Strava data: recent_activities (recent same-sport rides, for volume and trend), pr_efforts (segments where this ride set a personal record), and close_efforts (segments within a few seconds of a PR, where deltaToPRSeconds is the gap left to beat it, and effortCount is how many times they have ridden that segment). Celebrate the real PRs, name a close_effort as a concrete next target, use effortCount to frame progress by experience on the trail, and read recent_activities for training load. Cite the real segment names and times, and never invent efforts that are not listed. For runs it may also carry runQuality, recent runs with splitBalancePct (second-half vs first-half pace, negative means a faster finish), paceVariationPct (how even the splits were), decouplingPct (aerobic decoupling, the pace-to-heart-rate drift, higher means the heart climbed to hold pace), and read (an automatic one-line take). Use runQuality to coach pacing and aerobic fitness across runs (for example rising decoupling means going out too hard or a base that needs work); build on the read rather than contradicting it, and cite the real numbers.
 - If a "health_context" block is present, it is the athlete's own Apple Health vitals: a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, with a basis line naming the measurements used. Read it for recovery framing: when readiness is low or HRV is below baseline, bias next-session advice toward easy volume and recovery; when high, it supports pushing. Cite the real numbers, respect the basis (say so when there is no reading yet today), and never invent vitals.
 - Respect the data_caveats. If data is sparse or a mount/source is uncertain, say so and hedge rather than overclaiming.
+- ${units}
 - The athlete is at ${level} level — pitch depth and vocabulary accordingly.
 - Be direct and encouraging, never fluffy. Do not restate the whole dataset.
 
@@ -13015,7 +13140,9 @@ function coachInputPlaceholder(sport) {
 function renderCoachPanel(D, sport) {
   const sec = document.getElementById('coachSection');
   if (!sec) return;
-  coachState = { sport, digest: buildDigest(D, sport), messages: [], streaming: false };
+  /* The digest carries the athlete's chosen units (U.metric()); flipping the toggle re-renders through
+     _lastRender, which rebuilds this panel, so the coach never holds a digest in the other system. */
+  coachState = { sport, digest: buildDigest(D, sport, U.metric()), messages: [], streaming: false };
   show('coachSection');
   /* Fold recent same-sport sessions from the library into the digest so coaching can speak to a
      trend ("your weak-side radius improved since last week"), not just this one ride. Async and
@@ -13119,12 +13246,25 @@ function coachAnalyzePrompt(sport) {
 // not part of buildDigest, so the coaching drift-guard is unaffected. Attached BEFORE the cache key
 // is hashed, so a reply generated with old Strava data is not replayed after the data changes, and
 // so the write path (sendCoach) and read path (restoreCachedCoach) hash the same digest.
+/* The native app builds its Strava digest with fixed Codable keys (distanceKm / elevGainM), so an
+   imperial athlete would read miles everywhere except this block. Restate those two in their units,
+   named by unit like the rest of the digest; times, counts, and percentages are unit-neutral and pass
+   through. The injected object is never mutated (the app may reuse it). */
+function stravaContextInUnits(sc, metric) {
+  if (metric || !sc || !Array.isArray(sc.recentActivities)) return sc;
+  const u = digestUnits(false);
+  return { ...sc, recentActivities: sc.recentActivities.map(a => {
+    const { distanceKm, elevGainM, ...rest } = a;
+    return { ...rest, ...u.dist('distance', distanceKm != null ? distanceKm * 1000 : null), ...u.elev('elev_gain', elevGainM) };
+  }) };
+}
+
 function attachStravaContext(state) {
   try {
     const sc = window.LOAM_STRAVA_CONTEXT;
     if (sc && typeof sc === 'object' && state.digest && !state.digest.strava_history) {
-      state.digest.strava_history = sc;
-      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides. pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. runQuality (runs only): recent runs with splitBalancePct (second-half vs first-half pace, negative is a faster finish), paceVariationPct (split evenness), decouplingPct (pace-to-heart-rate drift, higher means more cardiac drift), and read (an automatic one-line take). Use for progression, celebrate real PRs, name a close_effort as a concrete target, frame progress by effortCount, and coach pacing and aerobic fitness from runQuality; cite the real numbers and never invent efforts not listed here.";
+      state.digest.strava_history = stravaContextInUnits(sc, U.metric());
+      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides (each activity's distance and elevation field names its unit). pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. runQuality (runs only): recent runs with splitBalancePct (second-half vs first-half pace, negative is a faster finish), paceVariationPct (split evenness), decouplingPct (pace-to-heart-rate drift, higher means more cardiac drift), and read (an automatic one-line take). Use for progression, celebrate real PRs, name a close_effort as a concrete target, frame progress by effortCount, and coach pacing and aerobic fitness from runQuality; cite the real numbers and never invent efforts not listed here.";
     }
   } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
 }
@@ -13165,7 +13305,7 @@ function coachKeyDigest(digest) {
    model + system prompt so any of them changing yields a fresh key. Callers must attach history
    (await digestReady) first so descent_history is present in the key on both paths. */
 function coachFirstTurnKey(state, level, model, text) {
-  return analysisCacheKey([coachKeyDigest(state.digest), level, model, coachSystemPrompt(state.sport, level), text].join('|'));
+  return analysisCacheKey([coachKeyDigest(state.digest), level, model, coachSystemPrompt(state.sport, level, U.metric()), text].join('|'));
 }
 
 /* On (re)opening a ride, if the deterministic first insight was generated before (this session or a
@@ -13242,7 +13382,7 @@ async function sendCoach(text) {
   coachState.messages.push({ role: 'user', content: text });
 
   const system = [
-    { type: 'text', text: coachSystemPrompt(coachState.sport, level) },
+    { type: 'text', text: coachSystemPrompt(coachState.sport, level, U.metric()) },
     { type: 'text', text: 'SESSION DATA (JSON):\n' + JSON.stringify(coachState.digest), cache_control: { type: 'ephemeral' } }
   ];
   const bubble = appendCoachBubble('assistant', '');
@@ -16507,7 +16647,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'b12536a · 2026-07-24';
+const LOAM_BUILD = '22befbb · 2026-07-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
