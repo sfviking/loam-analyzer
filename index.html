@@ -934,6 +934,7 @@
   .coach-controls a { color:var(--accent-3); text-decoration:none; }
   .coach-controls a:hover { text-decoration:underline; }
   .coach-key-ok { color:var(--accent-2); }
+  .coach-key-scope { color:var(--text-muted); }
   .coach-thread { display:flex; flex-direction:column; gap:10px; max-height:440px; overflow-y:auto; }
   .coach-thread:empty { display:none; }
   .coach-msg { display:flex; }
@@ -7284,7 +7285,17 @@ const LoamGolf = (function () {
    * seconds of t. Matching is case-insensitive.
    */
 
-  const G_CLUBS = ['driver', 'iron', 'wedge'];
+  /* Every string that names a club, lowercased: the three generic chips first, then the specific clubs
+     behind the phone's "More club" picker. Matched by EXACT (case-insensitive) string against what the
+     capture app stamped, so this stays character for character in step with AnnotationPresets.clubChips
+     + AnnotationPresets.clubPicker (pinned by analyzer/sports/golf/annotation-contract.test.js, which
+     also pins this list against the module's, since the golf drift guard only compares functions).
+     Putter is absent on purpose: a putt produces no detectable angular burst. */
+  const G_CLUBS = [
+    'driver', 'iron', 'wedge',
+    '3 wood', '5 wood', 'hybrid', '3 iron', '4 iron', '5 iron', '6 iron', '7 iron', '8 iron',
+    '9 iron', 'pitching wedge', 'gap wedge', 'sand wedge', 'lob wedge', 'other club',
+  ];
   const G_QUALITY = ['good', 'mishit'];
   const G_QUALITY_WINDOW_S = 3.0;   // a Good / Mishit tap this close to a swing labels it
 
@@ -9616,7 +9627,7 @@ function onLiftReps(i, val) {
    lean (low bar leans more to keep the bar over midfoot), and tempo sets the cycle time. The skeleton
    is solved bar-over-midfoot by liftSkeleton, so the pose is mechanically honest, not a canned loop. ---- */
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', trail: [], ghosts: [] };
-function liftFormCharKey() { return localStorage.getItem('loam.liftChar') || 'cleaner'; }
+function liftFormCharKey() { try { return localStorage.getItem('loam.liftChar') || 'cleaner'; } catch (e) { return 'cleaner'; } }
 /* Squat, deadlift and curl have real, fact-driven poses (squat descent, hip hinge, elbow-flexion
    curl). Any OTHER explicitly tapped lift (press, bench, dips, other, row, ...) has no dedicated pose
    yet and is drawn as a neutral upright standing hold, not a misleading squat: no descent (dmax 0), a
@@ -9718,7 +9729,10 @@ function liftFormStop() {
   cancelAnimationFrame(_liftForm.raf);
   _liftForm.raf = 0; _liftForm.playing = false; _liftForm.D = null; _liftForm.tfKey = '';
 }
-function setLiftFormChar(k) { localStorage.setItem('loam.liftChar', k); document.querySelectorAll('.lf-char').forEach(b => b.classList.toggle('on', b.dataset.k === k)); liftFormStart(); }
+/* The write is best-effort: private mode / a full quota throws, and letting that escape would take
+   the character switch (and the replay restart below it) down with it. Same guard every other
+   preference write on this page uses; the pick still applies to this render. */
+function setLiftFormChar(k) { try { localStorage.setItem('loam.liftChar', k); } catch (e) { /* private mode / quota */ } document.querySelectorAll('.lf-char').forEach(b => b.classList.toggle('on', b.dataset.k === k)); liftFormStart(); }
 function setLiftFormSet(i) { _liftForm.setIdx = +i; liftFormStart(); }
 function toggleLiftFormPlay() {
   _liftForm.playing = !_liftForm.playing;
@@ -11565,8 +11579,8 @@ function loamSaveChart(gd) {
    - Web with the Web Share API: open the OS share sheet with the image file so it reaches the same
      messaging/social targets. A user cancel (AbortError) is respected, not silently downloaded.
    - Web without share support (most desktops): fall back to a plain download.
-   TODO (deferred, per product): once a public download page exists, append its URL to `caption` so a
-   shared card carries an install link. Intentionally omitted for now. */
+   The caption carries no install link yet, deferred per product until a public download page exists
+   to point at. Tracked in issue #385. */
 async function loamShareImage(dataURL, filename, caption) {
   const text = caption || '';
   const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
@@ -11677,8 +11691,16 @@ function loamPlot(el, traces, layout, cfg) {
    user set the carry for the current run; it overrides the detected mount and the render
    (mount notice, digest, geek stats) reflects it. Persisted per run by the cache key. */
 let _currentRunKey = null;
-function carryGet() { return _currentRunKey ? (localStorage.getItem('loam_carry:' + _currentRunKey) || '') : ''; }
-function carrySet(v) { if (!_currentRunKey) return; if (v) localStorage.setItem('loam_carry:' + _currentRunKey, v); else localStorage.removeItem('loam_carry:' + _currentRunKey); }
+/* Both sides are best-effort: private mode / a full quota throws on write, and a storage-disabled
+   context throws on read too. An escaping error here would take down the carry selector's change
+   handler and, with it, the re-render the pick exists to trigger. Same guard as the run labels. */
+function carryGet() { try { return _currentRunKey ? (localStorage.getItem('loam_carry:' + _currentRunKey) || '') : ''; } catch (e) { return ''; } }
+function carrySet(v) {
+  if (!_currentRunKey) return;
+  try {
+    if (v) localStorage.setItem('loam_carry:' + _currentRunKey, v); else localStorage.removeItem('loam_carry:' + _currentRunKey);
+  } catch (e) { /* private mode / quota; the choice still applies to this render */ }
+}
 
 /* Raw metrics dump: flatten the AI-coach digest (which already aggregates every
    computed number) into a collapsible key/value table, plus a couple of derived
@@ -12161,21 +12183,67 @@ function renderRunParams(D) {
    We send a compact metrics digest (not raw sensor data) and stream the reply. */
 
 const COACH_LS = { key: 'loam_anthropic_key', model: 'loam_coach_model', level: 'loam_coach_level' };
-const COACH_MODELS = [['claude-opus-4-8', 'Opus 4.8 — best'], ['claude-sonnet-4-6', 'Sonnet 4.6 — faster/cheaper']];
+const COACH_MODELS = [['claude-opus-5', 'Opus 5 — best'], ['claude-sonnet-5', 'Sonnet 5 — faster/cheaper']];
+const COACH_MODEL_DEFAULT = COACH_MODELS[0][0];
 const COACH_LEVELS = ['beginner', 'intermediate', 'advanced'];
 let coachState = null;          /* { sport, digest, messages, streaming } */
 let coachAbort = null;
 
-function coachGet(k, def) { return localStorage.getItem(COACH_LS[k]) || def; }
+/* Guarded like every other storage read in this file: `localStorage` itself throws (not just the
+   write) when a browser is set to block all storage, and this one sits on the path that builds the
+   coach request, so an unguarded read took down the coach even for the iOS bundled-key path, which
+   needs no storage at all. */
+function coachGet(k, def) { try { return localStorage.getItem(COACH_LS[k]) || def; } catch (e) { return def; } }
 function coachSet(k, v) { try { localStorage.setItem(COACH_LS[k], v); } catch (e) { /* private mode / quota; the setting still applies for this page */ } }
 
-/* Effective coach key: a user's own key (localStorage) always wins; otherwise fall back to a
-   host-injected bundled key (window.LOAM_DEFAULT_ANTHROPIC_KEY, set by the iOS app so testers can
-   use the owner's account). Empty string when neither is present. The standalone web app never sets
-   the bundled global, so it stays per-user. */
+/* ---- Where the API key lives.
+   The model and skill-level preferences are ordinary settings and stay in localStorage. The KEY is
+   different, because web storage is scoped to an ORIGIN, not to a page: the hosted analyzer sits at
+   https://sfviking.github.io/loam-analyzer/, and every other GitHub Pages site under that account
+   (the account root site, any other project page) shares the exact same origin and can therefore
+   read anything the analyzer put in localStorage. Nothing there is hostile today, but a long-lived
+   secret readable by every unrelated page on the domain is a worse default than it needs to be.
+
+   So the key defaults to sessionStorage: scoped to this tab, gone when the tab closes, and never
+   visible to another site sitting in a different tab. "Remember on this device" is an explicit
+   opt-in that also writes localStorage, for people who would rather not paste the key every session.
+   Read order is session first, then the remembered copy, then the host-injected bundled key. */
+/* The model to send. A stored preference is only honoured when it is still on the menu: model ids
+   are retired over time, and without this check a returning user who once picked the older Sonnet
+   kept silently sending that id forever while the dropdown (which marks an option selected only on
+   an exact match) showed the default. The UI and the request disagreed, and the eventual failure was
+   a bare 404 from the API with nothing pointing at a stale setting. Re-validating on read fixes it
+   for every future model change, not just this one. */
+function coachModel() {
+  const stored = coachGet('model', COACH_MODEL_DEFAULT);
+  return COACH_MODELS.some(([v]) => v === stored) ? stored : COACH_MODEL_DEFAULT;
+}
+function coachSession() { try { return window.sessionStorage; } catch (e) { return null; } }
+function coachSessionKey() { const s = coachSession(); try { return (s && s.getItem(COACH_LS.key)) || ''; } catch (e) { return ''; } }
+function coachRememberedKey() { try { return localStorage.getItem(COACH_LS.key) || ''; } catch (e) { return ''; } }
+/* Whether the key is persisted across tabs/sessions on this device (the opt-in above). */
+function coachKeyRemembered() { return !!coachRememberedKey(); }
+
+/* Effective coach key: a user's own key always wins; otherwise fall back to a host-injected bundled
+   key (window.LOAM_DEFAULT_ANTHROPIC_KEY, set by the iOS app so testers can use the owner's account).
+   Empty string when neither is present. The standalone web app never sets the bundled global, so it
+   stays per-user. */
 function coachBundledKey() { return (typeof window !== 'undefined' && window.LOAM_DEFAULT_ANTHROPIC_KEY) || ''; }
-function coachKey() { return localStorage.getItem(COACH_LS.key) || coachBundledKey(); }
-function coachHasOwnKey() { return !!localStorage.getItem(COACH_LS.key); }
+function coachKey() { return coachSessionKey() || coachRememberedKey() || coachBundledKey(); }
+function coachHasOwnKey() { return !!(coachSessionKey() || coachRememberedKey()); }
+
+/* Store the key, or clear it everywhere when `v` is empty. `remember` persists it to localStorage in
+   addition to this tab's sessionStorage; turning remember off drops the persisted copy but keeps the
+   key usable for the rest of this tab's session. */
+function coachStoreKey(v, remember) {
+  const s = coachSession();
+  try {
+    if (v) { if (s) s.setItem(COACH_LS.key, v); } else if (s) { s.removeItem(COACH_LS.key); }
+  } catch (e) { /* private mode: the key still applies for this page via the value passed around */ }
+  try {
+    if (v && remember) localStorage.setItem(COACH_LS.key, v); else localStorage.removeItem(COACH_LS.key);
+  } catch (e) { /* private mode / quota */ }
+}
 
 /* Compact, LLM-friendly summary of the session. Numbers only — no raw signals. */
 /* Ride-wide turn mechanics for the coach + highlights: left/right lean symmetry (median peak body lean
@@ -13008,7 +13076,7 @@ For follow-up questions, answer briefly and conversationally. Always respond dir
 /* Streaming browser-direct call to the Claude Messages API. */
 async function callClaude({ system, messages, onText, onDone, onError, signal }) {
   const key = coachKey();
-  const model = coachGet('model', 'claude-opus-4-8');
+  const model = coachModel();
   if (!key) { onError('No API key set.'); return; }
   let resp;
   try {
@@ -13020,7 +13088,12 @@ async function callClaude({ system, messages, onText, onDone, onError, signal })
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true'
       },
-      body: JSON.stringify({ model, max_tokens: 4096, stream: true, thinking: { type: 'adaptive' }, system, messages })
+      /* max_tokens bounds thinking AND the visible answer together, so adaptive thinking spends from
+         the same budget the coaching text needs. 4096 was tight enough on the newer models (which
+         think by default and write longer) that a deep MTB analysis could run out mid-bullet; the
+         per-sport prompts already cap the format at a handful of bullets, so the extra headroom buys
+         completeness rather than length. Streaming, so a big ceiling costs no latency. */
+      body: JSON.stringify({ model, max_tokens: 8192, stream: true, thinking: { type: 'adaptive' }, system, messages })
     });
   } catch (e) { if (e.name === 'AbortError') { onDone(''); return; } onError('Network error: ' + e.message); return; }
   if (!resp.ok || !resp.body) {
@@ -13083,7 +13156,12 @@ function renderCoachKeyStatus() {
   const el = document.getElementById('coachKeyStatus');
   if (!el) return;
   if (coachHasOwnKey()) {
-    el.innerHTML = `<span class="coach-key-ok">✓ your API key</span> · <a href="#" id="coachKeyChange">change</a>`;
+    /* Say which it is, so "why do I have to paste this again?" has a visible answer rather than
+       reading as a bug: this session only (the default) vs remembered on this device. */
+    const scope = coachKeyRemembered()
+      ? `<span class="coach-key-scope">remembered on this device</span>`
+      : `<span class="coach-key-scope">this session only</span>`;
+    el.innerHTML = `<span class="coach-key-ok">✓ your API key</span> · ${scope} · <a href="#" id="coachKeyChange">change</a>`;
   } else if (coachBundledKey()) {
     el.innerHTML = `<span class="coach-key-ok">✓ bundled key</span> · <a href="#" id="coachKeyChange">use your own</a>`;
   } else {
@@ -13094,11 +13172,20 @@ function renderCoachKeyStatus() {
 }
 
 function promptCoachKey() {
-  const cur = coachGet('key', '');
-  const k = window.prompt('Anthropic API key — stored only in this browser and sent directly to Anthropic. Get one at console.anthropic.com:', cur);
+  const cur = coachSessionKey() || coachRememberedKey();
+  const k = window.prompt('Anthropic API key. Kept in this browser only and sent directly to Anthropic, never to a Loam server. Get one at console.anthropic.com:', cur);
   if (k === null) return;
   const v = k.trim();
-  if (v) coachSet('key', v); else localStorage.removeItem(COACH_LS.key);
+  if (!v) { coachStoreKey('', false); renderCoachKeyStatus(); return; }
+  /* Ask once, rather than persisting a secret by default. The honest tradeoff is stated in the
+     question: remembering it survives closing the tab, at the cost of leaving the key readable by
+     any other page served from this same origin. Declining still keeps it for this tab. */
+  const remember = window.confirm(
+    'Remember this key on this device?\n\n'
+    + 'OK: saved in this browser so you do not have to paste it again. On a shared web host '
+    + '(github.io), other pages on the same domain can read it.\n\n'
+    + 'Cancel: kept for this tab only and forgotten when you close it.');
+  coachStoreKey(v, remember);
   renderCoachKeyStatus();
 }
 
@@ -13153,7 +13240,7 @@ function renderCoachPanel(D, sport) {
     attachCoachDescentHistory(D, sport),
   ]);
 
-  const model = coachGet('model', 'claude-opus-4-8');
+  const model = coachModel();
   const level = coachGet('level', 'intermediate');
   const modelOpts = COACH_MODELS.map(([v, l]) => `<option value="${v}" ${v === model ? 'selected' : ''}>${l}</option>`).join('');
   const levelOpts = COACH_LEVELS.map(l => `<option value="${l}" ${l === level ? 'selected' : ''}>${l[0].toUpperCase() + l.slice(1)}</option>`).join('');
@@ -13317,7 +13404,7 @@ async function restoreCachedCoach(state, sport) {
   try { await state.digestReady; } catch (e) { /* history is best-effort */ }
   if (coachState !== state || state.messages.length) return;   // panel re-rendered, or already active
   const level = coachGet('level', 'intermediate');
-  const model = coachGet('model', 'claude-opus-4-8');
+  const model = coachModel();
   const text = coachAnalyzePrompt(sport);
   let hit;
   try { hit = await getCachedCoaching(coachFirstTurnKey(state, level, model, text)); } catch (e) { return; }
@@ -13345,7 +13432,7 @@ async function sendCoach(text) {
 
   // Cache only the first, deterministic "analyze this session" turn; follow-ups are conversational.
   const level = coachGet('level', 'intermediate');
-  const model = coachGet('model', 'claude-opus-4-8');
+  const model = coachModel();
   let coachCacheKey = null;
   const state = coachState;   /* a re-render replaces coachState; never write into the new one */
 
@@ -16647,7 +16734,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
    when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '22befbb · 2026-07-25';
+const LOAM_BUILD = 'eacad01 · 2026-07-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
