@@ -463,8 +463,9 @@
   #results.focus-mode .detail-chart { display: none; }
   #turnFilterTag { font-size: 11px; color: var(--accent); margin-left: auto; }
   #turnFilterTag a { cursor: pointer; text-decoration: underline; }
-  /* Play-by-play turn links: the numbered chip jumps to that turn on the map, the trailing "table"
-     link to its row in the turn-by-turn table. Chip numbers are ride-wide, matching both targets. */
+  /* Play-by-play turn links: the numbered chip opens that corner on its segment page (map framed on
+     the corner, ledger beside it, replay loaded on it), the trailing "table" link goes to its row in
+     the turn-by-turn table. Chip numbers are ride-wide, matching both targets. */
   .pbp-turn { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
     padding: 1px 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;
     color: var(--text); cursor: pointer; }
@@ -472,12 +473,20 @@
   .pbp-row-link { cursor: pointer; color: var(--text-muted); font-size: 11px; text-decoration: underline; white-space: nowrap; }
   .pbp-row-link:hover { color: var(--accent); }
   .pbp-focus { margin-bottom: 8px; line-height: 1.7; }
+  /* The play-by-play's expander borrows the corner ledger's .ledger-more styling; it just needs a
+     box of its own, since it is not sitting flush at the bottom of a bordered panel. */
+  .pbp-more { margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; }
   /* Focused-run chip in the map legend: names the segment the map is zoomed to and offers the way
      back out, since the turn table's own reset link sits far below the fold. */
   #mapFocusTag { color: var(--accent); margin-left: auto; }
   #mapFocusTag a { cursor: pointer; text-decoration: underline; }
   .run-rename { cursor: pointer; opacity: 0.55; font-size: 12px; padding-left: 5px; }
   .run-rename:hover { opacity: 1; }
+  .run-skip { cursor: pointer; opacity: 0.45; font-size: 12px; padding-left: 5px; }
+  .run-skip:hover { opacity: 1; color: var(--accent); }
+  /* Beats the accent colour #runsTable tbody tr.opens-detail .run-name sets on drillable rows. */
+  #runsTable tbody tr .run-name[data-skipped],
+  #runsTable tbody tr.opens-detail .run-name[data-skipped] { color: var(--text-muted); }
   .focus-hint { font-size: 11px; color: var(--text-muted); text-transform: none; letter-spacing: 0; }
   #analyzeAnotherBtn, #attachFitBtn { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; font-family: inherit; font-size: 12px; cursor: pointer; }
   #analyzeAnotherBtn:hover, #attachFitBtn:hover { border-color: var(--accent); color: var(--accent); }
@@ -1374,7 +1383,7 @@
       <div id="playByPlay" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
           Play-by-play
-          <span class="subtitle">turn-by-turn vs your fastest lap of the same trail · tap a turn to see it on the map</span>
+          <span class="subtitle">vs your fastest lap of the same trail · biggest give-ups first · tap a corner to open it</span>
           <select id="pbpRun" style="margin-left:auto;"></select>
         </div>
         <div id="pbpBody"></div>
@@ -3379,6 +3388,15 @@ function drawRuns() {
       ? ` <span class="tag-badge" style="background:rgba(127,176,105,0.10);color:var(--text-muted);"
            title="No Segment Start tap, so this ${nounSingular} starts ${r.tStart <= D.ride.start + 0.5 ? 'at the beginning of the recording' : 'where the previous segment ended'}">start assumed</span>`
       : '';
+    /* Marked "not a trail": a road transit or the ride home that grade segmentation admitted as a
+       descent. Muted badge, so an excluded run reads as excluded rather than missing. */
+    const skipped = runSkipped(r.tStart);
+    const skipBadge = skipped
+      ? ` <span class="tag-badge" style="background:rgba(127,176,105,0.10);color:var(--text-muted);"
+           title="Excluded from corner coaching: no lap comparison, and its corners are not offered as lines to study">not a trail</span>`
+      : '';
+    const skipToggle = ` <span class="run-skip" data-idx="${r.n - 1}" title="${skipped
+      ? 'Count this as a trail again' : 'Not a trail (a road transit or the ride home): skip it for corner coaching'}">${skipped ? '↩' : '⊘'}</span>`;
     let actions = '';
     if (r.src) {
       actions = r.src.autoTag
@@ -3397,7 +3415,7 @@ function drawRuns() {
     /* The classes + data-n/data-l attributes drive the phone card reflow (max-width 700px CSS):
        data-n prefixes the name with the run number, data-l becomes each metric tile's label. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
-      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;">${escapeHtml(label)}${badge}${impliedBadge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this run">✎</span>${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
+      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}>${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this run">✎</span>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
       <td data-l="Time" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist">${U.dist(m.distance)}</td>
       <td data-l="Top" ${m.maxSpeed === bestTop ? hi : ''}>${U.speed(m.maxSpeed)}</td>
@@ -3429,6 +3447,15 @@ function drawRuns() {
       else promptTagDescent(r.src, D.libraryRideId);
     };
   });
+  document.querySelectorAll('#runsTable .run-skip').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const r = runs[+btn.dataset.idx];
+      setRunSkipped(r.tStart, !runSkipped(r.tStart));
+      drawRuns();                       /* re-renders the rows, the lap picker, and the scrub chips */
+      try { if (_runsD) formRenderScrubChips(_runsD); } catch (e2) {}
+    };
+  });
   document.querySelectorAll('#runsTable .run-rename').forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation();
@@ -3454,6 +3481,21 @@ function setRunLabel(tStart, name) {
   try { (name && name.length) ? localStorage.setItem(runLabelKey(tStart), name) : localStorage.removeItem(runLabelKey(tStart)); } catch (e) {}
 }
 
+/* Runs the rider has marked "not a trail", stored the same way as the custom labels. Run
+   segmentation is grade-based (detectGradeSegments: |grade| > 3% sustained 20 s, plus 30 m of net
+   drop), which a canyon road descent home clears easily - so a drive or a road transit can arrive as
+   a "Descent" and its corners then read as lines worth studying. There is no honest automatic fix:
+   markLiftSegments' straightness/speed-CV geometry is validated only in conjunction with
+   dir === 'up' && gradeAvg >= 12, and on this population it misfires both ways (a fire road is
+   straight and metronome-steady; an offramp with traffic is neither). So this follows the same call
+   the repo already made for lift type and club type - the athlete labels it, the label sticks, and
+   every mark is the ground truth a future detector would need. */
+function runSkipKey(tStart) { return `loam_runskip:${_currentRunKey || 'x'}:${Math.round(tStart)}`; }
+function runSkipped(tStart) { try { return localStorage.getItem(runSkipKey(tStart)) === '1'; } catch (e) { return false; } }
+function setRunSkipped(tStart, skip) {
+  try { skip ? localStorage.setItem(runSkipKey(tStart), '1') : localStorage.removeItem(runSkipKey(tStart)); } catch (e) {}
+}
+
 /* Focus one run: zoom the map to its segment, and (MTB only) filter the per-turn table to it. */
 /* ---------- Segment page ----------
    A dedicated view for one run/descent (opened from a runs-table row, like the cross-ride
@@ -3463,10 +3505,12 @@ function setRunLabel(tStart, name) {
    turn markers, in the exact visual language of the main map. */
 let _segMap = null, _segOverlay = null, _segMarkers = null, _segLoc = null, _segReturnScroll = 0, _segCoachWasVisible = false;
 let _segFormHome = null;   /* original DOM slot of #formReplaySection, so the segment page can borrow it and Back can return it */
+let _segTurns = null;      /* this segment's turns, so a focused corner can be framed by its own window */
+let _segPinnedN = null;    /* a corner arrived at from elsewhere: keep it listed and marked even outside the top scrubbers */
 let segTurnMarkers = {};
 function segFocusTurn(n) {
-  const mk = segTurnMarkers[n];
-  try { if (mk && _segMap && mk.getLatLng) _segMap.panTo(mk.getLatLng(), { animate: true }); } catch (e) {}
+  const T = (_segTurns || []).find(x => x.n === n);
+  focusMapOnTurn(_segMap, segTurnMarkers[n], T, _segLoc);
 }
 /* The segment map mirrors the corner ledger: markers only for the rows the
    ledger is currently showing (the top scrubbers by default, the full set once
@@ -3482,23 +3526,24 @@ function syncSegTurnMarkers(shown) {
     const ta = T.tPeak != null ? T.tPeak : (T.tStart + T.tEnd) / 2;
     const p = nearestByTime(_segLoc, ta);
     if (!p) continue;
-    const hasV = T.vExit != null && T.vEntry != null;
-    const delta = hasV ? T.vExit - T.vEntry : 0;
     const icon = L.divIcon({
       className: '',
       html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnRingColor(T)}; outline-offset:1px;">${T.n}</div>`,
       iconSize: [26, 26], iconAnchor: [13, 13]
     });
     const mk = L.marker([p.latitude, p.longitude], { icon }).addTo(_segMarkers);
-    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
-    mk.bindTooltip(
-      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : U.small(T.radius)} · ` +
-      `${hasV ? U.speedNum(T.vEntry).toFixed(1) + ' → ' + U.speedNum(T.vExit).toFixed(1) + ' ' + U.speedUnit() + dStr : ''}`, { direction: 'top' });
+    mk.bindTooltip(turnTooltipHtml(T), { direction: 'top' });
     segTurnMarkers[T.n] = mk;
   }
 }
-function openSegmentPage(r, D) {
+/* focusN (optional): a ride-wide turn number to land on, used when the rider arrived from a corner
+   link elsewhere on the page rather than from the runs table. That corner is pinned into the ledger
+   (so it is listed and marked even when it is not one of the top scrubbers), framed on the map, and
+   loaded into the borrowed form replay. */
+function openSegmentPage(r, D, focusN) {
   const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
+  _segTurns = turns;
+  _segPinnedN = focusN != null && turns.some(T => T.n === focusN) ? focusN : null;
   const label = runLabel(r.tStart) || r.label;
   const m = r.metrics || {};
   document.getElementById('segTitle').textContent = label;
@@ -3563,7 +3608,9 @@ function openSegmentPage(r, D) {
     if (peer && peer.metrics.duration < me.metrics.duration) {
       const { deltas } = pbpDeltasFromTurns(runTurnsFromD(me, D), runTurnsFromD(peer, D));
       const map = {};
-      for (const d of (deltas || [])) if (d.rideN != null && isFinite(d.dApex)) map[d.rideN] = d.dApex / 2.23694;
+      /* d.usable: a corner whose speeds never resolved would otherwise show a fabricated delta
+         against a real one, the same artifact that used to headline the play-by-play. */
+      for (const d of (deltas || [])) if (d.rideN != null && d.usable && isFinite(d.dApex)) map[d.rideN] = d.dApex / 2.23694;
       if (Object.keys(map).length) segDeltas = map;
     }
   } catch (e) { segDeltas = null; }
@@ -3585,8 +3632,18 @@ function openSegmentPage(r, D) {
         const sel = document.getElementById('formTurn');
         const autoRuns = _runsMode === 'auto' ? (segRunsList || []) : (segmentRuns(D, 'auto').runs || []);
         const m = autoRuns.find(o => o.tStart === r.tStart && o.tEnd === r.tEnd);
-        if (m && sel) { const v = 'seg:' + m.n; if (Array.from(sel.options).some(o => o.value === v)) sel.value = v; }
-        formSelectSegment(D, r);
+        const pinned = _segPinnedN != null ? turns.find(T => T.n === _segPinnedN) : null;
+        if (pinned) {
+          /* Arrived on a specific corner, so open the replay ON it rather than on the whole segment:
+             the map answers "where is it", this answers "what did I do". Same three steps the
+             most-scrubbed chips run. */
+          if (sel) sel.value = String(pinned.n);
+          formMarkActiveChip(pinned.n);
+          formSelectTurn(D, pinned);
+        } else {
+          if (m && sel) { const v = 'seg:' + m.n; if (Array.from(sel.options).some(o => o.value === v)) sel.value = v; }
+          formSelectSegment(D, r);
+        }
         /* Chips scope to this descent while its page is up: only its corners. */
         formRenderScrubChips(D, turns, 'THIS SEGMENT');
         formArmAutoplay();
@@ -3598,6 +3655,13 @@ function openSegmentPage(r, D) {
     try {
       _segMap.invalidateSize();
       if (latlngs.length) _segMap.fitBounds(latlngs, { padding: [30, 30] });
+      /* Frame the arrived-at corner AFTER the segment fit above, or the fit overwrites the zoom. */
+      if (_segPinnedN != null) {
+        highlightTurn(_segPinnedN);
+        segFocusTurn(_segPinnedN);
+        const mk = segTurnMarkers[_segPinnedN];
+        if (mk) { try { mk.openTooltip(); } catch (e) {} }
+      }
     } catch (e) {}
   }, 60);
 }
@@ -3684,6 +3748,7 @@ function closeSegmentPage() {
     }
   }
   segTurnMarkers = {};
+  _segPinnedN = null;
   setStatus('Back to ride', true);
   setTimeout(() => {
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
@@ -3795,6 +3860,15 @@ function runTurnsFromD(run, D) {
   return (D.turns || []).filter(T => T.tPeak >= run.tStart && T.tPeak <= run.tEnd)
     .map(T => ({ n: T.n, direction: T.direction, vPeak: T.vPeak, vExit: T.vExit }));
 }
+/* A turn whose speeds never resolved is not comparable. detectTurns takes vPeak/vExit from speedAt,
+   and makeGpsInterpSpeedAt falls back to () => 0 when the recording carries no usable GPS Doppler
+   speed (and clamps to the edge fix, often a stationary 0, for turns outside GPS coverage). Those
+   zeros are not null, so they used to sail into the delta math and manufacture a huge deficit: a
+   0 m/s apex against a 5.8 m/s reference reads as "13.0 mph slower at the apex" and takes over the
+   Focus line. Gate on the same >1.8 m/s floor the corner ledger uses to decide a row is showable. */
+function pbpSpeedUsable(T) {
+  return !!T && isFinite(T.vPeak) && T.vPeak > 1.8 && isFinite(T.vExit) && T.vExit > 1.8;
+}
 function pbpDeltasFromTurns(A, F) {
   const MPS = 2.23694, n = Math.min(A.length, F.length), out = [];
   for (let i = 0; i < n; i++) {
@@ -3802,6 +3876,8 @@ function pbpDeltasFromTurns(A, F) {
     out.push({
       n: i + 1, dir: a.direction,
       rideN: a.n != null ? a.n : null,   /* this lap's turn as numbered on the map/table */
+      /* Both sides must have real speed, or the difference below is an artifact, not a read. */
+      usable: pbpSpeedUsable(a) && pbpSpeedUsable(f),
       dApex: (a.vPeak - f.vPeak) * MPS,
       dExitGain: ((a.vExit - a.vPeak) - (f.vExit - f.vPeak)) * MPS,
     });
@@ -3835,6 +3911,8 @@ function pbpTurnDeltas(run, fastest, D) {
    trailing "table" link to its row. Before, lines said "Turn 3" meaning "3rd turn of this lap",
    which matched nothing else on the page and gave the reader nowhere to go with the insight. */
 let _pbpCtx = null;   /* { run, D } behind the rendered play-by-play, for its turn links */
+let _pbpShowAll = false;   /* expander state; a fresh panel or a run change re-collapses */
+const PBP_FOCUS_LINES = 3;   /* the focused read: the corners that cost the most, worst first */
 function renderPlayByPlay(run, ref, D) {
   const body = document.getElementById('pbpBody');
   if (!body) return;
@@ -3865,50 +3943,96 @@ function renderPlayByPlay(run, ref, D) {
      math stays in mph (pbpDeltasFromTurns, thresholds below); only the display converts. */
   const spd = (mph) => `${U.speedNum(Math.abs(mph) / 2.23694).toFixed(1)} ${U.speedUnit()}`;
   const chip = (d) => d.rideN != null
-    ? `<button type="button" class="pbp-turn" data-n="${d.rideN}" title="Show turn ${d.rideN} on the map">Turn ${d.rideN}<span class="dir-${d.dir}">${d.dir}</span></button>`
+    ? `<button type="button" class="pbp-turn" data-n="${d.rideN}" title="Open turn ${d.rideN} on this segment's map">Turn ${d.rideN}<span class="dir-${d.dir}">${d.dir}</span></button>`
     : `<strong>Turn ${d.n}${d.dir}</strong>`;
+  /* Only turns whose speeds resolved on BOTH laps can be compared (see pbpSpeedUsable). */
+  const cmp = deltas.filter(d => d.usable);
   /* Lead with the action: the turn(s) that gave up the most speed vs the reference lap, so the list
      below reads as detail, not as the assignment itself. */
-  const apexWorst = deltas.filter(d => d.dApex <= -1.0).sort((a, b) => a.dApex - b.dApex)[0] || null;
-  const exitWorst = deltas.filter(d => d.dExitGain <= -1.0).sort((a, b) => a.dExitGain - b.dExitGain)[0] || null;
+  const apexWorst = cmp.filter(d => d.dApex <= -1.0).sort((a, b) => a.dApex - b.dApex)[0] || null;
+  const exitWorst = cmp.filter(d => d.dExitGain <= -1.0).sort((a, b) => a.dExitGain - b.dExitGain)[0] || null;
   if (apexWorst || exitWorst) {
     const parts = [];
     if (apexWorst) parts.push(`${chip(apexWorst)} ${spd(apexWorst.dApex)} slower at the apex${exitWorst === apexWorst ? ` and ${spd(apexWorst.dExitGain)} softer on exit` : ''}`);
     if (exitWorst && exitWorst !== apexWorst) parts.push(`${chip(exitWorst)} ${spd(exitWorst.dExitGain)} softer on exit`);
     html += `<div class="pbp-focus"><strong>Focus next lap:</strong> ${parts.join(' · ')}. The biggest speed give-ups on this lap.</div>`;
   }
-  const lines = [];
-  for (const d of deltas) {
+  /* What one turn has to say. The 1.0 mph thresholds are unchanged and deliberately NOT swapped for
+     FORM_SCRUB_MIN_MPH: that constant gates entry-to-apex bleed WITHIN a corner (turnScrubMph),
+     while these are a lap-vs-lap apex/exit DIFFERENCE. Borrowing it would borrow validity it does
+     not have and silently change which corners are reported. */
+  const noteFor = (d) => {
     const bits = [];
     if (d.dApex <= -1.0) bits.push(`braked harder, <span style="color:var(--accent);">${spd(d.dApex)} slower at the apex</span>`);
     else if (d.dApex >= 1.0) bits.push(`<span style="color:var(--moss);">carried ${spd(d.dApex)} more through the apex</span>`);
     if (d.dExitGain >= 1.0) bits.push(`<span style="color:var(--moss);">drove out ${spd(d.dExitGain)} stronger</span>`);
     else if (d.dExitGain <= -1.0) bits.push(`${spd(d.dExitGain)} softer on exit`);
-    if (bits.length) lines.push(`<li style="margin-bottom:5px;">${chip(d)} ${bits.join(', ')}.`
-      + (d.rideN != null ? ` <a class="pbp-row-link" data-n="${d.rideN}" title="Show this turn's row in the turn-by-turn table">table ↓</a>` : '') + `</li>`);
-  }
+    return bits;
+  };
+  const lineFor = (d) => `<li style="margin-bottom:5px;">${chip(d)} ${noteFor(d).join(', ')}.`
+    + (d.rideN != null ? ` <a class="pbp-row-link" data-n="${d.rideN}" title="Show this turn's row in the turn-by-turn table">table ↓</a>` : '') + `</li>`;
+  /* Every turn with something to say, in ride order: the full read, one tap away and unchanged. */
+  const noted = cmp.filter(d => noteFor(d).length);
+  /* The focused read: the corners that COST time, worst first, capped. A thirty-turn lap used to
+     print thirty bullets in ride order, which is a report, not an assignment; the give-up that
+     actually mattered sat in the middle of a wall of 1.2 mph noise. */
+  const cost = (d) => Math.max(-d.dApex, -d.dExitGain);
+  const giveUps = noted.filter(d => cost(d) >= 1.0).sort((a, b) => cost(b) - cost(a));
+  const focused = giveUps.slice(0, PBP_FOCUS_LINES);
+  const canExpand = noted.length > focused.length;
+  const shown = _pbpShowAll ? noted : focused;
   if (!countA) {
     /* No per-turn data for the selected run (turn detection is MTB body-frame only), so only the
        total time above is comparable. Say that instead of "no differences", which reads as "you
        matched the fastest lap everywhere". */
     html += `<div class="dim">No per-turn data for this run, so only the total time is compared.</div>`;
+  } else if (!cmp.length) {
+    /* Turns exist but their speeds never resolved, so every delta would be an artifact. */
+    html += `<div class="dim">No usable turn speeds on this lap, so the turns cannot be compared. Only the total time above is.</div>`;
+  } else if (!noted.length) {
+    html += `<div class="dim">No notable turn-by-turn differences (within ~${spd(1.0)} everywhere).</div>`;
   } else {
-    html += lines.length
-      ? `<ul style="margin:0; padding-left:18px; line-height:1.5;">${lines.join('')}</ul>`
-      : `<div class="dim">No notable turn-by-turn differences (within ~${spd(1.0)} everywhere).</div>`;
+    if (shown.length) html += `<ul style="margin:0; padding-left:18px; line-height:1.5;">${shown.map(lineFor).join('')}</ul>`;
+    if (!_pbpShowAll) {
+      /* The rest, counted rather than listed: the panel is about what to work on next lap. */
+      const others = noted.length - shown.length;
+      const gained = cmp.filter(d => d.dApex >= 1.0 || d.dExitGain >= 1.0).length;
+      const tail = [];
+      /* With nothing listed, the expander below already says how many turns there are, so counting
+         them again here just repeats itself. */
+      if (!shown.length) tail.push('No corner cost you real speed on this lap');
+      else if (others > 0) tail.push(`${others} more corner${others === 1 ? '' : 's'} in the full list`);
+      if (gained > 0) tail.push(`${gained} where you carried more speed`);
+      if (tail.length) html += `<div class="dim" style="font-size:12px; margin-top:6px;">${tail.join(' · ')}.</div>`;
+    }
+    if (canExpand)
+      html += `<button type="button" class="ledger-more pbp-more">${_pbpShowAll
+        ? `Show the ${PBP_FOCUS_LINES} that matter`
+        : `Show all ${noted.length} turns`}</button>`;
   }
   body.innerHTML = html;
   body.querySelectorAll('.pbp-turn').forEach(b => { b.onclick = () => pbpShowTurnOnMap(+b.dataset.n); });
   body.querySelectorAll('.pbp-row-link').forEach(a => { a.onclick = () => pbpShowTurnRow(+a.dataset.n); });
+  const moreBtn = body.querySelector('.pbp-more');
+  if (moreBtn) moreBtn.onclick = () => { _pbpShowAll = !_pbpShowAll; renderPlayByPlay(run, ref, D); };
 }
 
-/* The play-by-play's two turn links. The map chip mirrors tapping the run's row in the Runs table
-   (zoom the map to this run so the marker exists, filter the turn table to match) and then singles
-   out the one turn: highlight ring + open tooltip on the map, highlighted row in the table. The
-   "table" link goes the other way, opening the turn-by-turn table at that turn's row. */
+/* The play-by-play's two turn links, which answer two different questions. The chip answers "where
+   is this corner and what did I do in it" by opening the run's segment page focused on that corner
+   (its own map framed on the corner, the corner ledger beside it, the replay loaded on it). The
+   "table" link answers "show me the numbers", opening the turn-by-turn table at that turn's row and
+   staying on the ride view. */
 function pbpShowTurnOnMap(n) {
   if (!_pbpCtx) return;
   const { run, D } = _pbpCtx;
+  /* The play-by-play is the one turn affordance with no map anywhere near it, and it used to answer
+     "where is this corner" by scrolling to the whole-ride map and PANNING at whole-ride zoom, which
+     drops the corner into a pile of overlapping markers spanning the whole recording. Send the rider
+     to the segment page instead: this descent's own map, zoomed to the corner, beside its corner
+     ledger, with Form Replay already on that corner and one Back button home. Sports without
+     body-frame turns have nothing to put on that page, so they keep the in-place map focus. */
+  const hasSegTurns = (D.turns || []).some(T => T.tPeak >= run.tStart && T.tPeak <= run.tEnd);
+  if (isMtbFamily(D.sport) && hasSegTurns) { openSegmentPage(run, D, n); return; }
   if (!turnMarkers[n]) {
     showTurnsForRun(run, D);
     /* Keep the Runs table's focused-row highlight in sync, exactly as tapping the row does. */
@@ -3916,8 +4040,6 @@ function pbpShowTurnOnMap(n) {
     const tr = document.querySelector(`#runsTable tbody tr[data-idx="${run.n - 1}"]`);
     if (tr) tr.style.background = 'rgba(127,176,105,0.12)';
   } else {
-    /* Marker already on the map (this run or the full ride is in focus): pan to it and bring the
-       map into view; no refit, so repeated clicks hop turn to turn without the zoom jumping. */
     const mapSec = document.getElementById('overviewSection');
     if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
     focusMapOnMarker(turnMarkers[n]);
@@ -3938,12 +4060,15 @@ function pbpShowTurnRow(n) {
   const row = document.querySelector(`#turnTable tbody tr[data-n="${n}"]`);
   if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
-async function setupPlayByPlay(runs, D) {
+async function setupPlayByPlay(allRuns, D) {
   const panel = document.getElementById('playByPlay');
   if (!panel) return;
   const sel = document.getElementById('pbpRun');
   const body = document.getElementById('pbpBody');
-  if (!runs || runs.length < 2) { panel.classList.add('hidden'); return; }
+  /* A run marked "not a trail" is neither compared nor offered as a reference lap: comparing the
+     ride home against itself produces a wall of corner notes about turning off a road. */
+  const runs = (allRuns || []).filter(r => !runSkipped(r.tStart));
+  if (runs.length < 2) { panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
   // Each run's reference is a normalized { label, turns, duration, crossRide, sameSegmentOK }. Prefer
   // the fastest OTHER lap in THIS ride (same session, cleanest alignment); for a run with no in-ride
@@ -3999,7 +4124,10 @@ async function setupPlayByPlay(runs, D) {
     const ref = r && refOf.get(r.n);
     if (r && ref) renderPlayByPlay(r, ref, D);
   };
-  sel.onchange = draw;
+  /* A fresh panel or a different lap re-collapses to the focused read; the expander itself
+     re-renders through renderPlayByPlay, which must NOT reset it (same split as the ledger). */
+  sel.onchange = () => { _pbpShowAll = false; draw(); };
+  _pbpShowAll = false;
   draw();
 }
 
@@ -4720,7 +4848,11 @@ function formInRunTurns(D) {
   try {
     const { runs } = segmentRuns(D, 'auto');
     if (!runs || !runs.length) return D.turns || [];
-    const inAny = (T) => { const t = T.tPeak != null ? T.tPeak : T.tStart; return runs.some(r => t >= r.tStart && t <= r.tEnd); };
+    /* Runs the rider marked "not a trail" drop out too: grade segmentation cannot tell a canyon
+       road home from a descent, so the label is the only thing that can. */
+    const keep = runs.filter(r => !runSkipped(r.tStart));
+    if (!keep.length) return D.turns || [];
+    const inAny = (T) => { const t = T.tPeak != null ? T.tPeak : T.tStart; return keep.some(r => t >= r.tStart && t <= r.tEnd); };
     return (D.turns || []).filter(inAny);
   } catch (e) { return D.turns || []; }
 }
@@ -9540,7 +9672,7 @@ function hideAllSections() {
   liftFormStop();
   swingCamStop();
   /* A fresh render always lands on the main results view, never a stale segment page. */
-  try { const sp = document.getElementById('segmentPage'); if (sp) sp.classList.add('hidden'); segTurnMarkers = {}; } catch (e) {}
+  try { const sp = document.getElementById('segmentPage'); if (sp) sp.classList.add('hidden'); segTurnMarkers = {}; _segPinnedN = null; _segTurns = null; } catch (e) {}
   /* If the form replay was riding along on the segment page, send it home first so
      the fresh render sets it up in the results flow, not inside a hidden page. */
   try {
@@ -14500,8 +14632,6 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
     if (ta < lo || ta > hi) continue;
     const p = nearestByTime(inWin, ta);
     if (!p) continue;
-    const hasV = T.vExit != null && T.vEntry != null;
-    const delta = hasV ? T.vExit - T.vEntry : 0;
     const ring = turnRingColor(T);
     const icon = L.divIcon({
       className: '',
@@ -14510,10 +14640,7 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
     });
     const m = L.marker([p.latitude, p.longitude], { icon }).addTo(mapOverlay);
     /* Tooltip units follow the Units toggle (they used to hardcode mph and meters). */
-    const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
-    m.bindTooltip(
-      `Turn ${T.n}${T.direction} · r ${isNaN(T.radius) ? '—' : U.small(T.radius)} · ` +
-      `${hasV ? U.speedNum(T.vEntry).toFixed(1) + ' → ' + U.speedNum(T.vExit).toFixed(1) + ' ' + U.speedUnit() + dStr : ''}`, { direction: 'top' });
+    m.bindTooltip(turnTooltipHtml(T), { direction: 'top' });
     turnMarkers[T.n] = m;
   }
 
@@ -15262,7 +15389,16 @@ function renderCornerLedger(turns, hostId, deltasByN) {
       }
     }
   }
-  const shown = _ledgerShowAll ? usable : usable.slice(0, LEDGER_FOCUS_ROWS);
+  let shown = _ledgerShowAll ? usable : usable.slice(0, LEDGER_FOCUS_ROWS);
+  /* A corner the rider arrived at from a link elsewhere (a play-by-play chip) stays listed even when
+     it is not one of the top scrubbers, so the page shows what was actually asked for. Appended to
+     `shown`, not just to the map, so the map-mirrors-the-ledger property holds: every marker keeps a
+     matching row. A corner that failed the speed filter above cannot be listed at all; the map still
+     frames it from its GPS window, it simply gets no marker. */
+  if (isSeg && _segPinnedN != null && !shown.some(T => T.n === _segPinnedN)) {
+    const pin = usable.find(T => T.n === _segPinnedN);
+    if (pin) shown = shown.concat([pin]);
+  }
   const M = loamChartTheme();
   const unit = U.speedUnit();
   const rows = shown.map(T => {
@@ -15331,7 +15467,8 @@ function renderCornerLedger(turns, hostId, deltasByN) {
     row.addEventListener('mouseleave', () => highlightTurn(null));
     row.addEventListener('click', () => {
       highlightTurn(n);
-      if (isSeg) segFocusTurn(n); else focusMapOnMarker(turnMarkers[n]);
+      const T = shown.find(x => x.n === n);
+      if (isSeg) segFocusTurn(n); else focusMapOnMarker(turnMarkers[n], T);
     });
     row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); } });
   });
@@ -15375,7 +15512,7 @@ function renderTurnTable(turns) {
     tr.addEventListener('mouseleave', () => highlightTurn(null));
     /* Tap works where hover never fires (phones): tapping a row pins its highlight and brings the map
        to that turn. On desktop the hover handlers above still drive it; the click just adds focus. */
-    tr.addEventListener('click', () => { highlightTurn(T.n); focusMapOnMarker(turnMarkers[T.n]); });
+    tr.addEventListener('click', () => { highlightTurn(T.n); focusMapOnMarker(turnMarkers[T.n], T); });
     tbody.appendChild(tr);
   }
   document.getElementById('turnCountLabel').textContent = turns.length;
@@ -15383,12 +15520,53 @@ function renderTurnTable(turns) {
   if (toggle) toggle.textContent = `Turn-by-turn table (${turns.length} turn${turns.length === 1 ? '' : 's'})`;
 }
 
-/* Pan the map to a turn/jump marker and, on a touch device (single-column layout where the map is
-   above the table), scroll the map back into view so the tapped highlight is actually visible. */
-function focusMapOnMarker(marker) {
+/* Frame ONE corner on a Leaflet map. Every turn affordance in the app used to PAN to its marker and
+   leave the zoom alone, so on a whole-ride fit the corner landed inside a pile of overlapping
+   markers spanning the recording - the marker was centred and still unreadable. A corner is only
+   metres across, so fit its own GPS window instead (the tStart-1.0 .. tEnd+0.5 slice formTurnSeries
+   already uses, which keeps the approach and the exit on screen), clamped so a very short turn
+   cannot punch past the basemap's tiles. Too few fixes to frame: fall back to zooming IN on the
+   marker, never out, the same Math.max floor the road-corner chips use. */
+/* One corner's map tooltip, shared by the ride map and the segment map so the two copies cannot
+   drift. Speeds print only when they are real: detectTurns takes them from speedAt, which falls back
+   to () => 0 when the recording has no usable GPS Doppler speed (and clamps to the edge fix, often a
+   stationary 0, outside GPS coverage). Zero is not null, so the old `!= null` guard let it through
+   and the tooltip stated an authoritative "r 0.0 ft · 0.0 → 0.0 mph (+0.0)" for a corner it knew
+   nothing about. Radius is vPeak/omegaRad, so it collapses to 0 rather than NaN in the same case and
+   needs its own guard - isNaN never caught it. Floor matches the corner ledger's showable-row test. */
+function turnTooltipHtml(T) {
+  const hasV = isFinite(T.vEntry) && T.vEntry > 1.8 && isFinite(T.vExit) && T.vExit > 1.8;
+  const rOK = isFinite(T.radius) && T.radius > 0;
+  const delta = hasV ? T.vExit - T.vEntry : 0;
+  const dStr = hasV ? ` (${delta >= 0 ? '+' : ''}${U.speedNum(delta).toFixed(1)})` : '';
+  return `Turn ${T.n}${T.direction} · r ${rOK ? U.small(T.radius) : '—'} · `
+    + (hasV ? `${U.speedNum(T.vEntry).toFixed(1)} → ${U.speedNum(T.vExit).toFixed(1)} ${U.speedUnit()}${dStr}`
+            : 'speed unavailable');
+}
+const TURN_FOCUS_MAX_ZOOM = 18;   /* one below the satellite basemap's native 19 */
+const TURN_FOCUS_MIN_ZOOM = 16;   /* floor for the no-fixes fallback */
+function rideLocRows() {
+  return (_runsD && _runsD.sensors && _runsD.sensors.location) || [];
+}
+function focusMapOnTurn(map, marker, T, locRows) {
+  if (!map) return;
   try {
-    if (marker && mapInstance && marker.getLatLng) mapInstance.panTo(marker.getLatLng(), { animate: true });
+    if (T && T.tStart != null && T.tEnd != null) {
+      const pts = (locRows || []).filter(p => p.latitude != null && p.longitude != null
+        && p.t >= T.tStart - 1.0 && p.t <= T.tEnd + 0.5).map(p => [p.latitude, p.longitude]);
+      if (pts.length > 1) { map.fitBounds(pts, { padding: [40, 40], maxZoom: TURN_FOCUS_MAX_ZOOM }); return; }
+    }
   } catch (e) {}
+  try {
+    if (marker && marker.getLatLng)
+      map.setView(marker.getLatLng(), Math.max(map.getZoom(), TURN_FOCUS_MIN_ZOOM), { animate: true });
+  } catch (e) {}
+}
+/* Zoom the main map to a turn/jump marker and, on a touch device (single-column layout where the map
+   is above the table), scroll the map back into view so the tapped highlight is actually visible.
+   `T` is optional: with it the corner gets framed, without it (jumps) this zooms in on the point. */
+function focusMapOnMarker(marker, T) {
+  focusMapOnTurn(mapInstance, marker, T, rideLocRows());
   if (window.matchMedia && window.matchMedia('(hover: none)').matches) {
     const el = document.getElementById('map');
     if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -17434,7 +17612,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '9295a5bdd · 2026-07-29';
+const LOAM_BUILD = '747cd7228 · 2026-07-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
@@ -17447,7 +17625,8 @@ const LOAM_WHATS_NEW = [
     ['Strava athlete dashboard', 'totals, trend charts back to 2 years, KOMs, records, a training heatmap, and your Eddington number (iOS Stats tab).'],
     ['Fitness / fatigue / form', 'the Progress page draws CTL, ATL, and TSB from your saved rides, the classic Performance Management Chart.'],
     ['Climbs panel for runs and hikes', 'per-climb gain, grade, VAM, pace and grade-adjusted pace, with cadence and heart-rate fade.'],
-    ['Play-by-play turn links', 'every turn in the lap comparison is tappable, jumping to that turn on the map or in the turn table, and a "Focus next lap" line names your biggest give-ups.'],
+    ['Lap comparison reads as an assignment', 'the three corners that cost you the most, worst first, with the full turn-by-turn list one tap away; tapping a corner opens it on its segment page, framed on the corner.'],
+    ['Mark a run "not a trail"', 'a road transit or the ride home can look like a descent to grade detection; label it once and its corners drop out of the lap comparison and the most-scrubbed picks.'],
     ['Strava from the app', 'upload rides (with visibility and default bike/shoes), compare starred-segment PRs, and share a FIT straight into Loam.'],
   ] },
   { h: 'Better', items: [
