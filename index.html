@@ -1186,6 +1186,19 @@
   @media (max-width: 720px) { .sc-wrap { grid-template-columns: 1fr; } }
   .sc-stage { background: var(--surface, #f7fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; overflow: hidden; }
   .sc-stage svg { display: block; width: 100%; height: auto; }
+  /* The golfer's own clip beside the measured animation. Two columns only when a clip is loaded, and
+     never on a narrow screen, where two half-width panes would make both unreadable. */
+  .sc-media { display: grid; gap: 10px; grid-template-columns: 1fr; }
+  .sc-media.with-video { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  @media (max-width: 1000px) { .sc-media.with-video { grid-template-columns: 1fr; } }
+  .sc-clip video { display: block; width: 100%; height: auto; max-height: 340px; background: #000; border-radius: 10px; border: 1px solid var(--border, #e2e8f0); }
+  .sc-file { font: 12px 'JetBrains Mono', monospace; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
+  .sc-file input { display: none; }
+  .sc-videobar { margin-top: 10px; font: 12px/1.7 'JetBrains Mono', monospace; color: var(--text-dim, #4a5261); }
+  .sc-videobar .sc-vrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .sc-videobar button, .sc-videobar select { font: 11px 'JetBrains Mono', monospace; padding: 5px 9px; border-radius: 7px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
+  .sc-videobar button.primary { border-color: var(--accent, #e87b3d); color: var(--accent, #e87b3d); }
+  .sc-vwarn { color: var(--accent, #e87b3d); }
   .sc-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   .sc-controls button, .sc-controls select { font: 12px 'JetBrains Mono', monospace; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
   .sc-controls button.on { border-color: var(--accent, #e87b3d); color: var(--accent, #e87b3d); }
@@ -5868,6 +5881,45 @@ async function deleteRideSource(key) {
   } catch (e) { /* orphaned sources are small; best-effort */ }
 }
 
+/* ---- The localStorage half of deleting a ride.
+   IndexedDB holds the ride, its source bytes and its cached render, and all three are bounded and
+   evicted. A few small per-recording USER EDITS live in localStorage instead, because they have to
+   survive re-analyzing the same file: the carry-over note, a lift's per-set loads and rep
+   corrections, golf's self-reported swing count, and per-run labels. Every one is keyed by the
+   recording's content hash, which is exactly the ride's dedupKey.
+
+   Nothing used to remove them. That leaked in two ways: localStorage has a hard ~5 MB origin cap
+   and no eviction of any kind (slow, since the entries are tiny, but unbounded), and re-analyzing a
+   deleted file silently resurrected its old rep corrections, which reads as the analyzer inventing
+   an edit nobody made.
+
+   Mirrors analyzer/core/storage/ride-local-keys.js (pinned by its drift guard). */
+function rideLocalKeys(key, allKeys) {
+  if (!key) return [];
+  const exact = new Set([
+    'loam_carry:' + key,
+    'loam.liftW.' + key,
+    'loam.liftReps.' + key,
+    'loam.golfSwings.' + key,
+  ]);
+  /* Run labels carry a per-run suffix (`loam_runlabel:<contentHash>:<tStart>`), so they need a
+     prefix scan rather than an exact match. The trailing colon matters: without it a hash that is a
+     prefix of another hash would drag the other recording's labels out with it. */
+  const labelPrefix = 'loam_runlabel:' + key + ':';
+  return (allKeys || []).filter((k) => exact.has(k) || k.indexOf(labelPrefix) === 0);
+}
+/* Best-effort, like every other storage touch in this file: a browser blocking storage throws on
+   read as well as write, and failing to tidy up must never abort the delete the user asked for. */
+function deleteRideLocalData(key) {
+  try {
+    const all = [];
+    for (let i = 0; i < localStorage.length; i++) all.push(localStorage.key(i));
+    /* Collect first, then remove. Removing inside the index walk above would renumber the remaining
+       entries underneath it and skip every other match. */
+    rideLocalKeys(key, all).forEach((k) => localStorage.removeItem(k));
+  } catch (e) { /* private mode / storage blocked; nothing to tidy that we can reach */ }
+}
+
 async function getCachedAnalysis(hash) {
   try {
     const db = await openLibrary();
@@ -7628,6 +7680,216 @@ const LoamGolf = (function () {
     };
   }
 
+  /* ---- ported from analyzer/sports/golf/video-sync.js ---- */
+  /*
+   * Video sync for the Swing Cam: pinning a clip of the golfer's own swings onto the
+   * measured swing clock, so the footage and the animated club angle show the same
+   * instant. See the module for why the mapping carries a RATE as well as an offset
+   * (golf ground truth is shot in slow motion, and an iPhone slow-mo clip is
+   * time-stretched in the file itself) and why the rate is solved from marked frames
+   * rather than typed in.
+   */
+  const GV_MIN_ANCHOR_GAP_S = 8;
+  const GV_MIN_RATE = 0.5;
+  const GV_MAX_RATE = 12;
+
+  const gvClamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
+
+  /* Session time at animation phase u of a swing. impactFrac is exactly
+     (tImpact - t0) / durationS, so the trace's own origin is recovered from it and the
+     anchor lands on the same instant the animation calls impact. */
+  function gSwingClock(swing, u) {
+    if (!swing) return null;
+    const p = swing.path;
+    const uu = gvClamp(Number(u) || 0, 0, 1);
+    if (p && p.durationS > 0 && p.impactFrac != null && swing.tImpact != null) {
+      const t0 = swing.tImpact - p.impactFrac * p.durationS;
+      return t0 + uu * p.durationS;
+    }
+    if (swing.tStart == null) return null;
+    return swing.tStart + uu * ((swing.tEnd - swing.tStart) || 0);
+  }
+
+  /* Where the clip is at a given session time, unclamped. */
+  function gvAt(sessionT, sync) {
+    if (!sync || sessionT == null) return null;
+    return sync.anchorVideoT + (sessionT - sync.anchorSessionT) * sync.rate;
+  }
+
+  /* The same, clamped into the clip. Null when there is no sync or no loaded clip, so the
+     caller leaves the video alone rather than parking it on frame zero. */
+  function gVideoTimeFor(sessionT, sync, videoDurationS) {
+    const raw = gvAt(sessionT, sync);
+    if (raw == null || !(videoDurationS > 0)) return null;
+    return gvClamp(raw, 0, videoDurationS);
+  }
+
+  /* Build a sync from the frames the golfer marked, each { sessionT, videoT }. Two or more
+     use the widest pair; a baseline too short or a rate outside the plausible band keeps the
+     last mark's position and reverts to the assumed rate rather than applying a bad stretch. */
+  function gSyncFromAnchors(anchors, fallbackRate = 1) {
+    const a = (anchors || [])
+      .filter(x => x && Number.isFinite(x.sessionT) && Number.isFinite(x.videoT))
+      .slice()
+      .sort((x, y) => x.sessionT - y.sessionT);
+    if (!a.length) return null;
+    const rate0 = Number.isFinite(fallbackRate) && fallbackRate > 0 ? fallbackRate : 1;
+    const last = a[a.length - 1];
+    const assumed = (note) => ({
+      anchorSessionT: last.sessionT, anchorVideoT: last.videoT,
+      rate: rate0, nAnchors: a.length, rateSource: 'assumed', rateNote: note,
+    });
+    if (a.length < 2) return assumed(null);
+
+    const first = a[0];
+    const dS = last.sessionT - first.sessionT;
+    if (!(Math.abs(dS) >= GV_MIN_ANCHOR_GAP_S)) return assumed('anchors-too-close');
+    const rate = (last.videoT - first.videoT) / dS;
+    if (!Number.isFinite(rate) || rate < GV_MIN_RATE || rate > GV_MAX_RATE) return assumed('rate-out-of-range');
+    return {
+      anchorSessionT: first.sessionT, anchorVideoT: first.videoT,
+      rate: +rate.toFixed(4), nAnchors: a.length, rateSource: 'measured', rateNote: null,
+    };
+  }
+
+  /* Whether the loaded clip actually contains a given swing, and by how much it misses. A
+     video seeked past its end freezes on the final frame, which reads as "the golfer stood
+     still" next to an animation that is still swinging; the caller shows the gap instead. */
+  function gClipCoverage(swing, sync, videoDurationS) {
+    const startT = gvAt(gSwingClock(swing, 0), sync);
+    const endT = gvAt(gSwingClock(swing, 1), sync);
+    if (startT == null || endT == null || !(videoDurationS > 0)) {
+      return { covered: false, videoStartS: null, videoEndS: null, missingHeadS: 0, missingTailS: 0 };
+    }
+    const lo = Math.min(startT, endT), hi = Math.max(startT, endT);
+    return {
+      covered: lo >= 0 && hi <= videoDurationS,
+      videoStartS: +lo.toFixed(3),
+      videoEndS: +hi.toFixed(3),
+      missingHeadS: lo < 0 ? +(-lo).toFixed(3) : 0,
+      missingTailS: hi > videoDurationS ? +(hi - videoDurationS).toFixed(3) : 0,
+    };
+  }
+
+  /* ---- ported from analyzer/sports/golf/pose.js ---- */
+  /*
+   * Body pose for the Swing Cam, estimated from the golfer's own video by Apple's
+   * Vision framework on device (`ios/Sources/Capture/SwingPoseExtractor.swift`, handed
+   * over as `window.LOAM_GOLF_POSE`). Nothing here calls Vision or cares who produced
+   * the track, which is what keeps the web analyzer working unchanged. An ESTIMATE
+   * from a model, not a measurement from a sensor: the render labels it, the club
+   * stays the watch's measured angle, and no number in the Golf view comes from it.
+   * See the module and golf-swing-spec.md ("Your own footage").
+   */
+  const GPOSE_MIN_CONF = 0.25;
+  const GPOSE_MIN_FRAMES = 6;
+
+  const GPOSE_BONES = [
+    ['leftShoulder', 'rightShoulder'], ['leftHip', 'rightHip'],
+    ['leftShoulder', 'leftHip'], ['rightShoulder', 'rightHip'],
+    ['leftShoulder', 'leftElbow'], ['leftElbow', 'leftWrist'],
+    ['rightShoulder', 'rightElbow'], ['rightElbow', 'rightWrist'],
+    ['leftHip', 'leftKnee'], ['leftKnee', 'leftAnkle'],
+    ['rightHip', 'rightKnee'], ['rightKnee', 'rightAnkle'],
+    ['neck', 'nose'],
+  ];
+
+  const gpLerp = (a, b, f) => a + (b - a) * f;
+  const gpMedian = (xs) => {
+    if (!xs.length) return null;
+    const s = xs.slice().sort((a, b) => a - b);
+    return s[s.length >> 1];
+  };
+
+  /* A joint if the model was confident enough about it, else null. */
+  function gpJoint(frame, name) {
+    const j = frame && frame.joints && frame.joints[name];
+    return j && j.c >= GPOSE_MIN_CONF && Number.isFinite(j.x) && Number.isFinite(j.y) ? j : null;
+  }
+
+  /* Midpoint of a pair, when both are confident. */
+  function gpMid(frame, a, b) {
+    const p = gpJoint(frame, a), q = gpJoint(frame, b);
+    if (!p || !q) return null;
+    return { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2, c: Math.min(p.c, q.c) };
+  }
+
+  /* The pose at a given time in the CLIP, interpolated between the straddling frames.
+     Joints missing on either side are dropped rather than held over, so a lost limb
+     disappears instead of freezing mid-air. */
+  function gPoseAt(track, videoT) {
+    const fr = track && track.frames;
+    if (!fr || fr.length === 0 || !Number.isFinite(videoT)) return null;
+    if (videoT < fr[0].t || videoT > fr[fr.length - 1].t) return null;
+    let lo = 0, hi = fr.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (fr[mid].t <= videoT) lo = mid; else hi = mid;
+    }
+    const a = fr[lo], b = fr[hi];
+    const span = b.t - a.t;
+    const f = span > 0 ? (videoT - a.t) / span : 0;
+    const joints = {};
+    for (const name of Object.keys(a.joints || {})) {
+      const p = gpJoint(a, name), q = gpJoint(b, name);
+      if (!p || !q) continue;
+      joints[name] = { x: gpLerp(p.x, q.x, f), y: gpLerp(p.y, q.y, f), c: Math.min(p.c, q.c) };
+    }
+    return { t: videoT, joints };
+  }
+
+  /* How to place this swing's pose on the stage. Scale and floor are medians over the
+     swing, not per frame: a per-frame fit would rescale the golfer every frame and
+     cancel exactly the motion worth seeing (the drop into the downswing, the sway off
+     the ball, the rise through impact). Null / not-ok falls back to the schematic. */
+  function gPoseAnchor(track, sampleAt, nSamples = 24) {
+    if (!track || !track.frames || !track.frames.length || typeof sampleAt !== 'function') return null;
+    const heights = [], rootXs = [], floors = [], confs = [];
+    for (let i = 0; i < nSamples; i++) {
+      const frame = gPoseAt(track, sampleAt(i / (nSamples - 1)));
+      if (!frame) continue;
+      const neck = gpJoint(frame, 'neck') || gpMid(frame, 'leftShoulder', 'rightShoulder');
+      const hips = gpJoint(frame, 'root') || gpMid(frame, 'leftHip', 'rightHip');
+      const feet = gpMid(frame, 'leftAnkle', 'rightAnkle');
+      if (!neck || !hips) continue;
+      const h = feet ? Math.abs(feet.y - neck.y) : Math.abs(hips.y - neck.y) * 2.35;
+      if (!(h > 0.02)) continue;
+      heights.push(h);
+      rootXs.push(hips.x);
+      floors.push(feet ? feet.y : hips.y - h * 0.53);
+      confs.push(Math.min(neck.c, hips.c));
+    }
+    if (heights.length < GPOSE_MIN_FRAMES) {
+      return { ok: false, nFrames: heights.length, meanConf: 0, height: null, refX: null, floorY: null };
+    }
+    return {
+      ok: true,
+      nFrames: heights.length,
+      meanConf: +(confs.reduce((s, c) => s + c, 0) / confs.length).toFixed(3),
+      height: gpMedian(heights),
+      refX: gpMedian(rootXs),
+      floorY: gpMedian(floors),
+    };
+  }
+
+  /* Image coordinates to stage coordinates: Vision's y grows upward, the stage's grows
+     downward, and the golfer is scaled to the stage box and stood on its ground line. */
+  function gPoseStageJoints(frame, anchor, stage) {
+    if (!frame || !anchor || !anchor.ok || !stage) return null;
+    const bodyPx = (stage.groundY - stage.topY);
+    const k = bodyPx / anchor.height;
+    const out = {};
+    for (const [name, j] of Object.entries(frame.joints || {})) {
+      if (j.c < GPOSE_MIN_CONF) continue;
+      out[name] = {
+        x: stage.cx + (j.x - anchor.refX) * k,
+        y: stage.groundY - (j.y - anchor.floorY) * k,
+        c: j.c,
+      };
+    }
+    return out;
+  }
+
   /* ---- ported from analyzer/sports/golf/analysis.js ---- */
   /*
    * Golf swing motion analysis. Born module-first (like strength): copied verbatim
@@ -7919,7 +8181,9 @@ const LoamGolf = (function () {
     };
   }
 
-  return { parseSwingMarks, analyzeGolf, detectSwings, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread };
+  return { parseSwingMarks, analyzeGolf, detectSwings, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread,
+    gSwingClock, gvAt, gVideoTimeFor, gSyncFromAnchors, gClipCoverage, GV_MIN_ANCHOR_GAP_S,
+    gPoseAt, gPoseAnchor, gPoseStageJoints, GPOSE_BONES, GPOSE_MIN_FRAMES };
 })();
 
 /* Graceful fallback for a recording too short or too slow to yield a moving window (a quick walk
@@ -9899,7 +10163,25 @@ function golfTruthSection(D) {
    single measured rotation angle in the swing plane reads correctly: the club sweeps a real arc. Turn of
    the shoulders and hips is drawn as foreshortening (a bar of width w*cos(turn)), which is the honest 2D
    projection of a line rotating away from the viewer. */
-const _swingCam = { swings: [], idx: 0, ref: null, playing: false, raf: 0, t0: 0, speed: 0.25, ghost: true };
+const _swingCam = {
+  swings: [], idx: 0, ref: null, playing: false, raf: 0, t0: 0, speed: 0.25, ghost: true,
+  /* An optional clip of the same session, slaved to the swing clock. `anchors` is the source of truth
+     (each one a frame the golfer marked as a swing's impact); `sync` is derived from them, so a nudge
+     or a new mark rebuilds it rather than editing it in place. `key` identifies the session the clip
+     was aligned to, so loading a different recording drops it instead of silently mis-aligning. */
+  vid: { url: null, name: '', dur: 0, rate: 1, anchors: [], sync: null, key: '' },
+  /* The body pose extracted from that clip by Apple's Vision framework on device, handed over by the
+     native app as `window.LOAM_GOLF_POSE` (the web analyzer has no Vision, so it simply never has a
+     track and keeps the schematic). The per-swing anchors are cached against the alignment they were
+     computed for.
+
+     `on` is the golfer's toggle, and it starts OFF on purpose: the schematic golfer is a deliberate
+     drawing, and a joint-driven body from a 2D pose model is a thinner, lankier thing that is not yet
+     an upgrade on it. So the posed body is opt-in until the rendering is genuinely better (the same
+     bar the Spotter Cam's 3D question is parked behind in CLAUDE.md), rather than shipping a
+     regression in how the Swing Cam looks to everyone who films a session. */
+  pose: { track: null, on: false, anchors: {}, syncKey: '', pending: false },
+};
 
 /* Club angle in degrees at phase u (0..1) of a swing, interpolated from the measured trace. */
 function scAngleAt(path, u) {
@@ -9917,32 +10199,104 @@ function scClubHead(hands, angleDeg, shaft) {
   return { x: hands.x - shaft * Math.cos(a), y: hands.y - shaft * Math.sin(a) };
 }
 
-/* One frame of the animation: a schematic golfer with the measured club. `u` is the phase 0..1. */
+/* The stage the Swing Cam draws into, and the box a pose body is scaled to stand in. */
+const SC_STAGE = { W: 460, H: 340, groundY: 302, topY: 40, cx: 460 * 0.52 };
+
+/*
+ * The golfer's real body at phase u, when a pose track has been extracted from their clip and the
+ * clip is aligned. Null otherwise, which is what makes the schematic the fallback rather than a
+ * second-class citizen: no track, no alignment, or a swing the model did not recover, and the
+ * drawing below is exactly what it always was.
+ */
+function swingCamPoseJoints(sw, u) {
+  const p = _swingCam.pose;
+  if (!p.on || !p.track || !sw) return null;
+  const sync = _swingCam.vid.sync;
+  if (!sync) return null;
+  const anchor = swingCamPoseAnchor(sw);
+  if (!anchor || !anchor.ok) return null;
+  const frame = LoamGolf.gPoseAt(p.track, LoamGolf.gvAt(LoamGolf.gSwingClock(sw, u), sync));
+  return LoamGolf.gPoseStageJoints(frame, anchor, SC_STAGE);
+}
+
+/* Anchors are medians over 24 sampled frames, so they are cached per swing and thrown away when the
+   alignment moves (a nudge or a new mark changes which part of the clip each swing maps to). */
+function swingCamPoseAnchor(sw) {
+  const p = _swingCam.pose;
+  const sync = _swingCam.vid.sync;
+  if (!p.track || !sync) return null;
+  const key = sync.anchorSessionT + ':' + sync.anchorVideoT + ':' + sync.rate;
+  if (p.syncKey !== key) { p.syncKey = key; p.anchors = {}; }
+  if (!(sw.index in p.anchors)) {
+    p.anchors[sw.index] = LoamGolf.gPoseAnchor(p.track, (u) => LoamGolf.gvAt(LoamGolf.gSwingClock(sw, u), sync));
+  }
+  return p.anchors[sw.index];
+}
+
+/* How many swings the model actually recovered, for the line that says so. */
+function swingCamPoseCoverage() {
+  const p = _swingCam.pose;
+  if (!p.track || !_swingCam.vid.sync) return { posed: 0, total: _swingCam.swings.length, meanConf: null };
+  let posed = 0, conf = 0;
+  for (const sw of _swingCam.swings) {
+    const a = swingCamPoseAnchor(sw);
+    if (a && a.ok) { posed++; conf += a.meanConf; }
+  }
+  return { posed, total: _swingCam.swings.length, meanConf: posed ? +(conf / posed).toFixed(2) : null };
+}
+
+/* One frame of the animation: the golfer with the measured club. `u` is the phase 0..1. The body is
+   either their own, posed from their video, or the schematic; the club is measured either way. */
 function swingCamSVG(sw, u, ghostSw) {
-  const W = 460, H = 340;
-  const groundY = 302, cx = W * 0.52;
-  /* Address geometry: the hands sit ahead of the chest and the shaft reaches the ball on the ground, so
-     the measured angle sweeps the arc a golfer would recognize instead of a stick spinning in mid-air. */
-  const hands = { x: cx + 6, y: 178 }, shaft = groundY - 6 - 178;
+  const { W, H, groundY, cx } = SC_STAGE;
   const ang = scAngleAt(sw.path, u);
-
-  /* Turn magnitudes are measured; their SHAPE through the swing is inferred from the club angle (we
-     measure how far the hips and head turned, not their per-sample trace), so both are tied to the same
-     normalized club rotation and labelled as schematic in the caption. Turn is drawn as foreshortening,
-     w * cos(turn), which is what a rotating line actually does when seen face-on. */
-  const peak = Math.max(1, Math.max(...sw.path.deg));
-  const turnPhase = Math.max(-1, Math.min(1, ang / peak));
-  const hipTurn = (sw.hipTurnDeg || 0) * turnPhase;
-  const headTurn = (sw.headTurnDeg || 0) * turnPhase * 0.45;
-  const shoW = 74 * (0.34 + 0.66 * Math.cos(Math.min(1.15, Math.abs(turnPhase) * 1.0)));
-  const hipW = 52 * (0.55 + 0.45 * Math.cos(Math.abs(hipTurn) * Math.PI / 180));
-
-  const shoY = 152, hipY = 218, headY = 122;
-  const shoL = { x: cx - shoW / 2, y: shoY }, shoR = { x: cx + shoW / 2, y: shoY };
-  const hipL = { x: cx - hipW / 2, y: hipY }, hipR = { x: cx + hipW / 2, y: hipY };
   const skin = '#c8925e', kit = '#3f4a2d', shoe = '#2c2119', accent = 'var(--accent, #e87b3d)';
   const line = (a, b, w, col, op = 1) => `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${col}" stroke-width="${w}" stroke-linecap="round" opacity="${op}"/>`;
   const poly = (pts, fill) => `<polygon points="${pts.map(p => p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ')}" fill="${fill}"/>`;
+
+  const joints = swingCamPoseJoints(sw, u);
+  let hands, shaft, body, label = '';
+  if (joints) {
+    const posed = swingCamPoseBody(joints, { skin, kit, shoe, line, poly });
+    hands = posed.hands; shaft = posed.shaft; body = posed.body;
+    label = `<text x="10" y="${H - 12}" fill="var(--text-muted, #9aa0aa)" font-family="'JetBrains Mono',monospace" font-size="10">body: your video, estimated pose &middot; club: measured</text>`;
+  } else {
+    /* Address geometry: the hands sit ahead of the chest and the shaft reaches the ball on the ground, so
+       the measured angle sweeps the arc a golfer would recognize instead of a stick spinning in mid-air. */
+    hands = { x: cx + 6, y: 178 };
+    shaft = groundY - 6 - 178;
+
+    /* Turn magnitudes are measured; their SHAPE through the swing is inferred from the club angle (we
+       measure how far the hips and head turned, not their per-sample trace), so both are tied to the same
+       normalized club rotation and labelled as schematic in the caption. Turn is drawn as foreshortening,
+       w * cos(turn), which is what a rotating line actually does when seen face-on. */
+    const peak = Math.max(1, Math.max(...sw.path.deg));
+    const turnPhase = Math.max(-1, Math.min(1, ang / peak));
+    const hipTurn = (sw.hipTurnDeg || 0) * turnPhase;
+    const headTurn = (sw.headTurnDeg || 0) * turnPhase * 0.45;
+    const shoW = 74 * (0.34 + 0.66 * Math.cos(Math.min(1.15, Math.abs(turnPhase) * 1.0)));
+    const hipW = 52 * (0.55 + 0.45 * Math.cos(Math.abs(hipTurn) * Math.PI / 180));
+
+    const shoY = 152, hipY = 218, headY = 122;
+    const shoL = { x: cx - shoW / 2, y: shoY }, shoR = { x: cx + shoW / 2, y: shoY };
+    const hipL = { x: cx - hipW / 2, y: hipY }, hipR = { x: cx + hipW / 2, y: hipY };
+    /* Legs: knees flexed and feet planted wider than the hips, the athletic address a golfer holds. */
+    const kneeL = { x: cx - hipW / 2 - 5, y: 262 }, kneeR = { x: cx + hipW / 2 + 5, y: 262 };
+    const footL = { x: cx - 34, y: groundY }, footR = { x: cx + 34, y: groundY };
+    body =
+        line(hipL, kneeL, 13, kit) + line(kneeL, footL, 11, kit)
+      + line(hipR, kneeR, 13, kit) + line(kneeR, footR, 11, kit)
+      + line({ x: footL.x - 7, y: groundY }, { x: footL.x + 7, y: groundY }, 6, shoe)
+      + line({ x: footR.x - 7, y: groundY }, { x: footR.x + 7, y: groundY }, 6, shoe)
+      + poly([hipL, hipR, shoR, shoL], kit)                                   // torso, narrowing as it turns
+      + line(shoL, shoR, 12, kit)
+      /* The arm triangle: both arms run to the single grip point, which is how a golfer's arms actually
+         hang, and it stays readable when the shoulders foreshorten to nothing at the top. */
+      + poly([shoL, shoR, hands], skin) + line(shoL, hands, 7, skin) + line(shoR, hands, 7, skin)
+      + `<circle cx="${cx}" cy="${headY}" r="16.5" fill="${skin}"/>`
+      + `<path d="M ${cx - 16} ${headY - 4} a 16.5 16.5 0 0 1 33 0 z" fill="${kit}"/>`   // cap
+      + `<circle cx="${(cx + 11 * Math.sin(headTurn * Math.PI / 180)).toFixed(1)}" cy="${headY + 4}" r="2.6" fill="#2c2119"/>`;
+  }
 
   /* Clubhead trail: the measured arc travelled so far, the golf analog of the lift's bar path. */
   let trail = '';
@@ -9962,23 +10316,6 @@ function swingCamSVG(sw, u, ghostSw) {
   }
 
   const club = scClubHead(hands, ang, shaft);
-  /* Legs: knees flexed and feet planted wider than the hips, the athletic address a golfer holds. */
-  const kneeL = { x: cx - hipW / 2 - 5, y: 262 }, kneeR = { x: cx + hipW / 2 + 5, y: 262 };
-  const footL = { x: cx - 34, y: groundY }, footR = { x: cx + 34, y: groundY };
-  const body =
-      line(hipL, kneeL, 13, kit) + line(kneeL, footL, 11, kit)
-    + line(hipR, kneeR, 13, kit) + line(kneeR, footR, 11, kit)
-    + line({ x: footL.x - 7, y: groundY }, { x: footL.x + 7, y: groundY }, 6, shoe)
-    + line({ x: footR.x - 7, y: groundY }, { x: footR.x + 7, y: groundY }, 6, shoe)
-    + poly([hipL, hipR, shoR, shoL], kit)                                   // torso, narrowing as it turns
-    + line(shoL, shoR, 12, kit)
-    /* The arm triangle: both arms run to the single grip point, which is how a golfer's arms actually
-       hang, and it stays readable when the shoulders foreshorten to nothing at the top. */
-    + poly([shoL, shoR, hands], skin) + line(shoL, hands, 7, skin) + line(shoR, hands, 7, skin)
-    + `<circle cx="${cx}" cy="${headY}" r="16.5" fill="${skin}"/>`
-    + `<path d="M ${cx - 16} ${headY - 4} a 16.5 16.5 0 0 1 33 0 z" fill="${kit}"/>`   // cap
-    + `<circle cx="${(cx + 11 * Math.sin(headTurn * Math.PI / 180)).toFixed(1)}" cy="${headY + 4}" r="2.6" fill="#2c2119"/>`;
-
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Animated golf swing">
     <rect width="${W}" height="${H}" fill="var(--surface, #f7fafc)"/>
     <line x1="0" y1="${groundY}" x2="${W}" y2="${groundY}" stroke="var(--border, #e2e8f0)" stroke-width="2"/>
@@ -9986,8 +10323,51 @@ function swingCamSVG(sw, u, ghostSw) {
     <circle cx="${hands.x.toFixed(1)}" cy="${(groundY - 5).toFixed(1)}" r="5" fill="#ffffff" stroke="var(--text-muted, #9aa0aa)" stroke-width="1.4"/>
     ${line(hands, club, 4, '#2c2119')}
     <circle cx="${club.x.toFixed(1)}" cy="${club.y.toFixed(1)}" r="6" fill="${accent}"/>
-    <circle cx="${hands.x}" cy="${hands.y}" r="7.5" fill="${skin}"/>
+    <circle cx="${hands.x.toFixed(1)}" cy="${hands.y.toFixed(1)}" r="7.5" fill="${skin}"/>
+    ${label}
   </svg>`;
+}
+
+/*
+ * The golfer's own body, drawn from the pose track's joints. Bones are skipped when either end is a
+ * joint the model was not confident about, so an occluded arm goes missing rather than being drawn
+ * somewhere it was not; the torso fills in only when all four of its corners are there.
+ *
+ * The hands are the midpoint of the two wrists (they are together on the grip), falling back to
+ * whichever wrist the model kept. That is the one place the pose and the measurement meet: the club
+ * hangs off the posed hands at the angle the WATCH measured, because a body-pose model cannot see a
+ * shaft. Position from the model, angle from the sensor.
+ */
+function swingCamPoseBody(j, { skin, kit, shoe, line, poly }) {
+  const bodyPx = SC_STAGE.groundY - SC_STAGE.topY;
+  const wrists = [j.leftWrist, j.rightWrist].filter(Boolean);
+  const hands = wrists.length === 2
+    ? { x: (wrists[0].x + wrists[1].x) / 2, y: (wrists[0].y + wrists[1].y) / 2 }
+    : wrists.length === 1 ? { x: wrists[0].x, y: wrists[0].y }
+    : { x: SC_STAGE.cx, y: SC_STAGE.groundY - bodyPx * 0.45 };
+  const head = j.nose || j.neck;
+  const headR = bodyPx * 0.062;
+
+  let bones = '';
+  for (const [a, b] of LoamGolf.GPOSE_BONES) {
+    const p = j[a], q = j[b];
+    if (!p || !q) continue;
+    const limb = /Elbow|Wrist/.test(a) || /Elbow|Wrist/.test(b);
+    const spine = a === 'neck' || b === 'neck';
+    bones += line(p, q, limb ? 8 : spine ? 9 : 13, limb ? skin : kit);
+  }
+  const torso = (j.leftShoulder && j.rightShoulder && j.leftHip && j.rightHip)
+    ? poly([j.leftHip, j.rightHip, j.rightShoulder, j.leftShoulder], kit) : '';
+  /* Feet, so the golfer stands on the ground line rather than ending at the ankles. */
+  let feet = '';
+  for (const ank of [j.leftAnkle, j.rightAnkle]) {
+    if (ank) feet += line({ x: ank.x - 7, y: ank.y }, { x: ank.x + 7, y: ank.y }, 6, shoe);
+  }
+  const headSvg = head
+    ? `<circle cx="${head.x.toFixed(1)}" cy="${head.y.toFixed(1)}" r="${headR.toFixed(1)}" fill="${skin}"/>`
+      + `<path d="M ${(head.x - headR).toFixed(1)} ${(head.y - headR * 0.25).toFixed(1)} a ${headR.toFixed(1)} ${headR.toFixed(1)} 0 0 1 ${(headR * 2).toFixed(1)} 0 z" fill="${kit}"/>`
+    : '';
+  return { hands, shaft: bodyPx * 0.45, body: torso + bones + feet + headSvg };
 }
 
 function scPhaseLabel(sw, u) {
@@ -10016,7 +10396,47 @@ function swingCamFrame(ts) {
   stage.innerHTML = swingCamSVG(sw, uu, st.ghost ? st.swings.find(s => s.index === st.ref) : null);
   const ph = document.getElementById('swingCamPhase');
   if (ph) ph.textContent = scPhaseLabel(sw, uu);
+  swingCamSyncVideo(uu);
   if (st.playing) st.raf = requestAnimationFrame(swingCamFrame);
+}
+
+/* Hold the loaded clip on the frame that matches animation phase `u` of the current swing.
+   Called from the animation loop (so only while the Swing Cam is playing) and after a nudge. A paused
+   Swing Cam is otherwise left alone: scrubbing the clip by hand to find an impact frame is the one
+   interaction that must not fight back. */
+function swingCamSyncVideo(u) {
+  const v = _swingCam.vid;
+  if (!v.sync || !v.dur) return;
+  const el = document.getElementById('swingCamVideo');
+  const sw = _swingCam.swings[_swingCam.idx];
+  if (!el || !sw || el.readyState < 1) return;
+  const sessionT = LoamGolf.gSwingClock(sw, u);
+  const raw = LoamGolf.gvAt(sessionT, v.sync);
+  const want = LoamGolf.gVideoTimeFor(sessionT, v.sync, v.dur);
+  if (want == null) return;
+  const seek = (tol) => { if (Math.abs(el.currentTime - want) > tol) { try { el.currentTime = want; } catch (e) {} } };
+  /* Outside the clip (it started late or stopped early) there is no frame to show, so hold the nearest
+     one rather than letting playback run on past the swing. The video bar says which. */
+  if (!_swingCam.playing || raw < 0 || raw > v.dur) {
+    if (!el.paused) { try { el.pause(); } catch (e) {} }
+    seek(0.02);
+    return;
+  }
+  /* Let the element play at the rate the alignment implies and correct only on real drift, instead of
+     seeking every animation frame: a per-frame seek stutters on a long clip, and the Swing Cam is
+     already rebuilding its SVG about sixty times a second. A slow-motion clip at 1/4 speed needs a
+     playback rate above 1, which is why this is clamped to what a media element will accept. */
+  const rate = Math.max(0.0625, Math.min(16, v.sync.rate * _swingCam.speed));
+  if (Math.abs(el.playbackRate - rate) > 1e-3) { try { el.playbackRate = rate; } catch (e) {} }
+  seek(0.12);
+  if (el.paused) { const p = el.play(); if (p && p.catch) p.catch(() => {}); }
+}
+
+/* Stop the clip whenever the animation stops, so a paused or torn-down Swing Cam does not leave a
+   video running behind it. */
+function swingCamPauseVideo() {
+  const el = document.getElementById('swingCamVideo');
+  if (el && !el.paused) { try { el.pause(); } catch (e) {} }
 }
 
 function swingCamStart() {
@@ -10029,14 +10449,15 @@ function swingCamStart() {
 function swingCamStop() {
   cancelAnimationFrame(_swingCam.raf);
   _swingCam.raf = 0; _swingCam.playing = false; _swingCam.swings = [];
+  swingCamPauseVideo();
 }
 function toggleSwingCamPlay() {
   _swingCam.playing = !_swingCam.playing;
   const b = document.getElementById('swingCamPlay');
   if (b) b.textContent = _swingCam.playing ? '❙❙ Pause' : '▶ Play';
-  if (_swingCam.playing) swingCamStart(); else cancelAnimationFrame(_swingCam.raf);
+  if (_swingCam.playing) swingCamStart(); else { cancelAnimationFrame(_swingCam.raf); swingCamPauseVideo(); }
 }
-function setSwingCamSwing(i) { _swingCam.idx = +i; renderSwingCamFacts(); swingCamStart(); }
+function setSwingCamSwing(i) { _swingCam.idx = +i; renderSwingCamFacts(); swingCamRefreshVideoBar(); swingCamStart(); }
 function setSwingCamSpeed(v) {
   _swingCam.speed = +v;
   document.querySelectorAll('.sc-speed').forEach(b => b.classList.toggle('on', +b.dataset.v === +v));
@@ -10067,6 +10488,260 @@ function renderSwingCamFacts() {
     + (sw.index === _swingCam.ref ? row('', 'your reference swing') : '');
 }
 
+/* ---------- Swing Cam video overlay ----------
+   Your own footage of the same session, slaved to the measured swing clock, so the clip and the
+   animation show the same instant. This adds no measurement: the video is never read for numbers, it
+   is the golfer's own eyes on the swing the watch measured, which is the pairing a range session has
+   always been missing. Ground-truth clips are shot in slow motion (Task C1), so the alignment carries
+   a rate as well as an offset; both come out of impact frames the golfer marks, never a typed-in fps.
+   The clip stays in memory only: nothing is uploaded, and nothing is written to the library. */
+
+/* Rebuild the derived sync whenever the anchors or the assumed rate change. */
+function swingCamResync() {
+  const v = _swingCam.vid;
+  v.sync = LoamGolf.gSyncFromAnchors(v.anchors, v.rate);
+}
+
+function onSwingCamVideoPick(input) {
+  const f = input && input.files && input.files[0];
+  if (!f) return;
+  const v = _swingCam.vid;
+  if (v.url) { try { URL.revokeObjectURL(v.url); } catch (e) {} }
+  v.url = URL.createObjectURL(f);
+  v.name = f.name || 'clip';
+  v.dur = 0; v.anchors = []; v.sync = null;
+  v.key = swingCamSessionKey(_swingCam.swings);
+  /* Clear the input so re-picking the same file still fires a change event (a re-load is how you
+     recover from a mis-encoded clip). */
+  try { input.value = ''; } catch (e) {}
+  swingCamRefreshVideoUI();
+}
+
+/* Duration only becomes known once the browser has read the container. */
+function onSwingCamVideoMeta() {
+  const el = document.getElementById('swingCamVideo');
+  _swingCam.vid.dur = el && isFinite(el.duration) ? el.duration : 0;
+  swingCamRefreshVideoBar();
+}
+
+/* State only, no DOM: the section builder drops a stale clip while the previous render is still on
+   screen, and must not repaint into markup that is about to be replaced. */
+function swingCamDropClip() {
+  const v = _swingCam.vid;
+  if (v.url) { try { URL.revokeObjectURL(v.url); } catch (e) {} }
+  _swingCam.vid = { url: null, name: '', dur: 0, rate: 1, anchors: [], sync: null, key: '' };
+  /* The pose was extracted FROM that clip, so it goes with it. */
+  _swingCam.pose = { track: null, on: _swingCam.pose.on, anchors: {}, syncKey: '', pending: false };
+}
+
+function swingCamRemoveVideo() {
+  swingCamDropClip();
+  swingCamRefreshVideoUI();
+}
+
+/* Mark the frame currently shown as this swing's impact. Two marks far enough apart also solve how
+   much the clip is slowed; until then the assumed rate applies. Re-anchoring the same swing replaces
+   its mark rather than stacking a contradictory pair. */
+function swingCamAnchor() {
+  const v = _swingCam.vid;
+  const el = document.getElementById('swingCamVideo');
+  const sw = _swingCam.swings[_swingCam.idx];
+  if (!el || !sw || !v.dur || sw.tImpact == null) return;
+  v.anchors = v.anchors.filter(a => a.swingIndex !== sw.index);
+  v.anchors.push({ swingIndex: sw.index, sessionT: sw.tImpact, videoT: el.currentTime });
+  swingCamResync();
+  swingCamRefreshVideoBar();
+}
+
+function swingCamClearAnchors() {
+  _swingCam.vid.anchors = [];
+  _swingCam.vid.sync = null;
+  swingCamRefreshVideoBar();
+}
+
+/* Slide the whole alignment by a fraction of a second of video time. Moves every mark, so the rate the
+   marks solved for survives the nudge and a later re-anchor still starts from what you see. */
+function swingCamNudge(ds) {
+  const v = _swingCam.vid;
+  if (!v.anchors.length) return;
+  v.anchors = v.anchors.map(a => ({ ...a, videoT: a.videoT + ds }));
+  swingCamResync();
+  swingCamRefreshVideoBar();
+  swingCamSyncVideo(swingCamImpactPhase(_swingCam.swings[_swingCam.idx]));
+}
+
+function swingCamSetClipRate(r) {
+  _swingCam.vid.rate = +r || 1;
+  swingCamResync();
+  swingCamRefreshVideoBar();
+}
+
+/* ---- Apple Vision body pose ----
+   The native app runs `VNDetectHumanBodyPoseRequest` over the clip on device and injects the joint
+   track; nothing is uploaded and no frame is read for a number. These are the analyzer's half of that
+   bridge, and they are all no-ops in a browser, where `window.LOAM_GOLF_POSE` is never set. */
+
+/* True when running inside the app's WKWebView, which is the only place pose extraction can happen. */
+function swingCamHasNativeBridge() {
+  return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam);
+}
+
+/* Ask the app to pick a clip and run Vision over it. The result arrives asynchronously through
+   onSwingCamPoseTrack below, the same shape the Strava and Health digests use. */
+function swingCamRequestPose() {
+  if (!swingCamHasNativeBridge()) return;
+  _swingCam.pose.pending = true;
+  swingCamRefreshVideoBar();
+  try { window.webkit.messageHandlers.loam.postMessage({ type: 'requestSwingPose' }); }
+  catch (e) { _swingCam.pose.pending = false; swingCamRefreshVideoBar(); }
+}
+
+/* Entry point the app calls with the extracted track (and, when it picked the clip itself, a URL the
+   analyzer can play through the loam:// scheme handler). */
+window.onSwingCamPoseTrack = function (track, clipUrl, clipName) {
+  const good = track && track.frames && track.frames.length ? track : null;
+  /* A clip URL means the app picked the file and read the pose out of THAT file, so it replaces
+     whatever was loaded here: keeping an older clip would align the pose against the wrong footage.
+     Dropping first also clears the stale pose, which is why the new one is set afterwards. */
+  if (clipUrl) {
+    swingCamDropClip();
+    const v = _swingCam.vid;
+    v.url = clipUrl;
+    v.name = clipName || 'clip';
+    v.key = swingCamSessionKey(_swingCam.swings);
+  }
+  const p = _swingCam.pose;
+  p.pending = false;
+  p.track = good;
+  p.anchors = {}; p.syncKey = '';
+  if (clipUrl) swingCamRefreshVideoUI();
+  else { swingCamRefreshVideoBar(); swingCamStart(); }
+};
+
+function toggleSwingCamPose() {
+  _swingCam.pose.on = !_swingCam.pose.on;
+  swingCamRefreshVideoBar();
+  swingCamStart();
+}
+
+/* The pose row of the video bar: what was recovered, and the honest label on it. */
+function swingCamPoseBarHtml() {
+  const p = _swingCam.pose;
+  if (!p.track) {
+    if (p.pending) return '<div style="margin-top:6px">Reading the clip with Apple Vision on device&hellip;</div>';
+    if (!swingCamHasNativeBridge()) return '';
+    return `<div class="sc-vrow" style="margin-top:6px">
+      <button onclick="swingCamRequestPose()">pose the body from a clip</button>
+      <span>Apple Vision reads the joints on device, so the video never leaves the phone.</span>
+    </div>`;
+  }
+  const cov = swingCamPoseCoverage();
+  const aligned = !!_swingCam.vid.sync;
+  const state = !aligned
+    ? 'Mark an impact frame above and the posed body follows the same alignment.'
+    : cov.posed === 0
+      ? `The model did not recover enough of any swing (it needs ${LoamGolf.GPOSE_MIN_FRAMES}+ frames per swing inside the clip), so the drawn golfer stands in.`
+      : `Posed ${cov.posed} of ${cov.total} swings${cov.meanConf != null ? ', mean confidence ' + cov.meanConf.toFixed(2) : ''}.`;
+  return `<div class="sc-vrow" style="margin-top:6px">
+      <button class="${p.on ? 'primary' : ''}" onclick="toggleSwingCamPose()">posed body</button>
+      <span>${state} The drawn golfer is still the default; the posed one is a joint skeleton from a 2D model, and it is not the better picture yet.</span>
+    </div>
+    <div style="margin-top:2px">Turned on, the body is <strong>estimated</strong> from your video by Apple's on-device pose model, not measured by the sensors, and no number in this view comes from it. The club angle and the timing are still the watch's.</div>`;
+}
+
+function swingCamImpactPhase(sw) {
+  return sw && sw.path && sw.path.impactFrac != null ? sw.path.impactFrac : 0.5;
+}
+
+/* A recording is identified by its swing count and end stamps: stable across re-renders of the same
+   session, different for the next one. */
+function swingCamSessionKey(swings) {
+  if (!swings || !swings.length) return '';
+  return swings.length + ':' + swings[0].tStart + ':' + swings[swings.length - 1].tEnd;
+}
+
+function swingCamRefreshVideoBar() {
+  const bar = document.getElementById('swingCamVideoBar');
+  if (bar) bar.innerHTML = swingCamVideoBarHtml();
+}
+
+/* Full rebuild, for loading and removing a clip: the media grid changes shape and the <video> element
+   itself appears or goes away. Restarts the loop so the stage repaints into its new node. */
+function swingCamRefreshVideoUI() {
+  const media = document.getElementById('swingCamMedia');
+  if (!media) return;
+  media.className = 'sc-media' + (_swingCam.vid.url ? ' with-video' : '');
+  media.innerHTML = swingCamMediaHtml();
+  const pick = document.getElementById('swingCamPick');
+  if (pick) pick.textContent = _swingCam.vid.url ? 'change clip' : '+ video';
+  swingCamRefreshVideoBar();
+  swingCamStart();
+}
+
+function swingCamMediaHtml() {
+  const v = _swingCam.vid;
+  const clip = v.url
+    ? `<div class="sc-clip"><video id="swingCamVideo" src="${v.url}" playsinline muted controls preload="metadata" onloadedmetadata="onSwingCamVideoMeta()"></video></div>`
+    : '';
+  return clip + `<div class="sc-stage" id="swingCamStage"></div>`;
+}
+
+function swingCamVideoBarHtml() {
+  const v = _swingCam.vid;
+  /* The pose row stands alone before a clip is loaded: inside the app, extracting a pose is also how
+     you get a clip in, since Vision runs over the file the app picked. */
+  if (!v.url) return swingCamPoseBarHtml();
+  const sw = _swingCam.swings[_swingCam.idx];
+  const sync = v.sync;
+  const n = v.anchors.length;
+  const rateOpts = [1, 4, 8].map(r => `<option value="${r}" ${r === v.rate ? 'selected' : ''}>${r}&times;</option>`).join('');
+
+  /* What the marks have and have not established, in the golfer's terms. */
+  let state;
+  if (!sync) {
+    state = `Not aligned yet. Pause, scrub the clip to <strong>swing ${sw ? sw.index : '?'}</strong>'s impact frame, then mark it.`;
+  } else if (sync.rateSource === 'measured') {
+    state = `Aligned on ${n} impact ${n === 1 ? 'frame' : 'frames'} &middot; clip runs <strong>${sync.rate.toFixed(sync.rate >= 10 ? 0 : 1)}&times;</strong> slower than real time, solved from your marks.`;
+  } else {
+    const why = sync.rateNote === 'anchors-too-close' ? ' Those two marks were too close together to solve the slow motion.'
+      : sync.rateNote === 'rate-out-of-range' ? ' Those marks solved to an impossible speed, so one of them is on the wrong frame.'
+      : '';
+    state = `Aligned on ${n} impact ${n === 1 ? 'frame' : 'frames'}, assuming the clip speed below.${why}`
+      + ` Mark a second swing at least ${LoamGolf.GV_MIN_ANCHOR_GAP_S}s later to solve it from the footage.`;
+  }
+
+  /* A clip that does not reach this swing would otherwise sit frozen on its first or last frame while
+     the animation swings on, which reads as a golfer standing still. Say it instead. */
+  let warn = '';
+  if (sync && v.dur && sw) {
+    const cov = LoamGolf.gClipCoverage(sw, sync, v.dur);
+    if (!cov.covered) {
+      const miss = cov.missingHeadS > 0 ? `starts ${cov.missingHeadS.toFixed(1)}s before the clip does` : `runs ${cov.missingTailS.toFixed(1)}s past the end of the clip`;
+      warn = `<div class="sc-vwarn">Swing ${sw.index} ${miss}, so the video is holding a frame here.</div>`;
+    }
+  }
+
+  const marks = v.anchors.length
+    ? ' Marked: ' + v.anchors.slice().sort((a, b) => a.sessionT - b.sessionT).map(a => 'swing ' + a.swingIndex).join(', ') + '.'
+    : '';
+
+  return `
+    <div class="sc-vrow">
+      <button class="primary" onclick="swingCamAnchor()">mark this frame as swing ${sw ? sw.index : ''} impact</button>
+      <button onclick="swingCamNudge(-0.05)">&minus;0.05s</button>
+      <button onclick="swingCamNudge(-0.01)">&minus;0.01s</button>
+      <button onclick="swingCamNudge(0.01)">+0.01s</button>
+      <button onclick="swingCamNudge(0.05)">+0.05s</button>
+      ${sync && sync.rateSource === 'measured' ? '' : `<select title="How much slower than real time the clip plays. Solved automatically once two swings are marked." onchange="swingCamSetClipRate(this.value)">${rateOpts}</select>`}
+      ${v.anchors.length ? '<button onclick="swingCamClearAnchors()">clear marks</button>' : ''}
+      <button onclick="swingCamRemoveVideo()">remove clip</button>
+    </div>
+    <div style="margin-top:6px">${state}${marks}</div>
+    ${warn}
+    <div style="margin-top:2px">${escapeHtml(v.name)}${v.dur ? ' &middot; ' + v.dur.toFixed(1) + 's' : ''} &middot; stays on this device, and is not saved with the session.</div>
+    ${swingCamPoseBarHtml()}`;
+}
+
 /* The Swing Cam card. Returns '' when no swing carries a measured path (any recording without watch
    attitude: pre-watch sessions, Sensor Logger exports), so the card is simply absent rather than
    inventing a canned animation. */
@@ -10077,6 +10752,16 @@ function golfSwingCamSection(D) {
   _swingCam.swings = swings;
   _swingCam.ref = ref;
   _swingCam.idx = Math.max(0, swings.findIndex(s => s.index === ref));
+  /* A clip is aligned to one recording's clock. Switching views and back keeps it; opening a different
+     session drops it, because those marks mean nothing against a different set of swings. */
+  const key = swingCamSessionKey(swings);
+  if (_swingCam.vid.url && _swingCam.vid.key !== key) swingCamDropClip();
+  _swingCam.vid.key = key;
+  /* A track the app injected before this render (it can extract while the view is being built). */
+  if (!_swingCam.pose.track && window.LOAM_GOLF_POSE && window.LOAM_GOLF_POSE.frames) {
+    _swingCam.pose.track = window.LOAM_GOLF_POSE;
+    _swingCam.pose.anchors = {}; _swingCam.pose.syncKey = '';
+  }
   const opts = swings.map((s, i) => `<option value="${i}" ${i === _swingCam.idx ? 'selected' : ''}>Swing ${s.index}${s.index === ref ? ' (reference)' : ''}${s.quality === 'mishit' ? ' · mishit' : ''}</option>`).join('');
   const speeds = [[0.5, '½×'], [0.25, '¼×'], [0.12, '⅛×']].map(([v, l]) =>
     `<button class="sc-speed ${v === _swingCam.speed ? 'on' : ''}" data-v="${v}" onclick="setSwingCamSpeed(${v})">${l}</button>`).join('');
@@ -10085,18 +10770,24 @@ function golfSwingCamSection(D) {
       <h4>Swing Cam</h4>
       <div class="sc-wrap">
         <div>
-          <div class="sc-stage" id="swingCamStage"></div>
+          <div class="sc-media${_swingCam.vid.url ? ' with-video' : ''}" id="swingCamMedia">${swingCamMediaHtml()}</div>
           <div class="sc-controls">
             <button id="swingCamPlay" onclick="toggleSwingCamPlay()">❙❙ Pause</button>
             <select onchange="setSwingCamSwing(this.value)">${opts}</select>
             ${speeds}
             <button id="swingCamGhost" class="${_swingCam.ghost ? 'on' : ''}" onclick="toggleSwingCamGhost()">ghost</button>
+            <label class="sc-file" title="Load a clip of this same session from this device. It is never uploaded.">
+              <input type="file" accept="video/*" onchange="onSwingCamVideoPick(this)">
+              <span id="swingCamPick">${_swingCam.vid.url ? 'change clip' : '+ video'}</span>
+            </label>
             <span class="sc-phase" id="swingCamPhase"></span>
           </div>
+          <div class="sc-videobar" id="swingCamVideoBar">${swingCamVideoBarHtml()}</div>
         </div>
         <div>
           <div class="sc-facts" id="swingCamFacts"></div>
-          <div class="golf-tablenote" style="margin-top:10px">The club angle and the timing are <strong>measured</strong> from your watch, sample by sample, which is why the transition pauses where yours did. Head and hip turn are measured too; the body around them is a schematic. There is no clubhead speed, face angle, or ball flight here, and the grey ghost is your reference swing at the same point.</div>
+          <div class="golf-tablenote" style="margin-top:10px">The club angle and the timing are <strong>measured</strong> from your watch, sample by sample, which is why the transition pauses where yours did. Head and hip turn are measured too; the golfer drawn around them is a schematic. If you filmed the session you can swap that drawing for your own body, posed from the video by an on-device model and labeled as the <strong>estimate</strong> it is. There is no clubhead speed, face angle, or ball flight here either way, and the grey ghost is your reference swing at the same point.</div>
+          <div class="golf-tablenote" style="margin-top:8px">Filmed the session? <strong>+ video</strong> loads the clip beside the animation and drives it from the same clock, so you can watch your own swing and the measurement together. Nothing is read out of the footage: the numbers still come from the sensors, and the clip never leaves this device.</div>
         </div>
       </div>
     </div>`;
@@ -16546,7 +17237,13 @@ function wireRideRowActions(host, rides, cachedByRide, sourceByRide) {
       if (!confirm('Delete this ride from the library?')) return;
       const ride = rides.find(r => r.id === +b.dataset.id);
       await deleteRide(+b.dataset.id);
-      if (ride && ride.dedupKey) await deleteRideSource(ride.dedupKey);
+      if (ride && ride.dedupKey) {
+        await deleteRideSource(ride.dedupKey);
+        /* The localStorage side-data (carry note, lift loads / rep corrections, golf swing count,
+           run labels) is keyed by the same content hash, and this is the only place that can know
+           the ride is gone. */
+        deleteRideLocalData(ride.dedupKey);
+      }
       await renderLibraryContents();
     };
   });
@@ -16730,14 +17427,21 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
 });
 
 /* ---------- Version + What's new ----------
-   LOAM_VERSION is the release shown in the header and Settings > About. LOAM_BUILD is 'dev' in the
-   source/web copy and gets stamped with a git short hash + build time by ios/scripts/vendor-analyzer.sh
-   when the app bundles the analyzer, so a build can be identified exactly. CHANGELOG.md is canonical. */
+   LOAM_VERSION is the release shown in the header and Settings > About. LOAM_BUILD is 'dev' in this
+   source copy; both publishers replace it with the git BLOB SHA of this file plus a date, so a build
+   can be identified exactly and the hosted page and the app can be checked against each other:
+   ios/scripts/vendor-analyzer.sh stamps the app-bundled copy, .github/workflows/publish-analyzer.yml
+   stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
+   CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = 'eacad01 · 2026-07-28';
+const LOAM_BUILD = '9295a5bdd · 2026-07-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
+    /* Third element = the sport this item announces, so a build that hides that sport hides the item
+       too (see whatsNewVisibleSections). Golf is still BETA and is dropped from the iOS VIP channel's
+       Activity picker, so announcing it there would advertise a sport those testers cannot record. */
+    ['Golf at the range (beta)', 'watch on your lead wrist: every swing found automatically, tempo against the 3:1 reference, head stability, swing-to-swing consistency, a Swing Cam replay posed from your own wrist, and a per-club breakdown when you tap the club. It reads your body, not the ball, so it complements a launch monitor rather than replacing one (no clubhead speed, no face angle).', 'golf'],
     ['Loam on your watch face', 'a complication that opens the watch app with one tap (circular, corner, inline, or rectangular slot).'],
     ['Health vitals + daily readiness', 'HRV, resting HR, and VO2max trends against your own normal band, plus a transparent 0-100 readiness score (iOS Stats tab).'],
     ['Strava athlete dashboard', 'totals, trend charts back to 2 years, KOMs, records, a training heatmap, and your Eddington number (iOS Stats tab).'],
@@ -16759,12 +17463,29 @@ const LOAM_WHATS_NEW = [
     ['Saner numbers', 'no more impossible lean readings, the fitness chart buckets rides by your local day, and a forgotten End-set tap cannot crash lift analysis.'],
   ] },
 ];
+/* Sports this build must not advertise, lower-cased. The iOS VIP channel drops golf (still BETA) from
+   the Record screen's Activity picker, so What's new must not announce it to those testers either:
+   the entry would be advertising a sport they have no way to record. Injected by AnalyzerWebView as a
+   comma-separated list; absent (so empty) on the web page and on every other build. */
+function loamHiddenSports() {
+  const raw = (typeof window !== 'undefined' && window.LOAM_HIDDEN_SPORTS) || '';
+  return String(raw).split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+/* Drop items tagged with a hidden sport, then drop any section left with nothing in it (an empty
+   "New" heading reads as a bug). Items with no sport tag are never channel-specific and always show.
+   Mirrors analyzer/core/whats-new/visible-sections.js (pinned by its drift guard). */
+function whatsNewVisibleSections(sections, hidden) {
+  const drop = (hidden || []).map(s => String(s).toLowerCase());
+  return (sections || [])
+    .map(s => ({ h: s.h, items: (s.items || []).filter(it => !(it[2] && drop.includes(String(it[2]).toLowerCase()))) }))
+    .filter(s => s.items.length > 0);
+}
 function showWhatsNew() {
   const v = document.getElementById('whatsNewVersion');
   const stamp = (LOAM_BUILD && LOAM_BUILD !== 'dev') ? ' · build ' + LOAM_BUILD : ' · dev';
   if (v) v.textContent = 'Loam ' + LOAM_VERSION + ' · July 2026' + stamp;
   const body = document.getElementById('whatsNewBody');
-  if (body) body.innerHTML = LOAM_WHATS_NEW.map(s =>
+  if (body) body.innerHTML = whatsNewVisibleSections(LOAM_WHATS_NEW, loamHiddenSports()).map(s =>
     `<h4>${escapeHtml(s.h)}</h4><ul>${s.items.map(([t, d]) => `<li><strong>${escapeHtml(t)}</strong> — ${escapeHtml(d)}</li>`).join('')}</ul>`
   ).join('') + `<div class="wn-foot">Full history in CHANGELOG.md</div>`;
   document.getElementById('whatsNewModal').classList.remove('hidden');
