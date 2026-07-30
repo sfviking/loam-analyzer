@@ -13883,7 +13883,7 @@ Rules:
 - Ground every claim in the numbers provided. Never invent metrics that are not in the data.
 - If a "history" array is present (recent prior sessions, newest first), use it for trend: call out what is improving or regressing versus those sessions instead of treating this ride in isolation. Do not invent history that is not there.
 - If a "strava_history" block is present, it is the athlete's own Strava data: recent_activities (recent same-sport rides, for volume and trend), pr_efforts (segments where this ride set a personal record), and close_efforts (segments within a few seconds of a PR, where deltaToPRSeconds is the gap left to beat it, and effortCount is how many times they have ridden that segment). Celebrate the real PRs, name a close_effort as a concrete next target, use effortCount to frame progress by experience on the trail, and read recent_activities for training load. Cite the real segment names and times, and never invent efforts that are not listed. For runs it may also carry runQuality, recent runs with splitBalancePct (second-half vs first-half pace, negative means a faster finish), paceVariationPct (how even the splits were), decouplingPct (aerobic decoupling, the pace-to-heart-rate drift, higher means the heart climbed to hold pace), and read (an automatic one-line take). Use runQuality to coach pacing and aerobic fitness across runs (for example rising decoupling means going out too hard or a base that needs work); build on the read rather than contradicting it, and cite the real numbers.
-- If a "health_context" block is present, it is the athlete's own Apple Health vitals: a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, with a basis line naming the measurements used. Read it for recovery framing: when readiness is low or HRV is below baseline, bias next-session advice toward easy volume and recovery; when high, it supports pushing. Cite the real numbers, respect the basis (say so when there is no reading yet today), and never invent vitals.
+- If a "health_context" block is present, it is the athlete's own Apple Health vitals, in up to two DATED blocks: "asOfSession" is their state on the day of this recording, and "current" is their state today. Each carries an asOf day, a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, and a basis line naming the measurements used. Use asOfSession to interpret how this session went (they rode it in that state) and current to frame what to do next; when current is absent the session is today and asOfSession serves both. Keep them straight: if the recording is not from today, never narrate asOfSession in the present tense or attribute today's readiness to that session, and when asOfSession is missing say the ride day's recovery state is unknown rather than substituting today's. Low readiness or HRV below baseline biases next-session advice toward easy volume and recovery; high supports pushing. Cite the real numbers, respect the basis (say so when there was no reading yet on that block's day), and never invent vitals.
 - Respect the data_caveats. If data is sparse or a mount/source is uncertain, say so and hedge rather than overclaiming.
 - ${units}
 - The athlete is at ${level} level — pitch depth and vocabulary accordingly.
@@ -14179,18 +14179,24 @@ function attachStravaContext(state) {
   } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
 }
 
-// Fold in the athlete's Apple Health vitals when the native app has them: today's readiness score
-// with its visible components plus HRV / resting-HR / training-load baselines, injected into
+// Fold in the athlete's Apple Health vitals when the native app has them: readiness with its
+// visible components plus HRV / resting-HR / training-load baselines, injected into
 // window.LOAM_HEALTH_CONTEXT by the iOS app. Purely on-device data, no Strava needed. Same
 // note-travels-with-data pattern as strava_history (so every sport's prompt gets the guidance), and
 // attached BEFORE the cache key is hashed for the same reason: a reply generated against
 // yesterday's readiness is not replayed today.
+//
+// Two dated blocks, not one: asOfSession is the athlete's state on the day of THIS recording and
+// current is their state now. The app used to send a single undated digest built for the moment the
+// analyzer opened, so reviewing a two-week-old ride got today's readiness described in the present
+// tense as if it were that ride's. Each block carries an asOf day so the coach can name which is
+// which; current is absent when the session IS today.
 function attachHealthContext(state) {
   try {
     const hc = window.LOAM_HEALTH_CONTEXT;
     if (hc && typeof hc === 'object' && state.digest && !state.digest.health_context) {
       state.digest.health_context = hc;
-      state.digest.health_context_note = "The athlete's own Apple Health vitals, computed on their phone. readinessScore is 0-100 with readinessBand green/amber/red: green means at or above their personal baseline (ready to push), amber somewhat below (keep quality but go easier), red well below baseline or a load spike (prioritize recovery). components list each visible input: HRV vs a 60-day personal baseline, resting HR vs baseline, and 7-day vs 28-day training load (loadRatio above about 1.3 is a sharp ramp). basis names the exact measurements the score used; respect it (if there is no reading yet today, say so rather than presenting the score as this morning's state). Use this for recovery framing of the next-session advice: low readiness or HRV below baseline biases toward easy volume and recovery, high readiness supports intensity. Cite the real numbers and never invent vitals not listed here.";
+      state.digest.health_context_note = "The athlete's own Apple Health vitals, computed on their phone. Up to two dated blocks: health_context.asOfSession is their state ON THE DAY OF THIS RECORDING (use it to interpret how the session went), and health_context.current is their state TODAY (use it for what to do next). Each block's asOf field is the day it describes (yyyy-MM-dd). When current is absent the session is today and asOfSession covers both; when asOfSession is absent there is no vitals data for that recording's day, so say the ride's own recovery state is unknown rather than substituting today's. Never describe a dated block as though it were the other one: if the recording is not from today, do not narrate asOfSession in the present tense, and do not attribute today's readiness to that ride. Within each block: readinessScore is 0-100 with readinessBand green/amber/red: green means at or above their personal baseline (ready to push), amber somewhat below (keep quality but go easier), red well below baseline or a load spike (prioritize recovery). components list each visible input: HRV vs a 60-day personal baseline, resting HR vs baseline, and 7-day vs 28-day training load (loadRatio above about 1.3 is a sharp ramp). basis names the exact measurements the score used; respect it (if there was no reading yet on that block's day, say so rather than presenting the score as that morning's state). vo2Max is the latest estimate as of that block's day, with vo2MaxDate. Cite the real numbers and never invent vitals not listed here.";
     }
   } catch (e) { /* best-effort; coach runs without health context on any error */ }
 }
@@ -17611,8 +17617,8 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    ios/scripts/vendor-analyzer.sh stamps the app-bundled copy, .github/workflows/publish-analyzer.yml
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
-const LOAM_VERSION = '1.2.0';
-const LOAM_BUILD = '747cd7228 · 2026-07-30';
+const LOAM_VERSION = '1.3.0';
+const LOAM_BUILD = 'bc4a781e7 · 2026-07-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
