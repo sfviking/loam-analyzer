@@ -275,6 +275,20 @@
     max-width: 720px; width: 92%; min-width: 0; max-height: 88vh;
     overflow-x: hidden; overflow-y: auto; padding: 20px;
   }
+  /* iOS and iPadOS automatically zoom the PAGE in whenever a focused text field is smaller than
+     16px, and a zoomed page lays position:fixed overlays out against the layout viewport, not the
+     visible one - so tapping the name field in the segment modal zoomed the page and pushed the
+     modal's right edge, including Save, off screen with no way to reach it. Every text field in this
+     file is 12-14px for density, so the fix is per-device rather than per-field: on a touch device
+     they render at 16px and iOS never zooms. This is the fix that KEEPS pinch-zoom working;
+     maximum-scale=1 / user-scalable=no on the viewport meta would also stop the auto-zoom but takes
+     zooming away from everyone, which is an accessibility regression. Selects are left alone: they
+     open a native picker instead of a keyboard, so they never trigger the zoom. !important because
+     most of these fields carry their font-size inline. */
+  @media (pointer: coarse) {
+    input[type="text"], input[type="search"], input[type="number"], input[type="tel"],
+    input[type="url"], input[type="email"], input[type="password"], textarea { font-size: 16px !important; }
+  }
   #segTrimModal h3 { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600;
                      font-size: 20px; margin-bottom: 6px; }
   #segTrimModal .close { float: right; background: transparent; border: 0; color: var(--text-muted);
@@ -3193,7 +3207,13 @@ function detectLaps(sensors, ride, tBase, yaw) {
   if (loc.length < 10) return { runs: [], period, strength };
   const p0 = loc.find(r => r.speed > 0.8) || loc[0];
   let maxD = 0; for (const r of loc) maxD = Math.max(maxD, haversineMeters(p0.latitude, p0.longitude, r.latitude, r.longitude));
-  const R = Math.max(8, maxD * 0.12);
+  /* Closing a loop means coming back to the SAME point, and GPS is good to ~5-10 m, so the start
+     neighbourhood is tens of metres. Scaling it at 12% of the ride's extent with NO ceiling made it
+     ~960 m on a 10 km point-to-point, so simply riding home at the end counted as "back at the
+     start" and split the ride into an hour-long lap plus a 51 s tail. The 12% still keeps a pump
+     track's neighbourhood proportionally tight; the cap only ever binds on a big ride. */
+  const CLOSE_MAX_M = 80;
+  const R = Math.min(Math.max(8, maxD * 0.12), CLOSE_MAX_M);
   const bounds = [loc[0].t]; let away = false, lastB = loc[0].t;
   for (const r of loc) {
     const d = haversineMeters(p0.latitude, p0.longitude, r.latitude, r.longitude);
@@ -3206,6 +3226,19 @@ function detectLaps(sensors, ride, tBase, yaw) {
   if (runs.length < 2 && period && strength > 0.3) {
     runs = [];
     for (let ts = ride.start; ts < ride.end - period * 0.5; ts += period) runs.push({ tStart: ts, tEnd: Math.min(ts + period, ride.end) });
+  }
+  /* Laps are only laps if they are laps of the same thing. Loop closure can still emit a set that
+     plainly is not one - an hour-long "Lap 1" beside a 51 s "Lap 2" - so drop the members that do
+     not resemble the rest, and report nothing at all rather than something misleading when fewer
+     than two survive. The bounds are deliberately wide (half to double the median): a slow lap is
+     still a lap, and this exists to reject the absurd, not to police pace. A lone surviving lap is
+     dropped too, since one "lap" spanning the whole ride is not a lap either. */
+  if (runs.length) {
+    const durs = runs.map(r => r.tEnd - r.tStart).sort((a, b) => a - b);
+    const mid = durs.length >> 1;
+    const med = durs.length % 2 ? durs[mid] : (durs[mid - 1] + durs[mid]) / 2;
+    const kept = runs.filter(r => (r.tEnd - r.tStart) >= 0.5 * med && (r.tEnd - r.tStart) <= 2 * med);
+    runs = kept.length >= 2 ? kept : [];
   }
   return { runs, period, strength };
 }
@@ -3331,7 +3364,24 @@ function drawRuns() {
   const sub = document.getElementById('runsSubtitle');
   if (sub) {
     let s = `${runs.length} ${nounSingular}${runs.length > 1 ? 's' : ''}`;
-    if (mode === 'laps' && lapInfo && lapInfo.period) s += ` · ~${lapInfo.period.toFixed(0)}s each, periodicity ${(lapInfo.strength * 100).toFixed(0)}%`;
+    /* Marks-mode rows ARE the rider's Segment Start/End taps, but the noun is "run" on purpose: a
+       segment is the stretch of trail (named, tagged, with a leaderboard across rides) and a run is
+       one traversal of it, the same split Strava draws between a segment and an effort. Nothing on
+       screen said so, so tapping "Segment Start" and getting a row called "Run 1" read as a
+       leftover rather than as the two halves of one idea (owner question, 2026-07-31). Naming the
+       source here is the fix; renaming the rows to "Segment" would collide with "Name this
+       segment", "Tagged segments", and "your fastest lap of this segment", which all mean the
+       cross-ride stretch. */
+    if (mode === 'marks') s += ` from your Segment Start/End taps`;
+    /* Describe the laps actually listed, not the yaw autocorrelation behind them. The raw period
+       read "~88s each, periodicity 8%" above an hour-long lap: a number about the signal, not about
+       the ride, and the periodicity percentage means nothing to a rider anyway. */
+    if (mode === 'laps' && runs.length) {
+      const durs = runs.map(r => r.metrics.duration).filter(d => isFinite(d) && d > 0).sort((a, b) => a - b);
+      const mid = durs.length >> 1;
+      const med = durs.length ? (durs.length % 2 ? durs[mid] : (durs[mid - 1] + durs[mid]) / 2) : 0;
+      if (med > 0) s += ` · ~${fmtDuration(med)} each`;
+    }
     /* Discoverability: say a row opens its corners when at least one does (MTB runs with turns). */
     if (isMtbFamily(D.sport) && runs.some(r => (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd))) {
       s += ` · tap a ${nounSingular} for its corners`;
@@ -3913,6 +3963,39 @@ function pbpTurnDeltas(run, fastest, D) {
 let _pbpCtx = null;   /* { run, D } behind the rendered play-by-play, for its turn links */
 let _pbpShowAll = false;   /* expander state; a fresh panel or a run change re-collapses */
 const PBP_FOCUS_LINES = 3;   /* the focused read: the corners that cost the most, worst first */
+/* Rank paired turn deltas into the coaching read, shared by the in-ride play-by-play and the
+   cross-ride descent comparison so the two cannot drift apart. `cmp` drops the pairings whose speeds
+   never resolved (pbpSpeedUsable); `noted` is every remaining corner with something to say, in ride
+   order; `giveUps` is those that COST speed, worst first; `gained` counts the ones that were purely
+   better. `gained` deliberately excludes anything in `giveUps`: a corner can brake harder into the
+   apex AND drive out stronger, and counting it both as your biggest give-up and as one you "carried
+   more speed through" made the two halves of the summary contradict each other. The 1.0 mph
+   thresholds are the lap-vs-lap difference floor - see renderPlayByPlay for why they are
+   deliberately not FORM_SCRUB_MIN_MPH. */
+function pbpTurnCost(d) { return Math.max(-d.dApex, -d.dExitGain); }
+/* The words for one paired corner, shared so the in-ride and cross-ride reads phrase the same delta
+   identically. `spd` formats an mph magnitude in the active units. */
+function pbpNoteBits(d, spd) {
+  const bits = [];
+  if (d.dApex <= -1.0) bits.push(`braked harder, <span style="color:var(--accent);">${spd(d.dApex)} slower at the apex</span>`);
+  else if (d.dApex >= 1.0) bits.push(`<span style="color:var(--moss);">carried ${spd(d.dApex)} more through the apex</span>`);
+  if (d.dExitGain >= 1.0) bits.push(`<span style="color:var(--moss);">drove out ${spd(d.dExitGain)} stronger</span>`);
+  else if (d.dExitGain <= -1.0) bits.push(`${spd(d.dExitGain)} softer on exit`);
+  return bits;
+}
+/* mph magnitude -> the active speed unit. The delta math stays mph; only the display converts. */
+function pbpSpeedFmt(mph) { return `${U.speedNum(Math.abs(mph) / 2.23694).toFixed(1)} ${U.speedUnit()}`; }
+function pbpRankDeltas(deltas) {
+  const cmp = (deltas || []).filter(d => d.usable);
+  const speaks = (d) => d.dApex <= -1.0 || d.dApex >= 1.0 || d.dExitGain >= 1.0 || d.dExitGain <= -1.0;
+  const noted = cmp.filter(speaks);
+  return {
+    cmp,
+    noted,
+    giveUps: noted.filter(d => pbpTurnCost(d) >= 1.0).sort((a, b) => pbpTurnCost(b) - pbpTurnCost(a)),
+    gained: cmp.filter(d => (d.dApex >= 1.0 || d.dExitGain >= 1.0) && pbpTurnCost(d) < 1.0).length,
+  };
+}
 function renderPlayByPlay(run, ref, D) {
   const body = document.getElementById('pbpBody');
   if (!body) return;
@@ -3946,7 +4029,7 @@ function renderPlayByPlay(run, ref, D) {
     ? `<button type="button" class="pbp-turn" data-n="${d.rideN}" title="Open turn ${d.rideN} on this segment's map">Turn ${d.rideN}<span class="dir-${d.dir}">${d.dir}</span></button>`
     : `<strong>Turn ${d.n}${d.dir}</strong>`;
   /* Only turns whose speeds resolved on BOTH laps can be compared (see pbpSpeedUsable). */
-  const cmp = deltas.filter(d => d.usable);
+  const { cmp, gained } = pbpRankDeltas(deltas);
   /* Lead with the action: the turn(s) that gave up the most speed vs the reference lap, so the list
      below reads as detail, not as the assignment itself. */
   const apexWorst = cmp.filter(d => d.dApex <= -1.0).sort((a, b) => a.dApex - b.dApex)[0] || null;
@@ -3961,23 +4044,13 @@ function renderPlayByPlay(run, ref, D) {
      FORM_SCRUB_MIN_MPH: that constant gates entry-to-apex bleed WITHIN a corner (turnScrubMph),
      while these are a lap-vs-lap apex/exit DIFFERENCE. Borrowing it would borrow validity it does
      not have and silently change which corners are reported. */
-  const noteFor = (d) => {
-    const bits = [];
-    if (d.dApex <= -1.0) bits.push(`braked harder, <span style="color:var(--accent);">${spd(d.dApex)} slower at the apex</span>`);
-    else if (d.dApex >= 1.0) bits.push(`<span style="color:var(--moss);">carried ${spd(d.dApex)} more through the apex</span>`);
-    if (d.dExitGain >= 1.0) bits.push(`<span style="color:var(--moss);">drove out ${spd(d.dExitGain)} stronger</span>`);
-    else if (d.dExitGain <= -1.0) bits.push(`${spd(d.dExitGain)} softer on exit`);
-    return bits;
-  };
+  const noteFor = (d) => pbpNoteBits(d, spd);
   const lineFor = (d) => `<li style="margin-bottom:5px;">${chip(d)} ${noteFor(d).join(', ')}.`
     + (d.rideN != null ? ` <a class="pbp-row-link" data-n="${d.rideN}" title="Show this turn's row in the turn-by-turn table">table ↓</a>` : '') + `</li>`;
-  /* Every turn with something to say, in ride order: the full read, one tap away and unchanged. */
-  const noted = cmp.filter(d => noteFor(d).length);
-  /* The focused read: the corners that COST time, worst first, capped. A thirty-turn lap used to
-     print thirty bullets in ride order, which is a report, not an assignment; the give-up that
-     actually mattered sat in the middle of a wall of 1.2 mph noise. */
-  const cost = (d) => Math.max(-d.dApex, -d.dExitGain);
-  const giveUps = noted.filter(d => cost(d) >= 1.0).sort((a, b) => cost(b) - cost(a));
+  /* Every turn with something to say (ride order) and the corners that COST time (worst first),
+     from the shared ranker. A thirty-turn lap used to print thirty bullets in ride order, which is a
+     report, not an assignment; the give-up that mattered sat in a wall of 1.2 mph noise. */
+  const { noted, giveUps } = pbpRankDeltas(deltas);
   const focused = giveUps.slice(0, PBP_FOCUS_LINES);
   const canExpand = noted.length > focused.length;
   const shown = _pbpShowAll ? noted : focused;
@@ -3994,14 +4067,15 @@ function renderPlayByPlay(run, ref, D) {
   } else {
     if (shown.length) html += `<ul style="margin:0; padding-left:18px; line-height:1.5;">${shown.map(lineFor).join('')}</ul>`;
     if (!_pbpShowAll) {
-      /* The rest, counted rather than listed: the panel is about what to work on next lap. */
-      const others = noted.length - shown.length;
-      const gained = cmp.filter(d => d.dApex >= 1.0 || d.dExitGain >= 1.0).length;
+      /* The rest, counted rather than listed: the panel is about what to work on next lap. The two
+         counts are disjoint - give-ups not shown, then corners that were purely better - so they
+         never describe the same corner twice. */
+      const others = giveUps.length - shown.length;
       const tail = [];
       /* With nothing listed, the expander below already says how many turns there are, so counting
          them again here just repeats itself. */
       if (!shown.length) tail.push('No corner cost you real speed on this lap');
-      else if (others > 0) tail.push(`${others} more corner${others === 1 ? '' : 's'} in the full list`);
+      else if (others > 0) tail.push(`${others} more corner${others === 1 ? '' : 's'} cost you time`);
       if (gained > 0) tail.push(`${gained} where you carried more speed`);
       if (tail.length) html += `<div class="dim" style="font-size:12px; margin-top:6px;">${tail.join(' · ')}.</div>`;
     }
@@ -9046,6 +9120,53 @@ async function analyzeMulti(sensorFiles) {
 /* Render the cross-ride dashboard: a per-ride summary panel and one section
    per matched descent cluster, each with a summary table, speed-vs-distance
    overlay, and DTW lag chart vs the longest descent in the cluster. */
+/* Corner-by-corner read for the cross-ride descent comparison: the same ranked "biggest give-ups
+   first" coaching read the in-ride Compare laps shows, but between two laps from DIFFERENT rides.
+   The library stores { direction, vPeak, vExit, tRel } per descent turn, which is exactly what
+   pbpDeltasFromTurns needs. Entry speed, radius and lean are NOT stored, so the corner ledger and
+   the scrub/lean reads stay in-ride only (see ROADMAP, "Deeper cross-ride comparison"). Corners are
+   numbered within the descent rather than ride-wide, because a turn number from another ride's
+   numbering means nothing here. */
+function renderCrossTurnRead(hostId, subject, reference) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  const A = (subject && subject.turns) || [], F = (reference && reference.turns) || [];
+  if (!subject || !reference || subject === reference || !A.length || !F.length) {
+    /* Honest empty state: descents saved before per-turn storage existed (and every non-MTB save)
+       carry no turns, and re-opening that ride once backfills it. */
+    host.innerHTML = `<div class="dim" style="font-size:12px;">No corner-by-corner read: it needs two selected laps that both stored their turns. Rides saved before per-descent turns existed, and non-MTB rides, carry none &mdash; re-open such a ride once to backfill it.</div>`;
+    host.classList.remove('hidden');
+    return;
+  }
+  const { deltas, countA, countF } = pbpDeltasFromTurns(A, F);
+  const { noted, giveUps, gained, cmp } = pbpRankDeltas(deltas);
+  const corner = (d) => `<strong>Corner ${d.n}${d.dir}</strong>`;
+  let html = `<div style="margin-bottom:8px;"><strong>${escapeHtml(subject.tag)}</strong> vs `
+    + `<strong>${escapeHtml(reference.tag)}</strong>, corner by corner</div>`;
+  if (countA !== countF)
+    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These laps detected different numbers of corners (${countA} vs ${countF}), so they are lined up in order and a missed or extra corner shifts every pairing after it. Read the notes with that in mind.</div>`;
+  if (!cmp.length) {
+    html += `<div class="dim">Neither lap stored usable corner speeds, so only the times above are comparable.</div>`;
+  } else if (!noted.length) {
+    html += `<div class="dim">No notable corner-by-corner differences (within ~${pbpSpeedFmt(1.0)} everywhere).</div>`;
+  } else {
+    const focused = giveUps.slice(0, PBP_FOCUS_LINES);
+    if (focused.length) {
+      html += `<ul style="margin:0; padding-left:18px; line-height:1.5;">`
+        + focused.map(d => `<li style="margin-bottom:5px;">${corner(d)} ${pbpNoteBits(d, pbpSpeedFmt).join(', ')}.</li>`).join('')
+        + `</ul>`;
+    }
+    const rest = giveUps.length - focused.length;
+    const tail = [];
+    if (!focused.length) tail.push('No corner cost you real speed on this lap');
+    else if (rest > 0) tail.push(`${rest} more corner${rest === 1 ? '' : 's'} cost you time`);
+    if (gained > 0) tail.push(`${gained} where you carried more speed`);
+    if (tail.length) html += `<div class="dim" style="font-size:12px; margin-top:6px;">${tail.join(' · ')}.</div>`;
+  }
+  host.innerHTML = html;
+  host.classList.remove('hidden');
+}
+
 function renderCrossRide({ perRide, clusters }) {
   /* Tear down any Leaflet gain/loss maps from a prior render before the container is rebuilt. */
   for (const mp of _crossDeltaMaps) { try { mp.remove(); } catch (e) {} }
@@ -9184,7 +9305,9 @@ function renderCrossRide({ perRide, clusters }) {
       </div>
       <div class="chart" id="crossDeltaMap_${ci}" style="height:380px; margin-bottom:8px;"></div>
       <div class="chart detail-chart" id="crossSpeedChart_${ci}" style="height:280px; margin-bottom:8px;"></div>
-      <div class="chart detail-chart" id="crossDtwChart_${ci}" style="height:220px; margin-bottom:24px;"></div>`;
+      <div class="chart detail-chart" id="crossDtwChart_${ci}" style="height:220px; margin-bottom:8px;"></div>
+      <div class="chart detail-chart" id="crossTurnChart_${ci}" style="height:260px; margin-bottom:8px;"></div>
+      <div class="panel" id="crossPbp_${ci}" style="padding:16px; margin-bottom:24px;"></div>`;
     container.appendChild(section);
 
     /* Comparison table rows, re-sortable: best time (fastest first, the default) or date (newest
@@ -9309,6 +9432,36 @@ function renderCrossRide({ perRide, clusters }) {
         const dm = memberDate(m), dc = chartCmp ? memberDate(chartCmp) : null;
         if (!chartCmp || (dm && (!dc || dm.getTime() > dc.getTime()))) chartCmp = m;
       }
+      /* Corner-by-corner apex speed, one line per selected lap that stored its turns. The x axis is
+         the corner's position down the descent (1..N), not a ride-wide turn number: those are not
+         stored, and one ride's numbering means nothing to another. This answers "which corner am I
+         losing" across every selected lap at once, where the read below is pairwise. */
+      const turnMembers = selected.filter(m => (m.turns || []).length);
+      const turnEl = document.getElementById(`crossTurnChart_${ci}`);
+      if (turnMembers.length >= 2) {
+        const turnTraces = turnMembers.map(m => ({
+          x: m.turns.map((_, i) => i + 1),
+          y: m.turns.map(T => T.vPeak != null ? U.speedNum(T.vPeak) : null),
+          type: 'scatter', mode: 'lines+markers',
+          line: { color: m.color, width: 2 }, marker: { size: 6 },
+          name: m.tag,
+        }));
+        loamPlot(`crossTurnChart_${ci}`, turnTraces, {
+          paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+          font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+          title: { text: 'Apex speed by corner' + note, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
+          margin: { l: 48, r: 14, t: 32, b: 64 },
+          xaxis: { title: { text: 'corner down the descent', font: { size: 11 } }, gridcolor: '#e2e8f0', dtick: 1 },
+          yaxis: { title: { text: `apex speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
+          legend: { x: 0, y: -0.32, orientation: 'h', font: { size: 10 } },
+          hovermode: 'x unified',
+        }, PLOT_CFG);
+      } else if (turnEl) {
+        turnEl.innerHTML = `<div style="padding:24px; color:var(--text-muted); font-size:12px;">Apex speed by corner needs two selected laps that stored their turns. Rides saved before per-descent turns existed, and non-MTB rides, carry none.</div>`;
+      }
+      /* Pairwise read, against the same lap the painted map uses. */
+      renderCrossTurnRead(`crossPbp_${ci}`, chartCmp, chartRef);
+
       let bestPaint = null;
       if (chartRef && chartCmp) {
         const primary = pairwiseDescentDTW(chartRef, chartCmp);
@@ -17618,7 +17771,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'bc4a781e7 · 2026-07-30';
+const LOAM_BUILD = '8d4172a2b · 2026-07-31';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
