@@ -555,6 +555,30 @@
   .section-nav button:hover { border-color: var(--accent); color: var(--accent); }
   .section-nav button.nav-compare { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
+  /* Rotate hint for the chart-heavy sections. Display is off in the base rule and only turned on
+     inside the media query, so the default for every context that is NOT a phone held upright is
+     "not shown": on a desktop "turn your phone sideways" is nonsense, and in landscape the advice
+     has already been taken, so the tip removes itself on rotation with no JS involved. `.hidden`
+     is `display: none !important`, so the dismissed state still wins over the query. */
+  .landscape-tip { display: none; }
+  @media (orientation: portrait) and (pointer: coarse) {
+    .landscape-tip {
+      display: flex; align-items: flex-start; gap: 10px;
+      margin: -12px 0 24px; padding: 10px 12px;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+      font-size: 12px; line-height: 1.45; color: var(--text-muted);
+    }
+  }
+  .landscape-tip .lt-icon { font-size: 15px; line-height: 1.2; color: var(--accent); }
+  .landscape-tip .lt-body { flex: 1; min-width: 0; }
+  .landscape-tip button {
+    flex: none; align-self: center;
+    background: none; border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 11px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted); cursor: pointer;
+  }
+  .landscape-tip button:hover { border-color: var(--accent); color: var(--accent); }
+
   .hero-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; margin-bottom: 32px; }
   @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; } }
 
@@ -1331,6 +1355,15 @@
   </div>
 
   <nav id="sectionNav" class="section-nav" aria-label="Jump to section"></nav>
+
+  <!-- Rotate hint. Hidden by default and only revealed on a phone held upright (see .landscape-tip):
+       the charts below already have landscape layouts, but nothing told anyone they were there. -->
+  <div id="landscapeTip" class="landscape-tip hidden" role="note">
+    <span class="lt-icon" aria-hidden="true">&#8635;</span>
+    <span class="lt-body">Turn your phone sideways for the busy charts &mdash; the timeline, cadence
+      traces and lap tables all get more room in landscape.</span>
+    <button type="button" id="landscapeTipDismiss">Got it</button>
+  </div>
 
   <section id="mtbCalibNotice" class="hidden">
     <div class="mount-notice">
@@ -7513,7 +7546,49 @@ function computeStrengthSummary(sensors, ride, R) {
   };
 }
 
-  return { parseSetMarks, analyzeStrength, classifyBarPositions, estimateConcentricVelocity, countRepsWrist, computeStrengthSummary };
+/* ==== ported from analyzer/sports/strength/detect.js ==== */
+const MAX_STATIONARY_MED_SPEED = 1.0;  // m/s; above this the athlete was translating (not lifting)
+const MAX_STATIONARY_P90_SPEED = 2.5;
+
+function detectStrength(sensors, ride) {
+  const reasons = [];
+
+  /* Reject locomotion: sustained GPS speed means MTB / running / walking, not a lift. */
+  const loc = (sensors.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  if (loc.length >= 10) {
+    const sp = loc.map(r => r.speed).sort((a, b) => a - b);
+    const med = sp[Math.floor(sp.length / 2)];
+    const p90 = sp[Math.floor(sp.length * 0.9)];
+    if (med > MAX_STATIONARY_MED_SPEED || p90 > MAX_STATIONARY_P90_SPEED) {
+      return { sport: 'unknown', confidence: 0, reasons: [`GPS median ${med.toFixed(1)} / p90 ${p90.toFixed(1)} m/s: moving, not a lift`] };
+    }
+    reasons.push(`GPS median ${med.toFixed(1)} m/s: stationary`);
+  } else {
+    reasons.push('no sustained GPS: stationary or indoor');
+  }
+
+  /* Look for organized rep bursts. Reuse the analysis; it is pure and cheap. */
+  let R;
+  try {
+    R = analyzeStrength(sensors, ride);
+  } catch {
+    return { sport: 'unknown', confidence: 0, reasons: [...reasons, 'no gravity stream to read reps'] };
+  }
+  if (R.nSets >= 1 && R.nReps >= 3) {
+    reasons.push(`${R.nSets} set(s), ${R.nReps} reps of low-frequency pocket-tilt oscillation`);
+    /* Confidence scales with the number of coherent sets and reps. A single short set is the most
+     * likely incidental-motion false positive (a stationary phone jostling in a pocket), so a lone
+     * set stays tentative and only multiple sets read as a confident lift; a dispatcher gates on
+     * this. The exact floor wants a ground-truth stationary-but-not-lifting recording to tune (none
+     * exists yet), so do NOT tighten the rep/set thresholds blind: legitimate strength work runs as
+     * few as 2 to 3 reps per set, and raising the floor would drop real low-rep sets. */
+    const confidence = Math.min(1, 0.4 + 0.13 * R.nSets + 0.02 * R.nReps);
+    return { sport: 'strength', confidence: +confidence.toFixed(2), reasons, nSets: R.nSets, nReps: R.nReps };
+  }
+  return { sport: 'unknown', confidence: 0, reasons: [...reasons, 'no repeated rep oscillation found'] };
+}
+
+  return { parseSetMarks, analyzeStrength, detectStrength, classifyBarPositions, estimateConcentricVelocity, countRepsWrist, computeStrengthSummary };
 })();
 
 /* Golf swing analysis, ported verbatim from analyzer/sports/golf/ (see golf/drift.test.js, which
@@ -8387,10 +8462,79 @@ const LoamGolf = (function () {
     };
   }
 
-  return { parseSwingMarks, analyzeGolf, detectSwings, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread,
+  /* ---- ported from analyzer/sports/golf/detect.js ---- */
+  const G_MAX_STATIONARY_MED_SPEED = 1.0;   // m/s; above this the golfer was translating (walking a course)
+  const G_MAX_STATIONARY_P90_SPEED = 2.5;
+  const G_MIN_SWINGS = 3;
+
+function detectGolf(sensors, ride) {
+  const reasons = [];
+
+  /* Reject locomotion: sustained GPS speed means a walk / ride, not a range session. */
+  const loc = (sensors.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  if (loc.length >= 10) {
+    const sp = loc.map(r => r.speed).sort((a, b) => a - b);
+    const med = sp[Math.floor(sp.length / 2)];
+    const p90 = sp[Math.floor(sp.length * 0.9)];
+    if (med > G_MAX_STATIONARY_MED_SPEED || p90 > G_MAX_STATIONARY_P90_SPEED) {
+      return { sport: 'unknown', confidence: 0, reasons: [`GPS median ${med.toFixed(1)} / p90 ${p90.toFixed(1)} m/s: moving, not a range session`] };
+    }
+    reasons.push(`GPS median ${med.toFixed(1)} m/s: stationary`);
+  } else {
+    reasons.push('no sustained GPS: stationary or indoor');
+  }
+
+  /* Look for organized wrist swing bursts. */
+  let det;
+  try {
+    det = detectSwings(sensors.wrist || [], ride.start, ride.end);
+  } catch (e) {
+    return { sport: 'unknown', confidence: 0, reasons: [...reasons, 'no wrist stream to read swings'] };
+  }
+  const n = det.swings.length;
+  if (n >= G_MIN_SWINGS) {
+    reasons.push(`${n} wrist swing burst(s)`);
+    /* Confidence scales with the number of coherent swings; a couple of bursts could be incidental
+       arm motion, so it stays tentative and a run of swings reads as a confident range session. */
+    const confidence = Math.min(1, 0.4 + 0.06 * n);
+    return { sport: 'golf', confidence: +confidence.toFixed(2), reasons, nSwings: n };
+  }
+  return { sport: 'unknown', confidence: 0, reasons: [...reasons, 'no repeated swing bursts found'] };
+}
+
+  return { parseSwingMarks, analyzeGolf, detectSwings, detectGolf, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread,
     gSwingClock, gvAt, gVideoTimeFor, gSyncFromAnchors, gClipCoverage, GV_MIN_ANCHOR_GAP_S,
     gPoseAt, gPoseAnchor, gPoseStageJoints, GPOSE_BONES, GPOSE_MIN_FRAMES };
 })();
+
+/* Which stationary sport an UNTAPPED recording looks like, or null.
+
+   Golf and lifting are normally routed by a tap: a club chip or a Set chip in the annotations. An
+   athlete who forgot to tap has no such marker, and until this existed the recording fell straight
+   through to the GPS path, found no moving window (it is a driving-range bay or a squat rack), and
+   drew renderMinimalSummary: a duration, a distance of roughly zero, and a map of where they stood.
+   The Range and Lift views were unreachable without knowing to reopen the file with the sport
+   selector, which is knowledge the screen never offered.
+
+   Only ever asked when the GPS has already said there is nothing to segment, which is both the
+   cheap gate and the safe one: detectStrength runs the full rep analysis, not something to spend on
+   every MTB ride, and a real ride can never reach here to be hijacked by it. Golf is asked first
+   because the two detectors share the same "no sustained GPS" evidence and the wrist swing burst is
+   the more specific signal (analyzeStrength reads pocket-tilt oscillation, which a swing also
+   produces). Returns the dashboard's sport id, not the detector's, since detectStrength says
+   'strength' where the routing here says 'weightlifting'. */
+function detectStationarySport(sensors, span) {
+  if (!span || span.start == null || span.end == null) return null;
+  try {
+    const g = LoamGolf.detectGolf(sensors, span);
+    if (g.sport === 'golf') { dbg('[stationary detect]', JSON.stringify(g)); return 'golf'; }
+  } catch (e) { /* no wrist stream: not a range session */ }
+  try {
+    const s = LoamStrength.detectStrength(sensors, span);
+    if (s.sport === 'strength') { dbg('[stationary detect]', JSON.stringify(s)); return 'weightlifting'; }
+  } catch (e) { /* no gravity stream: not a lift */ }
+  return null;
+}
 
 /* Graceful fallback for a recording too short or too slow to yield a moving window (a quick walk
    around the block, an indoor shuffle): rather than a hard "could not detect a moving window" error,
@@ -8595,7 +8739,7 @@ async function analyze(files) {
        turn detection ran over the drive itself) while the analysis still ran as the picked sport. */
     const autoSport = userSport === 'auto';
     const canInfer = autoSport && spanRide.start != null;
-    const isLift = /^(weightlifting|strength|lifting)$/.test(userSport)
+    let isLift = /^(weightlifting|strength|lifting)$/.test(userSport)
       || (canInfer && LoamStrength.parseSetMarks(sensors.annotations || [], spanRide).length >= 1);
     /* Golf is stationary like a lift (a driving-range session records no GPS route), so it takes the
        same span-based window instead of GPS ride-window detection. Inference requires a CLUB tap
@@ -8603,7 +8747,7 @@ async function analyze(files) {
        and plausible free text in a non-golf recording, so a lone quality tap is too thin a signal to
        spend a ride's window on. clubOf(end) is the last club tap in the span, or null for none. */
     const golfSwingMarks = canInfer ? LoamGolf.parseSwingMarks(sensors.annotations || [], spanRide) : null;
-    const isGolf = /^golf$/.test(userSport)
+    let isGolf = /^golf$/.test(userSport)
       || (golfSwingMarks != null && golfSwingMarks.clubOf(spanRide.end) != null);
 
     const phoneStartUTC = parseUTCFromFilename(sensorFile.name);
@@ -8615,17 +8759,30 @@ async function analyze(files) {
       ride = spanRide;
     } else {
       if (!sensors.accel.length) throw new Error('Missing motion data');
-      if (!sensors.location.length)
-        throw new Error('No GPS in this recording. If it was a lift or golf, pick Weightlifting or Golf in the sport selector so it analyzes as a stationary session.');
       onProgress('detecting active window');
-      ride = detectRidingWindow(sensors.location);
-      if (ride.start == null || ride.end == null) {
-        // Too short / too slow for a moving window, but we still have a GPS track. Show a minimal
-        // summary (duration, distance, avg speed, map) instead of a hard error, so a quick walk
-        // around the block shows something. Only error when there is not even enough GPS to map.
-        const positioned = sensors.location.filter(r => r.latitude != null && r.longitude != null);
-        if (positioned.length >= 2) { renderMinimalSummary(sensors, spanRide, positioned); return; }
-        throw new Error('Could not detect a moving window in GPS data');
+      const moving = sensors.location.length ? detectRidingWindow(sensors.location) : { start: null, end: null };
+      if (moving.start != null && moving.end != null) {
+        ride = moving;
+      } else {
+        /* No moving window, so this is either a stationary session or a recording too short to
+           segment. Ask the stationary detectors before falling back: an untapped range or lift
+           session has no chip to route on, and everything below this point would show it a map of
+           the bay (or a bare error) with no hint that its own view exists. See
+           detectStationarySport. Auto-detect only, so a declared sport is never overridden. */
+        onProgress('checking for a stationary session');
+        const stationary = autoSport ? detectStationarySport(sensors, spanRide) : null;
+        if (stationary === 'golf') { isGolf = true; ride = spanRide; }
+        else if (stationary === 'weightlifting') { isLift = true; ride = spanRide; }
+        else if (!sensors.location.length) {
+          throw new Error('No GPS in this recording. If it was a lift or golf, pick Weightlifting or Golf in the sport selector so it analyzes as a stationary session.');
+        } else {
+          // Too short / too slow for a moving window, but we still have a GPS track. Show a minimal
+          // summary (duration, distance, avg speed, map) instead of a hard error, so a quick walk
+          // around the block shows something. Only error when there is not even enough GPS to map.
+          const positioned = sensors.location.filter(r => r.latitude != null && r.longitude != null);
+          if (positioned.length >= 2) { renderMinimalSummary(sensors, spanRide, positioned); return; }
+          throw new Error('Could not detect a moving window in GPS data');
+        }
       }
     }
 
@@ -9578,6 +9735,47 @@ function fmtDuration(sec) {
   const s = total % 60;
   if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
   return `${m}m ${String(s).padStart(2,'0')}s`;
+}
+
+/* Reveal the rotate hint once a session has actually rendered sections worth rotating for; whether
+   it is really visible is CSS's call (phone, portrait), so this only clears the `hidden` class and
+   never measures the viewport itself. Dismissal sticks across rides and reloads: it is advice, and
+   advice repeated after you have taken it is nagging. Wrapped because a private-mode localStorage
+   throw here would take the whole nav render down with it. */
+const LANDSCAPE_TIP_KEY = 'loam_landscape_tip_dismissed';
+function showLandscapeTip() {
+  const tip = document.getElementById('landscapeTip');
+  if (!tip) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(LANDSCAPE_TIP_KEY) === '1'; } catch (e) { /* ignore */ }
+  if (dismissed) return;
+  tip.classList.remove('hidden');
+  const btn = document.getElementById('landscapeTipDismiss');
+  if (btn && !btn.dataset.wired) {
+    btn.dataset.wired = '1';
+    btn.onclick = () => {
+      tip.classList.add('hidden');
+      try { localStorage.setItem(LANDSCAPE_TIP_KEY, '1'); } catch (e) { /* ignore */ }
+    };
+  }
+}
+
+/* The same h/m/s rollover as fmtDuration, but as a stat tile's value markup (big number, small
+   unit span). Four render paths built this inline as minutes and seconds only, so anything past an
+   hour kept counting minutes: a 78-minute run read "78m 2s", and a road ride -- which is usually
+   over an hour -- read things like "185m 30s". Hours are only shown once there is one, so a short
+   run keeps the shorter, cleaner "42m 18s".
+
+   Separate from fmtDuration rather than replacing it: that one is pinned to
+   analyzer/core/format/format.js by a drift guard and returns plain text for places that cannot
+   take markup (chart labels, the coach digest, aria text). */
+function durTileHTML(sec) {
+  const total = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const part = (n, u) => `${n}<span class="unit">${u}</span>`;
+  return (h > 0 ? part(h, 'h') + ' ' : '') + part(m, 'm') + ' ' + part(s, 's');
 }
 
 /* ---------- Progress dashboard ----------
@@ -10815,8 +11013,13 @@ function swingCamDropClip() {
   const v = _swingCam.vid;
   if (v.url) { try { URL.revokeObjectURL(v.url); } catch (e) {} }
   _swingCam.vid = { url: null, name: '', dur: 0, rate: 1, anchors: [], sync: null, key: '' };
-  /* The pose was extracted FROM that clip, so it goes with it. */
+  /* The pose was extracted FROM that clip, so it goes with it. The injected global goes too, and
+     that is not belt-and-braces: golfSwingCamSection drops a stale clip and then, a few lines later,
+     adopts window.LOAM_GOLF_POSE for a track it does not already have. Clearing only the local copy
+     therefore un-did itself on the very next render, and the track this drop exists to discard came
+     straight back to pose a different session's swings. */
   _swingCam.pose = { track: null, on: _swingCam.pose.on, anchors: {}, syncKey: '', pending: false };
+  try { window.LOAM_GOLF_POSE = null; } catch (e) {}
 }
 
 function swingCamRemoveVideo() {
@@ -11038,9 +11241,12 @@ function golfSwingCamSection(D) {
   _swingCam.ref = ref;
   _swingCam.idx = Math.max(0, swings.findIndex(s => s.index === ref));
   /* A clip is aligned to one recording's clock. Switching views and back keeps it; opening a different
-     session drops it, because those marks mean nothing against a different set of swings. */
+     session drops it, because those marks mean nothing against a different set of swings. The pose
+     track is tested here too, not just the clip: a track injected as `window.LOAM_GOLF_POSE` arrives
+     without a clip URL, so gating the drop on `vid.url` alone let one session's joints survive into
+     the next one and pose the wrong swings. */
   const key = swingCamSessionKey(swings);
-  if (_swingCam.vid.url && _swingCam.vid.key !== key) swingCamDropClip();
+  if ((_swingCam.vid.url || _swingCam.pose.track) && _swingCam.vid.key !== key) swingCamDropClip();
   _swingCam.vid.key = key;
   /* A track the app injected before this render (it can extract while the view is being built). */
   if (!_swingCam.pose.track && window.LOAM_GOLF_POSE && window.LOAM_GOLF_POSE.frames) {
@@ -11643,7 +11849,7 @@ function renderRoadUpsell(D) {
 }
 
 function renderGpsStats(s, sport) {
-  const mmss = (sec) => { const m = Math.floor(sec / 60), ss = Math.round(sec - m * 60); return `${m}<span class="unit">m</span> ${ss}<span class="unit">s</span>`; };
+  const mmss = (sec) => durTileHTML(sec);
   const foot = sport === 'run' || sport === 'walk';
   const hasLifts = s.liftCount > 0;
   /* Foot activities lead with distance + pace (no lifts, no "riding" speed); bike rides lead with
@@ -12726,8 +12932,6 @@ function renderRunStats(s, detection, mount) {
   const oscVal = s.oscMedian == null ? '—'
     : `<span class="value"${oscHand ? ' style="color:var(--text-muted);"' : ''}>${oscHand ? '~' : ''}${s.oscMedian.toFixed(1)}<span class="unit">cm</span></span>`;
   const dur = s.duration;
-  const mins = Math.floor(dur / 60);
-  const secs = Math.round(dur - mins * 60);
   const paceStr = s.paceMinPerKm == null ? '—' : (() => {
     const m = Math.floor(s.paceMinPerKm);
     const sec = Math.round((s.paceMinPerKm - m) * 60);
@@ -12750,7 +12954,7 @@ function renderRunStats(s, detection, mount) {
     </div>
     <div class="stat">
       <div class="label">Duration</div>
-      <div class="value">${mins}<span class="unit">m</span> ${secs}<span class="unit">s</span></div>
+      <div class="value">${durTileHTML(dur)}</div>
       <div class="sub">moving time</div>
     </div>
     <div class="stat">
@@ -14583,6 +14787,7 @@ function buildSectionNav() {
   ].filter(e => e.el);
   nav.innerHTML = '';
   if (entries.length < 2) return;   // a single chip is not worth a nav bar
+  showLandscapeTip();
   const lbl = document.createElement('span');
   lbl.className = 'nav-label';
   lbl.textContent = 'Jump to';
@@ -14666,8 +14871,6 @@ function resetSegmentFocus(ride) {
 
 function renderStats(s, hasFit) {
   const dur = s.duration;
-  const mins = Math.floor(dur / 60);
-  const secs = Math.round(dur - mins * 60);
   /* Vertical drop follows the Units toggle like every other tile (it used to hardcode meters,
      contradicting the hero card's feet on the same screen); the other system rides in the sub. */
   const dropVal = s.altDrop == null ? '—'
@@ -14709,7 +14912,7 @@ function renderStats(s, hasFit) {
     </div>
     <div class="stat">
       <div class="label">Duration</div>
-      <div class="value">${mins}<span class="unit">m</span> ${secs}<span class="unit">s</span></div>
+      <div class="value">${durTileHTML(dur)}</div>
       <div class="sub">moving time</div>
     </div>
     <div class="stat">
@@ -16758,7 +16961,7 @@ function renderRoadStats(el, D) {
   if (!el) return;
   const s = D.session || {}, m = D.metrics || {};
   const dur = D.ride.end - D.ride.start;
-  const fmtDur = (sec) => { const mn = Math.floor(sec / 60), sc = Math.round(sec - mn * 60); return `${mn}<span class="unit">m</span> ${sc}<span class="unit">s</span>`; };
+  const fmtDur = (sec) => durTileHTML(sec);
   const moving = D.movingTime || dur;
   const distM = s.distance != null ? s.distance : null;
   const avgMoving = distM != null && moving > 0 ? distM / moving : (s.avgSpeed != null ? s.avgSpeed : null);
@@ -17771,7 +17974,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '8d4172a2b · 2026-07-31';
+const LOAM_BUILD = '52362338e · 2026-07-31';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
