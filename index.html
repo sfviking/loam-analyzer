@@ -10,11 +10,21 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,400;12..96,600;12..96,800&family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<!-- Subresource Integrity on every third-party file. The whole promise of this page is that a
+     recording never leaves the device, and these four scripts run with full access to the parsed
+     GPS track, so a compromised or substituted CDN response is the one way that promise could
+     quietly break. The hashes pin the exact bytes; a mismatch makes the browser refuse the file
+     rather than run it. The URLs were already version-pinned, and the same bytes are committed under
+     ios/Resources/analyzer/vendor/, so these reproduce offline:
+       openssl dgst -sha384 -binary <file> | openssl base64 -A
+     Update them ONLY together with the version in the URL. Google Fonts is deliberately not pinned:
+     the CSS it serves varies by user agent, so a fixed hash would break the page on some browsers,
+     and it delivers no script. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js" integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs" crossorigin="anonymous"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7" crossorigin="anonymous"></script>
 
 <style>
   /* ---- Field Instrument tokens (analyzer-visual-language.md) ----
@@ -874,6 +884,20 @@
     color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 12px;
   }
   .mount-notice strong { color: var(--accent-4); font-weight: 600; }
+  /* Session pacing verdict, sitting above the splits it is computed from. Deliberately a line of
+     prose rather than a tile: it is one sentence about the whole run, and a big number would imply
+     more precision than a first-half-versus-second-half comparison of six splits carries. */
+  .run-pacing {
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 13.5px; line-height: 1.55;
+    color: var(--text-dim); padding: 0 0 14px; margin-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .run-pacing .rp-verdict { font-weight: 600; color: var(--text); }
+  .run-pacing .rp-fade { color: var(--accent-4); }
+  .run-pacing .rp-neg { color: var(--accent); }
+  .run-pacing .rp-note {
+    display: block; margin-top: 5px; font-size: 11.5px; color: var(--text-muted);
+  }
   .notice-action {
     display: inline-block; margin-top: 10px;
     background: var(--accent-4); color: var(--on-accent); border: 0; cursor: pointer;
@@ -1101,7 +1125,10 @@
   </div>
   <div class="or">— or —</div>
   <button id="fileBtn">Choose files</button>
-  <input type="file" id="fileInput" accept=".zip,.csv,.gz,.fit" multiple style="display:none">
+  <!-- Kept in step with isReadableSensorFile, which is the one predicate both intake paths ask.
+       `.gz` alone used to be advertised here while the predicate only accepts `.csv.gz`, so the
+       picker invited a file it would then refuse. -->
+  <input type="file" id="fileInput" accept=".zip,.csv,.csv.gz,.fit" multiple style="display:none">
   <div id="pendingFiles" class="pending-files"></div>
   <div id="recentRides" class="recent-rides hidden"></div>
 </div>
@@ -1576,10 +1603,11 @@
       <span class="subtitle"><span id="runSplitsLabel"></span></span>
     </div>
     <div class="panel">
+      <div id="runPacing" class="run-pacing hidden"></div>
       <div style="overflow-x:auto;">
         <table id="runSplitsTable">
           <thead><tr>
-            <th>#</th><th>Time</th><th>Pace</th><th>HR</th><th></th>
+            <th>#</th><th>Time</th><th>Pace</th><th class="split-hr-col">HR</th><th></th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -1596,7 +1624,7 @@
       <div style="overflow-x:auto;">
         <table id="runClimbsTable">
           <thead><tr>
-            <th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>VAM</th><th>Pace</th><th>GAP</th><th>Cadence</th><th>HR</th>
+            <th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>VAM</th><th>Pace</th><th>GAP</th><th>Cadence</th><th class="climb-hr-col">HR</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -5925,14 +5953,33 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   const duration = ride.end - ride.start;
   /* Moving vs stopped. `duration` is the span of the active window, which still contains every
      traffic light and water stop inside it, so labelling that "moving time" overstated it. Moving
-     time integrates only the samples above a walking floor, and a segment spanning a GPS dropout is
-     skipped rather than counted as motion -- both rules match computeGpsSummary, so a run and a
-     GPS-only ride cannot disagree about what moving means. */
+     time integrates the samples above a walking floor, plus any dropout whose bridged distance shows
+     the runner kept going (see below). computeGpsSummary still uses the older two-way rule and drops
+     dropout time on the floor; it integrates Doppler speed rather than walking a path, so it has no
+     bridged distance to judge a gap by. The two therefore no longer agree exactly on a recording
+     with heavy signal loss, which is a deliberate divergence and not drift. */
   let movingTime = 0;
   for (let i = 1; i < inRide.length; i++) {
-    const dt = inRide[i].t - inRide[i - 1].t;
-    if (dt > 5) continue;                       // GPS dropout, not a stationary rider
-    if (inRide[i].speed >= 0.5) movingTime += dt;
+    const a = inRide[i - 1], b = inRide[i];
+    const dt = b.t - a.t;
+    if (!(dt > 0)) continue;
+    if (dt > 5) {
+      /* GPS dropout. The samples are missing, so the fix cannot report its own speed and the gap has
+         to be judged by the ground it bridged: metres over seconds, against the same walking floor.
+         Skipping the gap outright looked conservative but was not, because stoppedTime is the
+         remainder: every dropout silently became "stopped". On the reference 6.53 mi run that read
+         "6m 00s stopped" when the runner actually stood still for about 79 s, and the other five
+         minutes were a phone hunting for a fix at the trailhead while its owner ran. That also drove
+         the first mile's pace to 4:51/mi once the splits started dividing by moving time. */
+      if (a.latitude == null || b.latitude == null) continue;   // no position: nothing to judge it by
+      const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
+      const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
+               + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+      const bridged = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
+      if (bridged / dt >= 0.5) movingTime += dt;
+      continue;
+    }
+    if (b.speed >= 0.5) movingTime += dt;
   }
   const stoppedTime = Math.max(0, duration - movingTime);
   /* Session heart rate. Already computed for strength and golf and already fed to the coach digest,
@@ -5942,9 +5989,15 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   const hrIn = (hr || []).filter(r => r && r.t >= ride.start && r.t <= ride.end && r.bpm != null);
   const hrAvg = hrIn.length ? Math.round(hrIn.reduce((a, r) => a + r.bpm, 0) / hrIn.length) : null;
   const hrMax = hrIn.length ? Math.round(Math.max(...hrIn.map(r => r.bpm))) : null;
-  /* Average speed follows the path distance over the window, the way Strava derives pace, so pace and
-     distance stay consistent; max speed stays the instantaneous Doppler peak. */
+  /* Two speeds, because there are two honest answers and the headline needs the one it labels.
+     `avgSpeed` is the path distance over the whole window (elapsed), the way Strava derives an
+     elapsed pace; `movingSpeed` is the same distance over the moving time, which is what a runner
+     means by "my pace" and what Strava leads with. The tile that reads "50m 42s moving" has to
+     divide by 50m 42s: showing moving duration beside an elapsed pace put 7:46/mi and 8:41/mi next
+     to each other on one screen, differing by 55 s/mi with nothing on the page to explain the gap.
+     Max speed stays the instantaneous Doppler peak. */
   const avgSpeed = duration > 0 ? distance / duration : 0;
+  const movingSpeed = movingTime > 0 ? distance / movingTime : avgSpeed;
   let altGain = 0, altLoss = 0;
   if (baro && baro.length) {
     const inB = baro.filter(r => r.t >= ride.start && r.t <= ride.end);
@@ -5956,8 +6009,9 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   return {
     duration, movingTime, stoppedTime,
     hrAvg, hrMax,
-    distance, maxSpeed, avgSpeed,
+    distance, maxSpeed, avgSpeed, movingSpeed,
     paceMinPerKm: avgSpeed > 0 ? (1000 / avgSpeed) / 60 : null,
+    movingPaceMinPerKm: movingSpeed > 0 ? (1000 / movingSpeed) / 60 : null,
     altGain, altLoss,
     cadMedian: R.cadMedian, cadMean: R.cadMean,
     oscMedian: R.oscMedian,
@@ -5973,9 +6027,15 @@ function computeRunSummary(loc, baro, ride, R, hr) {
    Ported from analyzer/sports/running/splits.js and pinned to it by that module's drift guard.
    Pure arithmetic on the GPS track the summary already walks, so it carries none of the hedging the
    gait metrics need. See the module for why boundaries are interpolated rather than snapped, and why
-   a dropout is bridged here but skipped by moving time. */
+   a dropout is bridged here but skipped by moving time.
+
+   Each split carries BOTH clocks: `seconds` (elapsed) and `movingSeconds` (stops removed). The table
+   leads with the moving one so the rows sum to the Duration tile above them, which shows moving time. */
 const SPLIT_R_EARTH = 6371000;
 const splitToRad = (d) => (d * Math.PI) / 180;
+/* Moving-time rules, deliberately identical to computeRunSummary's walking floor and dropout gap. */
+const SPLIT_MOVING_MIN_MPS = 0.5;
+const SPLIT_MOVING_MAX_GAP_S = 5;
 
 /** Great-circle metres between two fixes. Inlined so the drift guard can run this standalone. */
 function splitHop(a, b) {
@@ -5989,8 +6049,9 @@ function splitHop(a, b) {
 /**
  * Split the ride window into `unitM`-metre pieces.
  *
- * Returns `[{ index, meters, seconds, tStart, tEnd, avgHr, partial }]`, one per unit covered, in
- * order. An empty array when the track never covers a full unit AND has no distance to report.
+ * Returns `[{ index, meters, seconds, movingSeconds, tStart, tEnd, avgHr, partial }]`, one per unit
+ * covered, in order. An empty array when the track never covers a full unit AND has no distance to
+ * report.
  */
 function computeSplits(loc, ride, unitM, hr) {
   if (!(unitM > 0)) return [];
@@ -6019,32 +6080,64 @@ function computeSplits(loc, ride, unitM, hr) {
   let cum = 0;               // metres covered so far
   let splitStartT = inRide[0].t;
   let target = unitM;        // cumulative distance at which the current split closes
+  let movingAccum = 0;       // moving seconds banked toward the split currently open
 
   for (let i = 1; i < inRide.length; i++) {
     const a = inRide[i - 1], b = inRide[i];
     const d = splitHop(a, b);
     if (!(d > 0)) continue;
     const dt = b.t - a.t;
-    let segStartCum = cum;
+    /* THREE kinds of hop, and they are not two. A hop is either
+         moving   - under the gap limit, at or above the walking floor: real ground, real seconds;
+         standing - under the gap limit, below the floor: the runner is parked at a crossing and the
+                    only thing moving is the GPS fix. No ground, no seconds;
+         dropout  - over the gap limit: the signal went away but the runner did not. Real ground
+                    (this is the bridging the module has always done), and real seconds whenever the
+                    ground it bridged implies the runner was still moving.
+       Distinguishing standing from dropout is what makes the pace honest. Both failures showed up on
+       one reference mile: 734 m of the run's path accumulated while parked, and the first mile
+       reported 4:51/mi with "4:54 stopped" for a runner whose every other mile was 7:46 or slower.
+       Almost none of that was standing. It was a phone hunting for a fix at the trailhead, ~300 s of
+       sparse samples that a two-way moving/not-moving test could only file under "stopped". */
+    const overGap = !(dt > 0) || dt > SPLIT_MOVING_MAX_GAP_S;
+    /* A live fix reports its own speed. A blacked-out one cannot, so it is judged by the ground it
+       crossed: metres over seconds is an implied speed, and at or above the walking floor the runner
+       was plainly still moving. */
+    const impliedMoving = overGap ? (d / dt >= SPLIT_MOVING_MIN_MPS) : (b.speed >= SPLIT_MOVING_MIN_MPS);
+    const standing = !overGap && !impliedMoving;
+    const hopMoving = impliedMoving ? dt : 0;
+    if (standing) continue;
+    /* The cumulative distance at the START of this hop, held fixed for the whole crossing loop.
+       It used to be reassigned to `target` after each crossing, which made the second boundary
+       inside one hop interpolate from the previous boundary instead of from the hop start: a
+       2.5 km dropout hop closed its second kilometre at the same instant as its first, so that
+       split came back with `seconds: 0` and no pace, and the remainder swallowed the missing time.
+       Rare (it needs a single hop longer than a whole unit) but wrong, and invisible to a test that
+       only counted rows. */
+    const hopStartCum = cum;
+    let fracDone = 0;        // fraction of this hop already assigned to closed splits
     cum += d;
     /* One hop can cross more than one boundary (a long dropout, or a fast descent), so close every
        boundary it spans rather than assuming at most one. */
     while (cum >= target) {
-      const frac = (target - segStartCum) / d;         // where in this hop the boundary falls
+      const frac = (target - hopStartCum) / d;         // where in this hop the boundary falls
       const tCross = a.t + dt * frac;
       splits.push({
         index: splits.length + 1,
         meters: unitM,
         seconds: tCross - splitStartT,
+        movingSeconds: movingAccum + hopMoving * (frac - fracDone),
         tStart: splitStartT,
         tEnd: tCross,
         avgHr: hrFor(splitStartT, tCross),
         partial: false,
       });
       splitStartT = tCross;
-      segStartCum = target;
+      fracDone = frac;
+      movingAccum = 0;
       target += unitM;
     }
+    movingAccum += hopMoving * (1 - fracDone);
   }
 
   /* Whatever is left over. Reported with its true distance so the UI can say "0.24 mi" instead of
@@ -6056,6 +6149,7 @@ function computeSplits(loc, ride, unitM, hr) {
       index: splits.length + 1,
       meters: leftover,
       seconds: lastT - splitStartT,
+      movingSeconds: movingAccum,
       tStart: splitStartT,
       tEnd: lastT,
       avgHr: hrFor(splitStartT, lastT),
@@ -6066,17 +6160,28 @@ function computeSplits(loc, ride, unitM, hr) {
 }
 
 /**
+ * The moving seconds a split should be judged on. Ranking has to use whatever the table PRINTS, or
+ * the "fastest" tag ends up on a row that is visibly not the smallest number on screen: a mile
+ * containing a two-minute stop is the slowest by the wall clock and can be the quickest on the legs.
+ * Falls back to elapsed for a split that predates `movingSeconds` (a cached analysis, or a caller
+ * that builds split-shaped objects by hand).
+ */
+function splitPaceSeconds(s) {
+  return s.movingSeconds != null ? s.movingSeconds : s.seconds;
+}
+
+/**
  * The fastest and slowest FULL splits, for highlighting. Partial splits are excluded: a 0.2 mi
  * remainder is not a fast mile, and letting it win the comparison is how a leaderboard lies.
  * Returns `{ fastest, slowest }` of split indexes, or nulls when there are fewer than two full ones.
  */
 function splitExtremes(splits) {
-  const full = (splits || []).filter((s) => !s.partial && s.seconds > 0);
+  const full = (splits || []).filter((s) => !s.partial && splitPaceSeconds(s) > 0);
   if (full.length < 2) return { fastest: null, slowest: null };
   let fastest = full[0], slowest = full[0];
   for (const s of full) {
-    if (s.seconds < fastest.seconds) fastest = s;
-    if (s.seconds > slowest.seconds) slowest = s;
+    if (splitPaceSeconds(s) < splitPaceSeconds(fastest)) fastest = s;
+    if (splitPaceSeconds(s) > splitPaceSeconds(slowest)) slowest = s;
   }
   return { fastest: fastest.index, slowest: slowest.index };
 }
@@ -11953,9 +12058,15 @@ function renderAllRunning(D) {
   (() => {
     const imperial = !U.metric();
     const unitM = imperial ? 1609.344 : 1000;
+    const unitLabel = imperial ? 'mile' : 'km';
     const rows = (D.sensors && D.sensors.location) || [];
     const hrRows = (D.sensors && D.sensors.heartRate) || [];
-    renderRunSplits(computeSplits(rows, D.ride, unitM, hrRows), imperial ? 'mile' : 'km');
+    const splits = computeSplits(rows, D.ride, unitM, hrRows);
+    renderRunSplits(splits, unitLabel, (D.summary || {}).distance);
+    /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
+       grade adjustment and the GAP column can never disagree about the hill. */
+    const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
+    renderRunPacing(runPacing(splits, alts), unitLabel);
   })();
   renderRunOsc(D.running.oscSeries);
   renderRunClimbs(D.running.climbs || []);
@@ -13150,8 +13261,17 @@ function renderGeekStats(D, sport) {
   /* Distance comes off the summary, not the digest: the digest's distance key now follows the Units
      toggle (distance_km vs distance_mi), and U.small formats the stride from raw meters anyway. */
   const distM = (D.summary || {}).distance;
-  if (sport === 'running' && distM && dg.cadence_spm_median && dg.duration_min) {
-    const steps = dg.cadence_spm_median * dg.duration_min;
+  /* Minutes come off the summary's MOVING time, not the digest's elapsed `duration_min`. This is the
+     second place the run's step count is derived, and it has to agree with the Steps tile, which
+     divides by moving time because nobody strides while stopped. Falls back to elapsed for a summary
+     with no moving time (an older cached analysis). */
+  const movingMin = (() => {
+    const sm = D.summary || {};
+    const sec = sm.movingTime != null ? sm.movingTime : sm.duration;
+    return sec != null ? sec / 60 : dg.duration_min;
+  })();
+  if (sport === 'running' && distM && dg.cadence_spm_median && movingMin) {
+    const steps = dg.cadence_spm_median * movingMin;
     rows.push(['Est Steps', Math.round(steps).toString()]);
     rows.push(['Stride Length', U.small(distM / steps)]);
   }
@@ -13171,24 +13291,25 @@ function renderRunStats(s, detection, mount) {
   const oscHand = mount === 'hand';
   const oscVal = s.oscMedian == null ? '—'
     : `<span class="value"${oscHand ? ' style="color:var(--text-muted);"' : ''}>${oscHand ? '~' : ''}${s.oscMedian.toFixed(1)}<span class="unit">cm</span></span>`;
-  const dur = s.duration;
-  const paceStr = s.paceMinPerKm == null ? '—' : (() => {
-    const m = Math.floor(s.paceMinPerKm);
-    const sec = Math.round((s.paceMinPerKm - m) * 60);
-    return `${m}:${String(sec).padStart(2,'0')}`;
-  })();
-  // Steps: stride count estimated from median cadence over the moving time (this pipeline has no raw
-  // pedometer channel); stride length is the path distance per step.
-  const stepsVal = s.cadMedian ? Math.round(s.cadMedian * (s.duration / 60)) : null;
-  const strideM = (stepsVal && s.distance) ? s.distance / stepsVal : null;
   /* The tile always said "moving time" while showing the whole active window, stops included. It now
      shows moving time and names the stop beside it, but only once the stop is worth a word: every run
      has a few seconds of GPS settling, and "12s stopped" is noise, not information. */
   const movingSec = s.movingTime != null ? s.movingTime : s.duration;
   const stoppedSec = s.stoppedTime != null ? s.stoppedTime : 0;
-  const durSub = stoppedSec >= 30
+  const stopWorthNaming = stoppedSec >= 30;
+  const durSub = stopWorthNaming
     ? `moving · ${fmtDuration(stoppedSec)} stopped`
     : 'moving time';
+  /* EVERY number derived from a duration divides by the duration the tile beside it displays.
+     When the Duration tile moved to moving time, Pace and Steps stayed on the elapsed window, so
+     one screen carried 50m42s next to 8:41/mi when 50m42s over 6.53 mi is 7:46/mi, and a step count
+     that kept counting through six minutes of standing still. Moving is the right basis for both:
+     "pace" means moving pace to every runner and to Strava, and nobody takes strides at a red light. */
+  const paceSpeed = s.movingSpeed != null ? s.movingSpeed : s.avgSpeed;
+  // Steps: stride count estimated from median cadence over the moving time (this pipeline has no raw
+  // pedometer channel); stride length is the path distance per step.
+  const stepsVal = s.cadMedian ? Math.round(s.cadMedian * (movingSec / 60)) : null;
+  const strideM = (stepsVal && s.distance) ? s.distance / stepsVal : null;
   /* Heart rate, when the watch streamed it. Omitted entirely rather than shown as a dash: a run
      recorded without the watch has no HR to report, and an empty tile in the grid reads as a
      measurement that failed rather than a sensor that was not worn. */
@@ -13217,7 +13338,7 @@ function renderRunStats(s, detection, mount) {
     <div class="stat">
       <div class="label">Distance</div>
       <div class="value">${U.dist(s.distance)}</div>
-      <div class="sub">moving distance</div>
+      <div class="sub">GPS path length</div>
     </div>
     ${hrTile}
     <div class="stat">
@@ -13227,13 +13348,13 @@ function renderRunStats(s, detection, mount) {
     </div>
     <div class="stat accent3">
       <div class="label">Pace</div>
-      <div class="value">${U.pace(s.avgSpeed)}</div>
-      <div class="sub">${U.speed(s.avgSpeed)} avg</div>
+      <div class="value">${U.pace(paceSpeed)}</div>
+      <div class="sub">${U.speed(paceSpeed)} moving${stopWorthNaming ? ` · ${U.pace(s.avgSpeed)} elapsed` : ''}</div>
     </div>
     <div class="stat">
       <div class="label">Elev gain / loss</div>
-      <div class="value">${s.altGain.toFixed(0)}<span class="unit">m ↑</span></div>
-      <div class="sub">${s.altLoss.toFixed(0)}m ↓ · ${s.nDownhills} desc / ${s.nUphills} climb</div>
+      <div class="value">${U.elev(s.altGain)}<span class="unit"> ↑</span></div>
+      <div class="sub">${U.elev(s.altLoss)} ↓ · ${s.nDownhills} desc / ${s.nUphills} climb</div>
     </div>
   `;
 }
@@ -13516,6 +13637,126 @@ function analyzeRunningClimbs(segments, alts, cadSeries, hrRows) {
     .map((c, i) => { c.index = i + 1; return c; });
 }
 
+/* ---------- Session pacing ----------
+   Ported from analyzer/sports/running/pacing.js and pinned to it by that module's drift guard.
+
+   Did the back half hold the front half's pace? The road side already answers this for a cyclist
+   (analyzeClimbs' `pacingFade`, first third against last third of POWER), but that needs a power
+   meter, so a runner never saw it. Splits are the runner's version of the same instrument.
+
+   Terrain is the whole difficulty. The reference run's raw splits read 9:45, 7:46, 8:46, 9:12, 7:49,
+   7:53, which looks like a negative split and is nothing of the kind: the quick miles are the
+   downhill ones. So the comparison runs on grade-adjusted pace via the Minetti model already used
+   for the Climbs panel's GAP column, and when the terrain correction turns out LARGER than the
+   finding it produces, no verdict is offered at all. A verdict that only exists because of a model
+   is a verdict about the model. See the module header for the rest of the reasoning. */
+const PACE_MIN_FULL_SPLITS = 4;      // below this, a trend is not a trend
+const PACE_EVEN_BAND = 0.02;         // within 2% of the first half, the run was even
+const PACE_BIG_FADE = 0.08;          // past 8%, worth more than a mention
+
+/** Linear interpolation of an { t, alt } series at time t. Null outside the series or when empty. */
+function pacingAltAt(alts, t) {
+  if (!alts || !alts.length) return null;
+  if (t <= alts[0].t) return alts[0].alt;
+  if (t >= alts[alts.length - 1].t) return alts[alts.length - 1].alt;
+  let lo = 0, hi = alts.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (alts[mid].t <= t) lo = mid; else hi = mid;
+  }
+  const a = alts[lo], b = alts[hi];
+  const span = b.t - a.t;
+  return span > 0 ? a.alt + ((b.alt - a.alt) * (t - a.t)) / span : a.alt;
+}
+
+/** The moving seconds a split should be paced on, matching what the splits table prints. */
+function pacingMovingOf(s) {
+  return s.movingSeconds != null ? s.movingSeconds : s.seconds;
+}
+
+function pacingMean(xs) {
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+}
+
+/**
+ * Compare the first and second halves of a run's full splits. Returns an object whose `verdict` is
+ * 'negative' | 'even' | 'fade', or null with a `reason` ('too-short' | 'terrain') when withheld.
+ */
+function runPacing(splits, alts) {
+  const full = (splits || []).filter((s) => !s.partial && pacingMovingOf(s) > 0 && s.meters > 0);
+  if (full.length < PACE_MIN_FULL_SPLITS) {
+    return { verdict: null, reason: 'too-short', fullSplits: full.length };
+  }
+
+  /* Seconds per unit, raw and grade-adjusted, for each full split. An odd count drops the MIDDLE
+     split so the halves stay the same size: comparing three splits against four would bias the
+     answer toward whichever half got the extra one. */
+  const rows = full.map((s) => {
+    const seconds = pacingMovingOf(s);
+    const speed = s.meters / seconds;
+    const rise = pacingAltAt(alts, s.tEnd) != null && pacingAltAt(alts, s.tStart) != null
+      ? pacingAltAt(alts, s.tEnd) - pacingAltAt(alts, s.tStart) : null;
+    const gradePct = rise != null && s.meters > 0 ? (rise / s.meters) * 100 : null;
+    const gapSpeed = gradePct != null ? gradeAdjustedSpeed(speed, gradePct) : null;
+    return {
+      index: s.index,
+      rawSecPerUnit: seconds,
+      gapSecPerUnit: gapSpeed ? s.meters / gapSpeed : null,
+      gradePct,
+    };
+  });
+
+  const half = Math.floor(rows.length / 2);
+  const firstRows = rows.slice(0, half);
+  const lastRows = rows.slice(rows.length - half);
+
+  const rawFirst = pacingMean(firstRows.map((r) => r.rawSecPerUnit));
+  const rawLast = pacingMean(lastRows.map((r) => r.rawSecPerUnit));
+  const rawDelta = rawLast - rawFirst;
+
+  const haveGap = rows.every((r) => r.gapSecPerUnit != null);
+  const gapFirst = haveGap ? pacingMean(firstRows.map((r) => r.gapSecPerUnit)) : null;
+  const gapLast = haveGap ? pacingMean(lastRows.map((r) => r.gapSecPerUnit)) : null;
+  const gapDelta = haveGap ? gapLast - gapFirst : null;
+
+  /* The terrain gate. `correction` is how far grade adjustment moved the answer. When it moves it
+     further than the answer itself, the finding is a property of the model and of the hill profile,
+     not of how the run was paced, and the honest output is silence. */
+  if (haveGap) {
+    const correction = gapDelta - rawDelta;
+    if (Math.abs(correction) > Math.abs(gapDelta)) {
+      return {
+        verdict: null,
+        reason: 'terrain',
+        fullSplits: full.length,
+        gradeAdjusted: true,
+        rawDeltaSec: rawDelta,
+        deltaSec: gapDelta,
+        correctionSec: correction,
+      };
+    }
+  }
+
+  const base = haveGap ? gapFirst : rawFirst;
+  const delta = haveGap ? gapDelta : rawDelta;
+  const frac = base > 0 ? delta / base : 0;
+  const verdict = Math.abs(frac) <= PACE_EVEN_BAND ? 'even' : (frac > 0 ? 'fade' : 'negative');
+
+  return {
+    verdict,
+    reason: null,
+    fullSplits: full.length,
+    halfSize: half,
+    gradeAdjusted: haveGap,
+    firstHalfSecPerUnit: base,
+    secondHalfSecPerUnit: haveGap ? gapLast : rawLast,
+    deltaSec: delta,
+    deltaFrac: frac,
+    rawDeltaSec: rawDelta,
+    big: Math.abs(frac) >= PACE_BIG_FADE,
+  };
+}
+
 function renderRunSegments(segments, opts) {
   if (!segments.length) { hide('runSegmentsSection'); return; }
   show('runSegmentsSection');
@@ -13565,43 +13806,111 @@ function renderRunSegments(segments, opts) {
    Rows carry a bar scaled BETWEEN the fastest and slowest full split rather than from zero: on a
    run where every split is within a few seconds, a zero-based bar renders as five identical blocks
    and says nothing. The partial last split is drawn without a bar and labelled with its real
-   distance, because its pace is real but its duration is not comparable to a full one. */
-function renderRunSplits(splits, unitLabel) {
+   distance, because its pace is real but its duration is not comparable to a full one.
+
+   TIME AND PACE ARE MOVING, not elapsed, so the rows sum to the Duration tile above them. On elapsed
+   they did not: a real 6.53 mi run showed 50m42s on the tile and 56m43s across the rows, six minutes
+   of standing at crossings spread through the splits with nothing on screen accounting for it. A
+   split whose stop is worth a word says so on the row rather than silently swallowing it. */
+/* The pacing verdict, written out. Only ever a sentence: the underlying comparison is two means of
+   three or four splits, which supports "you faded 24 s/mi", not a decimal place. Withheld cases say
+   nothing at all rather than hedging, except the terrain one, which is worth naming because the
+   runner can see the hills on the chart and would otherwise wonder why there is no verdict. */
+function renderRunPacing(pacing, unitLabel) {
+  const el = document.getElementById('runPacing');
+  if (!el) return;
+  const secs = (v) => {
+    const a = Math.abs(Math.round(v));
+    return a >= 60 ? `${Math.floor(a / 60)}:${String(a % 60).padStart(2, '0')}` : `${a} s`;
+  };
+  if (!pacing || (!pacing.verdict && pacing.reason !== 'terrain')) { el.classList.add('hidden'); return; }
+
+  if (pacing.reason === 'terrain') {
+    el.innerHTML = '<span class="rp-verdict">No pacing verdict for this one.</span> '
+      + `The halves ran different terrain, and correcting for it moves the answer by more than the answer is worth `
+      + `(raw pace differs by ${secs(pacing.rawDeltaSec)}/${unitLabel}, almost all of it the hills). `
+      + 'A read here would be describing the route, not the run.'
+      + '<span class="rp-note">Grade-adjusted using the Minetti cost-of-running model, the same one behind the Climbs panel\'s GAP column.</span>';
+    el.classList.remove('hidden');
+    return;
+  }
+
+  const n = pacing.halfSize;
+  const halves = `first ${n} vs last ${n}`;
+  let lead;
+  if (pacing.verdict === 'even') {
+    lead = `<span class="rp-verdict">Evenly paced.</span> The back half held the front half's pace to within ${secs(pacing.deltaSec)}/${unitLabel}.`;
+  } else if (pacing.verdict === 'negative') {
+    lead = `<span class="rp-verdict rp-neg">Negative split.</span> The back half ran ${secs(pacing.deltaSec)}/${unitLabel} quicker than the front half`
+      + (pacing.big ? ', by a clear margin.' : '.');
+  } else {
+    lead = `<span class="rp-verdict rp-fade">Faded ${secs(pacing.deltaSec)}/${unitLabel}.</span> `
+      + (pacing.big ? 'That is a big enough drop to read as going out too hard.' : 'A mild drop over the back half.');
+  }
+  const note = pacing.gradeAdjusted
+    ? `${halves} ${unitLabel}s, on grade-adjusted pace so the hills do not decide it (Minetti model, as used by the Climbs panel's GAP column).`
+    : `${halves} ${unitLabel}s, on raw pace: this recording carried no altitude, so the comparison is NOT corrected for terrain and a hilly route will skew it.`;
+  el.innerHTML = `${lead}<span class="rp-note">${note}</span>`;
+  el.classList.remove('hidden');
+}
+
+function renderRunSplits(splits, unitLabel, totalPathM) {
   if (!splits || !splits.length) { hide('runSplitsSection'); return; }
   show('runSplitsSection');
   const tbody = document.querySelector('#runSplitsTable tbody');
   if (!tbody) return;
+  /* Moving seconds for every row, falling back to elapsed for a cached analysis computed before
+     computeSplits carried the second clock. */
+  const movingOf = (sp) => (sp.movingSeconds != null ? sp.movingSeconds : sp.seconds);
   const { fastest, slowest } = splitExtremes(splits);
   const full = splits.filter(s => !s.partial);
-  const fast = full.length ? Math.min(...full.map(s => s.seconds)) : 0;
-  const slow = full.length ? Math.max(...full.map(s => s.seconds)) : 0;
+  const fast = full.length ? Math.min(...full.map(movingOf)) : 0;
+  const slow = full.length ? Math.max(...full.map(movingOf)) : 0;
   const span = slow - fast;
+  /* The HR column is dropped outright when the watch was not worn, rather than printing a column of
+     dashes down every row. Same reasoning the Heart rate TILE already applies: an empty measurement
+     reads as one that failed, when in fact no sensor was ever there. */
+  const anyHr = splits.some(sp => sp.avgHr != null);
+  document.querySelectorAll('#runSplitsTable .split-hr-col').forEach(th => th.classList.toggle('hidden', !anyHr));
   const label = document.getElementById('runSplitsLabel');
   if (label) {
     const n = full.length;
+    /* Splits advance on ground covered, so on a run with a long stop they cover less than the
+       headline GPS-path distance, the difference being fixes that wandered while the runner stood
+       still. Say so once the gap is worth a word (100 m), rather than leaving two distances on one
+       screen with nothing to reconcile them. */
+    const covered = splits.reduce((a, sp) => a + sp.meters, 0);
+    const driftM = (totalPathM != null && totalPathM > covered) ? totalPathM - covered : 0;
     label.textContent = `${n} full ${unitLabel}${n === 1 ? '' : 's'}`
       + (splits.length > n ? ' + a partial' : '')
-      + (fastest ? ` \u00b7 fastest #${fastest}, slowest #${slowest}` : '');
+      + (fastest ? ` \u00b7 fastest #${fastest}, slowest #${slowest}` : '')
+      + ' \u00b7 moving time'
+      + (driftM >= 100 ? ` \u00b7 ${U.dist(driftM)} of GPS drift while stopped, excluded` : '');
   }
   const clock = (sec) => {
     const m = Math.floor(sec / 60), ss = Math.round(sec - m * 60);
     return m + ':' + String(ss).padStart(2, '0');
   };
   tbody.innerHTML = splits.map(sp => {
-    const mps = sp.seconds > 0 ? sp.meters / sp.seconds : null;
+    const moving = movingOf(sp);
+    const mps = moving > 0 ? sp.meters / moving : null;
     /* Longer split = slower, so the bar grows with time. Full-width is the slowest split. */
-    const pct = (!sp.partial && span > 0) ? 12 + 88 * ((sp.seconds - fast) / span) : 0;
+    const pct = (!sp.partial && span > 0) ? 12 + 88 * ((moving - fast) / span) : 0;
     const tone = sp.index === fastest ? 'var(--accent)'
       : sp.index === slowest ? 'var(--text-muted)' : 'var(--border)';
     const bar = sp.partial ? ''
       : `<div style="height:6px;border-radius:3px;background:${tone};width:${pct.toFixed(0)}%;min-width:8px;"></div>`;
     const note = sp.partial ? `<span class="dim" style="font-size:11px;">${U.dist(sp.meters)}</span>` : '';
     const mark = sp.index === fastest ? ' <span class="dim" style="font-size:11px;">fastest</span>' : '';
+    /* Name the stop on the row once it is worth naming (10 s, a crossing rather than GPS settling),
+       so a split that took noticeably longer on the clock than on the legs explains itself. */
+    const stopped = sp.seconds - moving;
+    const stopNote = stopped >= 10 ? ` <span class="dim" style="font-size:11px;">+${clock(stopped)} stopped</span>` : '';
     return `<tr>
       <td>${sp.index}${sp.partial ? ' <span class="dim" style="font-size:11px;">partial</span>' : ''}</td>
-      <td>${clock(sp.seconds)}</td>
+      <td>${clock(moving)}${stopNote}</td>
       <td>${mps ? U.pace(mps) : '\u2014'}${mark}</td>
-      <td>${sp.avgHr != null ? sp.avgHr + ' bpm' : '\u2014'}</td>
+      ${anyHr ? `<td class="split-hr-col">${sp.avgHr != null ? sp.avgHr + ' bpm' : '\u2014'}</td>` : ''}
       <td style="width:35%;">${bar}${note}</td>
     </tr>`;
   }).join('');
@@ -13616,6 +13925,10 @@ function renderRunClimbs(climbs) {
   const paceStr = (mps) => (mps && mps > 0) ? U.pace(mps) : '—';
   /* Rounded signed delta with no "-0": a tiny negative fade should read 0, not -0. */
   const signed = (v) => { const r = Math.round(v); return (r > 0 ? '+' : '') + (r === 0 ? 0 : r); };
+  /* Drop the HR column entirely on a run with no watch, rather than a dash per climb. Same call as
+     the splits table and the Heart rate tile: nothing was measured, so nothing is claimed. */
+  const anyHr = climbs.some(c => c.avgHr != null);
+  document.querySelectorAll('#runClimbsTable .climb-hr-col').forEach(th => th.classList.toggle('hidden', !anyHr));
   tbody.innerHTML = climbs.map(c => {
     const cadFade = c.cadenceFade == null ? ''
       : ` <span class="dim" style="font-size:11px;${Math.round(c.cadenceFade) <= -4 ? 'color:#c0392b;' : ''}">${signed(c.cadenceFade)}</span>`;
@@ -13634,7 +13947,7 @@ function renderRunClimbs(climbs) {
       <td>${paceStr(c.speedAvg)}</td>
       <td>${paceStr(c.gapSpeed)}</td>
       <td>${cad}</td>
-      <td>${hr}</td>
+      ${anyHr ? `<td class="climb-hr-col">${hr}</td>` : ''}
     </tr>`;
   }).join('');
   const label = document.getElementById('runClimbCountLabel');
@@ -14214,9 +14527,15 @@ function buildDigest(D, sport, metric) {
         walk_breaks: (D.gait.breaks || []).map(b => ({ at_min: +((b.t0 - D.ride.start) / 60).toFixed(1), duration_s: Math.round(b.t1 - b.t0) })),
       } : null,
       duration_min: r1(s.duration / 60),
+      /* Moving and stopped, so the coach can see a session that was 50 minutes of running inside a
+         57-minute window and speak to the stops. `avg_pace` is the MOVING pace, matching the Pace
+         tile, the splits and the share card: a coach quoting an elapsed 8:41 at a runner looking at
+         7:46 on screen is arguing with the app. */
+      moving_min: s.movingTime != null ? r1(s.movingTime / 60) : null,
+      stopped_min: s.stoppedTime != null ? r1(s.stoppedTime / 60) : null,
       ...u.dist('distance', s.distance),
-      ...u.paceMin('avg_pace', s.paceMinPerKm),
-      ...u.speed('avg_speed', s.avgSpeed),
+      ...u.paceMin('avg_pace', s.movingPaceMinPerKm != null ? s.movingPaceMinPerKm : s.paceMinPerKm),
+      ...u.speed('avg_speed', s.movingSpeed != null ? s.movingSpeed : s.avgSpeed),
       cadence_spm_median: r1(s.cadMedian, 0),
       cadence_spm_mean: r1(s.cadMean, 0),
       vertical_oscillation_cm_median: r1(s.oscMedian),
@@ -15572,9 +15891,13 @@ function renderRideSignature(D, sport) {
     const s = D.summary || {};
     let stats;
     if (sport === 'running' || sport === 'walking') {
+      /* Moving pace, matching the Pace tile and the splits below it. A card is the thing that gets
+         shared, so it is the worst place for the elapsed figure to disagree with the screen it was
+         cut from. GPS-only foot activities (sport 'run'/'walk', below) already run on a moving
+         average from computeGpsSummary, so only this branch needed it. */
       stats = [
         { ...rsSplit(U.dist(s.distance)), label: 'DISTANCE' },
-        { ...rsSplit(U.pace ? U.pace(s.avgSpeed) : null), label: 'AVG PACE' },
+        { ...rsSplit(U.pace ? U.pace(s.movingSpeed != null ? s.movingSpeed : s.avgSpeed) : null), label: 'AVG PACE' },
         { num: s.cadMedian ? Math.round(s.cadMedian) : '—', unit: 'spm', label: 'CADENCE' },
         { ...rsSplit(U.elev(s.altGain)), label: 'CLIMB' },
       ];
@@ -15615,7 +15938,12 @@ function renderRideSignature(D, sport) {
         fourth,
       ];
     }
-    const durMin = Math.floor((s.duration || (ride.end - ride.start)) / 60);
+    /* Moving minutes when the summary knows them, so the header and the AVG PACE tile below it
+       describe the same clock: distance over this many minutes has to come out at the pace printed
+       two lines down, or the card contradicts itself in the one artefact people share. Sports whose
+       summary has no movingTime (MTB, road, GPS-only) fall through to the window as before. */
+    const durSec = s.movingTime != null ? s.movingTime : (s.duration || (ride.end - ride.start));
+    const durMin = Math.floor(durSec / 60);
     const label = rsLabel(D.title);
     const rideWord = D.eBike ? 'E-MTB' : sportLex(sport).signature;
     const subtitle = `${rideWord} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
@@ -18289,7 +18617,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '6e0e59dcd · 2026-08-01';
+const LOAM_BUILD = 'f62430d84 · 2026-08-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
