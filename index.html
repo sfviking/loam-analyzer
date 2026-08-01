@@ -1570,6 +1570,23 @@
     <div class="chart" id="runOscChart" style="height:260px;"></div>
   </section>
 
+  <section id="runSplitsSection" class="hidden">
+    <div class="section-title">
+      Splits
+      <span class="subtitle"><span id="runSplitsLabel"></span></span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table id="runSplitsTable">
+          <thead><tr>
+            <th>#</th><th>Time</th><th>Pace</th><th>HR</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <section id="runClimbsSection" class="hidden">
     <div class="section-title">
       Climbs
@@ -3380,6 +3397,48 @@ function renderRunsPanel(D) {
   drawRuns();
 }
 
+/* Nothing to show for the CURRENT segmentation mode.
+
+   Auto finding nothing means the recording genuinely has no runs, so the panel goes away. An
+   explicit mode finding nothing is a different thing and must NOT hide the panel: the mode selector
+   lives inside this section, so hiding it removes the only control that could switch back, and the
+   rider is stranded with no way to return short of re-analyzing the file. That is what picking
+   "Laps (loop)" on a point-to-point run did -- the section vanished, and the Jump-to "Runs" chip,
+   still in the nav and still pointing at it, did nothing when tapped.
+
+   The nav is rebuilt on both paths. The old early return skipped buildSectionNav() entirely, which
+   is precisely why the chip went stale rather than disappearing with the section it targets. */
+function drawRunsEmpty(mode) {
+  const nav = () => { if (typeof buildSectionNav === 'function') buildSectionNav(); };
+  if (_runsMode === 'auto') { hide('runsSection'); nav(); return; }
+  show('runsSection');
+  const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : 'Runs';
+  const t = document.getElementById('runsTitle'); if (t) t.textContent = nounTitle;
+  const what = _runsMode === 'laps' ? 'repeated loops of the same ground'
+    : _runsMode === 'descents' ? 'sustained descents'
+    : 'Segment Start / End taps';
+  const sub = document.getElementById('runsSubtitle');
+  if (sub) sub.textContent = `none found \u00b7 this recording has no ${what}`;
+  const tbody = document.querySelector('#runsTable tbody');
+  if (tbody) {
+    tbody.innerHTML = `<tr><td colspan="10" style="padding:18px 12px; text-align:left; color:var(--text-muted);">`
+      + `No ${nounTitle.toLowerCase()} in this recording. Pick another mode above \u2014 `
+      + `<strong>Auto</strong> chooses whichever fits.</td></tr>`;
+  }
+  /* Clear the rest rather than leaving the previous mode's rows and charts standing under a heading
+     that now says something else. The charts are hidden, not emptied: an emptied .chart renders as a
+     blank bordered box (see drawRunsDtw). */
+  for (const id of ['runsOverlayChart', 'runsDtwChart']) {
+    const el = document.getElementById(id);
+    if (el) { el.innerHTML = ''; el.classList.add('hidden'); }
+  }
+  for (const id of ['playByPlay', 'runsCta']) {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('hidden');
+  }
+  nav();
+}
+
 function drawRuns() {
   const D = _runsD; if (!D) return;
   /* The runs panel is now the single home for per-segment interaction, so the tag/compare actions
@@ -3387,7 +3446,7 @@ function drawRuns() {
   currentSavedDescents = D.savedDescents || null;
   currentLibraryRideId = D.libraryRideId;
   const { mode, runs, lapInfo } = segmentRuns(D, _runsMode);
-  if (!runs.length) { hide('runsSection'); return; }
+  if (!runs.length) { drawRunsEmpty(mode); return; }
   show('runsSection');
   /* Title and count-noun follow the segmentation MODE (the row noun), not the sport, so the panel
      never reads "N runs (descents)": descents -> Descents, laps -> Laps, marks -> Runs. */
@@ -5667,7 +5726,11 @@ function formFrame() {
 function drawRunsDtw(runs, D) {
   const el = document.getElementById('runsDtwChart');
   if (!el || !window.Plotly) return;
-  if (runs.length < 2) { el.innerHTML = ''; return; }
+  /* Hide the element, do not just empty it. `.chart` carries a background, border and shadow and
+     the div carries an inline height, so an emptied-but-present node renders as a 260px blank
+     bordered box under the speed chart -- which is what a single-run session showed. */
+  if (runs.length < 2) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
   const speedOf = r => resample1Hz(D.sensors.location.filter(x => x.speed != null), r.tStart, r.tEnd, 'speed');
   let refIdx = 0;
   for (let i = 1; i < runs.length; i++) if (runs[i].metrics.duration < runs[refIdx].metrics.duration) refIdx = i;
@@ -5706,6 +5769,10 @@ function drawRunsOverlay(runs, D) {
     for (let k = 1; k < loc.length; k++) { d += ((loc[k].speed + loc[k - 1].speed) / 2) * (loc[k].t - loc[k - 1].t); xs.push(U.smallNum(d)); ys.push(U.speedNum(loc[k].speed)); }
     return { x: xs, y: ys, type: 'scatter', mode: 'lines', line: { color: palette[i % palette.length], width: 1.5 }, name: `${r.n}. ${r.label}`.slice(0, 26) };
   }).filter(Boolean);
+  /* Same rule as the DTW chart below: with nothing to draw, Plotly would still render an axes frame
+     inside a bordered 300px box, which reads as a chart that failed rather than one with no data. */
+  if (!traces.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
   loamPlot(el, traces, {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     title: { text: 'Speed vs distance into run (overlay to compare)', font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
@@ -5806,7 +5873,7 @@ function pairwiseDescentDTW(refD, otherD) {
   return { path, totalCost, delta, soft };
 }
 
-function computeRunSummary(loc, baro, ride, R) {
+function computeRunSummary(loc, baro, ride, R, hr) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
@@ -5825,6 +5892,25 @@ function computeRunSummary(loc, baro, ride, R) {
     distance += 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
   }
   const duration = ride.end - ride.start;
+  /* Moving vs stopped. `duration` is the span of the active window, which still contains every
+     traffic light and water stop inside it, so labelling that "moving time" overstated it. Moving
+     time integrates only the samples above a walking floor, and a segment spanning a GPS dropout is
+     skipped rather than counted as motion -- both rules match computeGpsSummary, so a run and a
+     GPS-only ride cannot disagree about what moving means. */
+  let movingTime = 0;
+  for (let i = 1; i < inRide.length; i++) {
+    const dt = inRide[i].t - inRide[i - 1].t;
+    if (dt > 5) continue;                       // GPS dropout, not a stationary rider
+    if (inRide[i].speed >= 0.5) movingTime += dt;
+  }
+  const stoppedTime = Math.max(0, duration - movingTime);
+  /* Session heart rate. Already computed for strength and golf and already fed to the coach digest,
+     but the run headline never carried it, so the number the coach reasoned about was one the runner
+     could not see. Mean over the window rather than a moving-time-weighted mean: HR during a stop is
+     still the runner's heart rate, and the recovery it shows is part of the session. */
+  const hrIn = (hr || []).filter(r => r && r.t >= ride.start && r.t <= ride.end && r.bpm != null);
+  const hrAvg = hrIn.length ? Math.round(hrIn.reduce((a, r) => a + r.bpm, 0) / hrIn.length) : null;
+  const hrMax = hrIn.length ? Math.round(Math.max(...hrIn.map(r => r.bpm))) : null;
   /* Average speed follows the path distance over the window, the way Strava derives pace, so pace and
      distance stay consistent; max speed stays the instantaneous Doppler peak. */
   const avgSpeed = duration > 0 ? distance / duration : 0;
@@ -5837,7 +5923,8 @@ function computeRunSummary(loc, baro, ride, R) {
     }
   }
   return {
-    duration,
+    duration, movingTime, stoppedTime,
+    hrAvg, hrMax,
     distance, maxSpeed, avgSpeed,
     paceMinPerKm: avgSpeed > 0 ? (1000 / avgSpeed) / 60 : null,
     altGain, altLoss,
@@ -5848,6 +5935,119 @@ function computeRunSummary(loc, baro, ride, R) {
     nDownhills: R.segments.filter(s => s.dir === 'down').length,
     nUphills: R.segments.filter(s => s.dir === 'up').length,
   };
+}
+
+
+/* ---------- Per-unit splits (each mile / km) ----------
+   Ported from analyzer/sports/running/splits.js and pinned to it by that module's drift guard.
+   Pure arithmetic on the GPS track the summary already walks, so it carries none of the hedging the
+   gait metrics need. See the module for why boundaries are interpolated rather than snapped, and why
+   a dropout is bridged here but skipped by moving time. */
+const SPLIT_R_EARTH = 6371000;
+const splitToRad = (d) => (d * Math.PI) / 180;
+
+/** Great-circle metres between two fixes. Inlined so the drift guard can run this standalone. */
+function splitHop(a, b) {
+  const dLat = splitToRad(b.latitude - a.latitude);
+  const dLon = splitToRad(b.longitude - a.longitude);
+  const h = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+    + Math.cos(splitToRad(a.latitude)) * Math.cos(splitToRad(b.latitude)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * SPLIT_R_EARTH * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/**
+ * Split the ride window into `unitM`-metre pieces.
+ *
+ * Returns `[{ index, meters, seconds, tStart, tEnd, avgHr, partial }]`, one per unit covered, in
+ * order. An empty array when the track never covers a full unit AND has no distance to report.
+ */
+function computeSplits(loc, ride, unitM, hr) {
+  if (!(unitM > 0)) return [];
+  const inRide = (loc || [])
+    .filter((r) => r && r.t >= ride.start && r.t <= ride.end
+      && r.latitude != null && r.longitude != null)
+    .sort((a, b) => a.t - b.t);
+  if (inRide.length < 2) return [];
+
+  const hrIn = (hr || []).filter((r) => r && r.bpm != null).sort((a, b) => a.t - b.t);
+  /* Mean HR over a split's own time window. Linear scan per split would be O(n*m); the rows are
+     sorted, so a single cursor walks them once across all splits. */
+  let hrCursor = 0;
+  const hrFor = (t0, t1) => {
+    while (hrCursor > 0 && hrIn[hrCursor - 1] && hrIn[hrCursor - 1].t >= t0) hrCursor--;
+    let sum = 0, n = 0, i = hrCursor;
+    while (i < hrIn.length && hrIn[i].t <= t1) {
+      if (hrIn[i].t >= t0) { sum += hrIn[i].bpm; n++; }
+      i++;
+    }
+    hrCursor = Math.max(0, i - 1);
+    return n ? Math.round(sum / n) : null;
+  };
+
+  const splits = [];
+  let cum = 0;               // metres covered so far
+  let splitStartT = inRide[0].t;
+  let target = unitM;        // cumulative distance at which the current split closes
+
+  for (let i = 1; i < inRide.length; i++) {
+    const a = inRide[i - 1], b = inRide[i];
+    const d = splitHop(a, b);
+    if (!(d > 0)) continue;
+    const dt = b.t - a.t;
+    let segStartCum = cum;
+    cum += d;
+    /* One hop can cross more than one boundary (a long dropout, or a fast descent), so close every
+       boundary it spans rather than assuming at most one. */
+    while (cum >= target) {
+      const frac = (target - segStartCum) / d;         // where in this hop the boundary falls
+      const tCross = a.t + dt * frac;
+      splits.push({
+        index: splits.length + 1,
+        meters: unitM,
+        seconds: tCross - splitStartT,
+        tStart: splitStartT,
+        tEnd: tCross,
+        avgHr: hrFor(splitStartT, tCross),
+        partial: false,
+      });
+      splitStartT = tCross;
+      segStartCum = target;
+      target += unitM;
+    }
+  }
+
+  /* Whatever is left over. Reported with its true distance so the UI can say "0.24 mi" instead of
+     implying a full unit at an absurd pace. */
+  const leftover = cum - (target - unitM);
+  const lastT = inRide[inRide.length - 1].t;
+  if (leftover > 1 && lastT > splitStartT) {
+    splits.push({
+      index: splits.length + 1,
+      meters: leftover,
+      seconds: lastT - splitStartT,
+      tStart: splitStartT,
+      tEnd: lastT,
+      avgHr: hrFor(splitStartT, lastT),
+      partial: true,
+    });
+  }
+  return splits;
+}
+
+/**
+ * The fastest and slowest FULL splits, for highlighting. Partial splits are excluded: a 0.2 mi
+ * remainder is not a fast mile, and letting it win the comparison is how a leaderboard lies.
+ * Returns `{ fastest, slowest }` of split indexes, or nulls when there are fewer than two full ones.
+ */
+function splitExtremes(splits) {
+  const full = (splits || []).filter((s) => !s.partial && s.seconds > 0);
+  if (full.length < 2) return { fastest: null, slowest: null };
+  let fastest = full[0], slowest = full[0];
+  for (const s of full) {
+    if (s.seconds < fastest.seconds) fastest = s;
+    if (s.seconds > slowest.seconds) slowest = s;
+  }
+  return { fastest: fastest.index, slowest: slowest.index };
 }
 
 /* ========== Library (IndexedDB persistence) ==========
@@ -8844,7 +9044,7 @@ async function analyze(files) {
         climbAltSeries(sensors.baro, sensors.location, ride),
         running.cadSeries,
         sensors.heartRate || []);
-      const runSummary = computeRunSummary(sensors.location, sensors.baro, ride, running);
+      const runSummary = computeRunSummary(sensors.location, sensors.baro, ride, running, sensors.heartRate || []);
       onProgress('pairing annotation-based descents');
       const descents = pairDescentAnnotations(sensors.annotations || []);
       let comparison = null;
@@ -10032,7 +10232,7 @@ function hideAllSections() {
       if (fs && fs.parentNode !== _segFormHome.parent) _segFormHome.parent.insertBefore(fs, _segFormHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -11717,6 +11917,15 @@ function renderAllRunning(D) {
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
   renderRunTimeline(D);
   renderRunCadence(D.running.cadSeries);
+  /* Splits follow the athlete's unit setting: an imperial runner gets miles, not a metric table
+     under an imperial headline. Computed off the same GPS rows the summary walks. */
+  (() => {
+    const imperial = !U.metric();
+    const unitM = imperial ? 1609.344 : 1000;
+    const rows = (D.sensors && D.sensors.location) || [];
+    const hrRows = (D.sensors && D.sensors.heartRate) || [];
+    renderRunSplits(computeSplits(rows, D.ride, unitM, hrRows), imperial ? 'mile' : 'km');
+  })();
   renderRunOsc(D.running.oscSeries);
   renderRunClimbs(D.running.climbs || []);
   renderRunSegments(D.running.segments);
@@ -12941,6 +13150,23 @@ function renderRunStats(s, detection, mount) {
   // pedometer channel); stride length is the path distance per step.
   const stepsVal = s.cadMedian ? Math.round(s.cadMedian * (s.duration / 60)) : null;
   const strideM = (stepsVal && s.distance) ? s.distance / stepsVal : null;
+  /* The tile always said "moving time" while showing the whole active window, stops included. It now
+     shows moving time and names the stop beside it, but only once the stop is worth a word: every run
+     has a few seconds of GPS settling, and "12s stopped" is noise, not information. */
+  const movingSec = s.movingTime != null ? s.movingTime : s.duration;
+  const stoppedSec = s.stoppedTime != null ? s.stoppedTime : 0;
+  const durSub = stoppedSec >= 30
+    ? `moving · ${fmtDuration(stoppedSec)} stopped`
+    : 'moving time';
+  /* Heart rate, when the watch streamed it. Omitted entirely rather than shown as a dash: a run
+     recorded without the watch has no HR to report, and an empty tile in the grid reads as a
+     measurement that failed rather than a sensor that was not worn. */
+  const hrTile = s.hrAvg == null ? '' : `
+    <div class="stat accent2">
+      <div class="label">Heart rate</div>
+      <div class="value">${s.hrAvg}<span class="unit">bpm</span></div>
+      <div class="sub">avg · ${s.hrMax} max</div>
+    </div>`;
   document.getElementById('statsPanel').innerHTML = `
     <div class="stat accent">
       <div class="label">Cadence</div>
@@ -12954,14 +13180,15 @@ function renderRunStats(s, detection, mount) {
     </div>
     <div class="stat">
       <div class="label">Duration</div>
-      <div class="value">${durTileHTML(dur)}</div>
-      <div class="sub">moving time</div>
+      <div class="value">${durTileHTML(movingSec)}</div>
+      <div class="sub">${durSub}</div>
     </div>
     <div class="stat">
       <div class="label">Distance</div>
       <div class="value">${U.dist(s.distance)}</div>
       <div class="sub">moving distance</div>
     </div>
+    ${hrTile}
     <div class="stat">
       <div class="label">Steps</div>
       <div class="value">${stepsVal != null ? stepsVal.toLocaleString() : '—'}</div>
@@ -13301,6 +13528,54 @@ function renderRunSegments(segments, opts) {
 /* The Climbs panel: one row per sustained up-segment, with the climb-specific coaching read the flat
    segments table does not give (gain, VAM, grade-adjusted pace, and whether cadence held / heart
    drifted through the climb). All display honors the Units toggle. */
+/* Per-mile / per-km splits. The unit follows the athlete's own units setting, so an imperial runner
+   gets miles rather than a metric table with an imperial headline above it.
+
+   Rows carry a bar scaled BETWEEN the fastest and slowest full split rather than from zero: on a
+   run where every split is within a few seconds, a zero-based bar renders as five identical blocks
+   and says nothing. The partial last split is drawn without a bar and labelled with its real
+   distance, because its pace is real but its duration is not comparable to a full one. */
+function renderRunSplits(splits, unitLabel) {
+  if (!splits || !splits.length) { hide('runSplitsSection'); return; }
+  show('runSplitsSection');
+  const tbody = document.querySelector('#runSplitsTable tbody');
+  if (!tbody) return;
+  const { fastest, slowest } = splitExtremes(splits);
+  const full = splits.filter(s => !s.partial);
+  const fast = full.length ? Math.min(...full.map(s => s.seconds)) : 0;
+  const slow = full.length ? Math.max(...full.map(s => s.seconds)) : 0;
+  const span = slow - fast;
+  const label = document.getElementById('runSplitsLabel');
+  if (label) {
+    const n = full.length;
+    label.textContent = `${n} full ${unitLabel}${n === 1 ? '' : 's'}`
+      + (splits.length > n ? ' + a partial' : '')
+      + (fastest ? ` \u00b7 fastest #${fastest}, slowest #${slowest}` : '');
+  }
+  const clock = (sec) => {
+    const m = Math.floor(sec / 60), ss = Math.round(sec - m * 60);
+    return m + ':' + String(ss).padStart(2, '0');
+  };
+  tbody.innerHTML = splits.map(sp => {
+    const mps = sp.seconds > 0 ? sp.meters / sp.seconds : null;
+    /* Longer split = slower, so the bar grows with time. Full-width is the slowest split. */
+    const pct = (!sp.partial && span > 0) ? 12 + 88 * ((sp.seconds - fast) / span) : 0;
+    const tone = sp.index === fastest ? 'var(--accent)'
+      : sp.index === slowest ? 'var(--text-muted)' : 'var(--border)';
+    const bar = sp.partial ? ''
+      : `<div style="height:6px;border-radius:3px;background:${tone};width:${pct.toFixed(0)}%;min-width:8px;"></div>`;
+    const note = sp.partial ? `<span class="dim" style="font-size:11px;">${U.dist(sp.meters)}</span>` : '';
+    const mark = sp.index === fastest ? ' <span class="dim" style="font-size:11px;">fastest</span>' : '';
+    return `<tr>
+      <td>${sp.index}${sp.partial ? ' <span class="dim" style="font-size:11px;">partial</span>' : ''}</td>
+      <td>${clock(sp.seconds)}</td>
+      <td>${mps ? U.pace(mps) : '\u2014'}${mark}</td>
+      <td>${sp.avgHr != null ? sp.avgHr + ' bpm' : '\u2014'}</td>
+      <td style="width:35%;">${bar}${note}</td>
+    </tr>`;
+  }).join('');
+}
+
 function renderRunClimbs(climbs) {
   if (!climbs || !climbs.length) { hide('runClimbsSection'); return; }
   show('runClimbsSection');
@@ -17974,7 +18249,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '52362338e · 2026-07-31';
+const LOAM_BUILD = '6c2e333d3 · 2026-08-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
