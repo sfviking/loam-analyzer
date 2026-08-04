@@ -5082,6 +5082,35 @@ function formInRunTurns(D) {
     return (D.turns || []).filter(inAny);
   } catch (e) { return D.turns || []; }
 }
+/* Every turn EXCEPT those sitting inside a run the rider marked "not a trail".
+
+   Deliberately narrower than formInRunTurns above, and the difference is the point. formInRunTurns
+   answers "which corners are lines worth coaching", so it also drops corners on pedaled transits
+   between runs. This answers only "which corners are on something the rider says is a trail", so a
+   transit corner survives and only the labelled negative is removed.
+
+   That keeps the fix to the reported problem. Grade segmentation cannot tell a canyon road home from
+   a descent (owner report, 2026-07-30: the most-scrubbed turns were freeway offramps on the drive
+   home), the label is the only thing that can, and nothing here should quietly narrow a surface in a
+   second unrelated way while fixing that.
+
+   The rule this draws, for anything added later: a surface that makes a COACHING CLAIM about a
+   corner reads the label; a surface that ENUMERATES corners (the ledger, the turn table, the map
+   markers, the timeline) does not, because a ledger listing every corner it detected is honest even
+   when one of them was a freeway offramp. */
+function turnsOnLabelledTrails(D) {
+  try {
+    const { runs } = segmentRuns(D, 'auto');
+    if (!runs || !runs.length) return D.turns || [];
+    const skipped = runs.filter(r => runSkipped(r.tStart));
+    if (!skipped.length) return D.turns || [];
+    const inSkipped = (T) => {
+      const t = T.tPeak != null ? T.tPeak : T.tStart;
+      return skipped.some(r => t >= r.tStart && t <= r.tEnd);
+    };
+    return (D.turns || []).filter(T => !inSkipped(T));
+  } catch (e) { return D.turns || []; }
+}
 /* Quick-pick chips for the biggest scrubbers: click to load + play that turn's replay directly.
    Renders from the whole ride by default; the segment page passes its windowed turns (and a label
    suffix) so the chips only reference corners of the descent on screen, and Back restores the
@@ -13665,11 +13694,12 @@ function analyzeRunningClimbs(segments, alts, cadSeries, hrRows) {
    meter, so a runner never saw it. Splits are the runner's version of the same instrument.
 
    Terrain is the whole difficulty. The reference run's raw splits read 9:45, 7:46, 8:46, 9:12, 7:49,
-   7:53, which looks like a negative split and is nothing of the kind: the quick miles are the
-   downhill ones. So the comparison runs on grade-adjusted pace via the Minetti model already used
-   for the Climbs panel's GAP column, and when the terrain correction turns out LARGER than the
-   finding it produces, no verdict is offered at all. A verdict that only exists because of a model
-   is a verdict about the model. See the module header for the rest of the reasoning. */
+   7:53, and the quick miles are the downhill ones. So the comparison runs on grade-adjusted pace via
+   the Minetti model already used for the Climbs panel's GAP column, and no verdict is offered when
+   that correction REVERSES the direction of the finding: a verdict that only exists because of a
+   model is a verdict about the model. A correction that merely resizes the finding is the model
+   doing its job and is reported, flagged `terrainDominant` when the hills outweighed the residual so
+   the UI can name the raw figure too. See the module header for the rest of the reasoning. */
 const PACE_MIN_FULL_SPLITS = 4;      // below this, a trend is not a trend
 const PACE_EVEN_BAND = 0.02;         // within 2% of the first half, the run was even
 const PACE_BIG_FADE = 0.08;          // past 8%, worth more than a mention
@@ -13739,27 +13769,33 @@ function runPacing(splits, alts) {
   const gapLast = haveGap ? pacingMean(lastRows.map((r) => r.gapSecPerUnit)) : null;
   const gapDelta = haveGap ? gapLast - gapFirst : null;
 
-  /* The terrain gate. `correction` is how far grade adjustment moved the answer. When it moves it
-     further than the answer itself, the finding is a property of the model and of the hill profile,
-     not of how the run was paced, and the honest output is silence. */
-  if (haveGap) {
-    const correction = gapDelta - rawDelta;
-    if (Math.abs(correction) > Math.abs(gapDelta)) {
-      return {
-        verdict: null,
-        reason: 'terrain',
-        fullSplits: full.length,
-        gradeAdjusted: true,
-        rawDeltaSec: rawDelta,
-        deltaSec: gapDelta,
-        correctionSec: correction,
-      };
-    }
-  }
-
   const base = haveGap ? gapFirst : rawFirst;
   const delta = haveGap ? gapDelta : rawDelta;
   const frac = base > 0 ? delta / base : 0;
+  /* How far grade adjustment moved the answer. Reported either way, so the UI can say how much of
+     the raw difference was the hill rather than the runner. */
+  const correction = haveGap ? gapDelta - rawDelta : 0;
+
+  /* The terrain gate: withhold when the correction REVERSES the direction of the finding. Raw pace
+     saying "negative split" while corrected pace says "fade" (or the reverse) means the verdict is
+     the model's alone, and no measured quantity points that way. Silence is the honest output there.
+     A correction that merely RESIZES the finding is the model doing its job, so it is reported,
+     flagged with `terrainDominant` when the hills accounted for more than the residual.
+
+     The even band is checked first: inside it no direction is being claimed at all, so there is no
+     reversal to guard against. */
+  if (haveGap && Math.abs(frac) > PACE_EVEN_BAND && Math.sign(gapDelta) !== Math.sign(rawDelta)) {
+    return {
+      verdict: null,
+      reason: 'terrain',
+      fullSplits: full.length,
+      gradeAdjusted: true,
+      rawDeltaSec: rawDelta,
+      deltaSec: gapDelta,
+      correctionSec: correction,
+    };
+  }
+
   const verdict = Math.abs(frac) <= PACE_EVEN_BAND ? 'even' : (frac > 0 ? 'fade' : 'negative');
 
   return {
@@ -13773,6 +13809,8 @@ function runPacing(splits, alts) {
     deltaSec: delta,
     deltaFrac: frac,
     rawDeltaSec: rawDelta,
+    correctionSec: correction,
+    terrainDominant: haveGap && Math.abs(correction) > Math.abs(delta),
     big: Math.abs(frac) >= PACE_BIG_FADE,
   };
 }
@@ -13847,9 +13885,10 @@ function renderRunPacing(pacing, unitLabel) {
 
   if (pacing.reason === 'terrain') {
     el.innerHTML = '<span class="rp-verdict">No pacing verdict for this one.</span> '
-      + `The halves ran different terrain, and correcting for it moves the answer by more than the answer is worth `
-      + `(raw pace differs by ${secs(pacing.rawDeltaSec)}/${unitLabel}, almost all of it the hills). `
-      + 'A read here would be describing the route, not the run.'
+      + `The halves ran different terrain, and correcting for it flips the answer over: raw pace says `
+      + `${pacing.rawDeltaSec > 0 ? 'you faded' : 'you finished quicker'} by ${secs(pacing.rawDeltaSec)}/${unitLabel}, `
+      + `while grade-adjusted pace says the opposite. A verdict that only the model points at is a verdict `
+      + 'about the model, so there is nothing honest to report here.'
       + '<span class="rp-note">Grade-adjusted using the Minetti cost-of-running model, the same one behind the Climbs panel\'s GAP column.</span>';
     el.classList.remove('hidden');
     return;
@@ -13867,8 +13906,15 @@ function renderRunPacing(pacing, unitLabel) {
     lead = `<span class="rp-verdict rp-fade">Faded ${secs(pacing.deltaSec)}/${unitLabel}.</span> `
       + (pacing.big ? 'That is a big enough drop to read as going out too hard.' : 'A mild drop over the back half.');
   }
+  /* When the correction outweighs what is left of the finding, the hills did most of the visible
+     work. The verdict still stands (the direction survived the correction, or it would have been
+     withheld above), but showing the adjusted number alone would overstate how much of the raw
+     difference was the runner, so the raw figure is named beside it. */
+  const dominant = pacing.terrainDominant
+    ? ` The hills did most of the visible work here: raw pace differs by ${secs(pacing.rawDeltaSec)}/${unitLabel}, and the correction accounts for more of that than what is left.`
+    : '';
   const note = pacing.gradeAdjusted
-    ? `${halves} ${unitLabel}s, on grade-adjusted pace so the hills do not decide it (Minetti model, as used by the Climbs panel's GAP column).`
+    ? `${halves} ${unitLabel}s, on grade-adjusted pace so the hills do not decide it (Minetti model, as used by the Climbs panel's GAP column).${dominant}`
     : `${halves} ${unitLabel}s, on raw pace: this recording carried no altitude, so the comparison is NOT corrected for terrain and a hilly route will skew it.`;
   el.innerHTML = `${lead}<span class="rp-note">${note}</span>`;
   el.classList.remove('hidden');
@@ -14108,7 +14154,18 @@ function scrollToCoach() { const c = document.getElementById('coachSection'); if
    first (the differentiators), then headline turn / jump / e-bike facts. */
 function mtbHighlights(D) {
   const s = D.summary || {};
-  const mech = turnMechanics(D, U.metric());
+  /* Rescoped at the CALL SITE, not inside turnMechanics: that function is pinned to
+     analyzer/core/coaching/coaching.js by its drift guard, and it reads D.turns, so handing it a
+     filtered copy rescopes it without touching the pinned body (the corner ledger's symmetry footer
+     already does exactly this). Corners on a run the rider marked "not a trail" must not become the
+     hero card's headline: naming a freeway offramp as the ride's hardest braking is the symptom that
+     started this.
+
+     buildDigest deliberately does NOT get the same treatment. Its turns.total and
+     median_apex_radius come from D.summary, so rescoping only its mechanics block would leave the
+     digest contradicting itself, and fixing that properly means rescoping the summary too. That is a
+     larger change and it is tracked in CLAUDE.md rather than half-done here. */
+  const mech = turnMechanics({ ...D, turns: turnsOnLabelledTrails(D) }, U.metric());
   const cands = [];
   if (mech && mech.lean_asymmetry && mech.lean_asymmetry.gap_deg >= 3) {
     const la = mech.lean_asymmetry;
@@ -18637,7 +18694,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '54c45fe3a · 2026-08-01';
+const LOAM_BUILD = '1a7c1deba · 2026-08-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
