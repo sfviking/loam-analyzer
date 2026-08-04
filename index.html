@@ -2218,7 +2218,7 @@ function parseUTCFromFilename(name) {
 }
 
 function emptyCombinedSensors() {
-  return { gravity: [], gyro: [], accel: [], location: [], baro: [], headphone: [], wrist: [], annotations: [], heartRate: [] };
+  return { gravity: [], gyro: [], accel: [], location: [], baro: [], headphone: [], wrist: [], annotations: [], heartRate: [], pedometer: [] };
 }
 /* Append one combined-CSV row to the per-channel arrays. Factored out of extractFromCombined so the
    streaming parser (loadCombinedCSV) can feed rows in one at a time, never holding the whole file. */
@@ -2256,6 +2256,13 @@ function addCombinedRow(out, r) {
       qw: r.wristMotion_quaternionW, qx: r.wristMotion_quaternionX, qy: r.wristMotion_quaternionY, qz: r.wristMotion_quaternionZ });
   if (r.annotation_text != null && String(r.annotation_text).trim() !== '')
     out.annotations.push({ t, text: String(r.annotation_text).trim() });
+  /* CMPedometer's cumulative step count. The capture app has written this column since the schema
+     was defined (ios/Sources/Export/SensorLoggerSchema.swift), and until 2026-08-03 the analyzer
+     dropped it on the floor and estimated steps from cadence instead. Same situation the wrist
+     quaternion was in: always exported, never read. Cumulative and sparse (roughly one update every
+     2.6 s on the reference recordings), so it is differenced rather than read pointwise. */
+  if (r.pedometer_steps != null)
+    out.pedometer.push({ t, steps: r.pedometer_steps });
   if (r.heartRate_bpm != null)
     out.heartRate.push({ t, bpm: r.heartRate_bpm });
 }
@@ -2265,7 +2272,7 @@ function extractFromCombined(rows) {
   return out;
 }
 function extractFromZip(zipData) {
-  const out = { gravity: [], gyro: [], accel: [], location: [], baro: [], headphone: [], wrist: [], annotations: [], heartRate: [] };
+  const out = { gravity: [], gyro: [], accel: [], location: [], baro: [], headphone: [], wrist: [], annotations: [], heartRate: [], pedometer: [] };
   /* One shared time origin for the whole zip: the earliest first sample across all channels.
      Rebasing each channel to its own first row skewed late starters: GPS was shifted earlier by
      its time-to-first-fix, and annotations (which only exist when the rider speaks) had their
@@ -12096,7 +12103,16 @@ function renderAllRunning(D) {
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
   renderSampleRateNotice(D);
   renderRideSignature(D, sport);
-  renderRunStats(D.summary, D.detection, D.running && D.running.mount);
+  /* Pedometer channel, when the recording carries one. Computed here rather than inside
+     renderRunStats because it needs the raw sensors and the ride window, not just the summary. */
+  const pedRows = (D.sensors && D.sensors.pedometer) || [];
+  const pedCad = pedCadence(pedRows, (D.sensors && D.sensors.location) || [], D.ride);
+  const pedInfo = {
+    totals: pedTotals(pedRows, D.ride),
+    cadence: pedCad,
+    agreement: pedCadenceAgreement(D.summary && D.summary.cadMedian, pedCad),
+  };
+  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo);
   /* Walking gets the highlights card too (coach parity); the empty-guard hides it if no bullets. */
   renderCoachHighlights(D, sport);
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
@@ -13333,7 +13349,7 @@ function renderGeekStats(D, sport) {
   show('geekStatsSection');
 }
 
-function renderRunStats(s, detection, mount) {
+function renderRunStats(s, detection, mount, ped) {
   const fmt = (v, unit, d=1) => v == null ? '—' : `<span class="value">${v.toFixed(d)}<span class="unit">${unit}</span></span>`;
   /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
      Mark the number itself (~, muted) instead of relying only on the caption below. */
@@ -13355,10 +13371,38 @@ function renderRunStats(s, detection, mount) {
      that kept counting through six minutes of standing still. Moving is the right basis for both:
      "pace" means moving pace to every runner and to Strava, and nobody takes strides at a red light. */
   const paceSpeed = s.movingSpeed != null ? s.movingSpeed : s.avgSpeed;
-  // Steps: stride count estimated from median cadence over the moving time (this pipeline has no raw
-  // pedometer channel); stride length is the path distance per step.
-  const stepsVal = s.cadMedian ? Math.round(s.cadMedian * (movingSec / 60)) : null;
-  const strideM = (stepsVal && s.distance) ? s.distance / stepsVal : null;
+  /* Steps: COUNTED from the pedometer channel when the recording carries one, and only estimated
+     from cadence x moving time when it does not. The old comment here said "this pipeline has no raw
+     pedometer channel", which stopped being true the moment the capture app defined its schema; the
+     column was simply being dropped on ingest. The estimate reads 8213 steps on the reference run
+     against 8751 counted, and the whole 6% lands in stride length. */
+  const stepInfo = pedStepsAndStride({
+    totals: ped && ped.totals,
+    distanceM: s.distance,
+    cadMedian: s.cadMedian,
+    movingSec,
+  });
+  const stepsVal = stepInfo ? stepInfo.steps : null;
+  const strideM = stepInfo ? stepInfo.strideM : null;
+  const stepsSub = !stepInfo ? 'cadence × moving time'
+    : (strideM != null
+        ? `${U.small(strideM)} stride · ${stepInfo.measured ? 'counted' : 'estimated'}`
+        : (stepInfo.measured ? 'counted by the pedometer' : 'cadence × moving time'));
+  /* The cadence caption carries the second opinion. Loam's cadence is a DFT peak on phone
+     accelerometry; the pedometer is Apple's own step counter on a different algorithm, so the two
+     agreeing is worth stating and the two disagreeing is worth stating LOUDER. Neither is declared
+     the winner, because two estimates diverging says one is wrong without saying which.
+
+     Measured over data/run/ on 2026-08-03, all three recordings long enough to carry pedometer data
+     agree: 162 vs 163, 163 vs 163, and (a walk) 113 vs 117. The walk is the interesting one, because
+     it is the walk-band swap above doing its job. Skip that swap and the running band reports 169
+     for that same walk; the pedometer would then have flagged it. Confirming a correction already in
+     place is exactly what a second instrument is for. */
+  const agr = ped && ped.agreement;
+  const cadSub = !agr ? 'median · FFT on |accel|'
+    : agr.agrees
+      ? `median · FFT on |accel| · pedometer agrees (${agr.pedSpm.toFixed(0)} spm)`
+      : `median · FFT on |accel| · <span style="color:var(--accent-4)">pedometer says ${agr.pedSpm.toFixed(0)} spm</span>`;
   /* Heart rate, when the watch streamed it. Omitted entirely rather than shown as a dash: a run
      recorded without the watch has no HR to report, and an empty tile in the grid reads as a
      measurement that failed rather than a sensor that was not worn. */
@@ -13372,7 +13416,7 @@ function renderRunStats(s, detection, mount) {
     <div class="stat accent">
       <div class="label">Cadence</div>
       ${fmt(s.cadMedian, 'spm', 0)}
-      <div class="sub">median · FFT on |accel|</div>
+      <div class="sub">${cadSub}</div>
     </div>
     <div class="stat accent2">
       <div class="label">Oscillation</div>
@@ -13393,7 +13437,7 @@ function renderRunStats(s, detection, mount) {
     <div class="stat">
       <div class="label">Steps</div>
       <div class="value">${stepsVal != null ? stepsVal.toLocaleString() : '—'}</div>
-      <div class="sub">${strideM != null ? U.small(strideM) + ' stride' : 'cadence × moving time'}</div>
+      <div class="sub">${stepsSub}</div>
     </div>
     <div class="stat accent3">
       <div class="label">Pace</div>
@@ -13870,6 +13914,89 @@ function renderRunSegments(segments, opts) {
    they did not: a real 6.53 mi run showed 50m42s on the tile and 56m43s across the rows, six minutes
    of standing at crossings spread through the splits with nothing on screen accounting for it. A
    split whose stop is worth a word says so on the row rather than silently swallowing it. */
+/* ---------- Pedometer: steps, stride, and a second opinion on cadence ----------
+   Ported from analyzer/sports/running/pedometer.js and pinned to it by that module's drift guard.
+   See the module header for the measurements behind every constant here; the short version:
+
+     - the capture app has always written pedometer_steps and the analyzer always dropped it, the
+       same situation the wrist quaternion was in before the Swing Cam;
+     - counted steps beat cadence x moving-time (8751 vs 8213 on the reference run, and the whole 6%
+       lands in stride length);
+     - cadence is WINDOWED, never totalled, because a totals answer divides by "moving time" and on
+       the reference run that reads 150.6 or 172.6 spm depending only on which definition is used;
+     - CMPedometer is a second estimate, not ground truth, so the UI reports agreement and never
+       declares a winner. */
+const PED_MIN_DT_S = 2;      // updates land ~2.6 s apart
+const PED_MAX_DT_S = 10;     // longer than this straddles a stop
+const PED_MOVING_MPS = 1.0;  // same moving threshold the cadence DFT uses
+const PED_MIN_WINDOWS = 10;  // below this there is nothing to take a median of
+const PED_AGREE_SPM = 5;     // within this the two methods are called agreeing
+
+function pedMedian(xs) {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+function pedInRide(rows, ride) {
+  return (rows || []).filter((r) => r && r.t >= ride.start && r.t <= ride.end);
+}
+/** Steps actually counted over the ride. Differenced: the column is cumulative and never resets. */
+function pedTotals(pedRows, ride) {
+  const rows = pedInRide(pedRows, ride).filter((r) => Number.isFinite(r.steps));
+  if (rows.length < 2) return null;
+  const first = rows[0], last = rows[rows.length - 1];
+  const steps = last.steps - first.steps;
+  if (!(steps > 0)) return null;
+  return { steps, updates: rows.length, spanS: last.t - first.t };
+}
+/** Median rate across consecutive updates the runner was moving through. */
+function pedCadence(pedRows, locRows, ride) {
+  const rows = pedInRide(pedRows, ride).filter((r) => Number.isFinite(r.steps));
+  if (rows.length < 2) return null;
+  const loc = (locRows || []).filter((r) => r && Number.isFinite(r.speed));
+  const movingIn = (t0, t1) => {
+    let sum = 0, n = 0;
+    for (const r of loc) {
+      if (r.t < t0) continue;
+      if (r.t > t1) break;
+      sum += r.speed; n++;
+    }
+    return n > 0 && sum / n > PED_MOVING_MPS;
+  };
+  const rates = [];
+  for (let i = 1; i < rows.length; i++) {
+    const dt = rows[i].t - rows[i - 1].t;
+    const ds = rows[i].steps - rows[i - 1].steps;
+    if (dt < PED_MIN_DT_S || dt > PED_MAX_DT_S) continue;
+    if (!(ds >= 0)) continue;
+    if (!movingIn(rows[i - 1].t, rows[i].t)) continue;
+    rates.push((ds / dt) * 60);
+  }
+  if (rates.length < PED_MIN_WINDOWS) return null;
+  return { spm: pedMedian(rates), windows: rates.length };
+}
+/** Counted steps when there is a pedometer, the old cadence estimate when there is not. */
+function pedStepsAndStride({ totals, distanceM, cadMedian, movingSec }) {
+  let steps = null;
+  let measured = false;
+  if (totals && totals.steps > 0) {
+    steps = Math.round(totals.steps);
+    measured = true;
+  } else if (cadMedian > 0 && movingSec > 0) {
+    steps = Math.round(cadMedian * (movingSec / 60));
+  }
+  if (!steps) return null;
+  const strideM = distanceM > 0 ? distanceM / steps : null;
+  return { steps, strideM, measured };
+}
+/** Report the gap between the two cadence methods, and pick no winner. */
+function pedCadenceAgreement(fftSpm, ped) {
+  if (!(fftSpm > 0) || !ped || !(ped.spm > 0)) return null;
+  const deltaSpm = ped.spm - fftSpm;
+  return { fftSpm, pedSpm: ped.spm, deltaSpm, agrees: Math.abs(deltaSpm) <= PED_AGREE_SPM, windows: ped.windows };
+}
+
 /* The pacing verdict, written out. Only ever a sentence: the underlying comparison is two means of
    three or four splits, which supports "you faded 24 s/mi", not a decimal place. Withheld cases say
    nothing at all rather than hedging, except the terrain one, which is worth naming because the
@@ -18694,7 +18821,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '1a7c1deba · 2026-08-03';
+const LOAM_BUILD = '9927b485f · 2026-08-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
