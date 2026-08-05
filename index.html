@@ -9248,6 +9248,21 @@ function normalizeSwimImport(raw) {
   const ledgerStrokes = lengths.reduce((s, l) => s + (l.strokes || 0), 0);
   const totalStrokes = Number.isFinite(strokeRaw) && strokeRaw > 0 ? Math.round(strokeRaw) : ledgerStrokes;
 
+  /* Open water only, and both are empty for a pool swim. The GPS route comes from HKWorkoutRoute
+     (there is no route in a pool), and the raw stroke-count samples are kept as a time series
+     because with no lap events there is nothing to bucket them into -- they ARE the signal. A pool
+     swim discards both: its lengths already carry everything. */
+  const route = (Array.isArray(raw.route) ? raw.route : [])
+    .map(r => ({ t: Number(r.t), lat: Number(r.lat), lon: Number(r.lon) }))
+    .filter(r => Number.isFinite(r.t) && Number.isFinite(r.lat) && Number.isFinite(r.lon)
+      && Math.abs(r.lat) <= 90 && Math.abs(r.lon) <= 180)
+    .sort((a, b) => a.t - b.t);
+
+  const strokeSamples = (Array.isArray(raw.strokeSamples) ? raw.strokeSamples : [])
+    .map(s => ({ t0: Number(s.t0), t1: Number(s.t1), count: Number(s.count) }))
+    .filter(s => Number.isFinite(s.t0) && Number.isFinite(s.t1) && s.t1 > s.t0 && s.count > 0)
+    .sort((a, b) => a.t0 - b.t0);
+
   const kcalRaw = Number(raw.activeEnergyKcal);
   const hr = (Array.isArray(raw.hr) ? raw.hr : [])
     .map(r => ({ t: Number(r.t), bpm: Number(r.bpm) }))
@@ -9262,7 +9277,183 @@ function normalizeSwimImport(raw) {
     locationType, poolLengthM, displayUnit,
     totalDistanceM, totalStrokes,
     activeEnergyKcal: Number.isFinite(kcalRaw) && kcalRaw > 0 ? Math.round(kcalRaw) : null,
-    lengths, hr,
+    lengths, hr, route, strokeSamples,
+  };
+}
+
+
+  /* ---- ported from analyzer/sports/swim/open-water.js ---- */
+/* Cumulative along-path distance for a route, in metres. Index i is the distance from the first
+   fix to fix i, so windowing by distance is a subtraction rather than a rescan. */
+function routeCumulative(route) {
+  const cum = [0];
+  for (let i = 1; i < route.length; i++) {
+    cum.push(cum[i - 1] + haversineMeters(route[i - 1].lat, route[i - 1].lon, route[i].lat, route[i].lon));
+  }
+  return cum;
+}
+
+/* Rolling straightness along the route, one reading per window.
+ *
+ * Windowed by TIME rather than by distance, because the thing being measured is a behavior (how
+ * often the swimmer sights and corrects) and behaviors happen on a clock. A distance window would
+ * also stretch and shrink with pace, which is the other variable.
+ *
+ * `windowS` is deliberately long. Open-water GPS is sparse and noisy: the watch only gets a fix when
+ * the wrist breaks the surface on a recovery stroke, so consecutive fixes carry real position error,
+ * and over a short window that error dominates the actual wandering. A long window averages it down
+ * at the cost of localization, which is the right trade when the alternative is reporting noise as
+ * navigation.
+ */
+function routePoints(route) {
+  return (route || [])
+    .filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.lat) && Number.isFinite(r.lon))
+    .slice().sort((a, b) => a.t - b.t);
+}
+
+/* Straightness of one slice: net displacement between its endpoints over the distance actually
+   swum. 1.0 is a perfect line; 0.5 means half the swimming went sideways. Returns null for a slice
+   too short to mean anything, rather than the 0/0 that an idle swimmer would otherwise produce. */
+function sliceStraightness(route, cum, i0, i1) {
+  const path = cum[i1] - cum[i0];
+  if (!(path > 0)) return null;
+  const net = haversineMeters(route[i0].lat, route[i0].lon, route[i1].lat, route[i1].lon);
+  return +Math.min(1, net / path).toFixed(3);
+}
+
+function straightnessWindows(route, opts) {
+  const windowS = (opts && opts.windowS) || 60;
+  const minFixes = (opts && opts.minFixes) || 4;
+  const pts = routePoints(route);
+  if (pts.length < minFixes) return [];
+  const cum = routeCumulative(pts);
+
+  const out = [];
+  let i0 = 0;
+  while (i0 < pts.length - 1) {
+    const tEnd = pts[i0].t + windowS;
+    let i1 = i0;
+    while (i1 + 1 < pts.length && pts[i1 + 1].t <= tEnd) i1++;
+    /* A window that could not gather enough fixes is skipped, not padded: a two-fix "window" has a
+       straightness of exactly 1 by construction (two points are always collinear) and would silently
+       inflate the session median toward perfect. */
+    if (i1 - i0 + 1 >= minFixes) {
+      const s = sliceStraightness(pts, cum, i0, i1);
+      if (s != null) {
+        out.push({
+          t0: pts[i0].t, t1: pts[i1].t,
+          straightness: s,
+          pathM: +(cum[i1] - cum[i0]).toFixed(1),
+          netM: +(haversineMeters(pts[i0].lat, pts[i0].lon, pts[i1].lat, pts[i1].lon)).toFixed(1),
+          i0, i1,
+        });
+      }
+    }
+    if (i1 <= i0) i0++; else i0 = i1;
+  }
+  return out;
+}
+
+/* Stroke rate over time, from the raw stroke-count samples HealthKit writes over intervals.
+ *
+ * The clean read: strokes divided by the seconds they were counted over. No distance, so neither the
+ * current nor the GPS error can reach it. A rate that climbs through a long swim is fatigue, and it
+ * means the same thing in open water as in a pool, which is exactly why it survives here when
+ * distance per stroke does not. */
+function strokeRateSeries(strokeSamples) {
+  return (strokeSamples || [])
+    .filter(s => s && Number.isFinite(s.t0) && Number.isFinite(s.t1) && s.t1 > s.t0 && s.count > 0)
+    .slice().sort((a, b) => a.t0 - b.t0)
+    .map(s => ({
+      t0: s.t0, t1: s.t1,
+      spm: +(s.count / (s.t1 - s.t0) * 60).toFixed(1),
+    }));
+}
+
+/* Percent change across a series, by the same least-squares fit the pool trends use, so a "your
+   stroke rate rose 9% across the swim" here means the same thing it means there. Reimplemented
+   rather than imported to keep this module free of a circular dependency on analysis.js. */
+function seriesTrendPct(values) {
+  const ys = (values || []).filter(v => v != null && Number.isFinite(v));
+  const n = ys.length;
+  if (n < 2) return null;
+  const xbar = (n - 1) / 2;
+  const ybar = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0;
+  for (let i = 0; i < n; i++) { sxy += (i - xbar) * (ys[i] - ybar); sxx += (i - xbar) ** 2; }
+  if (sxx <= 0) return null;
+  const slope = sxy / sxx;
+  const intercept = ybar - slope * xbar;
+  if (!(intercept > 0)) return null;
+  return +(slope * (n - 1) / intercept * 100).toFixed(1);
+}
+
+/* Plain-language read for a navigation score, so the number arrives with a meaning attached rather
+   than as a bare ratio the swimmer has to calibrate for themselves. The bands are judgement, not
+   measurement, and are stated as such in the copy and in swim-spec.md. */
+function navigationRead(straightness) {
+  if (straightness == null) return null;
+  if (straightness >= 0.95) return {
+    label: 'straight',
+    mechanism: 'Your line held close to straight through most of the swim, so very little of your effort went sideways.',
+    action: 'Nothing to fix here. Keep the sighting rhythm you used.',
+  };
+  if (straightness >= 0.88) return {
+    label: 'mostly straight',
+    mechanism: 'You held a reasonable line with some drift between sightings. A little of the distance you swam was not toward the finish.',
+    action: 'Try sighting slightly more often through the stretches the map marks, and check whether you drift consistently to one side.',
+  };
+  return {
+    label: 'wandering',
+    mechanism: 'A meaningful share of your swimming went sideways rather than forward, which is the most common and most fixable way to lose time in open water.',
+    action: 'Sight more often, and if the drift is consistently one-sided it is usually a breathing-side or stroke-asymmetry habit worth checking in a pool.',
+  };
+}
+
+/* Session roll-up for an open-water swim.
+ *
+ * `pathM` is the distance actually swum along the GPS track; the workout's own total is kept
+ * separately because Apple fuses GPS with motion and its figure is generally the better one. They
+ * are reported side by side rather than reconciled: the gap between them is itself informative
+ * (sparse fixes make the track shorter than the swim), and quietly picking one would hide that. */
+function analyzeOpenWater(session, opts) {
+  const route = (session && session.route) || [];
+  const windows = straightnessWindows(route, opts);
+  const rate = strokeRateSeries(session && session.strokeSamples);
+
+  /* The SAME filtering and ordering straightnessWindows applies internally, because its windows
+     carry i0/i1 indices and a consumer that drew them against the caller's raw route would silently
+     mis-segment any track with a dropped or out-of-order fix. The points the windows index into are
+     returned alongside them so the two cannot come apart. */
+  const pts = routePoints(route);
+  const cum = pts.length ? routeCumulative(pts) : [0];
+  const pathM = pts.length ? +cum[cum.length - 1].toFixed(1) : null;
+
+  const straightVals = windows.map(w => w.straightness);
+  const medianStraightness = straightVals.length ? +median(straightVals).toFixed(3) : null;
+
+  /* The extra distance the wandering cost, expressed the way a swimmer thinks about it. Derived from
+     the median window rather than from end-to-end displacement, for the loop-course reason above. */
+  const extraPct = medianStraightness != null && medianStraightness > 0
+    ? +((1 / medianStraightness - 1) * 100).toFixed(1) : null;
+
+  const spms = rate.map(r => r.spm);
+  return {
+    hasRoute: pts.length > 1,
+    points: pts,
+    hasStrokeRate: rate.length > 1,
+    nFixes: pts.length,
+    pathM,
+    windows,
+    medianStraightness,
+    extraDistancePct: extraPct,
+    navigation: navigationRead(medianStraightness),
+    /* The worst stretch, so the map has something to point at rather than only a session average. */
+    worstWindow: windows.length
+      ? windows.reduce((a, b) => (b.straightness < a.straightness ? b : a)) : null,
+    strokeRate: rate,
+    medianStrokeRateSpm: spms.length ? +median(spms).toFixed(1) : null,
+    strokeRateChangePct: seriesTrendPct(spms),
   };
 }
 
@@ -9478,7 +9669,18 @@ function analyzeSwim(session, opts) {
     ? groupSwimSets(lengths, restGapS).map(s => analyzeSwimSet(s, { minTrendLengths, bandPct }))
     : [];
 
-  const swimmingS = sets.reduce((s, x) => s + x.durationS, 0);
+  /* No lengths means open water, where the pool read is not merely unavailable but actively
+     misleading (current, sighting and zigzag can invert the distance-per-stroke verdict), so a
+     DIFFERENT analysis runs instead of a degraded version of this one. See open-water.js. */
+  const openWater = !hasLengths ? analyzeOpenWater(session, opts) : null;
+
+  /* Time actually swimming, and time resting, are LENGTH-derived: they come from summing the sets
+     and subtracting. Open water has no sets, so summing gives zero and the subtraction then reports
+     the entire swim as rest -- which reached the tiles as "0m 00s swimming / 10m 00s rest" on a
+     continuous swim, and the coach digest as rest_min equal to the whole session. There is no wall
+     to rest at out there and no lap events to find a pause with, so the honest answer is that
+     neither number is known: null, not zero. */
+  const swimmingS = hasLengths ? sets.reduce((s, x) => s + x.durationS, 0) : null;
   const paces = lengths.map(l => l.pace100S).filter(v => v != null);
   const dpsAll = lengths.map(l => l.dps).filter(v => v != null);
   const swolfAll = lengths.map(l => l.swolf).filter(v => v != null);
@@ -9487,6 +9689,7 @@ function analyzeSwim(session, opts) {
   const graded = sets.filter(s => s.trend);
   return {
     hasLengths,
+    openWater,
     nLengths: lengths.length,
     nSets: sets.length,
     sets,
@@ -9494,8 +9697,13 @@ function analyzeSwim(session, opts) {
     poolLengthM: session.poolLengthM,
     totalDistanceM: session.totalDistanceM,
     totalStrokes: session.totalStrokes,
-    swimmingS: +swimmingS.toFixed(1),
-    restS: +Math.max(0, session.durationS - swimmingS).toFixed(1),
+    swimmingS: swimmingS == null ? null : +swimmingS.toFixed(1),
+    restS: swimmingS == null ? null : +Math.max(0, session.durationS - swimmingS).toFixed(1),
+    /* Open water has no per-length pace, but distance over duration is a perfectly good average and
+       is the number a swimmer actually quotes. Pool sessions keep the per-length median, which is
+       the better figure there because it excludes rest. */
+    avgPace100S: session.totalDistanceM > 0 && session.durationS > 0
+      ? +(session.durationS / session.totalDistanceM * 100).toFixed(1) : null,
     medianPace100S: paces.length ? +median(paces).toFixed(1) : null,
     medianDps: dpsAll.length ? +median(dpsAll).toFixed(2) : null,
     medianSwolf: swolfAll.length ? +median(swolfAll).toFixed(1) : null,
@@ -9563,8 +9771,11 @@ function swimDigest(D) {
     location: session.locationType || 'unknown',
     display_unit: session.displayUnit || 'm',
     duration_min: r1((s.durationS || 0) / 60),
-    swimming_min: r1((s.swimmingS || 0) / 60),
-    rest_min: r1((s.restS || 0) / 60),
+    /* null, not zero, for open water: there are no lap events to find a pause with, so how much of
+       the session was spent swimming is genuinely unknown rather than none of it. */
+    swimming_min: s.swimmingS == null ? null : r1(s.swimmingS / 60),
+    rest_min: s.restS == null ? null : r1(s.restS / 60),
+    avg_pace_s_per_100m: r1(s.avgPace100S),
     total_distance_m: r1(s.totalDistanceM, 0),
     total_lengths: s.nLengths,
     total_strokes: s.totalStrokes,
@@ -9681,6 +9892,7 @@ function computeSwimSummary(session, R) {
     nLengths: R.nLengths,
     nSets: R.nSets,
     medianPace100S: R.medianPace100S,
+    avgPace100S: R.avgPace100S,
     medianDps: R.medianDps,
     medianSwolf: R.medianSwolf,
     medianStrokeRateSpm: R.medianStrokeRateSpm,
@@ -9736,7 +9948,9 @@ function swimPaceLabel(pace100S, unit) {
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
     swimEffortRead, swimPaceCv, isCountable,
     computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel,
-    swimDigest, swimCaveats, swimCoachPrompt };
+    swimDigest, swimCaveats, swimCoachPrompt,
+    analyzeOpenWater, straightnessWindows, sliceStraightness, routeCumulative,
+    strokeRateSeries, seriesTrendPct, navigationRead, routePoints };
 })();
 
 /* Which stationary sport an UNTAPPED recording looks like, or null.
@@ -12961,40 +13175,157 @@ function renderSwim(D) {
   const where = s.locationType === 'openWater' ? 'open water'
     : (poolLabel ? poolLabel + ' pool' : 'pool');
 
-  const tiles = [
+  /* Two tile sets, because half the pool numbers are undefined out in open water and the other half
+     mean something different. Notably "swimming" and "rest" are LENGTH-derived, so open water gets
+     total duration instead: reporting a continuous swim as 0 s swimming and all rest is worse than
+     saying nothing, and it did exactly that until the analysis returned null for both. Pace likewise
+     switches from the per-length median (which excludes rest, the right figure in a pool) to
+     distance over duration. */
+  const ow = R.openWater || {};
+  const tiles = (R.hasLengths ? [
     tile(U.swimDistanceLabel(s.totalDistanceM, unit), 'distance'),
     tile(fmtDuration(s.swimmingS || 0), 'swimming'),
     tile(U.swimPaceLabel(s.medianPace100S, unit).replace(/\/100(m|yd)$/, ''), `pace /100${unit}`),
-    R.hasLengths ? tile(U.swimDpsLabel(s.medianDps, unit), 'per stroke') : '',
-    R.hasLengths ? tile(s.medianStrokeRateSpm != null ? s.medianStrokeRateSpm : '—', 'strokes/min') : '',
-    R.hasLengths ? tile(s.medianSwolf != null ? s.medianSwolf : '—', 'swolf') : '',
-    R.hasLengths ? tile(s.nLengths, 'lengths') : '',
-    R.hasLengths ? tile(s.nSets, 'sets') : '',
+    tile(U.swimDpsLabel(s.medianDps, unit), 'per stroke'),
+    tile(s.medianStrokeRateSpm != null ? s.medianStrokeRateSpm : '—', 'strokes/min'),
+    tile(s.medianSwolf != null ? s.medianSwolf : '—', 'swolf'),
+    tile(s.nLengths, 'lengths'),
+    tile(s.nSets, 'sets'),
     s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max ~') : '',
-  ].filter(Boolean).join('');
+  ] : [
+    tile(U.swimDistanceLabel(s.totalDistanceM, unit), 'distance'),
+    tile(fmtDuration(s.durationS || 0), 'duration'),
+    tile(U.swimPaceLabel(s.avgPace100S, unit).replace(/\/100(m|yd)$/, ''), `avg pace /100${unit}`),
+    ow.medianStrokeRateSpm != null ? tile(ow.medianStrokeRateSpm, 'strokes/min') : '',
+    ow.medianStraightness != null ? tile(Math.round(ow.medianStraightness * 100) + '%', 'line held') : '',
+    s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max ~') : '',
+  ]).filter(Boolean).join('');
 
-  /* An open-water swim has no lap events at all, so there is no ledger, no sets, and no divergence
-     read. Say that outright rather than synthesizing pseudo-lengths from GPS, which would be
-     inventing the very data the view claims to analyze. */
+  /* Open water gets a DIFFERENT read, not a degraded pool one. Distance per stroke is confounded
+     three ways there (current, sighting, zigzag) badly enough to invert a verdict, so the pool
+     decomposition is withheld and navigation takes its place. See analyzer/sports/swim/open-water.js. */
   const body = R.hasLengths
     ? swimDecompSection(R, unit) + swimSetCards(R, unit) + swimLedger(R, unit)
-    : `
-    <div class="swim-set">
-      <div class="swim-set-head"><span class="swim-set-n">Open water</span></div>
-      <p class="swim-mech">Apple records lengths only in a pool, where the watch detects each turn. An open-water swim has no lengths, so there is nothing to fit a stroke trend across and this view can show totals only. Swim in a pool to get the per-set read.</p>
-    </div>`;
+    : swimOpenWaterSection(R, unit);
 
   el.innerHTML = `
     <div class="section-title">Swim <span class="beta-badge">BETA</span></div>
     <div class="strength-scope"><strong>Imported from Apple Health, not recorded by Loam.</strong>
-      Your watch already counts lengths, strokes and stroke type better than a phone in a locker ever could, so Loam takes those as given and adds the part Apple does not show: how your stroke <strong>changed</strong> across each set. Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster. Every trend below is an estimate (BETA) pending swim ground truth.</div>
+      Your watch already counts ${R.hasLengths ? 'lengths, strokes and stroke type' : 'distance, strokes and your GPS track'} better than a phone in a locker ever could, so Loam takes those as given and adds the part Apple does not show.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA) pending swim ground truth.</div>
     <div class="swim-tiles">${tiles}</div>
     <div class="strength-tablenote">${escapeHtml(where)}${s.styles && s.styles.length ? ' · ' + escapeHtml(s.styles.join(', ')) : ''}${s.restS ? ' · ' + fmtDuration(s.restS) + ' rest' : ''}${s.activeEnergyKcal ? ' · ' + s.activeEnergyKcal + ' kcal' : ''}</div>
     ${body}
-    <div class="strength-caveat"><strong>Beta:</strong> swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from Apple Watch and are shown as recorded. What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are not estimated here rather than being guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water. SWOLF is only comparable within one pool length.${swimShortPoolNote(s)}</div>
+    <div class="strength-caveat"><strong>Beta:</strong> swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from Apple Watch and are shown as recorded. What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are not estimated here rather than being guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water. ${R.hasLengths ? 'SWOLF is only comparable within one pool length.' : 'Out here your GPS track is sparse (the watch only fixes when your wrist surfaces), so the navigation read is windowed over a full minute and single wobbles mean nothing.'}${swimShortPoolNote(s)}</div>
   `;
   if (R.hasLengths) { drawSwimDecomp(R, unit); drawSwimQuadrant(R); }
+  else { drawSwimRouteMap(R); drawSwimStrokeRate(R); }
   renderCoachPanel(D, 'swimming');
+}
+
+/* The open-water view.
+ *
+ * Deliberately NOT the pool view with holes in it. In open water the water itself moves, so distance
+ * per stroke stops being a technique read: swimming into a current collapses it and turning at a
+ * buoy inflates it, and neither is anything the swimmer did with their arms. Sighting adds strokes,
+ * and zigzag adds distance precisely BECAUSE the swimmer navigated badly. Those confounds can invert
+ * the verdict rather than just blur it, so the decomposition is withheld entirely.
+ *
+ * What replaces it is the read open water actually rewards: navigation. Swimmers routinely cover
+ * 10-20% more than the course by sighting badly, it is the most fixable thing in the discipline, and
+ * neither Fitness nor Garmin surfaces it as a coachable number. */
+function swimOpenWaterSection(R, unit) {
+  const ow = R.openWater || {};
+  if (!ow.hasRoute && !ow.hasStrokeRate) {
+    return `<div class="swim-set">
+      <div class="swim-set-head"><span class="swim-set-n">Open water</span></div>
+      <p class="swim-mech">This swim carries no GPS route and no stroke samples, so there is nothing to read beyond the totals above. A watch-recorded open-water swim normally has both.</p>
+    </div>`;
+  }
+  const nav = ow.navigation;
+  const pct = ow.extraDistancePct;
+  const navCard = ow.hasRoute && nav ? `
+    <div class="swim-set">
+      <div class="swim-set-head">
+        <span class="swim-set-n">Navigation</span>
+        <span class="swim-set-sub">${LoamSwim.swimDistanceLabel(ow.pathM, unit)} of track &middot; ${ow.nFixes} GPS fixes</span>
+        <span class="swim-verdict ${pct != null && pct >= 12 ? 'spinning' : pct != null && pct >= 5 ? 'fading' : 'holding'}">${escapeHtml(nav.label)}</span>
+      </div>
+      <div class="swim-factors">
+        <span>line held <b>${Math.round((ow.medianStraightness || 0) * 100)}%</b></span>
+        ${pct != null ? `<span>extra distance <b class="${pct >= 5 ? 'down' : 'flat'}">${pct > 0 ? '+' : ''}${pct}%</b></span>` : ''}
+        ${ow.worstWindow ? `<span>worst stretch <b>${Math.round(ow.worstWindow.straightness * 100)}%</b></span>` : ''}
+      </div>
+      <p class="swim-mech">${escapeHtml(nav.mechanism)}</p>
+      <p class="swim-act">${escapeHtml(nav.action)}</p>
+    </div>` : '';
+
+  const map = ow.hasRoute ? `<div class="section-title" style="margin-top:22px">Your line
+      <span class="subtitle">redder where you wandered off it</span>
+    </div>
+    <div class="panel"><div id="swimRouteMap" style="height:340px;border-radius:10px;overflow:hidden"></div>
+      <div class="strength-tablenote">Colour is straightness over a rolling window, not speed. Open-water GPS only gets a fix when your wrist breaks the surface, so short wobbles are as likely to be the watch as you: read the long stretches, not single segments.</div>
+    </div>` : '';
+
+  const rate = ow.hasStrokeRate ? `<div class="section-title" style="margin-top:22px">Stroke rate
+      <span class="subtitle">the one read a current cannot distort</span>
+    </div>
+    <div class="panel"><div id="swimStrokeRateChart" class="chart" style="height:260px"></div>
+      <div class="strength-tablenote">Strokes over a clock, with no distance in it, so neither the current nor GPS error reaches this number. ${ow.strokeRateChangePct != null ? `It ${ow.strokeRateChangePct > 2 ? 'rose' : ow.strokeRateChangePct < -2 ? 'fell' : 'held'} ${Math.abs(ow.strokeRateChangePct)}% across the swim.` : ''}</div>
+    </div>` : '';
+
+  return `<div class="strength-scope" style="margin-bottom:14px"><strong>Open water, so the stroke read is withheld on purpose.</strong> Distance per stroke only means something when the water is still. Out here a current, a sighting break, or a zigzag between buoys all move it, and none of them is your catch — the number could say you are losing hold of the water when the water simply moved. What open water does reward is <strong>navigation</strong>, so that is what is measured instead.</div>
+    ${navCard}${map}${rate}`;
+}
+
+/* The route, coloured by how straight the swimmer was holding their line through each window rather
+   than by speed. Speed in open water is mostly the current; the line is the swimmer. */
+function drawSwimRouteMap(R) {
+  const ow = R.openWater || {};
+  const el = document.getElementById('swimRouteMap');
+  if (!el || !ow.hasRoute || typeof L === 'undefined') return;
+  const route = ow.points || [];
+  if (route.length < 2) return;
+  try {
+    const map = L.map(el, { zoomControl: true, attributionControl: false });
+    const bm = BASEMAPS[basemapPref()] || BASEMAPS.satellite;
+    L.tileLayer(bm.url, bm.opts).addTo(map);
+    const pts = route.map(p => [p.lat, p.lon]);
+    /* One polyline per window so each stretch carries its own colour. Windows overlap at their
+       endpoints, which is what keeps the line continuous. */
+    const bad = '#c14e2e', ok = '#a06f24', good = '#1f7ba6';
+    for (const w of (ow.windows || [])) {
+      const seg = pts.slice(w.i0, w.i1 + 1);
+      if (seg.length < 2) continue;
+      const c = w.straightness >= 0.95 ? good : w.straightness >= 0.88 ? ok : bad;
+      L.polyline(seg, { color: c, weight: 5, opacity: 0.85 }).addTo(map);
+    }
+    /* The raw track underneath, so stretches too sparse to window are still visible rather than
+       vanishing from the swimmer's own map. */
+    L.polyline(pts, { color: '#7a808c', weight: 1.5, opacity: 0.5 }).addTo(map);
+    L.circleMarker(pts[0], { radius: 5, color: '#4a9d6e', fillOpacity: 1 }).addTo(map);
+    L.circleMarker(pts[pts.length - 1], { radius: 5, color: '#c14e2e', fillOpacity: 1 }).addTo(map);
+    map.fitBounds(L.latLngBounds(pts), { padding: [18, 18] });
+    setTimeout(() => map.invalidateSize(), 60);
+  } catch (e) { dbg('[swim route map]', e); }
+}
+
+function drawSwimStrokeRate(R) {
+  const ow = R.openWater || {};
+  const el = document.getElementById('swimStrokeRateChart');
+  if (!el || !ow.hasStrokeRate || typeof Plotly === 'undefined') return;
+  const t0 = ow.strokeRate[0].t0;
+  loamPlot(el, [{
+    x: ow.strokeRate.map(r => +((r.t0 - t0) / 60).toFixed(2)),
+    y: ow.strokeRate.map(r => r.spm),
+    type: 'scatter', mode: 'lines+markers',
+    line: { color: '#1f7ba6', width: 2 }, marker: { size: 5 },
+    hovertemplate: '%{x:.1f} min<br>%{y:.1f} spm<extra></extra>',
+  }], {
+    margin: { l: 54, r: 12, t: 8, b: 42 },
+    xaxis: { title: 'minutes', fixedrange: true },
+    yaxis: { title: 'strokes / min', fixedrange: true },
+    showlegend: false,
+  }, { displayModeBar: false, responsive: true });
 }
 
 /* A pool short enough that the push-off is a large share of every length gets this said on screen,
@@ -20056,7 +20387,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '3fea1863c · 2026-08-05';
+const LOAM_BUILD = '0a936222a · 2026-08-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
