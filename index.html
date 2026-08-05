@@ -2537,6 +2537,7 @@ const SPORT_LEX = {
   ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'grade' },   /* GPS-only generic */
   lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', legend: 'sets' },
   golf: { activity: 'Range', signature: 'GOLF', ctaVerb: 'swing', legend: 'swings' },
+  swim: { activity: 'Swim', signature: 'SWIM', ctaVerb: 'swim', legend: 'lengths' },
 };
 /* One predicate for "is this a weightlifting session". Two identifiers legitimately reach here: a
    declared/tapped lift is tagged 'weightlifting' (the sport picker's value), while an AUTO-detected lift
@@ -2556,7 +2557,11 @@ function normalizeSport(sport) {
   if (sport === 'walking') return 'walk';
   if (isLiftSport(sport)) return 'lift';
   if (isGolfSport(sport)) return 'golf';
+  if (isSwimSport(sport)) return 'swim';
   if (SPORT_LEX[sport]) return sport;
+  /* CATCH-ALL, and the reason swimming shipped calling itself a ride: an unrecognized sport silently
+     becomes MTB here, so every shared surface reads "ride" with nothing failing anywhere. A new sport
+     must be added above, not left to fall through. */
   return 'ride';
 }
 function sportLex(sport) { return SPORT_LEX[normalizeSport(sport)]; }
@@ -16778,6 +16783,7 @@ function coachChips(sport) {
   if (sport === 'run' || sport === 'walk') return ['How was my pacing on the climbs?', 'Where did I fade?', `What should I focus on next ${sport === 'walk' ? 'hike' : 'run'}?`];
   if (sport === 'ride') return ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?'];
   if (sport === 'road') return ['How was my climb pacing?', 'What does my L/R balance say?', 'How do I descend with more confidence?'];
+  if (isSwimSport(sport)) return ['Am I holding my stroke or spinning?', 'How was my pacing across the sets?', 'What should I focus on next swim?'];
   if (isMtbFamily(sport)) return ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
   return ['What stands out in this session?', 'Where did I fade?', 'What should I focus on next session?'];
 }
@@ -16792,6 +16798,7 @@ function coachInputPlaceholder(sport) {
     : (sport === 'lift' || isLiftSport(sport)) ? 'how do I hold depth when I fatigue?'
     : sport === 'running' ? 'cadence drills for me'
     : (sport === 'walking' || sport === 'run' || sport === 'walk') ? 'how should I pace the climbs?'
+    : isSwimSport(sport) ? 'was I losing hold of the water?'
     : sport === 'road' ? 'how do I pace a long climb?'
     : sport === 'ride' ? 'how do I carry more speed on the descents?'
     : isMtbFamily(sport) ? 'drills for my weaker turn direction'
@@ -16894,9 +16901,13 @@ function setCoachSending(on) {
 function coachAnalyzePrompt(sport) {
   /* Golf and lift come first: without them a range session opened with "Analyze this ride", which is
      the one line the athlete always sees. 'range session' matches cachedSportNoun's wording for golf.
+     Swim was added after shipping, having reintroduced exactly that bug: an imported swim opened with
+     "Analyze this ride". The trailing 'ride' is a CATCH-ALL, so every new sport silently inherits it
+     and the only symptom is copy nobody diffs.
      The existing nouns are left byte-identical so cached replies from earlier rides still key-match. */
   const noun = isGolfSport(sport) ? 'range session'
     : (sport === 'lift' || isLiftSport(sport)) ? 'lift session'
+    : isSwimSport(sport) ? 'swim'
     : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
   return `Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`;
 }
@@ -19746,6 +19757,7 @@ function cachedSportNoun(cached) {
   if (isGolfSport(cached.sport)) return 'range session';
   if (d && d.gpsOnly) return d.gpsSport === 'run' ? 'run' : d.gpsSport === 'walk' ? 'walk' : 'ride';
   if (d && d.sport === 'road' && d.session) return 'road ride';
+  if (isSwimSport(cached.sport)) return 'swim';
   return cached.sport === 'running' ? 'run' : cached.sport === 'walking' ? 'walk' : 'ride';
 }
 
@@ -20387,7 +20399,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '0a936222a · 2026-08-05';
+const LOAM_BUILD = '72f587127 · 2026-08-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
