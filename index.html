@@ -2547,6 +2547,10 @@ function isLiftSport(sport) { return sport === 'weightlifting' || sport === 'str
 /* Golf is one identifier (the declared sport picker value and the golf detector both say 'golf'), so a
    single-value predicate is enough, unlike the weightlifting/strength split above. */
 function isGolfSport(sport) { return sport === 'golf'; }
+/* Swimming is never DETECTED, only imported (window.onSwimImport sets the sport directly), so this
+   predicate exists for the coach dispatch rather than for routing. Both spellings are accepted
+   because the payload says 'swimming' and the picker vocabulary elsewhere says 'swim'. */
+function isSwimSport(sport) { return sport === 'swimming' || sport === 'swim'; }
 function normalizeSport(sport) {
   if (sport === 'running') return 'run';
   if (sport === 'walking') return 'walk';
@@ -9503,6 +9507,138 @@ function analyzeSwim(session, opts) {
 }
 
 
+  /* ---- ported from analyzer/sports/swim/coaching.js ---- */
+/*
+ * Swim coaching digest + system prompt (BETA).
+ *
+ * Follows the shape golf and strength use: a compact, rounded, JSON-serializable digest plus a
+ * `data_caveats` string, and a "metric -> mechanism -> action" system prompt, so the same coaching
+ * call site consumes it. Unlike golf's, these are ported verbatim into the HTML's LoamSwim block and
+ * pinned by the swim drift guard, so the coach the app runs and the coach the tests exercise cannot
+ * drift apart.
+ *
+ * The prompt carries more hedging than the other sports and it is load-bearing rather than
+ * decorative. A swim import is the thinnest data in the project: there is no motion stream at all,
+ * only Apple's per-length aggregates, so a coach given free rein will happily invent a catch phase,
+ * a body roll, or a kick tempo it has no way to see. Every one of those is named and forbidden
+ * below, alongside the two real confounds (a short pool inflating distance per stroke through
+ * push-off share, and stroke styles not being comparable to each other).
+ */
+function swimDigest(D) {
+  const s = D.summary || {};
+  const R = D.swim || {};
+  const session = D.session || {};
+  const r1 = (x, n = 1) => (x == null || isNaN(x)) ? null : +(+x).toFixed(n);
+
+  const sets = (R.sets || []).map(set => ({
+    set: set.index,
+    lengths: set.nLengths,
+    stroke: set.dominantStyle,
+    mixed_strokes: set.mixedStyles || undefined,
+    distance_m: r1(set.distanceM, 0),
+    rest_before_s: r1(set.restBeforeS, 0),
+    median_pace_s_per_100m: r1(set.medianPace100S),
+    median_distance_per_stroke_m: r1(set.medianDps, 2),
+    median_stroke_rate_spm: r1(set.medianStrokeRateSpm),
+    median_swolf: r1(set.medianSwolf),
+    /* The spread of per-length times, which is what a pace clock trains and what Fitness does not
+       surface at all. Coachable on its own, independent of the trend below. */
+    pace_spread_cv_pct: r1(set.paceCvPct),
+    /* The whole point of the feature: how the two factors of pace moved across the set. */
+    distance_per_stroke_change_pct: set.trend ? set.trend.dpsPctChange : null,
+    stroke_rate_change_pct: set.trend ? set.trend.ratePctChange : null,
+    pace_change_pct: set.trend ? set.trend.pacePctChange : null,
+    verdict: set.trend ? set.trend.kind : null,
+    no_trend_reason: set.trend ? undefined : (set.trendReason || undefined),
+  }));
+
+  /* The pool length decides how much of each length is push-off and glide rather than stroking,
+     which is the single biggest confound on distance per stroke. Stated as a number so the prompt's
+     rule about it can be applied rather than guessed at. */
+  const poolM = session.poolLengthM != null ? r1(session.poolLengthM, 1) : null;
+
+  return {
+    sport: 'swimming (imported from Apple Health)',
+    pool_length_m: poolM,
+    location: session.locationType || 'unknown',
+    display_unit: session.displayUnit || 'm',
+    duration_min: r1((s.durationS || 0) / 60),
+    swimming_min: r1((s.swimmingS || 0) / 60),
+    rest_min: r1((s.restS || 0) / 60),
+    total_distance_m: r1(s.totalDistanceM, 0),
+    total_lengths: s.nLengths,
+    total_strokes: s.totalStrokes,
+    sets_count: s.nSets,
+    strokes_swum: s.styles,
+    median_pace_s_per_100m: r1(s.medianPace100S),
+    median_distance_per_stroke_m: r1(s.medianDps, 2),
+    median_stroke_rate_spm: r1(s.medianStrokeRateSpm),
+    median_swolf: r1(s.medianSwolf),
+    sets_graded: s.nGradedSets,
+    sets_losing_hold: s.nSpinningSets,
+    sets_holding: s.nHoldingSets,
+    heart_rate_avg_unreliable: s.hrAvg,
+    heart_rate_max_unreliable: s.hrMax,
+    active_energy_kcal: s.activeEnergyKcal,
+    sets,
+    data_caveats: swimCaveats(poolM, s),
+  };
+}
+
+/* Built as its own function so the caveats are testable and so the two that depend on THIS session
+   (a short pool, and a session with no stroke counts) are stated as facts rather than as a generic
+   disclaimer the coach can skim past. */
+function swimCaveats(poolM, s) {
+  const parts = [
+    'BETA, estimate-only. This session was IMPORTED from Apple Health, not recorded by Loam: there is no motion stream of any kind, only Apple Watch per-length aggregates.',
+    'Lengths, stroke counts and stroke styles are Apple\'s and are treated as ground truth; everything derived from them (distance per stroke, stroke rate, SWOLF, and the per-set trends) is arithmetic on those.',
+    'There is NO push-off or glide measurement, NO stroke-to-stroke consistency, NO body roll, and nothing about the non-watch arm, the kick, breathing, or head position. HealthKit does not store the raw wrist motion those would need. Never infer or invent them.',
+    'SWOLF is time plus strokes for one length, so it is only comparable within this one pool length and must not be compared to a published figure or to a session in a different pool.',
+    'Heart rate during a swim is unreliable: optical HR reads poorly through water. Treat it as indicative at most.',
+    'No swim ground truth exists for this project yet, so the set segmentation (a rest gap above 10 s) and the trend thresholds are unverified heuristics.',
+  ];
+  if (poolM != null && poolM <= 15) {
+    parts.push(
+      `IMPORTANT: this is a ${poolM} m pool, which is SHORT. The push-off and glide after each wall are a fixed few metres regardless of pool length, so in a pool this short they are a large share of every length. Distance per stroke here therefore partly measures the push-off, not the hold on the water, and it is more sensitive to glide variation than to stroke quality. Hedge every distance-per-stroke read accordingly, and prefer the pace spread and the set structure as the trustworthy signals.`);
+  }
+  if (!s || !s.totalStrokes) {
+    parts.push('This session carries NO stroke counts, so distance per stroke, stroke rate and SWOLF are unavailable and no trend could be fitted. Coach the pace and the set structure only.');
+  }
+  return parts.join(' ');
+}
+
+function swimCoachPrompt(level) {
+  return `You are Loam, an expert swim coach reading an Apple Watch pool session that was IMPORTED from Apple Health. Turn the numbers into specific, honest, actionable coaching.
+
+Method - for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies about the swim.
+3. Action: give one concrete cue or set for next time.
+
+Swimming reference points:
+- Speed is EXACTLY distance per stroke times stroke rate. Those two factors account for every pace change between them, and separating them is the entire reason this view exists. Holding a pace by taking a better hold of the water and holding it by spinning the arms faster are completely different sessions, and the Fitness app shows neither as a ratio.
+- The per-set verdicts mean: "spinning" = distance per stroke fell while rate rose, the arms turned over faster for less water, usually the catch slipping as the swimmer tires, and pace can look flat right through it. "fading" = at least one factor fell and neither rose, so the swim slowed overall; ordinary fatigue rather than a technique break. "lengthening" = a longer, slower stroke, usually deliberate. "building" = the swim got faster. "holding" = neither factor moved, which on a hard set is the outcome you want.
+- pace_spread_cv_pct is the spread of per-length times within a set. Two swimmers can average the same split with completely different spreads, and the spread is what a pace clock is meant to train. It is trustworthy even when the stroke numbers are not.
+- Stroke styles are NOT comparable to each other: breaststroke distance per stroke is nothing like freestyle. A trend is only ever fitted over a set's dominant stroke, and a set marked mixed_strokes had more than one. Never compare a breaststroke number to a freestyle one.
+- A set with no_trend_reason got no verdict because it did not have enough lengths of a single stroke. Say so plainly rather than reading a trend into it, and do not treat a missing verdict as a bad one.
+- Respect pool_length_m. In a short pool the push-off is a large fraction of every length (see data_caveats); hedge distance per stroke hard there.
+- NEVER invent a metric that is not in the data. There is no catch, no body roll, no kick, no breathing pattern, no head position, no glide length, and no stroke-to-stroke consistency here, because a HealthKit import has no motion stream at all. If the swimmer would want those, say so at most once and move on. Do not describe their technique as though you watched it.
+- Apple's stroke labels and length counts are ground truth. Do not second-guess them.
+
+Rules:
+- Ground every claim in the numbers provided. Respect the data_caveats and hedge when a read is confounded.
+- Report distances and paces in the session's own unit (display_unit): metres, or yards if that is what the pool was. Pace is per 100.
+- The athlete is at ${level} level - pitch depth and vocabulary accordingly.
+- Be direct and encouraging, never fluffy. Do not restate the whole dataset.
+
+Format your FIRST analysis as compact markdown:
+- One bold headline takeaway (a single line).
+- 2-4 bullets, each a single metric -> mechanism -> action.
+- A final line "**Next session:** ..." naming one focus.
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+}
+
+
   /* ---- ported from analyzer/sports/swim/summary.js ---- */
 /*
  * Swim session summary (BETA). Rolls the headline for an imported Apple Watch swim: distance, time
@@ -9599,7 +9735,8 @@ function swimPaceLabel(pace100S, unit) {
   return { normalizeSwimImport, swimLengthMetrics, isStrokeStyle,
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
     swimEffortRead, swimPaceCv, isCountable,
-    computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel };
+    computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel,
+    swimDigest, swimCaveats, swimCoachPrompt };
 })();
 
 /* Which stationary sport an UNTAPPED recording looks like, or null.
@@ -12839,7 +12976,9 @@ function renderSwim(D) {
   /* An open-water swim has no lap events at all, so there is no ledger, no sets, and no divergence
      read. Say that outright rather than synthesizing pseudo-lengths from GPS, which would be
      inventing the very data the view claims to analyze. */
-  const body = R.hasLengths ? swimSetCards(R, unit) + swimLedger(R, unit) : `
+  const body = R.hasLengths
+    ? swimDecompSection(R, unit) + swimSetCards(R, unit) + swimLedger(R, unit)
+    : `
     <div class="swim-set">
       <div class="swim-set-head"><span class="swim-set-n">Open water</span></div>
       <p class="swim-mech">Apple records lengths only in a pool, where the watch detects each turn. An open-water swim has no lengths, so there is nothing to fit a stroke trend across and this view can show totals only. Swim in a pool to get the per-set read.</p>
@@ -12852,8 +12991,150 @@ function renderSwim(D) {
     <div class="swim-tiles">${tiles}</div>
     <div class="strength-tablenote">${escapeHtml(where)}${s.styles && s.styles.length ? ' · ' + escapeHtml(s.styles.join(', ')) : ''}${s.restS ? ' · ' + fmtDuration(s.restS) + ' rest' : ''}${s.activeEnergyKcal ? ' · ' + s.activeEnergyKcal + ' kcal' : ''}</div>
     ${body}
-    <div class="strength-caveat"><strong>Beta:</strong> swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from Apple Watch and are shown as recorded. What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are not estimated here rather than being guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water. SWOLF is only comparable within one pool length.</div>
+    <div class="strength-caveat"><strong>Beta:</strong> swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from Apple Watch and are shown as recorded. What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are not estimated here rather than being guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water. SWOLF is only comparable within one pool length.${swimShortPoolNote(s)}</div>
   `;
+  if (R.hasLengths) { drawSwimDecomp(R, unit); drawSwimQuadrant(R); }
+  renderCoachPanel(D, 'swimming');
+}
+
+/* A pool short enough that the push-off is a large share of every length gets this said on screen,
+   not just in the coach's caveats. In a 12 m pool the wall is a much bigger fraction of the length
+   than in a 25 m one, so distance per stroke there is partly a measure of how well the swimmer
+   pushed off rather than how well they held the water. Stated because the first real session this
+   feature ever saw was a 12 m pool, and reading its DPS trend as technique would be wrong. */
+function swimShortPoolNote(s) {
+  if (s.poolLengthM == null || s.poolLengthM > 15) return '';
+  const label = LoamSwim.swimDistanceLabel(s.poolLengthM, s.displayUnit || 'm');
+  return ` This was a ${label} pool, which is short: the push-off and glide after each wall are a fixed few metres whatever the pool length, so they are a large share of every length here. Distance per stroke is correspondingly more sensitive to your push-off than to your stroke, and the pace spread is the more trustworthy read.`;
+}
+
+/* The chart the whole feature is for. Pace is distance-per-stroke times stroke rate, so plotting
+   both factors against the length they were swum makes a divergence VISIBLE rather than something
+   the reader has to reconstruct from two percentages: when the orange line falls while the blue one
+   climbs, that is the arms turning over faster for less water, and it is exactly the picture the
+   Fitness app cannot draw.
+   Each factor is normalized to its own first countable length and shown as a percentage of it, so
+   two quantities in different units (metres per stroke, strokes per minute) share one axis honestly.
+   Rest between sets is drawn as a shaded band so the reader can see where a set ended. */
+function swimDecompSection(R, unit) {
+  return `<div class="section-title" style="margin-top:22px">How your stroke changed
+      <span class="subtitle">distance per stroke and stroke rate, the two things pace is made of</span>
+    </div>
+    <div class="panel"><div id="swimDecompChart" class="chart" style="height:320px"></div>
+      <div class="strength-tablenote">Both lines are relative to the first length of the session, so they can share an axis. Falling orange with rising blue is the pattern worth catching: the same pace bought with more strokes.</div>
+    </div>
+    <div class="section-title" style="margin-top:22px">Set by set
+      <span class="subtitle">where each set landed on the two factors</span>
+    </div>
+    <div class="panel"><div id="swimQuadrantChart" class="chart" style="height:300px"></div>
+      <div class="strength-tablenote">Each dot is one set. Right is a longer stroke, up is a faster turnover. The bottom-right and top-left corners are the two honest ways to hold a pace; the top-left corner (more strokes, less water) is the one to watch.</div>
+    </div>`;
+}
+
+/* Colour per stroke style, so a mixed session reads at a glance and a breaststroke length is never
+   mistaken for a freestyle one on a chart that puts them side by side. */
+function swimStrokeColor(style) {
+  switch (style) {
+    case 'freestyle': return '#1f7ba6';
+    case 'breaststroke': return '#a06f24';
+    case 'backstroke': return '#7b5fc0';
+    case 'butterfly': return '#c14e2e';
+    case 'kickboard': return '#7a808c';
+    default: return '#4a9d6e';
+  }
+}
+
+function drawSwimDecomp(R, unit) {
+  const el = document.getElementById('swimDecompChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const all = R.sets.flatMap(set => set.lengths.map(l => ({ ...l, setIndex: set.index })));
+  /* Normalize against the first length that HAS both factors: a session that opens with a kickboard
+     length has no stroke numbers on length 1, and dividing by nothing would blank the whole chart. */
+  const base = all.find(l => l.dps != null && l.strokeRateSpm != null);
+  const x = all.map(l => l.index);
+  const pct = (v, b) => (v == null || b == null || !(b > 0)) ? null : +((v / b - 1) * 100).toFixed(1);
+
+  const traces = [{
+    x, y: all.map(l => pct(l.dps, base && base.dps)),
+    name: 'per stroke', type: 'scatter', mode: 'lines+markers',
+    line: { color: '#a06f24', width: 2 }, marker: { size: 6 }, connectgaps: false,
+    hovertemplate: 'length %{x}<br>per stroke %{y:+.1f}%<extra></extra>',
+  }, {
+    x, y: all.map(l => pct(l.strokeRateSpm, base && base.strokeRateSpm)),
+    name: 'stroke rate', type: 'scatter', mode: 'lines+markers',
+    line: { color: '#1f7ba6', width: 2 }, marker: { size: 6 }, connectgaps: false,
+    hovertemplate: 'length %{x}<br>stroke rate %{y:+.1f}%<extra></extra>',
+  }, {
+    /* Pace as a faint reference: it is the product of the other two, so it is the thing being
+       explained rather than a third independent signal, and it is styled to read that way. */
+    x, y: all.map(l => pct(l.pace100S, base && base.pace100S)),
+    name: 'pace (slower up)', type: 'scatter', mode: 'lines',
+    line: { color: '#7a808c', width: 1, dash: 'dot' }, connectgaps: false,
+    hovertemplate: 'length %{x}<br>pace %{y:+.1f}%<extra></extra>',
+  }];
+
+  /* Shade each set so the reader can see which lengths belong together, and where the rest fell. */
+  const shapes = R.sets.map((set, i) => ({
+    type: 'rect', xref: 'x', yref: 'paper',
+    x0: set.lengths[0].index - 0.5, x1: set.lengths[set.lengths.length - 1].index + 0.5,
+    y0: 0, y1: 1, line: { width: 0 },
+    fillcolor: i % 2 ? 'rgba(160,111,36,0.26)' : 'rgba(0,0,0,0)', layer: 'below', opacity: 0.25,
+  }));
+
+  loamPlot(el, traces, {
+    margin: { l: 52, r: 12, t: 8, b: 42 },
+    xaxis: { title: 'length', dtick: 1, fixedrange: true },
+    yaxis: { title: '% vs first length', zeroline: true, zerolinewidth: 1, fixedrange: true, ticksuffix: '%' },
+    shapes, showlegend: true,
+    legend: { orientation: 'h', y: 1.16, x: 0 },
+    hovermode: 'x unified',
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* One dot per set on the two factors. The quadrant a set lands in IS its verdict, so the picture
+   and the card cannot disagree: they are both reading trend.dpsPctChange and trend.ratePctChange.
+   Modelled on the road view's power/cadence quadrant. */
+function drawSwimQuadrant(R) {
+  const el = document.getElementById('swimQuadrantChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const graded = R.sets.filter(s => s.trend);
+  if (!graded.length) {
+    el.innerHTML = '<div class="strength-tablenote">No set had enough lengths of one stroke to place here.</div>';
+    return;
+  }
+  const xs = graded.map(s => s.trend.dpsPctChange);
+  const ys = graded.map(s => s.trend.ratePctChange);
+  const span = Math.max(6, ...xs.map(Math.abs), ...ys.map(Math.abs)) * 1.25;
+
+  const traces = [{
+    x: xs, y: ys, type: 'scatter', mode: 'markers+text',
+    text: graded.map(s => 'Set ' + s.index), textposition: 'top center',
+    textfont: { size: 10 },
+    marker: {
+      size: graded.map(s => Math.max(10, Math.min(30, s.nLengths * 2.5))),
+      color: graded.map(s => swimStrokeColor(s.dominantStyle)),
+      line: { width: 1, color: '#7a808c' },
+    },
+    customdata: graded.map(s => [s.trend.read.label, s.dominantStyle, s.nLengths]),
+    hovertemplate: 'Set %{customdata[2]} lengths of %{customdata[1]}<br>per stroke %{x:+.1f}%<br>stroke rate %{y:+.1f}%<br><b>%{customdata[0]}</b><extra></extra>',
+  }];
+
+  loamPlot(el, traces, {
+    margin: { l: 58, r: 12, t: 26, b: 46 },
+    xaxis: { title: 'distance per stroke', range: [-span, span], zeroline: true, zerolinewidth: 2, fixedrange: true, ticksuffix: '%' },
+    yaxis: { title: 'stroke rate', range: [-span, span], zeroline: true, zerolinewidth: 2, fixedrange: true, ticksuffix: '%' },
+    showlegend: false,
+    /* Corner labels are anchored to the PAPER, not to data coordinates. Anchoring them to data put
+       "losing hold" directly on top of the very dot it was labelling, because the label sat at a
+       fixed fraction of the axis range and the range is driven by that same dot. Paper coordinates
+       keep them in the corners whatever the data does. */
+    annotations: [
+      { xref: 'paper', yref: 'paper', x: 0.01, y: 0.99, xanchor: 'left', yanchor: 'top', text: 'losing hold', showarrow: false, font: { size: 10, color: '#c14e2e' } },
+      { xref: 'paper', yref: 'paper', x: 0.99, y: 0.99, xanchor: 'right', yanchor: 'top', text: 'building', showarrow: false, font: { size: 10, color: '#7a808c' } },
+      { xref: 'paper', yref: 'paper', x: 0.01, y: 0.01, xanchor: 'left', yanchor: 'bottom', text: 'fading', showarrow: false, font: { size: 10, color: '#7a808c' } },
+      { xref: 'paper', yref: 'paper', x: 0.99, y: 0.01, xanchor: 'right', yanchor: 'bottom', text: 'lengthening', showarrow: false, font: { size: 10, color: '#7a808c' } },
+    ],
+  }, { displayModeBar: false, responsive: true });
 }
 
 /* One card per set: what was swum, then the two factors of pace and what their divergence means. */
@@ -15428,6 +15709,12 @@ function buildDigest(D, sport, metric) {
   const s = D.summary || {};
   const u = digestUnits(metric);
   const r1 = (x, n = 1) => (x == null || isNaN(x)) ? null : +(+x).toFixed(n);
+  /* Swim: an IMPORTED Apple Health session, the only sport with no Loam recording behind it. The
+     digest is built by the drift-guarded LoamSwim module rather than inline here, so the coach the
+     app runs and the coach the tests exercise are the same code. It deliberately ignores `metric`:
+     a swim is measured in the POOL's unit (metres or yards, carried on the session as displayUnit),
+     and neither miles nor feet mean anything in a pool. */
+  if (isSwimSport(sport)) return LoamSwim.swimDigest(D);
   /* Golf: a stationary driving-range session. The coach's currency is tempo, head stability, a
      pelvis/kinematic-sequence hint, and swing-to-swing consistency. BETA / estimate-only, and there is
      no ball or club data (that needs a launch monitor), so the caveats say so plainly. */
@@ -15854,6 +16141,8 @@ function coachUnitsRule(metric) {
 
 function coachSystemPrompt(sport, level, metric) {
   const units = coachUnitsRule(metric);
+  /* Swim carries its own unit rule (the pool's, not the athlete's toggle), so it takes `level` only. */
+  if (isSwimSport(sport)) return LoamSwim.swimCoachPrompt(level);
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
   if (isGolfSport(sport)) {
     return `You are Loam, an expert golf coach reading sensor-derived metrics from a single driving-range session (Apple Watch on the lead wrist, AirPods in, phone in a pocket). Turn them into specific, honest, actionable coaching.
@@ -19767,7 +20056,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'fa76333e4 · 2026-08-05';
+const LOAM_BUILD = '3fea1863c · 2026-08-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
