@@ -898,6 +898,22 @@
   .run-pacing .rp-note {
     display: block; margin-top: 5px; font-size: 11.5px; color: var(--text-muted);
   }
+  #runBestEfforts { border-top: 1px solid var(--border); padding-top: 14px; }
+  .be-title {
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; font-weight: 600;
+    color: var(--text); letter-spacing: 0.02em; margin-bottom: 8px;
+  }
+  .be-title .be-sub { font-weight: 400; color: var(--text-muted); font-size: 11.5px; margin-left: 8px; }
+  .be-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .be-table td { padding: 5px 14px 5px 0; border-bottom: 1px solid var(--border); white-space: nowrap; text-align: left; }
+  .be-table tr:last-child td { border-bottom: 0; }
+  .be-table .be-label { color: var(--text-dim); width: 1%; }
+  .be-table .be-time { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); width: 1%; }
+  .be-table .be-pace { font-variant-numeric: tabular-nums; color: var(--text-dim); width: 1%; }
+  .be-table .be-note { width: 99%; white-space: normal; }
+  .be-gain { font-size: 11.5px; color: var(--accent); }
+  .be-gain.dim { color: var(--text-muted); }
+  .be-foot { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
   .notice-action {
     display: inline-block; margin-top: 10px;
     background: var(--accent-4); color: var(--on-accent); border: 0; cursor: pointer;
@@ -1613,6 +1629,7 @@
           <tbody></tbody>
         </table>
       </div>
+      <div id="runBestEfforts" class="hidden" style="margin-top:18px"></div>
     </div>
   </section>
 
@@ -2846,6 +2863,38 @@ function classifyGait(sensors, ride) {
   }
   if (cur && cur.t1 - cur.t0 >= 20) breaks.push(cur);
   return { activity, windows, breaks, walkFrac, runFrac: moving.length ? runN / moving.length : null, walkCadSeries };
+}
+
+/*
+ * Swap a walk's cadence over to the walk-band series, EVERYWHERE it is carried.
+ *
+ * analyzeRunning searches the running band (2.0-3.5 Hz) and on a walk that band locks onto the
+ * second harmonic, so the run-band answer for a 113 spm walk is 169. The dashboard has swapped
+ * cadSeries / cadMedian / cadMean over to the walk band since that was found, but it stopped there,
+ * and segments[].cadAvg is computed inside analyzeRunning from the run-band series and never
+ * revisited. So the walk view contradicted itself: on data/run/2026-06-09_19-48-31 the headline tile
+ * read 113 spm (with the pedometer agreeing at 117) while the two rows of the climb/descent table
+ * right below it read 172 and 183, and the same harmonic reached the AI coach, which receives
+ * per-segment cadence_spm in its digest.
+ *
+ * The recompute is the same expression analyzeRunning uses, run against the walk-band series, so the
+ * two agree by construction rather than by luck. Doing it here rather than in analyzeRunning keeps
+ * the band choice where the walk/run decision is actually made: classifyGait is what knows the
+ * session is a walk, and it runs after the analysis.
+ *
+ * Mutates and returns running. A no-op when the walk band found nothing to swap in.
+ */
+function applyWalkBandCadence(running, walkCadSeries) {
+  if (!running || !walkCadSeries || !walkCadSeries.length) return running;
+  running.cadSeries = walkCadSeries;
+  const spms = walkCadSeries.map(c => c.spm).sort((a, b) => a - b);
+  running.cadMedian = spms[Math.floor(spms.length / 2)];
+  running.cadMean = spms.reduce((a, b) => a + b, 0) / spms.length;
+  for (const seg of running.segments || []) {
+    const segCads = walkCadSeries.filter(c => c.t >= seg.tStart && c.t <= seg.tEnd && c.conf > 0.05);
+    seg.cadAvg = segCads.length ? segCads.reduce((s, c) => s + c.spm, 0) / segCads.length : null;
+  }
+  return running;
 }
 
 function lowerBound(arr, target) {
@@ -6242,6 +6291,116 @@ function splitExtremes(splits) {
   return { fastest: fastest.index, slowest: slowest.index };
 }
 
+/* ========== Best efforts (ported from analyzer/sports/running/best-efforts.js) ==========
+ *
+ * The fastest 1 km / 1 mile / 5 km and so on that this run contains. Splits answer "how fast was
+ * each mile", a question about the clock; best efforts answer "how fast can you run a mile", a
+ * question about the runner, and the two differ whenever the fast stretch straddles a boundary. On
+ * data/run/2026-06-05_14-54-13 the quickest printed split is mile 2 at 7:46 while the fastest
+ * continuous mile in the run is 7:34, twelve seconds that exist only because a marker fell where it
+ * did.
+ *
+ * NOT a rolling minimum over raw GPS, and that is the whole point. Standing at a crossing still
+ * emits fixes and those fixes wander: 734 m of path accumulated on that run while the runner was
+ * parked, 379 s of it inside the first mile. A window that counts drift as progress finds its
+ * "fastest mile" exactly there, because drift is distance the clock was not paying for. A best
+ * effort is MORE exposed to this than a split, because a split takes whatever ground it is given
+ * while a best effort goes hunting for the most favourable window in the run. So this walks the
+ * track under the same three-way hop rules computeSplits walks it under (moving / standing /
+ * dropout), on the same moving clock the splits table prints.
+ */
+const BE_R_EARTH = 6371000;
+const beToRad = (d) => (d * Math.PI) / 180;
+/* Identical to computeSplits'. Duplicated rather than shared for the same reason splits duplicates
+   them rather than sharing with computeRunSummary: each copy is pinned to its module separately. */
+const BE_MOVING_MIN_MPS = 0.5;
+const BE_MOVING_MAX_GAP_S = 5;
+/* Track and road standards only. A "fastest 3.7 km" is not a thing anyone has a feel for, so an
+   arbitrary grid would be noise dressed as a record. Both unit systems always, because a metric
+   runner still races a mile and an imperial one still races a 5k. */
+const BE_DISTANCES = [
+  { meters: 400, label: '400 m', metric: true },
+  { meters: 800, label: '800 m', metric: true },
+  { meters: 1000, label: '1 km', metric: true },
+  { meters: 1609.344, label: '1 mile', metric: false },
+  { meters: 5000, label: '5 km', metric: true },
+  { meters: 10000, label: '10 km', metric: true },
+  { meters: 21097.5, label: 'half marathon', metric: true },
+  { meters: 42195, label: 'marathon', metric: true },
+];
+
+function beHop(a, b) {
+  const dLat = beToRad(b.latitude - a.latitude);
+  const dLon = beToRad(b.longitude - a.longitude);
+  const h = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+    + Math.cos(beToRad(a.latitude)) * Math.cos(beToRad(b.latitude)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * BE_R_EARTH * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/* Cumulative { d, m, t } checkpoints: ground covered, moving seconds banked, wall clock at that fix.
+   Standing hops advance none of the three, which is what keeps drift out of every window above. */
+function beCheckpoints(loc, ride) {
+  const inRide = (loc || [])
+    .filter((r) => r && r.t >= ride.start && r.t <= ride.end
+      && r.latitude != null && r.longitude != null)
+    .sort((a, b) => a.t - b.t);
+  if (inRide.length < 2) return [];
+  const pts = [{ d: 0, m: 0, t: inRide[0].t }];
+  for (let i = 1; i < inRide.length; i++) {
+    const a = inRide[i - 1], b = inRide[i];
+    const d = beHop(a, b);
+    if (!(d > 0)) continue;
+    const dt = b.t - a.t;
+    const overGap = !(dt > 0) || dt > BE_MOVING_MAX_GAP_S;
+    const impliedMoving = overGap ? (dt > 0 && d / dt >= BE_MOVING_MIN_MPS) : (b.speed >= BE_MOVING_MIN_MPS);
+    if (!overGap && !impliedMoving) continue;
+    const prev = pts[pts.length - 1];
+    pts.push({ d: prev.d + d, m: prev.m + (impliedMoving ? dt : 0), t: b.t });
+  }
+  return pts;
+}
+
+/* The single fastest window covering `target` metres, on moving time. Two-pointer sweep; the window
+   START is interpolated so it measures exactly `target` rather than "at least target", since a long
+   hop at the start would otherwise donate its whole length to the effort and flatter it. The END is
+   a real fix, so a reading can run up to one sample interval long, never short. */
+function bestEffort(pts, target) {
+  if (!pts || pts.length < 2 || !(target > 0)) return null;
+  if (pts[pts.length - 1].d < target) return null;
+  let best = null;
+  let i = 0;
+  for (let j = 1; j < pts.length; j++) {
+    while (i + 1 < j && pts[j].d - pts[i + 1].d >= target) i++;
+    if (pts[j].d - pts[i].d < target) continue;
+    const need = pts[j].d - target;
+    const span = pts[i + 1].d - pts[i].d;
+    const f = span > 0 ? (need - pts[i].d) / span : 0;
+    const mStart = pts[i].m + (pts[i + 1].m - pts[i].m) * f;
+    const tStart = pts[i].t + (pts[i + 1].t - pts[i].t) * f;
+    const seconds = pts[j].m - mStart;
+    if (!(seconds > 0)) continue;
+    if (!best || seconds < best.seconds) {
+      best = { meters: target, seconds, tStart, tEnd: pts[j].t, speedMps: target / seconds };
+    }
+  }
+  return best;
+}
+
+/* Every standard distance this run actually covers. Longer ones are omitted rather than dashed: a
+   row reading "marathon: --" on a 10 km run is not information. */
+function computeBestEfforts(loc, ride, distances) {
+  const pts = beCheckpoints(loc, ride);
+  if (pts.length < 2) return [];
+  const covered = pts[pts.length - 1].d;
+  const out = [];
+  for (const d of (distances || BE_DISTANCES)) {
+    if (d.meters > covered) continue;
+    const b = bestEffort(pts, d.meters);
+    if (b) out.push({ ...d, ...b });
+  }
+  return out;
+}
+
 /* ========== Library (IndexedDB persistence) ==========
 
    Two stores:
@@ -8617,6 +8776,12 @@ const LoamGolf = (function () {
      since G_MAX_PRE_S + G_MAX_POST_S exceeds G_MAX_SWING_S. */
   const G_MAX_PRE_S = 2.0;
   const G_MAX_POST_S = 1.2;
+  /* Least peak phone rotation, in rad/s, that a swing must show for the phone to count as worn (see
+     gPhoneIsWorn). The two 2026-07-24 ground-truth sessions bracket the two cases three orders of
+     magnitude apart: pocket-worn peaks run 4.3-5.6 rad/s per swing, a phone propped up as the camera
+     peaks at 0.0029-0.0036, which is its noise floor. 0.1 sits ~40x under the worn case and ~28x over
+     the tripod one, so nothing has to be tuned finely to separate them. */
+  const G_MIN_PELVIS_RATE = 0.1;
 
   const RAD2DEG = 180 / Math.PI;
 
@@ -8810,10 +8975,45 @@ const LoamGolf = (function () {
   }
 
   /*
+   * Was the phone actually ON the golfer, judged by whether it rotated through the swings?
+   *
+   * The still-window gate alone is backwards for this failure mode, and it fired on real data. A
+   * phone propped up as a camera is the STILLEST case possible, so it sails through calibration, and
+   * the pelvis read then integrates sensor noise: on the tripod-filmed ground-truth session
+   * (golf/backyard-noball-2026-07-24) analyzeGolf reported hasPelvis true, hipTurnDeg 0.0 on all ten
+   * swings, and "lower-body-leads" on nine of them with lags up to 1370 ms, a pelvis peak 1.4 s
+   * before impact being an argmax over noise. CLAUDE.md now sanctions filming ground truth with the
+   * same phone, so that setup is expected rather than exotic.
+   *
+   * The discriminator is the swing windows themselves, not the quiet between them: a pocketed phone
+   * turns with the hips on every swing, a propped one never moves at all. Per swing it is the PEAK
+   * that is judged, since a swing is one short turn inside a mostly-still window and a median over
+   * that window reads near zero even for a real pocket; across swings it takes a MAJORITY, so one
+   * knock against the tripod cannot buy the read back.
+   */
+  function gPhoneIsWorn(gyro, swings) {
+    const list = swings || [];
+    if (!list.length) return false;
+    let turned = 0;
+    for (const sw of list) {
+      let peak = 0;
+      for (const r of gyro || []) {
+        if (r.t < sw.tStart) continue;
+        if (r.t > sw.tEnd) break;
+        const m = Math.hypot(r.x, r.y, r.z);
+        if (m > peak) peak = m;
+      }
+      if (peak >= G_MIN_PELVIS_RATE) turned++;
+    }
+    return turned * 2 > list.length;
+  }
+
+  /*
    * Full range-session analysis. Detects swings from the wrist, then per swing adds
    * head stability (AirPods), pelvis / sequence (pocket phone, when a still window
-   * lets us build a body frame), the tapped club / quality label, and a normalized
-   * swing-shape trace, and finally the swing-vs-swing consistency read.
+   * lets us build a body frame AND the phone actually turned with the golfer), the
+   * tapped club / quality label, and a normalized swing-shape trace, and finally the
+   * swing-vs-swing consistency read.
    */
   function analyzeGolf(sensors, ride, opts = {}) {
     const wrist = sensors.wrist || [];
@@ -8822,9 +9022,12 @@ const LoamGolf = (function () {
     const det = detectSwings(wrist, ride.start, ride.end);
     const hasHeadphone = head.length > 0;
     /* Body frame for the pelvis read (optional): a range session has ample still standing time between
-       swings, so the quietest-window calibration finds a pose. Absent phone / no still window -> no pelvis. */
+       swings, so the quietest-window calibration finds a pose. Absent phone / no still window -> no
+       pelvis. A pose is necessary and not sufficient: gPhoneIsWorn additionally requires the phone to
+       have turned during the swings, because a phone filming from a tripod passes the still-window
+       test by being stiller than any pocket ever is. */
     let gyroBody = null, hasPelvis = false;
-    if (gyro.length && grav.length && accel.length) {
+    if (gyro.length && grav.length && accel.length && gPhoneIsWorn(gyro, det.swings)) {
       try {
         const win = findCalibrationWindow(grav, accel, null, null, 'quietest');
         if (win) { const rot = calibrationRotation(grav, win.start, win.end); gyroBody = applyRotation(rot.R, gyro); hasPelvis = true; }
@@ -9222,13 +9425,11 @@ async function analyze(files) {
         }
       }
       /* The running cadence band (2.0-3.5 Hz) reads a harmonic on walks (a 113 spm walk showed
-         as 169 spm); swap in the walk-band series so walk cadence is the real step rate. */
-      if (sport === 'walking' && gait.walkCadSeries.length) {
-        running.cadSeries = gait.walkCadSeries;
-        const spms = gait.walkCadSeries.map(c => c.spm).sort((a, b) => a - b);
-        running.cadMedian = spms[Math.floor(spms.length / 2)];
-        running.cadMean = spms.reduce((a, b) => a + b, 0) / spms.length;
-      }
+         as 169 spm); swap in the walk-band series so walk cadence is the real step rate. The swap
+         has to reach the per-segment cadence too, which is why it is a function now: it used to be
+         inline here and touched only the series and the medians, leaving the climb/descent table and
+         the coach digest quoting the harmonic under a headline that did not. */
+      if (sport === 'walking') applyWalkBandCadence(running, gait.walkCadSeries);
       /* Per-climb read from the up-segments (uses whatever cadSeries is current, so a walk gets its
          walk-band cadence). Geometric gain/grade/VAM plus GPS pace, cadence and HR as context. */
       running.climbs = analyzeRunningClimbs(
@@ -11720,7 +11921,15 @@ function golfTraceSVG(swings, con) {
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${traced.map(line).join('')}</svg>`;
 }
 
-/* Per-swing tempo bars: the backswing (blue) and downswing (accent) split of each swing's time. */
+/* Per-swing tempo bars: the backswing (blue) and downswing (accent) split of each swing's time.
+   The bars show the SPLIT, and the caption below them exists to stop the ratios being read down the
+   column as technique. Measured on golf/backyard-noball-2026-07-24 (10 swings against a synced
+   120 fps video): the session MEAN validates at 2.40 against 2.46 optically, but swing-to-swing the
+   two methods do not correlate at all (r = -0.004), and timing scatter alone implies +/-0.28 of ratio
+   noise against observed spreads of 0.26 and 0.31. The cause is the denominator: at 50 Hz a 0.45 s
+   downswing is ~22 samples, so downswing duration sits at the noise floor (r = -0.36) while the
+   backswing is real (r = +0.73), and the ratio inherits its denominator. So the differences between
+   these rows are measurement, not swings, and the copy has to say so. */
 function golfTempoBars(swings) {
   const withTempo = (swings || []).filter(s => s.backswingS != null && s.downswingS != null);
   if (!withTempo.length) return '<div class="golf-tablenote">No tempo yet (needs a clean backswing / downswing split).</div>';
@@ -11729,7 +11938,8 @@ function golfTempoBars(swings) {
     const bp = (100 * s.backswingS / tot).toFixed(0), dp = (100 * s.downswingS / tot).toFixed(0);
     return `<div class="golf-tempo-row"><span class="tl">#${s.index} ${s.tempoRatio.toFixed(1)}:1</span>`
       + `<span class="golf-tempo-bar"><span class="b" style="width:${bp}%"></span><span class="d" style="width:${dp}%"></span></span></div>`;
-  }).join('');
+  }).join('')
+    + `<div class="golf-tablenote" style="margin-top:6px">Read the <strong>average</strong>, not the row-to-row differences. Against a 120&nbsp;fps video of a real session, the session average was accurate to about 2%, but individual swings did not track the video at all: the downswing is only around 22 samples at 50&nbsp;Hz, which puts roughly &plusmn;0.3 of noise on every ratio. That is the whole of the spread you see here.</div>`;
 }
 
 /* A schematic side-view golfer at one swing phase: spine (with lean), head, legs, arms to the grip, and
@@ -11843,6 +12053,13 @@ function renderGolf(D) {
   /* Built before the template so the Swing Cam can claim its state; empty string when this recording
      has no wrist attitude, in which case the static phase schematic below stands in. */
   const swingCam = golfSwingCamSection(D);
+  /* The hip-turn and sequence columns go blank whenever the phone was not on the golfer. Say why,
+     rather than leaving two dashed columns that read as a sensor that failed. The common case is
+     exactly the one CLAUDE.md now encourages: the phone was propped up filming the swings, which is
+     stiller than any pocket, so only its rotation through the swings can tell the two apart. */
+  const hadPhone = !!(D.sensors && D.sensors.gyro && D.sensors.gyro.length);
+  const pelvisNote = (g.hasPelvis || !hadPhone) ? '' :
+    `<div class="golf-tablenote" style="margin-bottom:6px">No <strong>hip turn</strong> or <strong>sequence</strong> for this session: the phone never turned during your swings, so it was not in a pocket (propped up filming, or set down). Those two columns need the phone on your body. Everything else here is unaffected.</div>`;
   /* Short label for the cell, with the full reading on hover / long-press (the guide below spells it
      out properly). "lower leads" alone is jargon to anyone who has not read a golf-instruction book. */
   const seqLabel = q => q === 'lower-body-leads' ? '<span title="Your hips started down before your hands: the efficient downswing order.">lower leads</span>'
@@ -11866,7 +12083,7 @@ function renderGolf(D) {
 
   el.innerHTML = `
     <div class="section-title">Range <span class="beta-badge">BETA</span></div>
-    <div class="strength-scope"><strong>A swing-motion coach, not a launch monitor.</strong> Loam reads your <strong>swing</strong> from the watch (wrist), AirPods (head), and pocketed phone (pelvis): tempo, head stability, and how <strong>repeatable</strong> your swings are. It cannot measure the ball or club (speed, face angle, path), which is what a launch monitor does. Every number here is an estimate (BETA), pending golf ground truth.</div>
+    <div class="strength-scope"><strong>A swing-motion coach, not a launch monitor.</strong> Loam reads your <strong>swing</strong> from the watch (wrist), AirPods (head), and pocketed phone (pelvis): tempo, head stability, and how <strong>repeatable</strong> your swings are. It cannot measure the ball or club (speed, face angle, path), which is what a launch monitor does. Every number here is an estimate (BETA): swing count and session-average tempo have now been checked against a video of a real session, the rest has not.</div>
     ${golfTipsSection()}
     <div class="golf-hero">
       <div class="golf-card">
@@ -11878,7 +12095,7 @@ function renderGolf(D) {
       <div class="golf-card">
         <h4>Tempo (backswing : downswing)</h4>
         <div class="golf-score" style="font-size:34px">${s.medianTempoRatio != null ? '&#8776; ' + s.medianTempoRatio.toFixed(1) + ' : 1' : '—'}</div>
-        <div class="golf-tablenote">Tour swings sit near 3:1 (a reference, not a target). Blue is the backswing, accent is the downswing.</div>
+        <div class="golf-tablenote">Your session average. Tour swings sit near 3:1 (a reference, not a target). Blue is the backswing, accent is the downswing.</div>
         <div style="margin-top:8px">${golfTempoBars(g.swings)}</div>
       </div>
     </div>
@@ -11896,16 +12113,17 @@ function renderGolf(D) {
       <div class="golf-tablenote">A schematic of the phases (side view). The animated Swing Cam needs Apple Watch attitude, which this recording does not carry.</div>
     </div>`}
     ${golfMetricsGuide(D)}
+    ${pelvisNote}
     <table class="strength-table">
       <thead><tr><th>#</th><th>club</th>
-        <th title="Backswing time divided by downswing time. Tour players sit near 3:1; consistency matters more than the number.">tempo</th>
+        <th title="Backswing time divided by downswing time. Tour players sit near 3:1. Judge your session average, not these rows against each other: a video check measured about ±0.3 of noise on a single swing's ratio.">tempo</th>
         <th title="Degrees your head rotated between address and impact, measured by the AirPods. Quieter is usually steadier.">head turn</th>
         <th title="Degrees your pelvis rotated, from the phone in your pocket. The softest number here.">hip turn</th>
         <th title="Lower leads = hips started down before the hands (efficient). Arms lead = casting or over the top. Unclear = within 40 ms.">sequence</th>
         <th title="Your own Good / Mishit taps.">quality</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <div class="strength-caveat"><strong>Beta:</strong> golf is new and unvalidated. Swings are detected from wrist angular speed (Apple Watch); at 50 Hz a downswing is only about 12 samples, so swing count and timing are usable but there is no club-head speed or ball data. Tempo (backswing : downswing) is good to about one decimal. Head turn is a direct AirPods attitude range; head sway (in the coach digest) is a double-integration upper bound, not a measurement. Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone and are the most speculative read. Consistency is a relative swing-to-swing score, honest without any absolute reference. Promotion past BETA needs ground truth: a slow-motion swing video for count and tempo, and a stationary non-swing recording to measure false positives.</div>
+    <div class="strength-caveat"><strong>Beta:</strong> golf is new and only partly validated. Swings are detected from wrist angular speed (Apple Watch); at 50 Hz a downswing is only about 12 samples, so swing count and timing are usable but there is no club-head speed or ball data. Against a synced 120&nbsp;fps video of one real 10-swing session, swing count was exactly right and the session-average tempo was accurate to about 2%, but <strong>a single swing's tempo ratio is not</strong>: it carries roughly &plusmn;0.3 of noise, so read the average and ignore the row-to-row differences. Head turn is a direct AirPods attitude range; head sway (in the coach digest) is a double-integration upper bound, not a measurement, and neither has been shown to separate a swing from standing around. Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone and are the most speculative read; they are withheld entirely when the phone was not on your body. Consistency is a relative swing-to-swing score, honest without any absolute reference. Promotion past BETA still needs a stationary non-swing recording to measure false positives, and a session with an actual ball strike (every golf recording so far is rehearsal swings through empty air).</div>
   `;
   /* Start the Swing Cam once its stage is in the DOM (the section markup is built above). */
   if (swingCam) { renderSwingCamFacts(); swingCamStart(); }
@@ -12128,6 +12346,10 @@ function renderAllRunning(D) {
     const hrRows = (D.sensors && D.sensors.heartRate) || [];
     const splits = computeSplits(rows, D.ride, unitM, hrRows);
     renderRunSplits(splits, unitLabel, (D.summary || {}).distance);
+    /* Best efforts sit under the splits table on purpose: they answer the question the table above
+       raises but cannot settle ("so how fast can I run a mile"), and reading them side by side is
+       what makes the difference between the two obvious. */
+    renderRunBestEfforts(computeBestEfforts(rows, D.ride), splits);
     /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
        grade adjustment and the GAP column can never disagree about the hill. */
     const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
@@ -13941,14 +14163,21 @@ function pedMedian(xs) {
 function pedInRide(rows, ride) {
   return (rows || []).filter((r) => r && r.t >= ride.start && r.t <= ride.end);
 }
-/** Steps actually counted over the ride. Differenced: the column is cumulative and never resets. */
+/* Steps actually counted over the ride. Summed per interval, not last-minus-first: the column is
+   cumulative but restarts at zero for each RECORDING, and a merged session (SessionMerge stitches
+   fragments by re-indexing seconds_elapsed and passing every other column through verbatim) carries
+   one saw-tooth per fragment. Last-minus-first read only the final tooth, turning 8751 real steps
+   into 4505 while still labelling them "counted". */
 function pedTotals(pedRows, ride) {
   const rows = pedInRide(pedRows, ride).filter((r) => Number.isFinite(r.steps));
   if (rows.length < 2) return null;
-  const first = rows[0], last = rows[rows.length - 1];
-  const steps = last.steps - first.steps;
+  let steps = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const d = rows[i].steps - rows[i - 1].steps;
+    if (d > 0) steps += d;   // a negative delta is a counter restart (merged file), not lost steps
+  }
   if (!(steps > 0)) return null;
-  return { steps, updates: rows.length, spanS: last.t - first.t };
+  return { steps, updates: rows.length, spanS: rows[rows.length - 1].t - rows[0].t };
 }
 /** Median rate across consecutive updates the runner was moving through. */
 function pedCadence(pedRows, locRows, ride) {
@@ -14047,6 +14276,60 @@ function renderRunPacing(pacing, unitLabel) {
   el.classList.remove('hidden');
 }
 
+/*
+ * Best efforts inside this run: the fastest continuous 1 km / 1 mile / 5 km the track contains.
+ *
+ * Rendered under the splits table because it answers the question the table raises and cannot
+ * settle. A split is one particular window of a mile; a best effort is the best window of a mile,
+ * so the two only agree when the fast stretch happened to line up with a marker. Where they differ
+ * the row says by how much, since that gap IS the point of the panel.
+ *
+ * `efforts` is computeBestEfforts output; `splits` is the same computeSplits output the table above
+ * printed, used only for that comparison.
+ */
+function renderRunBestEfforts(efforts, splits) {
+  const el = document.getElementById('runBestEfforts');
+  if (!el) return;
+  if (!efforts || !efforts.length) { el.classList.add('hidden'); return; }
+  /* Round to whole seconds BEFORE splitting, or 479.6 s prints as "7:60" instead of 8:00. */
+  const clock = (sec) => {
+    const tot = Math.round(sec);
+    const h = Math.floor(tot / 3600), m = Math.floor((tot - h * 3600) / 60), s = tot - h * 3600 - m * 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s).padStart(2, '0');
+  };
+  /* The fastest full split of the SAME distance, when the table above happens to print that unit.
+     Only one of the listed distances can ever match (the unit the athlete chose), which is exactly
+     the row where "your splits said 7:46" is a comparison a runner can check by eye. */
+  const unitM = U.metric() ? 1000 : 1609.344;
+  const full = (splits || []).filter(s => !s.partial);
+  const splitSec = full.length
+    ? Math.min(...full.map(s => (s.movingSeconds != null ? s.movingSeconds : s.seconds)))
+    : null;
+  const rows = efforts.map((e) => {
+    const matches = Math.abs(e.meters - unitM) < 1 && splitSec != null;
+    const gain = matches ? splitSec - e.seconds : 0;
+    /* Sub-second gaps are the end-of-window snap, not a finding, so they are not narrated. */
+    const note = matches && gain >= 1
+      ? `<span class="be-gain">${clock(gain)} faster than your best split</span>`
+      : matches
+        ? '<span class="be-gain dim">your fastest split was this stretch</span>'
+        : '';
+    return `<tr>
+      <td class="be-label">${e.label}</td>
+      <td class="be-time">${clock(e.seconds)}</td>
+      <td class="be-pace">${U.pace(e.speedMps)}</td>
+      <td class="be-note">${note}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="be-title">Best efforts <span class="be-sub">fastest continuous stretch of each distance, on moving time</span></div>
+    <div style="overflow-x:auto;"><table id="runBestEffortsTable" class="be-table">
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div class="be-foot">Found by sliding each distance across the whole run rather than reading it off the split markers, so a fast stretch that straddled a marker still counts. Ground covered while you were standing still does not: those fixes wander, and a window that counted them would report a mile you did not run.</div>`;
+  el.classList.remove('hidden');
+}
+
 function renderRunSplits(splits, unitLabel, totalPathM) {
   if (!splits || !splits.length) { hide('runSplitsSection'); return; }
   show('runSplitsSection');
@@ -14080,8 +14363,14 @@ function renderRunSplits(splits, unitLabel, totalPathM) {
       + ' \u00b7 moving time'
       + (driftM >= 100 ? ` \u00b7 ${U.dist(driftM)} of GPS drift while stopped, excluded` : '');
   }
+  /* Round to whole seconds BEFORE splitting. Rounding the remainder afterwards prints "7:60": 479.6 s
+     floors to 7 minutes and 59.6 rounds to 60. Latent here rather than observed, because the split
+     times on the recordings in data/run/ happen not to land in the last half-second, but moving
+     seconds are interpolated at the boundary so they are real-valued and any of them can. Found by
+     hitting it in a formatter of the same shape while building the best-efforts panel. */
   const clock = (sec) => {
-    const m = Math.floor(sec / 60), ss = Math.round(sec - m * 60);
+    const tot = Math.round(sec);
+    const m = Math.floor(tot / 60), ss = tot - m * 60;
     return m + ':' + String(ss).padStart(2, '0');
   };
   tbody.innerHTML = splits.map(sp => {
@@ -18821,7 +19110,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '9927b485f · 2026-08-03';
+const LOAM_BUILD = 'd8efa649a · 2026-08-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
