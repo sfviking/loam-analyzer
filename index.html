@@ -9517,7 +9517,8 @@ function swimTrend(values) {
   const slope = sxy / sxx;
   const intercept = ybar - slope * xbar;
   if (!(intercept > 0)) return null;
-  return { n, slope: +slope.toFixed(4), pctChange: +(slope * (n - 1) / intercept * 100).toFixed(1) };
+  return { n, slope: +slope.toFixed(4), intercept: +intercept.toFixed(4),
+           pctChange: +(slope * (n - 1) / intercept * 100).toFixed(1) };
 }
 
 /* The divergence read. `bandPct` is the dead zone inside which a trend is called flat: below it the
@@ -13276,64 +13277,132 @@ function swimCardSet(R) {
 
 /* The card's content, separated from its drawing so the choice of what to say is testable and so the
    open-water and pool variants can share one renderer. */
+/* mm:ss / h:mm:ss for the elapsed stat. */
+function swimCardClock(sec) {
+  if (sec == null || !Number.isFinite(sec)) return '—';
+  const t = Math.round(sec), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), ss = t % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+           : `${m}:${String(ss).padStart(2, '0')}`;
+}
+
 function swimCardModel(D) {
   const R = D.swim || {}, s = D.summary || {}, unit = s.displayUnit || 'm';
   const U = LoamSwim;
-  const stats = [
-    { v: U.swimPaceLabel(R.hasLengths ? s.medianPace100S : s.avgPace100S, unit).replace(/\/100(m|yd)$/, ''), l: 'PACE /100' + unit.toUpperCase() },
-    { v: U.swimDistanceLabel(s.totalDistanceM, unit), l: 'DISTANCE' },
-  ];
+  const paceV = U.swimPaceLabel(R.hasLengths ? s.medianPace100S : s.avgPace100S, unit).replace(/\/100(m|yd)$/, '');
+  const paceL = 'PACE /100' + unit.toUpperCase();
 
   if (!R.hasLengths) {
     const ow = R.openWater || {};
     if (!ow.hasRoute) return null;
-    stats.push({ v: ow.medianStrokeRateSpm != null ? String(ow.medianStrokeRateSpm) : '—', l: 'STROKES/MIN' });
+    /* A well-held line IS an accomplishment, so it may take the hero; an ordinary one may not, and
+       the distance leads instead. Same rule as the pool card below. */
+    const heldPct = Math.round((ow.medianStraightness || 0) * 100);
+    const proud = heldPct >= 95;
     return {
       eyebrow: 'OPEN WATER SWIM',
-      hero: 'Line held ' + Math.round((ow.medianStraightness || 0) * 100) + '%',
-      subhead: ow.extraDistancePct > 0
-        ? 'You swam ' + ow.extraDistancePct + '% further than the line you meant to.'
-        : 'Almost none of your effort went sideways.',
+      hero: proud ? 'Line held ' + heldPct + '%' : U.swimDistanceLabel(s.totalDistanceM, unit),
+      subhead: proud ? 'Almost none of your effort went sideways.'
+        : swimCardClock(s.durationS) + ' in open water.',
+      bandLabel: 'LINE HELD ' + heldPct + '%',
       caption: 'Redder where the line wandered off straight.',
-      kind: 'route', route: ow, stats, note: 'IMPORTED FROM APPLE HEALTH',
+      kind: 'route', route: ow, note: 'IMPORTED FROM APPLE HEALTH',
+      stats: proud
+        ? [{ v: paceV, l: paceL }, { v: U.swimDistanceLabel(s.totalDistanceM, unit), l: 'DISTANCE' },
+           { v: ow.medianStrokeRateSpm != null ? String(ow.medianStrokeRateSpm) : '—', l: 'STROKES/MIN' }]
+        : [{ v: paceV, l: paceL }, { v: swimCardClock(s.durationS), l: 'TIME' },
+           { v: ow.medianStrokeRateSpm != null ? String(ow.medianStrokeRateSpm) : '—', l: 'STROKES/MIN' }],
     };
   }
 
   const set = swimCardSet(R);
   if (!set) return null;
   const t = set.trend, read = t.read;
-  /* Normalized to this SET's first countable length, not the session's: the card tells one set's
-     story, and anchoring elsewhere would put the opening point somewhere other than zero. */
-  const rows = set.lengths.filter(l => LoamSwim.isCountable(l));
-  const base = rows[0];
-  if (!base || rows.length < 3) return null;
-  const pct = (v, b) => (v == null || !(b > 0)) ? null : (v / b - 1) * 100;
-  stats.push({ v: s.medianSwolf != null ? String(s.medianSwolf) : '—', l: 'SWOLF' });
+  /* The SAME rows the verdict was fitted over: dominant style AND countable. The card used to plot
+     every countable length in the set, which on a mixed set drew breaststroke lengths into a
+     freestyle set's picture -- a chart the verdict beside it was never computed from. */
+  const rows = set.lengths.filter(l => l.style === t.style && LoamSwim.isCountable(l));
+  if (rows.length < 3) return null;
+  const dpsT = LoamSwim.swimTrend(rows.map(l => l.dps));
+  const rateT = LoamSwim.swimTrend(rows.map(l => l.strokeRateSpm));
+  if (!dpsT || !rateT) return null;
+  /* Normalized to each series' own FITTED start rather than its first raw length, so the drawn
+     trend line begins at exactly 0% and ends at exactly the percentage printed beside it. Same
+     least-squares over the same rows as the module, so these are the module's numbers, not a
+     second opinion about them. */
+  const norm = (v, T) => (v == null || !Number.isFinite(v)) ? null : (v / T.intercept - 1) * 100;
+
+  /* THE HERO IS THE ACCOMPLISHMENT, not the diagnosis (owner's call, 2026-08-05). Every other Loam
+     card -- ride, run, road -- is a route map plus DISTANCE / TOP SPEED / CLIMB, with no verdict on
+     it anywhere. This card headlined a judgment about the swimmer because a pool has no map to fill
+     the hero slot, and the insight was reached for to fill it. That reasoning ("Strava owns distance
+     and pace, we would lose on their turf") is an argument about what makes Loam DIFFERENT, applied
+     to a surface whose job is expressive: what a person wants to post is not the same question.
+     Restating "Fading" as "27% shorter stroke" fixed the tone and not the structure -- it is a more
+     precise statement of a shortcoming, in 88px type.
+
+     So: distance leads, and the read moves to a labelled band below the chart. A GOOD read may still
+     take the hero, because holding a stroke through a hard set is an accomplishment too; a deficit
+     never does. This hides nothing -- the verdict, the mechanism and the chart are all still on the
+     card, and the Swim view and the AI coach state the verdict plainly either way. What changed is
+     which true fact is biggest on a social surface, which is a presentation call, not a claim. */
+  const proud = t.kind === 'holding' || t.kind === 'building';
+  const rateMag = Math.abs(Math.round(t.ratePctChange));
+  const distance = U.swimDistanceLabel(s.totalDistanceM, unit);
+  const lengthsLine = s.nLengths + ' lengths · ' + (t.style || 'swim');
+
   return {
-    eyebrow: [s.poolLengthM != null ? U.swimDistanceLabel(s.poolLengthM, unit).toUpperCase() + ' POOL' : 'POOL SWIM',
-              'SET ' + set.index + ' OF ' + s.nSets].join(' · '),
-    hero: read.label.replace(/^./, c => c.toUpperCase()),
-    subhead: t.kind === 'spinning' ? 'Same pace, bought with more strokes.'
-      : t.kind === 'holding' ? 'The stroke you finished on is the stroke you started with.'
-      : t.kind === 'fading' ? 'The whole stroke slowed together.'
-      : t.kind === 'lengthening' ? 'A longer, slower stroke, all the way through.'
-      : 'The swim got faster as it went.',
-    caption: t.kind === 'spinning' ? 'Pace never moved. The arms did all the extra work.'
+    eyebrow: s.poolLengthM != null ? U.swimDistanceLabel(s.poolLengthM, unit).toUpperCase() + ' POOL' : 'POOL SWIM',
+    hero: proud ? (t.kind === 'holding' ? 'You held the stroke' : 'You built through it') : distance,
+    subhead: proud
+      ? (t.kind === 'holding' ? 'The stroke you finished on is the stroke you started with.'
+                              : 'The swim got faster as it went.')
+      : lengthsLine,
+    /* The read, stated plainly and small, directly above the chart it belongs to. Present on every
+       card including the unflattering ones -- it is just no longer the thing shouted. */
+    bandLabel: [s.nSets > 1 ? 'SET ' + set.index + ' OF ' + s.nSets : null,
+                read.label.toUpperCase()].filter(Boolean).join(' · '),
+    caption: t.kind === 'spinning'
+      ? 'The stroke shortened while the arms sped up ' + rateMag + '%: the catch slipping, not fitness.'
       : 'Distance per stroke and stroke rate, the two things pace is made of.',
     kind: 'lines',
+    stats: proud
+      ? [{ v: paceV, l: paceL }, { v: distance, l: 'DISTANCE' },
+         { v: s.medianSwolf != null ? String(s.medianSwolf) : '—', l: 'SWOLF' }]
+      /* Distance is the hero here, so repeating it in the strip would waste one of three slots. */
+      : [{ v: paceV, l: paceL }, { v: swimCardClock(s.durationS), l: 'TIME' },
+         { v: s.medianSwolf != null ? String(s.medianSwolf) : '—', l: 'SWOLF' }],
     series: [
       { color: '#37a2c6', grad: 'rateFade', label: swimCardPct(t.ratePctChange) + ' stroke rate',
-        points: rows.map(l => pct(l.strokeRateSpm, base.strokeRateSpm)) },
+        end: t.ratePctChange, points: rows.map(l => norm(l.strokeRateSpm, rateT)) },
       { color: '#e87b3d', grad: 'dpsFade', label: swimCardPct(t.dpsPctChange) + ' per stroke',
-        points: rows.map(l => pct(l.dps, base.dps)) },
+        end: t.dpsPctChange, points: rows.map(l => norm(l.dps, dpsT)) },
     ],
-    stats, note: 'IMPORTED FROM APPLE HEALTH',
+    note: 'IMPORTED FROM APPLE HEALTH',
   };
 }
 
+/* Sign from the ROUNDED value, not the raw one: -0.4% is displayed as 0%, and taking the sign from
+   the unrounded number printed it as "-0%", which reads as a typo on the most public surface the
+   app has. */
 function swimCardPct(v) {
   if (v == null) return '—';
-  return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(Math.round(v)) + '%';
+  const r = Math.round(v);
+  return (r > 0 ? '+' : r < 0 ? '−' : '') + Math.abs(r) + '%';
+}
+
+/* Greedy word wrap to at most two lines, since SVG text does not wrap on its own and a long subhead
+   would otherwise run off the card. Anything past two lines is dropped with an ellipsis rather than
+   allowed to collide with the chart below it. */
+function swimCardWrap(text, max) {
+  const words = String(text).split(/\s+/).filter(Boolean), lines = [];
+  let cur = '';
+  for (const w of words) {
+    const next = cur ? cur + ' ' + w : w;
+    if (next.length > max && cur) { lines.push(cur); cur = w; } else { cur = next; }
+    if (lines.length === 2) break;
+  }
+  if (lines.length < 2 && cur) lines.push(cur);
+  return lines.slice(0, 2);
 }
 
 /* Draw the model as the chrome SVG the compositor rasterizes. Deliberately no axes, no gridlines and
@@ -13346,20 +13415,52 @@ function swimCardChrome(m) {
   if (m.kind === 'lines') {
     /* One shared vertical scale across both series so their divergence is honest: scaling each to its
        own range would manufacture a crossing on a swim that never had one. */
-    const all = m.series.flatMap(x => x.points).filter(v => v != null);
-    const span = Math.max(12, ...all.map(Math.abs)) * 1.15;
+    /* Scaled to the range actually drawn (both series, their fitted ends, and the 0% reference)
+       rather than pinning 0% to a fixed y. When both factors move the SAME way -- which is exactly
+       what 'fading' and 'building' are -- a fixed zero line puts every mark in one half of the band
+       and leaves the other half empty. The floor keeps a nearly-flat set from being magnified into
+       drama by its own noise. */
+    const all = m.series.flatMap(x => x.points.concat([x.end])).filter(v => v != null).concat([0]);
+    let lo = Math.min(...all), hi = Math.max(...all);
+    if (hi - lo < 10) { const mid = (hi + lo) / 2; lo = mid - 5; hi = mid + 5; }
+    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+    const TOP = 470, BOT = 730;
     const n = Math.max(2, m.series[0].points.length);
-    const X = i => 120 + (840 * i) / (n - 1);
-    const Y = v => 620 - (v / span) * 175;
-    proof = `<line x1="80" y1="620" x2="1000" y2="620" stroke="#2a2e22" stroke-width="2" stroke-dasharray="2 8"/>
-      <text x="1000" y="604" fill="#4a5040" font-family="${mono}" font-size="19" text-anchor="end" letter-spacing="2">FIRST LENGTH</text>`
-      + m.series.map(sr => {
-        const pts = sr.points.map((v, i) => v == null ? null : `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).filter(Boolean).join(' ');
-        const last = sr.points[sr.points.length - 1];
-        const ly = Y(last), up = last >= 0;
-        return `<polyline fill="none" stroke="url(#${sr.grad})" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" points="${pts}" filter="url(#cardGlow)"/>
-          <circle cx="${X(n - 1).toFixed(1)}" cy="${ly.toFixed(1)}" r="12" fill="${sr.color}"/>
-          <text x="936" y="${(ly + (up ? -30 : 44)).toFixed(1)}" fill="${sr.color}" font-family="${mono}" font-size="30" text-anchor="end" font-weight="600">${esc(sr.label)}</text>`;
+    /* The plot stops at 690 and the endpoint labels start at 720, in their own gutter. They used to
+       be right-anchored back INTO the plot, which drew them straight across the lines: on the first
+       real session the "stroke rate" label sat on top of the other series and neither could be read. */
+    /* The plot starts at 190, not at the card's 120 gutter, so "SET START" has clear space to sit in.
+       Both series are pinned to 0% at i=0 and therefore CONVERGE on the first point, so a label
+       anywhere near it overprints both lines at once -- which is what it did. */
+    const X = i => 190 + (500 * i) / (n - 1);
+    const Y = v => BOT - ((v - lo) / (hi - lo)) * (BOT - TOP);
+    const yZero = Y(0);
+    /* And pushed apart when the two series finish close together, which is the same collision from
+       the other direction -- two labels at the same y overprint each other. */
+    const ends = m.series.map(sr => Y(sr.end));
+    if (Math.abs(ends[0] - ends[1]) < 52) {
+      const mid = (ends[0] + ends[1]) / 2, up = ends[0] <= ends[1] ? -1 : 1;
+      ends[0] = mid + up * 26; ends[1] = mid - up * 26;
+    }
+    proof = `<line x1="190" y1="${yZero.toFixed(1)}" x2="690" y2="${yZero.toFixed(1)}" stroke="#2a2e22" stroke-width="2" stroke-dasharray="2 8"/>
+      <text x="172" y="${(yZero + 7).toFixed(1)}" fill="#4a5040" font-family="${mono}" font-size="19" text-anchor="end" letter-spacing="2">SET<tspan x="172" dy="24">START</tspan></text>`
+      + m.series.map((sr, si) => {
+        /* The bold line is the FIT; the dots are the lengths it was fitted through. Drawing the raw
+           per-length series bold is what made the first card unreadable: real per-length values
+           sawtooth hard, so "two lines pulling apart" came out as two tangles of noise. The claim
+           beside the chart is a trend, so the trend is what gets drawn -- and the dots stay, at low
+           opacity, so the scatter behind that claim is visible rather than quietly dropped. */
+        const dots = sr.points.map((v, i) => v == null ? '' :
+          `<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="6" fill="${sr.color}" opacity="0.3"/>`).join('');
+        const y1 = Y(sr.end);
+        /* When a label has been pushed off its endpoint to avoid the other one, a leader line keeps
+           it attached to the dot it describes. Without it, two series finishing together produce two
+           labels floating beside a single visible dot, and which belongs to which is a guess. */
+        const leader = Math.abs(ends[si] - y1) > 6
+          ? `<line x1="${(X(n - 1) + 16).toFixed(1)}" y1="${y1.toFixed(1)}" x2="712" y2="${ends[si].toFixed(1)}" stroke="${sr.color}" stroke-width="2" opacity="0.5"/>` : '';
+        return dots + `<line x1="${X(0).toFixed(1)}" y1="${Y(0).toFixed(1)}" x2="${X(n - 1).toFixed(1)}" y2="${y1.toFixed(1)}" stroke="url(#${sr.grad})" stroke-width="10" stroke-linecap="round" filter="url(#cardGlow)"/>
+          <circle cx="${X(n - 1).toFixed(1)}" cy="${y1.toFixed(1)}" r="11" fill="${sr.color}"/>${leader}
+          <text x="720" y="${(ends[si] + 10).toFixed(1)}" fill="${sr.color}" font-family="${mono}" font-size="27" font-weight="600">${esc(sr.label)}</text>`;
       }).join('');
   } else {
     /* Open water: the track itself, coloured by how straight the line was held. */
@@ -13389,12 +13490,21 @@ function swimCardChrome(m) {
       <text x="${x}" y="1078" fill="#6a705c" font-family="${mono}" font-size="20" letter-spacing="2.5">${esc(st.l)}</text>`;
   }).join('');
 
+  /* The hero is set in one line at whatever size that line can hold. A fixed 104px silently ran
+     "23% shorter stroke" off the right edge, and shrinking the copy to fit the type is the wrong way
+     round -- the sentence is the content. */
+  const heroSize = m.hero.length <= 14 ? 104 : m.hero.length <= 19 ? 88 : 74;
+  const sub = swimCardWrap(m.subhead, 46).map((ln, i) =>
+    `<text x="80" y="${336 + i * 46}" fill="#c9cfbb" font-size="36" letter-spacing="-0.3">${esc(ln)}</text>`).join('');
+
   return `<rect x="0" y="0" width="${W}" height="6" fill="#e87b3d"/>
     <text x="80" y="132" fill="#7a808c" font-family="${mono}" font-size="24" letter-spacing="4.5">${esc(m.eyebrow)}</text>
-    <text x="80" y="268" fill="#f5f1e6" font-size="104" font-weight="700" letter-spacing="-3">${esc(m.hero)}</text>
-    <text x="80" y="336" fill="#c9cfbb" font-size="36" letter-spacing="-0.3">${esc(m.subhead)}</text>
+    <text x="80" y="272" fill="#f5f1e6" font-size="${heroSize}" font-weight="700" letter-spacing="-3">${esc(m.hero)}</text>
+    ${sub}
+    ${m.bandLabel ? `<text x="80" y="430" fill="#d4a574" font-family="${mono}" font-size="21" letter-spacing="3">${esc(m.bandLabel)}</text>` : ''}
     ${proof}
-    <text x="80" y="900" fill="#9aa08a" font-size="29" letter-spacing="-0.2">${esc(m.caption)}</text>
+    ${swimCardWrap(m.caption, 58).map((ln, i) =>
+      `<text x="80" y="${884 + i * 38}" fill="#9aa08a" font-size="29" letter-spacing="-0.2">${esc(ln)}</text>`).join('')}
     <line x1="80" y1="962" x2="1000" y2="962" stroke="#2a2e22" stroke-width="2"/>
     ${stats}
     <text x="80" y="1258" fill="#f5f1e6" font-size="40" font-weight="700" letter-spacing="1">LO<tspan fill="#e87b3d">A</tspan>M</text>
@@ -13410,9 +13520,12 @@ function shareSwimCard(D) {
   if (!m) { setStatus('Nothing to put on a card for this swim yet'); return; }
   _rideSig = {
     W: SWIM_CARD_W, H: SWIM_CARD_H, tiles: [],
+    /* userSpaceOnUse, not the default objectBoundingBox: the trend lines are near-horizontal, and a
+       bounding box of zero height makes an objectBoundingBox gradient degenerate (the line renders
+       unpainted in some rasterizers). Pinned to the plot's own x-range instead. */
     defs: `<defs>
-      <linearGradient id="dpsFade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#d4a574" stop-opacity="0.25"/><stop offset="1" stop-color="#e87b3d"/></linearGradient>
-      <linearGradient id="rateFade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#37a2c6" stop-opacity="0.25"/><stop offset="1" stop-color="#37a2c6"/></linearGradient>
+      <linearGradient id="dpsFade" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="690" y2="0"><stop offset="0" stop-color="#d4a574" stop-opacity="0.25"/><stop offset="1" stop-color="#e87b3d"/></linearGradient>
+      <linearGradient id="rateFade" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="690" y2="0"><stop offset="0" stop-color="#37a2c6" stop-opacity="0.25"/><stop offset="1" stop-color="#37a2c6"/></linearGradient>
       <filter id="cardGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="10" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
     </defs>`,
     chrome: swimCardChrome(m),
@@ -20628,7 +20741,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'd96901718 · 2026-08-05';
+const LOAM_BUILD = '6adbbfc8f · 2026-08-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
