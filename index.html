@@ -611,6 +611,32 @@
   /* The swim card is 4:5 PORTRAIT (the ride's is 800x460 landscape), so it is width-capped rather
      than run to full width: at 100% of a desktop column it would be over a thousand pixels tall and
      push the whole analysis below the fold. */
+  /* 2px surface gaps between segments, so adjacent fills stay separable even for a reader who
+     cannot tell two hues apart. 4px rounded outer ends, square inside, per the mark spec. */
+  .swim-dist { display: flex; gap: 2px; height: 16px; margin: 2px 0 8px; }
+  .swim-dist span { display: block; min-width: 3px; }
+  .swim-dist span:first-child { border-radius: 4px 0 0 4px; }
+  .swim-dist span:last-child { border-radius: 0 4px 4px 0; }
+  .swim-dist span:only-child { border-radius: 4px; }
+  .swim-dist-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 10px;
+                   font-size: 12px; color: var(--dim, #5b6150); }
+  .swim-dist-key span { display: inline-flex; align-items: center; gap: 6px; }
+  .swim-dist-key i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .swim-dist-key b { font-weight: 700; color: var(--ink, #21251a); }
+  .swim-scope-row { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; flex-wrap: wrap; }
+  .swim-scope-row label {
+    font: 500 11px/1 'JetBrains Mono', monospace; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted, #8b9179);
+  }
+  .swim-scope-row select { font-size: 13px; padding: 5px 8px; border-radius: 8px; max-width: 100%; }
+  .swim-stroke-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  .swim-stroke-filter button {
+    font: 500 12px/1 'JetBrains Mono', monospace; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 6px 11px; border-radius: 999px; cursor: pointer;
+    background: var(--surface-2, #efe9d9); color: var(--dim, #5b6150);
+    border: 1px solid var(--border, #ddd5c0);
+  }
+  .swim-stroke-filter button.on { background: var(--ink, #21251a); color: var(--paper, #f5f1e6); border-color: var(--ink, #21251a); }
   .swim-sig-wrap { margin: 18px 0 26px; }
   .swim-sig { max-width: 420px; border-radius: 14px; overflow: hidden; line-height: 0;
               box-shadow: 0 10px 34px rgba(15,23,42,0.28); }
@@ -9677,6 +9703,43 @@ function isCountable(len) {
   return len.dps != null && len.strokeRateSpm != null;
 }
 
+/* Per-stroke aggregates across the whole session, most-swum first.
+ *
+ * A mixed session is the normal case, not an edge case -- a real 84-length session came back as
+ * freestyle AND breaststroke -- and until now the only per-stroke fact anywhere was a count. Every
+ * headline number (pace, distance per stroke, stroke rate, SWOLF) was a median over ALL lengths,
+ * which averages across strokes that are not comparable to each other: a breaststroke length and a
+ * freestyle length have completely different distance per stroke, so their blend describes neither.
+ *
+ * This is arithmetic on Apple's own stroke labels, which the project takes as ground truth, so it
+ * adds no inference. It is the same medians the session headline already reports, only grouped.
+ *
+ * SWOLF and distance per stroke stay per-stroke ONLY -- they are never summed or averaged across
+ * styles here, for the same reason the coach prompt forbids comparing them. */
+function swimStyleSplits(session) {
+  const lengths = (session && session.lengths) || [];
+  const byStyle = new Map();
+  for (const l of lengths) {
+    if (!byStyle.has(l.style)) byStyle.set(l.style, []);
+    byStyle.get(l.style).push(l);
+  }
+  const pick = (rows, key) => {
+    const vs = rows.map(r => r[key]).filter(v => v != null && Number.isFinite(v));
+    return vs.length ? median(vs) : null;
+  };
+  return [...byStyle.entries()].map(([style, rows]) => ({
+    style,
+    nLengths: rows.length,
+    distanceM: +rows.reduce((s, l) => s + (l.distanceM || 0), 0).toFixed(1),
+    strokes: rows.reduce((s, l) => s + (l.strokes || 0), 0),
+    durationS: +rows.reduce((s, l) => s + (l.durationS || 0), 0).toFixed(1),
+    medianPace100S: (v => v == null ? null : +v.toFixed(1))(pick(rows, 'pace100S')),
+    medianDps: (v => v == null ? null : +v.toFixed(2))(pick(rows, 'dps')),
+    medianStrokeRateSpm: (v => v == null ? null : +v.toFixed(1))(pick(rows, 'strokeRateSpm')),
+    medianSwolf: (v => v == null ? null : +v.toFixed(1))(pick(rows, 'swolf')),
+  })).sort((a, b) => b.nLengths - a.nLengths);
+}
+
 /* The session roll-up.
  *
  * Open water is handled by degrading rather than erroring: there are no lap events in open water, so
@@ -9977,7 +10040,7 @@ function swimPaceLabel(pace100S, unit) {
 
   return { normalizeSwimImport, swimLengthMetrics, isStrokeStyle,
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
-    swimEffortRead, swimPaceCv, isCountable,
+    swimEffortRead, swimPaceCv, isCountable, swimStyleSplits,
     computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel,
     swimDigest, swimCaveats, swimCoachPrompt,
     analyzeOpenWater, straightnessWindows, sliceStraightness, routeCumulative,
@@ -13236,7 +13299,10 @@ function renderSwim(D) {
      three ways there (current, sighting, zigzag) badly enough to invert a verdict, so the pool
      decomposition is withheld and navigation takes its place. See analyzer/sports/swim/open-water.js. */
   const body = R.hasLengths
-    ? swimDecompSection(R, unit) + swimSetCards(R, unit) + swimLedger(R, unit)
+    /* After the set cards, not before them: the set cards carry no heading of their own, so a
+       "By stroke" title above them reads as though they are part of it. Sits with the ledger
+       instead, which is the other per-length breakdown. */
+    ? swimDecompSection(R, unit) + swimSetCards(R, unit) + swimStyleSection(D.session, unit) + swimLedger(R, unit)
     : swimOpenWaterSection(R, unit);
 
   el.innerHTML = `
@@ -13290,6 +13356,17 @@ function swimCardSet(R) {
 
 /* The card's content, separated from its drawing so the choice of what to say is testable and so the
    open-water and pool variants can share one renderer. */
+/* "freestyle", or "freestyle & breaststroke", or "freestyle, breaststroke +1" -- the session's real
+   stroke mix, most-swum first. Named rather than counted per stroke because the card already states
+   the total length count beside it, and the per-stroke split is a whole section in the view. */
+function swimStyleMixLabel(s) {
+  const styles = (s && s.styles) || [];
+  if (!styles.length) return 'swim';
+  if (styles.length === 1) return styles[0];
+  if (styles.length === 2) return styles[0] + ' & ' + styles[1];
+  return styles[0] + ', ' + styles[1] + ' +' + (styles.length - 2);
+}
+
 /* mm:ss / h:mm:ss for the elapsed stat. */
 function swimCardClock(sec) {
   if (sec == null || !Number.isFinite(sec)) return '—';
@@ -13361,7 +13438,11 @@ function swimCardModel(D) {
   const proud = t.kind === 'holding' || t.kind === 'building';
   const rateMag = Math.abs(Math.round(t.ratePctChange));
   const distance = U.swimDistanceLabel(s.totalDistanceM, unit);
-  const lengthsLine = s.nLengths + ' lengths · ' + (t.style || 'swim');
+  /* The session's OWN stroke mix, not the featured set's stroke. These two were being paired -- a
+     session-wide length count next to one set's dominant style -- so an 84-length session that was
+     half freestyle read as "84 lengths - breaststroke", attributing the whole swim to a stroke it
+     was only partly swum in. */
+  const lengthsLine = s.nLengths + ' lengths · ' + swimStyleMixLabel(s);
 
   return {
     eyebrow: s.poolLengthM != null ? U.swimDistanceLabel(s.poolLengthM, unit).toUpperCase() + ' POOL' : 'POOL SWIM',
@@ -13755,12 +13836,53 @@ document.addEventListener('toggle', (e) => {
    Each factor is normalized to its own first countable length and shown as a percentage of it, so
    two quantities in different units (metres per stroke, strokes per minute) share one axis honestly.
    Rest between sets is drawn as a shaded band so the reader can see where a set ended. */
+/* Scopes the decomposition chart can be drawn at, as <select> options.
+ *
+ * Whole-session is NOT a safe default on a mixed swim. Every point is normalized against the first
+ * length in view, so a session that switches from freestyle to breaststroke halfway shows both lines
+ * lurching at the changeover -- distance per stroke leaping, rate collapsing -- and none of that is
+ * the swimmer changing. It is the stroke changing, and the chart reads as a dramatic finding.
+ * So a mixed session opens on its dominant stroke, where every point IS comparable, and whole-session
+ * stays one click away rather than being hidden. */
+function swimDecompScopes(R) {
+  const styles = [...new Set(R.sets.flatMap(set => set.lengths.map(l => l.style)))];
+  const counts = {};
+  for (const set of R.sets) for (const l of set.lengths) counts[l.style] = (counts[l.style] || 0) + 1;
+  const byCount = styles.slice().sort((a, b) => counts[b] - counts[a]);
+  const opts = [{ v: 'all', label: 'Whole session (' + R.nLengths + ' lengths)' }];
+  if (styles.length > 1) {
+    for (const st of byCount) opts.push({ v: 'style:' + st, label: st + ' only (' + counts[st] + ')', group: 'One stroke' });
+  }
+  for (const set of R.sets) {
+    opts.push({ v: 'set:' + set.index, group: 'One set',
+                label: 'Set ' + set.index + ' · ' + set.dominantStyle + ' (' + set.nLengths + ')' });
+  }
+  return { opts, def: styles.length > 1 ? 'style:' + byCount[0] : 'all' };
+}
+
 function swimDecompSection(R, unit) {
+  const { opts, def } = swimDecompScopes(R);
+  let group = null, sel = '';
+  for (const o of opts) {
+    if (o.group !== group) {
+      if (group) sel += '</optgroup>';
+      if (o.group) sel += `<optgroup label="${escapeHtml(o.group)}">`;
+      group = o.group;
+    }
+    sel += `<option value="${escapeHtml(o.v)}"${o.v === def ? ' selected' : ''}>${escapeHtml(o.label)}</option>`;
+  }
+  if (group) sel += '</optgroup>';
+
   return `<div class="section-title" style="margin-top:22px">How your stroke changed
       <span class="subtitle">distance per stroke and stroke rate, the two things pace is made of</span>
     </div>
-    <div class="panel"><div id="swimDecompChart" class="chart" style="height:320px"></div>
-      <div class="strength-tablenote">Both lines are relative to the first length of the session, so they can share an axis. Falling orange with rising blue is the pattern worth catching: the same pace bought with more strokes.</div>
+    <div class="panel">
+      <div class="swim-scope-row">
+        <label for="swimDecompScope">Show</label>
+        <select id="swimDecompScope" onchange="redrawSwimDecomp()">${sel}</select>
+      </div>
+      <div id="swimDecompChart" class="chart" style="height:320px"></div>
+      <div class="strength-tablenote" id="swimDecompNote"></div>
     </div>
     <div class="section-title" style="margin-top:22px">Set by set
       <span class="subtitle">where each set landed on the two factors</span>
@@ -13772,25 +13894,67 @@ function swimDecompSection(R, unit) {
 
 /* Colour per stroke style, so a mixed session reads at a glance and a breaststroke length is never
    mistaken for a freestyle one on a chart that puts them side by side. */
+/* Roles from analyzer-visual-language.md, in its fixed categorical order, assigned per stroke and
+   never cycled.
+ *
+ * Breaststroke moved OFF amber onto moss: amber against clay (butterfly) measured normal-vision
+ * ΔE 9.6 and deutan 0.6 on the dataviz validator -- two fills a full-colour reader struggles to
+ * separate and a deuteranope cannot. Moss against clay is 20.3. That pair already shipped in the
+ * set-by-set quadrant. "other" takes the freed amber.
+ *
+ * The honest limit, measured rather than assumed: NO four-role subset of the guide's palette clears
+ * the validator's normal-vision floor under `--pairs all` (best is ~11.7 against a floor of 15), so
+ * on an IM session hue alone cannot carry identity. The guide's row passes in ADJACENT mode, which
+ * is what it claims and what a fixed-order palette is checked against. Everything that uses these
+ * colours therefore labels its marks directly -- the distribution bar names every segment and the
+ * quadrant labels every dot -- so hue is reinforcement, never the identity channel. */
 function swimStrokeColor(style) {
   switch (style) {
-    case 'freestyle': return '#1f7ba6';
-    case 'breaststroke': return '#a06f24';
-    case 'backstroke': return '#7b5fc0';
-    case 'butterfly': return '#c14e2e';
-    case 'kickboard': return '#7a808c';
-    default: return '#4a9d6e';
+    case 'freestyle': return '#1f7ba6';    // sky
+    case 'breaststroke': return '#557a2f'; // moss
+    case 'backstroke': return '#7b5fc0';   // violet
+    case 'butterfly': return '#c14e2e';    // clay
+    case 'kickboard': return '#7a808c';    // deliberately neutral: not a stroke
+    default: return '#b07a2e';             // amber
   }
+}
+
+/* Re-draw at whatever the scope selector currently says. Reads the live render rather than taking
+   arguments, so the onchange handler needs no closure over R. */
+function redrawSwimDecomp() {
+  const D = _lastRender && _lastRender.D;
+  if (!D || !D.swim) return;
+  drawSwimDecomp(D.swim, (D.summary && D.summary.displayUnit) || 'm');
 }
 
 function drawSwimDecomp(R, unit) {
   const el = document.getElementById('swimDecompChart');
   if (!el || typeof Plotly === 'undefined') return;
-  const all = R.sets.flatMap(set => set.lengths.map(l => ({ ...l, setIndex: set.index })));
-  /* Normalize against the first length that HAS both factors: a session that opens with a kickboard
-     length has no stroke numbers on length 1, and dividing by nothing would blank the whole chart. */
+  const sel = document.getElementById('swimDecompScope');
+  const scope = (sel && sel.value) || swimDecompScopes(R).def;
+
+  const everything = R.sets.flatMap(set => set.lengths.map(l => ({ ...l, setIndex: set.index })));
+  const all = scope === 'all' ? everything
+    : scope.startsWith('style:') ? everything.filter(l => l.style === scope.slice(6))
+    : everything.filter(l => l.setIndex === +scope.slice(4));
+  if (!all.length) { el.innerHTML = '<div class="strength-tablenote">Nothing to plot at this scope.</div>'; return; }
+
+  /* Normalize against the first length that HAS both factors IN THIS SCOPE: a session that opens
+     with a kickboard length has no stroke numbers on length 1, and dividing by nothing would blank
+     the whole chart. Re-basing per scope is also what makes a scoped view mean anything -- against
+     the session's first length, a breaststroke-only view would just be a constant offset. */
   const base = all.find(l => l.dps != null && l.strokeRateSpm != null);
   const x = all.map(l => l.index);
+
+  /* Say plainly when the view still spans more than one stroke, because that is exactly the
+     comparison the rest of the app refuses to make. */
+  const styles = [...new Set(all.map(l => l.style))];
+  const note = document.getElementById('swimDecompNote');
+  if (note) {
+    note.innerHTML = styles.length > 1
+      ? `<strong>This view spans ${styles.length} strokes (${styles.map(escapeHtml).join(', ')}).</strong> Distance per stroke is not comparable between them, so the steps at each changeover are the stroke changing, not you. Pick one stroke or one set above to compare like with like.`
+      : `Both lines are relative to the first ${escapeHtml(styles[0] || '')} length in view, so they can share an axis. Falling orange with rising blue is the pattern worth catching: the same pace bought with more strokes.`;
+  }
   const pct = (v, b) => (v == null || b == null || !(b > 0)) ? null : +((v / b - 1) * 100).toFixed(1);
 
   const traces = [{
@@ -13812,13 +13976,18 @@ function drawSwimDecomp(R, unit) {
     hovertemplate: 'length %{x}<br>pace %{y:+.1f}%<extra></extra>',
   }];
 
-  /* Shade each set so the reader can see which lengths belong together, and where the rest fell. */
-  const shapes = R.sets.map((set, i) => ({
-    type: 'rect', xref: 'x', yref: 'paper',
-    x0: set.lengths[0].index - 0.5, x1: set.lengths[set.lengths.length - 1].index + 0.5,
-    y0: 0, y1: 1, line: { width: 0 },
-    fillcolor: i % 2 ? 'rgba(160,111,36,0.26)' : 'rgba(0,0,0,0)', layer: 'below', opacity: 0.25,
-  }));
+  /* Shade each set so the reader can see which lengths belong together, and where the rest fell.
+     Only when more than one set is in view: banding a single-set scope shades the whole plot. */
+  const inView = new Set(all.map(l => l.setIndex));
+  const shapes = inView.size < 2 ? [] : R.sets.filter(s => inView.has(s.index)).map((set, i) => {
+    const rows = set.lengths.filter(l => all.some(a => a.index === l.index));
+    return rows.length ? {
+      type: 'rect', xref: 'x', yref: 'paper',
+      x0: rows[0].index - 0.5, x1: rows[rows.length - 1].index + 0.5,
+      y0: 0, y1: 1, line: { width: 0 },
+      fillcolor: i % 2 ? 'rgba(160,111,36,0.26)' : 'rgba(0,0,0,0)', layer: 'below', opacity: 0.25,
+    } : null;
+  }).filter(Boolean);
 
   loamPlot(el, traces, {
     margin: { l: 52, r: 12, t: 8, b: 42 },
@@ -13929,9 +14098,73 @@ function swimSetCards(R, unit) {
 /* The length ledger. Enumerates what the watch recorded, one row per length, and makes no claim
    about any of it: the same split this repo draws elsewhere between a surface that RECOMMENDS
    (the set cards above, which read the trend) and one that merely ENUMERATES. */
+/* Per-stroke breakdown. A mixed session is the normal case, and until now the only per-stroke fact
+   on screen was the comma list in the session line -- every headline number was a median across
+   strokes that are not comparable to each other, which describes neither of them.
+   Only rendered when there IS more than one stroke: on a single-stroke session every row would just
+   repeat the session headline. */
+function swimStyleSection(session, unit) {
+  const splits = LoamSwim.swimStyleSplits(session);
+  if (splits.length < 2) return '';
+  const U = LoamSwim;
+  /* Part-to-whole across a handful of long-named categories, which is a STACKED BAR rather than a
+     pie (a pie of two slices is the classic version of this mistake, and stroke names do not fit in
+     slices). One row, so it costs almost no vertical space on a phone, and every segment is named in
+     the legend beneath -- identity is carried by the label, with colour only reinforcing it.
+     In a fixed-length pool a length is a length, so share of lengths and share of distance are the
+     same number; it is computed from distance so an odd-length pool cannot make it lie. */
+  const totalM = splits.reduce((a, x) => a + (x.distanceM || 0), 0) || 1;
+  const share = x => (x.distanceM || 0) / totalM * 100;
+  const bar = `<div class="swim-dist" role="img" aria-label="${escapeHtml(
+        splits.map(x => `${x.style} ${Math.round(share(x))} percent`).join(', '))}">`
+    + splits.map(x => `<span style="flex:${share(x).toFixed(3)} 1 0;background:${swimStrokeColor(x.style)}"
+        title="${escapeHtml(x.style)}: ${x.nLengths} lengths"></span>`).join('')
+    + `</div><div class="swim-dist-key">`
+    + splits.map(x => `<span><i style="background:${swimStrokeColor(x.style)}"></i>${escapeHtml(x.style)}
+        <b>${Math.round(share(x))}%</b> · ${x.nLengths} lengths</span>`).join('')
+    + `</div>`;
+
+  const rows = splits.map(x => `<tr>
+    <td><strong>${escapeHtml(x.style)}</strong></td>
+    <td>${x.nLengths}</td>
+    <td>${U.swimDistanceLabel(x.distanceM, unit)}</td>
+    <td>${U.swimPaceLabel(x.medianPace100S, unit)}</td>
+    <td>${U.swimDpsLabel(x.medianDps, unit)}</td>
+    <td>${x.medianStrokeRateSpm != null ? x.medianStrokeRateSpm : '&mdash;'}</td>
+    <td>${x.medianSwolf != null ? x.medianSwolf : '&mdash;'}</td>
+  </tr>`).join('');
+  return `<div class="section-title" style="margin-top:26px">By stroke</div>
+    ${bar}
+    <div class="strength-tablenote">Each stroke's own medians. Read DOWN a column, never across a row:
+      a breaststroke distance per stroke is nothing like a freestyle one, so the session-wide medians
+      above blend two numbers that do not belong together.
+      <strong>SWOLF</strong> is one length's seconds plus its stroke count (lower is better) &mdash; it
+      rewards covering the length in fewer strokes AND less time, so it only means anything within one
+      pool length and one stroke.</div>
+    <div class="swim-tablewrap"><table class="strength-table">
+      <thead><tr><th>stroke</th><th>lengths</th><th>distance</th><th>pace</th><th>per stroke</th><th>spm</th><th>swolf</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+/* Stroke filter for the ledger. An 84-length mixed session is a lot of scrolling to find the six
+   breaststroke lengths in it. Filters the ENUMERATION only -- it never rescopes a verdict, because
+   the per-set trends are fitted on each set's dominant stroke and a filtered trend would be a
+   different claim than the one the panel above it makes. */
+function filterSwimLedger(style) {
+  const wrap = document.getElementById('swimLedgerTable');
+  if (!wrap) return;
+  for (const tr of wrap.querySelectorAll('tbody tr')) {
+    tr.style.display = (!style || tr.dataset.style === style) ? '' : 'none';
+  }
+  for (const b of document.querySelectorAll('#swimStrokeFilter button')) {
+    b.classList.toggle('on', (b.dataset.style || '') === (style || ''));
+  }
+}
+
 function swimLedger(R, unit) {
   const U = LoamSwim;
-  const rows = R.sets.flatMap(set => set.lengths.map(l => `<tr>
+  const rows = R.sets.flatMap(set => set.lengths.map(l => `<tr data-style="${escapeHtml(l.style)}">
     <td>${l.index}</td>
     <td>${set.index}</td>
     <td>${escapeHtml(l.style)}</td>
@@ -13943,11 +14176,19 @@ function swimLedger(R, unit) {
     <td>${U.swimPaceLabel(l.pace100S, unit)}</td>
   </tr>`)).join('');
   const n = R.nLengths || 0;
+  /* One chip per stroke actually swum, plus All. Only offered on a mixed session; on a single-stroke
+     swim the filter would be a control with nothing to do. */
+  const styles = [...new Set(R.sets.flatMap(set => set.lengths.map(l => l.style)))];
+  const filter = styles.length < 2 ? '' :
+    `<div id="swimStrokeFilter" class="swim-stroke-filter">
+      <button class="on" data-style="" onclick="filterSwimLedger('')">All</button>` +
+    styles.map(st => `<button data-style="${escapeHtml(st)}" onclick="filterSwimLedger('${escapeHtml(st)}')">${escapeHtml(st)}</button>`).join('') +
+    `</div>`;
   /* Open for a short swim, folded for a long one: hiding six rows helps nobody, and a reader who
      disagrees gets their choice remembered from then on. */
   return `<div style="margin-top:22px"></div>` + foldSection(
     'swimLengths', 'Lengths', `${n} length${n === 1 ? '' : 's'}`,
-    `<div class="swim-tablewrap"><table class="strength-table">
+    filter + `<div class="swim-tablewrap" id="swimLedgerTable"><table class="strength-table">
       <thead><tr><th>#</th><th>set</th><th>stroke</th><th>time</th><th>strokes</th><th>per stroke</th><th>spm</th><th>swolf</th><th>pace</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`,
@@ -20813,7 +21054,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'dfd5b96d3 · 2026-08-06';
+const LOAM_BUILD = 'ed0045a32 · 2026-08-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
