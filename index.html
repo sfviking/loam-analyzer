@@ -544,21 +544,23 @@
   details.fold[open] > summary .fold-chev::after { content: 'hide \2013'; }
   details.fold:not([open]) > summary .fold-chev::after { content: 'show +'; }
   details.fold > summary:hover .fold-chev { color: var(--text, inherit); }
-  /* "smooth" checkbox tucked into a chart's subtitle; normal-case and clickable, unlike the caption. */
-  .section-title .subtitle .smooth-lbl {
+  /* "smooth" checkbox; normal-case and clickable, unlike the caption around it.
+     Styled on the CLASS ALONE, deliberately. This used to be scoped
+     `.section-title .subtitle .smooth-lbl`, i.e. only inside a subtitle -- so the one copy that sat
+     as a SIBLING of .subtitle never matched, silently inherited the section title's large bold type,
+     and shipped a heading-sized "smooth" on the Descents screen. A control that renders correctly
+     only in one nesting is a trap; this one now looks the same anywhere it is placed. */
+  .smooth-lbl {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
     text-transform: none; letter-spacing: normal; color: var(--text-dim);
-    margin-left: 10px; cursor: pointer; white-space: nowrap;
+    cursor: pointer; white-space: nowrap;
   }
-  .section-title .subtitle .smooth-lbl input { vertical-align: -1px; margin-right: 3px; cursor: pointer; }
+  .section-title .subtitle .smooth-lbl { margin-left: 10px; }
+  .smooth-lbl input { vertical-align: -1px; margin-right: 4px; cursor: pointer; }
   /* Same control, standing on its own directly above the chart it drives. In the Runs section the
      overlay chart sits BELOW the runs table, so a toggle in the section title was scrolled off the
      screen by the time the reader reached the graph it changes. */
   .chart-controls { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; }
-  .chart-controls .smooth-lbl {
-    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim);
-    cursor: pointer; white-space: nowrap;
-  }
-  .chart-controls .smooth-lbl input { vertical-align: -1px; margin-right: 4px; cursor: pointer; }
   /* "all turns" toggle in the Per-turn header, beside the sort select. */
   .ledger-all-lbl { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim);
     margin-left: 10px; cursor: pointer; white-space: nowrap; text-transform: none; letter-spacing: normal; }
@@ -8186,7 +8188,7 @@ function computeStrengthSummary(sensors, ride, R) {
   const hr = (sensors.heartRate || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.bpm != null);
   if (hr.length) {
     hrAvg = Math.round(hr.reduce((s, r) => s + r.bpm, 0) / hr.length);
-    hrMax = Math.max(...hr.map(r => r.bpm));
+    hrMax = Math.round(Math.max(...hr.map(r => r.bpm)));
   }
 
   return {
@@ -8455,7 +8457,7 @@ const LoamGolf = (function () {
     const hr = (sensors.heartRate || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.bpm != null);
     if (hr.length) {
       hrAvg = Math.round(hr.reduce((s, r) => s + r.bpm, 0) / hr.length);
-      hrMax = Math.max(...hr.map(r => r.bpm));
+      hrMax = Math.round(Math.max(...hr.map(r => r.bpm)));
     }
 
     /* Measured consistency, the honest half of the repeatability read. The DTW score below is
@@ -13303,13 +13305,26 @@ function renderSwim(D) {
      switches from the per-length median (which excludes rest, the right figure in a pool) to
      distance over duration. */
   const ow = R.openWater || {};
+  /* Three of these tiles are STROKE-SPECIFIC: distance per stroke, stroke rate and SWOLF mean
+     nothing averaged across strokes, because a breaststroke length and a freestyle length are not
+     the same measurement. The session medians blended them, so a mixed swim put a number on screen
+     that described neither stroke -- the exact comparison the coach prompt forbids and the By-stroke
+     table exists to undo.
+     On a mixed session they now report the DOMINANT stroke and say so in the label. That is a real
+     number about a real thing, the tile count and layout are unchanged, and the full split is one
+     section below. Distance, time, pace, lengths and sets are genuinely session-wide and stay as
+     they were: you did swim that far in that time, whatever the strokes. */
+  const splits = R.hasLengths ? U.swimStyleSplits(D.session) : [];
+  const dom = splits.length > 1 ? splits[0] : null;
+  const perStroke = dom || s;
+  const strokeTag = dom ? ' · ' + dom.style : '';
   const tiles = (R.hasLengths ? [
     tile(U.swimDistanceLabel(s.totalDistanceM, unit), 'distance'),
     tile(fmtDuration(s.swimmingS || 0), 'swimming'),
     tile(U.swimPaceLabel(s.medianPace100S, unit).replace(/\/100(m|yd)$/, ''), `pace /100${unit}`),
-    tile(U.swimDpsLabel(s.medianDps, unit), 'per stroke'),
-    tile(s.medianStrokeRateSpm != null ? s.medianStrokeRateSpm : '—', 'strokes/min'),
-    tile(s.medianSwolf != null ? s.medianSwolf : '—', 'swolf'),
+    tile(U.swimDpsLabel(perStroke.medianDps, unit), 'per stroke' + strokeTag),
+    tile(perStroke.medianStrokeRateSpm != null ? perStroke.medianStrokeRateSpm : '—', 'strokes/min' + strokeTag),
+    tile(perStroke.medianSwolf != null ? perStroke.medianSwolf : '—', 'swolf' + strokeTag),
     tile(s.nLengths, 'lengths'),
     tile(s.nSets, 'sets'),
     s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max ~') : '',
@@ -14006,8 +14021,10 @@ function drawSwimDecomp(R, unit) {
 
   /* Shade each set so the reader can see which lengths belong together, and where the rest fell.
      Only when more than one set is in view: banding a single-set scope shades the whole plot. */
+  /* ...and only while the bands still read as bands. Past a handful of sets the alternating fills
+     become stripes across the whole plot, which obscures the two traces instead of grouping them. */
   const inView = new Set(all.map(l => l.setIndex));
-  const shapes = inView.size < 2 ? [] : R.sets.filter(s => inView.has(s.index)).map((set, i) => {
+  const shapes = (inView.size < 2 || inView.size > 8) ? [] : R.sets.filter(s => inView.has(s.index)).map((set, i) => {
     const rows = set.lengths.filter(l => all.some(a => a.index === l.index));
     return rows.length ? {
       type: 'rect', xref: 'x', yref: 'paper',
@@ -17459,7 +17476,7 @@ function promptCoachKey() {
    hard-coded corner-drill chip shows up on a driving-range session. Each list is scoped to what that
    sport's digest and system prompt can actually answer. isMtbFamily/isLiftSport/isGolfSport are
    explicit here so an unrecognized sport lands on the neutral fallback instead of inheriting MTB's. */
-function coachChips(sport) {
+function coachChips(sport, opts) {
   if (isGolfSport(sport)) return ['How do I make my swings repeat?', 'Is my tempo consistent?', 'What should I work on next range session?'];
   if (sport === 'lift' || isLiftSport(sport)) return ['Where did my bar speed fade?', 'Was my depth consistent?', 'High bar vs low bar for my goals?'];
   if (sport === 'running') return ['How do I lower my vertical oscillation?', 'Cadence drills for me', 'Pacing advice for the climbs'];
@@ -17467,14 +17484,25 @@ function coachChips(sport) {
   if (sport === 'run' || sport === 'walk') return ['How was my pacing on the climbs?', 'Where did I fade?', `What should I focus on next ${sport === 'walk' ? 'hike' : 'run'}?`];
   if (sport === 'ride') return ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?'];
   if (sport === 'road') return ['How was my climb pacing?', 'What does my L/R balance say?', 'How do I descend with more confidence?'];
-  if (isSwimSport(sport)) return ['Am I holding my stroke or spinning?', 'How was my pacing across the sets?', 'What should I focus on next swim?'];
+  if (isSwimSport(sport)) {
+    /* Open water is not a degraded pool, and its chips must not pretend otherwise. There are no lap
+       events out there, so there are no lengths, no SETS, and no per-length stroke count -- which is
+       why the whole distance-per-stroke read is withheld (see analyzer/sports/swim/open-water.js).
+       Two of the three pool chips therefore asked about things that do not exist: "pacing across the
+       sets" on a swim with no sets, and the holding-vs-spinning read the view deliberately refuses
+       to show. The coach would have had to open by refusing its own suggested question. */
+    if (opts && opts.openWater) {
+      return ['How straight did I swim?', 'Did my stroke rate hold up?', 'What should I focus on next open-water swim?'];
+    }
+    return ['Am I holding my stroke or spinning?', 'How was my pacing across the sets?', 'What should I focus on next swim?'];
+  }
   if (isMtbFamily(sport)) return ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
   return ['What stands out in this session?', 'Where did I fade?', 'What should I focus on next session?'];
 }
 
 /* The follow-up box's example question, same rule as the chips: it used to name a turn drill on every
    sport, which reads as the wrong coach entirely on a range or a lift session. */
-function coachInputPlaceholder(sport) {
+function coachInputPlaceholder(sport, opts) {
   /* 'running'/'walking' are phone-motion sessions (cadence and oscillation exist); 'run'/'walk' are
      GPS-only imports where the system prompt forbids coaching cadence, so their example asks about
      pacing instead of a metric the coach would have to refuse. */
@@ -17482,7 +17510,7 @@ function coachInputPlaceholder(sport) {
     : (sport === 'lift' || isLiftSport(sport)) ? 'how do I hold depth when I fatigue?'
     : sport === 'running' ? 'cadence drills for me'
     : (sport === 'walking' || sport === 'run' || sport === 'walk') ? 'how should I pace the climbs?'
-    : isSwimSport(sport) ? 'was I losing hold of the water?'
+    : isSwimSport(sport) ? ((opts && opts.openWater) ? 'did I hold a straight line?' : 'was I losing hold of the water?')
     : sport === 'road' ? 'how do I pace a long climb?'
     : sport === 'ride' ? 'how do I carry more speed on the descents?'
     : isMtbFamily(sport) ? 'drills for my weaker turn direction'
@@ -17528,13 +17556,16 @@ function renderCoachPanel(D, sport) {
 
   /* One-tap follow-ups so "what should I work on" is not a typed question. sendCoach guards against
      firing while a reply is still streaming. */
-  const chipText = coachChips(sport);
+  /* hasLengths is the pool/open-water switch the whole Swim view keys on: no lap events means no
+     lengths, which means no sets and no per-length stroke numbers. */
+  const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false) };
+  const chipText = coachChips(sport, coachOpts);
   if (chips) {
     chips.innerHTML = chipText.map(t => `<button class="coach-chip">${escapeHtml(t)}</button>`).join('');
     chips.querySelectorAll('.coach-chip').forEach((b, i) => { b.onclick = () => sendCoach(chipText[i]); });
   }
   const inputEl = document.getElementById('coachInput');
-  if (inputEl) inputEl.placeholder = coachInputPlaceholder(sport);
+  if (inputEl) inputEl.placeholder = coachInputPlaceholder(sport, coachOpts);
 
   document.getElementById('coachStart').onclick = () => {
     if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
@@ -21106,9 +21137,16 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '9a88f6016 · 2026-08-06';
+const LOAM_BUILD = 'cde0ea82f · 2026-08-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
+    /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
+       channel that drops that sport from the Record screen's Activity picker -- but swimming is
+       never in that picker on ANY channel, because it cannot be recorded at all. Tagging it would
+       mean "hide this whenever swimming cannot be recorded", which is always, so the one sport that
+       most needs explaining would be the one never announced. */
+    ['Swimming, imported from Apple Health (beta)', 'Loam cannot record a swim — a phone cannot come in the pool, AirPods are not submersible, and Water Lock disables the watch screen — so it reads a swim your Apple Watch already recorded and adds the part the Fitness app does not show. Pace is exactly distance per stroke times stroke rate, and Loam fits both across every set, so you can see whether you held a pace by taking a better hold of the water or by spinning your arms faster. Per-set verdicts, a per-stroke breakdown, and the AI coach. Open water gets a different read rather than a worse one: how straight you held the line, and what the wandering cost you.'],
+    ['A swim card worth sending', 'a 4:5 poster of the session: what you swam up top, the two factors of your pace pulling apart underneath, and the read named. Open water gets your track instead, with the stretches where the line wandered picked out.'],
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
     /* Third element = the sport this item announces, so a build that hides that sport hides the item
        too (see whatsNewVisibleSections). Golf is still BETA and is dropped from the iOS VIP channel's
@@ -21124,6 +21162,9 @@ const LOAM_WHATS_NEW = [
     ['Strava from the app', 'upload rides (with visibility and default bike/shoes), compare starred-segment PRs, and share a FIT straight into Loam.'],
   ] },
   { h: 'Better', items: [
+    ['Charts you can scope', 'the swim decomposition chart draws the whole session, one stroke, or one set, and re-bases on whatever you picked. A mixed session opens on its dominant stroke, because a breaststroke length and a freestyle length are not the same measurement and a chart that mixes them shows a step at every changeover that is the stroke changing, not you.'],
+    ['Per-stroke numbers, not a blend', 'a mixed swim reports distance per stroke, stroke rate and SWOLF for each stroke separately, and the headline tiles name which stroke they are quoting instead of averaging across strokes that do not compare.'],
+    ['Long lists fold away', 'the length ledger and other long sections collapse, and your choice sticks. Imported swims in the Sessions list are collapsed by default, so a run of imports no longer pushes your recent recordings off the first screen.'],
     ['Segment timing you can trust', 'gates snap consistently (even on switchbacks), distance is geodesic, dead seconds at the start gate are trimmed, and a standing start is flagged.'],
     ['Segment starts up the approach', 'drag Start above the detected drop-in; re-tagging upgrades the segment in place, keeping its history.'],
     ['e-MTB reads', 'a cadence-vs-motor-power panel with a per-climb breakdown, and the AI coach sees it.'],
@@ -21131,6 +21172,10 @@ const LOAM_WHATS_NEW = [
     ['Honest weightlifting scope', 'the Lift view opens with what counts reliably and why set labeling matters; the activity is marked beta everywhere.'],
   ] },
   { h: 'Fixed', items: [
+    ['The coach knows which sport it is reading', 'a swim was described as a ride, and the coach could suggest recording your swim in Loam — advice to do something impossible. It also no longer offers an open-water swim questions about "sets", which open water does not have.'],
+    ['Sharing a card sends the picture', 'on some targets a card arrived as a link rather than as the image, and every card was exported under the same filename regardless of sport or session.'],
+    ['Controls next to what they control', 'the smooth toggle now sits above the graph it changes rather than above the table (and is no longer set in heading type), the swim card\'s share button sits on the card, and the calibration-pose notice can be hidden per ride.'],
+    ['Readable numbers and axes', 'heart-rate maxima are rounded (one read "111.9925390743", below its own average), and a long swim\'s x-axis no longer collapses into a picket fence of vertical digits.'],
     ['Units everywhere', 'the Imperial/Metric toggle now reaches highlights, timelines, comparisons, tooltips, and pace readouts (several were stuck in one system).'],
     ['Watch reliability', 'a wrist-motion stall is caught mid-session, a rapid stop/start no longer leaks a live workout, and a recording survives a mid-ride break.'],
     ['Saner numbers', 'no more impossible lean readings, the fitness chart buckets rides by your local day, and a forgotten End-set tap cannot crash lift analysis.'],
@@ -21156,7 +21201,7 @@ function whatsNewVisibleSections(sections, hidden) {
 function showWhatsNew() {
   const v = document.getElementById('whatsNewVersion');
   const stamp = (LOAM_BUILD && LOAM_BUILD !== 'dev') ? ' · build ' + LOAM_BUILD : ' · dev';
-  if (v) v.textContent = 'Loam ' + LOAM_VERSION + ' · July 2026' + stamp;
+  if (v) v.textContent = 'Loam ' + LOAM_VERSION + ' · August 2026' + stamp;
   const body = document.getElementById('whatsNewBody');
   if (body) body.innerHTML = whatsNewVisibleSections(LOAM_WHATS_NEW, loamHiddenSports()).map(s =>
     `<h4>${escapeHtml(s.h)}</h4><ul>${s.items.map(([t, d]) => `<li><strong>${escapeHtml(t)}</strong> — ${escapeHtml(d)}</li>`).join('')}</ul>`
