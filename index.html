@@ -608,6 +608,14 @@
   @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; } }
 
   /* Ride Signature card */
+  /* The swim card is 4:5 PORTRAIT (the ride's is 800x460 landscape), so it is width-capped rather
+     than run to full width: at 100% of a desktop column it would be over a thousand pixels tall and
+     push the whole analysis below the fold. */
+  .swim-sig-wrap { margin: 18px 0 26px; }
+  .swim-sig { max-width: 420px; border-radius: 14px; overflow: hidden; line-height: 0;
+              box-shadow: 0 10px 34px rgba(15,23,42,0.28); }
+  .swim-sig svg { display: block; width: 100%; height: auto; }
+  .swim-sig-cap { max-width: 420px; margin-top: 8px; font-size: 12px; color: var(--muted, #6f7562); }
   .ride-sig-wrap { position: relative; margin-bottom: 28px; }
   #rideSignature { width: 100%; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 34px rgba(15,23,42,0.28); line-height: 0; }
   #rideSignature svg { display: block; width: 100%; height: auto; }
@@ -9895,7 +9903,7 @@ function computeSwimSummary(session, R) {
   const hr = session.hr || [];
   if (hr.length) {
     hrAvg = Math.round(hr.reduce((s, r) => s + r.bpm, 0) / hr.length);
-    hrMax = Math.max(...hr.map(r => r.bpm));
+    hrMax = Math.round(Math.max(...hr.map(r => r.bpm)));
   }
 
   /* Styles actually swum, most-swum first, for the "what was this session" line. */
@@ -13238,10 +13246,15 @@ function renderSwim(D) {
     <div class="strength-scope"><strong>Imported from Apple Health, not recorded by Loam.</strong>
       Your watch already counts ${R.hasLengths ? 'lengths, strokes and stroke type' : 'distance, strokes and your GPS track'} better than a phone in a locker ever could, so Loam takes those as given and adds the part Apple does not show.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA) pending swim ground truth.</div>
     <div class="swim-tiles">${tiles}</div>
+    <div id="swimSigWrap" class="swim-sig-wrap hidden">
+      <div id="swimSignature" class="swim-sig"></div>
+      <div class="swim-sig-cap">Your session as a card. Share it.</div>
+    </div>
     <div class="strength-tablenote">${escapeHtml(where)}${s.styles && s.styles.length ? ' · ' + escapeHtml(s.styles.join(', ')) : ''}${s.restS ? ' · ' + fmtDuration(s.restS) + ' rest' : ''}${s.activeEnergyKcal ? ' · ' + s.activeEnergyKcal + ' kcal' : ''}</div>
     ${body}
     <div class="strength-caveat"><strong>Beta:</strong> swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from Apple Watch and are shown as recorded. What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are not estimated here rather than being guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water. ${R.hasLengths ? 'SWOLF is only comparable within one pool length.' : 'Out here your GPS track is sparse (the watch only fixes when your wrist surfaces), so the navigation read is windowed over a full minute and single wobbles mean nothing.'}${swimShortPoolNote(s)}</div>
   `;
+  renderSwimCard(D);
   if (R.hasLengths) { drawSwimDecomp(R, unit); drawSwimQuadrant(R); }
   else { drawSwimRouteMap(R); drawSwimStrokeRate(R); }
   renderCoachPanel(D, 'swimming');
@@ -13372,9 +13385,9 @@ function swimCardModel(D) {
       : [{ v: paceV, l: paceL }, { v: swimCardClock(s.durationS), l: 'TIME' },
          { v: s.medianSwolf != null ? String(s.medianSwolf) : '—', l: 'SWOLF' }],
     series: [
-      { color: '#37a2c6', grad: 'rateFade', label: swimCardPct(t.ratePctChange) + ' stroke rate',
+      { color: '#3f97c9', grad: 'rateFade', label: swimCardPct(t.ratePctChange) + ' stroke rate',
         end: t.ratePctChange, points: rows.map(l => norm(l.strokeRateSpm, rateT)) },
-      { color: '#e87b3d', grad: 'dpsFade', label: swimCardPct(t.dpsPctChange) + ' per stroke',
+      { color: '#d95f38', grad: 'dpsFade', label: swimCardPct(t.dpsPctChange) + ' per stroke',
         end: t.dpsPctChange, points: rows.map(l => norm(l.dps, dpsT)) },
     ],
     note: 'IMPORTED FROM APPLE HEALTH',
@@ -13409,7 +13422,16 @@ function swimCardWrap(text, max) {
    no legend: the endpoint labels carry the whole read, and a stranger should get it in about a second. */
 function swimCardChrome(m) {
   const W = SWIM_CARD_W, H = SWIM_CARD_H, esc = escapeHtml;
-  const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  /* The type trio from analyzer-visual-language.md, spelled out on EVERY text node the way the ride
+     and lift cards do it. SVG does not inherit the page's font stack, so a <text> with no
+     font-family falls back to the SVG default -- a SERIF -- which is why the hero, subhead and
+     wordmark were rendering in Times while the mono microlabels were fine.
+     (In the rasterized PNG the web fonts are not available at all, so these degrade to the generic
+     sans/mono fallbacks. That is the same trade the ride card already makes; embedding the fonts
+     as base64 would fix it at a cost of hundreds of KB in a single-file app.) */
+  const disp = "'Bricolage Grotesque','IBM Plex Sans',sans-serif";
+  const body = "'IBM Plex Sans',system-ui,sans-serif";
+  const mono = "'JetBrains Mono',monospace";
   let proof = '';
 
   if (m.kind === 'lines') {
@@ -13443,7 +13465,7 @@ function swimCardChrome(m) {
       ends[0] = mid + up * 26; ends[1] = mid - up * 26;
     }
     proof = `<line x1="190" y1="${yZero.toFixed(1)}" x2="690" y2="${yZero.toFixed(1)}" stroke="#2a2e22" stroke-width="2" stroke-dasharray="2 8"/>
-      <text x="172" y="${(yZero + 7).toFixed(1)}" fill="#4a5040" font-family="${mono}" font-size="19" text-anchor="end" letter-spacing="2">SET<tspan x="172" dy="24">START</tspan></text>`
+      <text x="172" y="${(yZero + 7).toFixed(1)}" fill="#5f6b59" font-family="${mono}" font-size="19" text-anchor="end" letter-spacing="2">SET<tspan x="172" dy="24">START</tspan></text>`
       + m.series.map((sr, si) => {
         /* The bold line is the FIT; the dots are the lengths it was fitted through. Drawing the raw
            per-length series bold is what made the first card unreadable: real per-length values
@@ -13479,15 +13501,15 @@ function swimCardChrome(m) {
       + (ow.windows || []).map(win => {
         const seg = pts.slice(win.i0, win.i1 + 1);
         if (seg.length < 2) return '';
-        const c = win.straightness >= 0.95 ? '#37a2c6' : win.straightness >= 0.88 ? '#d4a574' : '#e87b3d';
+        const c = win.straightness >= 0.95 ? '#3f97c9' : win.straightness >= 0.88 ? '#e0a458' : '#d95f38';
         return `<polyline fill="none" stroke="${c}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" points="${seg.map(p => PX(p) + ',' + PY(p)).join(' ')}" filter="url(#cardGlow)"/>`;
       }).join('');
   }
 
   const stats = m.stats.slice(0, 3).map((st, i) => {
     const x = 80 + i * 310;
-    return `<text x="${x}" y="1040" fill="#f5f1e6" font-family="${mono}" font-size="46" font-weight="600">${esc(st.v)}</text>
-      <text x="${x}" y="1078" fill="#6a705c" font-family="${mono}" font-size="20" letter-spacing="2.5">${esc(st.l)}</text>`;
+    return `<text x="${x}" y="1040" fill="#f0ead9" font-family="${disp}" font-size="46" font-weight="700">${esc(st.v)}</text>
+      <text x="${x}" y="1078" fill="#7c8b76" font-family="${mono}" font-size="20" letter-spacing="2.5">${esc(st.l)}</text>`;
   }).join('');
 
   /* The hero is set in one line at whatever size that line can hold. A fixed 104px silently ran
@@ -13495,22 +13517,72 @@ function swimCardChrome(m) {
      round -- the sentence is the content. */
   const heroSize = m.hero.length <= 14 ? 104 : m.hero.length <= 19 ? 88 : 74;
   const sub = swimCardWrap(m.subhead, 46).map((ln, i) =>
-    `<text x="80" y="${336 + i * 46}" fill="#c9cfbb" font-size="36" letter-spacing="-0.3">${esc(ln)}</text>`).join('');
+    `<text x="80" y="${336 + i * 46}" fill="#c3bda9" font-family="${body}" font-size="36" letter-spacing="-0.3">${esc(ln)}</text>`).join('');
 
-  return `<rect x="0" y="0" width="${W}" height="6" fill="#e87b3d"/>
-    <text x="80" y="132" fill="#7a808c" font-family="${mono}" font-size="24" letter-spacing="4.5">${esc(m.eyebrow)}</text>
-    <text x="80" y="272" fill="#f5f1e6" font-size="${heroSize}" font-weight="700" letter-spacing="-3">${esc(m.hero)}</text>
+  return `<rect x="0" y="0" width="${W}" height="6" fill="#d95f38"/>
+    <text x="80" y="132" fill="#7c8b76" font-family="${mono}" font-size="24" letter-spacing="4.5">${esc(m.eyebrow)}</text>
+    <text x="80" y="272" fill="#f0ead9" font-family="${disp}" font-size="${heroSize}" font-weight="800" letter-spacing="-3">${esc(m.hero)}</text>
     ${sub}
-    ${m.bandLabel ? `<text x="80" y="430" fill="#d4a574" font-family="${mono}" font-size="21" letter-spacing="3">${esc(m.bandLabel)}</text>` : ''}
+    ${m.bandLabel ? `<text x="80" y="430" fill="#e0a458" font-family="${mono}" font-size="21" letter-spacing="3">${esc(m.bandLabel)}</text>` : ''}
     ${proof}
     ${swimCardWrap(m.caption, 58).map((ln, i) =>
-      `<text x="80" y="${884 + i * 38}" fill="#9aa08a" font-size="29" letter-spacing="-0.2">${esc(ln)}</text>`).join('')}
+      `<text x="80" y="${884 + i * 38}" fill="#85907b" font-family="${body}" font-size="29" letter-spacing="-0.2">${esc(ln)}</text>`).join('')}
     <line x1="80" y1="962" x2="1000" y2="962" stroke="#2a2e22" stroke-width="2"/>
     ${stats}
-    <text x="80" y="1258" fill="#f5f1e6" font-size="40" font-weight="700" letter-spacing="1">LO<tspan fill="#e87b3d">A</tspan>M</text>
-    <text x="80" y="1296" fill="#5a604c" font-family="${mono}" font-size="19" letter-spacing="2.5">${esc(m.note)}</text>
-    <rect x="880" y="1224" width="120" height="42" rx="8" fill="none" stroke="#d4a574" stroke-width="2"/>
-    <text x="940" y="1253" fill="#d4a574" font-family="${mono}" font-size="21" text-anchor="middle" letter-spacing="3">BETA</text>`;
+    <text x="80" y="1258" fill="#f0ead9" font-family="${disp}" font-size="40" font-weight="800" letter-spacing="1">LO<tspan fill="#e0a458">A</tspan>M</text>
+    <text x="80" y="1296" fill="#7c8b76" font-family="${mono}" font-size="19" letter-spacing="2.5">${esc(m.note)}</text>
+    <rect x="880" y="1224" width="120" height="42" rx="8" fill="none" stroke="#e0a458" stroke-width="2"/>
+    <text x="940" y="1253" fill="#e0a458" font-family="${mono}" font-size="21" text-anchor="middle" letter-spacing="3">BETA</text>`;
+}
+
+/* userSpaceOnUse, not the default objectBoundingBox: the trend lines are near-horizontal, and a
+   bounding box of zero height makes an objectBoundingBox gradient degenerate (the line renders
+   unpainted in some rasterizers). Pinned to the plot's own x-range instead.
+   Shared by the on-page card and the exported PNG so the two cannot drift. */
+function swimCardDefs() {
+  return `<defs>
+      <linearGradient id="dpsFade" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="690" y2="0"><stop offset="0" stop-color="#d95f38" stop-opacity="0.25"/><stop offset="1" stop-color="#d95f38"/></linearGradient>
+      <linearGradient id="rateFade" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="690" y2="0"><stop offset="0" stop-color="#3f97c9" stop-opacity="0.25"/><stop offset="1" stop-color="#3f97c9"/></linearGradient>
+      <linearGradient id="swimCardBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#20291b"/><stop offset="0.52" stop-color="#141a10"/><stop offset="1" stop-color="#0a0d07"/></linearGradient>
+      <filter id="cardGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="10" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>`;
+}
+
+/* The card as a standalone SVG, for showing it ON THE PAGE.
+   The ride and the lift both render their card into the view with Share beside it (#rideSignature,
+   #liftSignature); the swim card was share-only, so the only way to SEE it was to export it and go
+   open the result somewhere else. Reported as "card is still missing from the analysis view".
+   The background gradient is the same one rideSigCompose fills the canvas with, so what is on screen
+   and what gets exported are the same picture rather than merely similar ones. */
+function swimCardSvg(m) {
+  return `<svg viewBox="0 0 ${SWIM_CARD_W} ${SWIM_CARD_H}" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+    ${swimCardDefs()}
+    <rect width="${SWIM_CARD_W}" height="${SWIM_CARD_H}" fill="url(#swimCardBg)"/>
+    ${swimCardChrome(m)}
+  </svg>`;
+}
+
+/* Draw the card into the Swim view and arm the Share button. Failure hides the block rather than
+   leaving an empty framed hole, matching how the ride signature handles the same case. */
+function renderSwimCard(D) {
+  const wrap = document.getElementById('swimSigWrap');
+  if (!wrap) return;
+  try {
+    const m = swimCardModel(D);
+    if (!m) { wrap.classList.add('hidden'); return; }
+    document.getElementById('swimSignature').innerHTML = swimCardSvg(m);
+    wrap.classList.remove('hidden');
+  } catch (e) { console.warn('swim card failed', e); wrap.classList.add('hidden'); }
+}
+
+/* One file per session, so two swims can never collide on the same temp path (see rideSigDeliver),
+   and so the file says which swim it is once it lands in Photos. Falls back to a timestamp if the
+   session carries no start, which still keeps two sessions apart. */
+function swimCardFilename(D) {
+  const start = (D && D.session && D.session.start) || null;
+  const d = start ? new Date(start * 1000) : new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `loam-swim-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.png`;
 }
 
 /* The BETA badge is unconditional on purpose: a share card is the most public surface the app has, so
@@ -13520,16 +13592,10 @@ function shareSwimCard(D) {
   if (!m) { setStatus('Nothing to put on a card for this swim yet'); return; }
   _rideSig = {
     W: SWIM_CARD_W, H: SWIM_CARD_H, tiles: [],
-    /* userSpaceOnUse, not the default objectBoundingBox: the trend lines are near-horizontal, and a
-       bounding box of zero height makes an objectBoundingBox gradient degenerate (the line renders
-       unpainted in some rasterizers). Pinned to the plot's own x-range instead. */
-    defs: `<defs>
-      <linearGradient id="dpsFade" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="690" y2="0"><stop offset="0" stop-color="#d4a574" stop-opacity="0.25"/><stop offset="1" stop-color="#e87b3d"/></linearGradient>
-      <linearGradient id="rateFade" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="690" y2="0"><stop offset="0" stop-color="#37a2c6" stop-opacity="0.25"/><stop offset="1" stop-color="#37a2c6"/></linearGradient>
-      <filter id="cardGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="10" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-    </defs>`,
+    defs: swimCardDefs(),
     chrome: swimCardChrome(m),
     boxX: 0, boxTop: 0, boxW: SWIM_CARD_W, boxH: SWIM_CARD_H,
+    filename: swimCardFilename(D), caption: 'My swim, analyzed with Loam.',
   };
   try { rideSigCompose(); } catch (e) { console.warn('swim card failed', e); }
 }
@@ -18148,7 +18214,13 @@ function rideSigDeliver(canvas) {
     if (canvas._loamRetried || !_rideSig) { console.warn('ride card export failed', e); return; }
     rideSigCompose({ skipTerrain: true }); return;
   }
-  loamShareImage(png, 'loam-ride-card.png', 'My ride, analyzed with Loam.');
+  /* Filename and caption come from whoever built the card. Every card used to export as
+     `loam-ride-card.png` captioned "My ride" -- so a SWIM was shared as a ride, and every session of
+     every sport wrote to the SAME temp path on iOS, which is the likeliest reason two different
+     swims shared out as the same picture. A per-session name also makes the file meaningful in
+     Photos and Files. */
+  loamShareImage(png, (_rideSig && _rideSig.filename) || 'loam-ride-card.png',
+                 (_rideSig && _rideSig.caption) || 'My ride, analyzed with Loam.');
 }
 
 /* Compose the card on a canvas: dark gradient base, terrain tiles (clipped to the track panel), then
@@ -20741,7 +20813,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '6adbbfc8f · 2026-08-05';
+const LOAM_BUILD = 'dfd5b96d3 · 2026-08-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
