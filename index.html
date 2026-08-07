@@ -1735,6 +1735,16 @@
     </div>
   </section>
 
+  <section id="runDecouplingSection" class="hidden">
+    <div class="section-title">
+      Aerobic decoupling
+      <span class="subtitle">speed per heartbeat, first half against second &middot; warmup dropped</span>
+    </div>
+    <div class="panel">
+      <div id="runDecouplingBody"></div>
+    </div>
+  </section>
+
   <section id="runClimbsSection" class="hidden">
     <div class="section-title">
       Climbs
@@ -11609,7 +11619,7 @@ function hideAllSections() {
       if (fs && fs.parentNode !== _segFormHome.parent) _segFormHome.parent.insertBefore(fs, _segFormHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -14341,6 +14351,7 @@ function renderAllRunning(D) {
     renderRunPacing(runPacing(splits, alts), unitLabel);
   })();
   renderRunOsc(D.running.oscSeries);
+  renderRunDecoupling(D);
   renderRunClimbs(D.running.climbs || []);
   renderRunSegments(D.running.segments);
   renderRunParams(D);
@@ -15928,6 +15939,192 @@ function runningClimbMetrics(seg, alts, cadSeries, hrRows, index) {
    order. The gain floor drops the sub-metre bumps and near-stationary GPS-wander blips that clear the
    grade-segment test but are not climbs worth a card (they still appear in the full climb/descent
    segments table). */
+/* Build the sample series the decoupling read needs and render it.
+   `moving` comes from the same 0.5 m/s gate computeRunSummary uses for moving time, so a traffic
+   light is excluded from the distance while its heart-rate recovery stays in the average -- without
+   it a stop in one half reads as several percent of lost efficiency. Heart rate is carried forward
+   from the most recent sample at or before each fix rather than interpolated: HR arrives at its own
+   cadence, and inventing values between beats would flatter the coverage check. */
+function runDecouplingSamples(D) {
+  const loc = (D.sensors && D.sensors.location) || [];
+  const hrRows = ((D.sensors && D.sensors.heartRate) || []).filter(r => r && r.bpm != null);
+  const ride = D.ride || {};
+  const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], loc, ride);
+  const inRide = loc.filter(r => r && r.t >= ride.start && r.t <= ride.end &&
+                                 r.latitude != null && r.longitude != null);
+  if (inRide.length < 4) return [];
+  const out = [];
+  let distanceM = 0, hi = 0, ai = 0, lastHr = null, lastAlt = null;
+  for (let i = 0; i < inRide.length; i++) {
+    const r = inRide[i];
+    if (i > 0) { const q = inRide[i - 1]; distanceM += haversineMeters(q.latitude, q.longitude, r.latitude, r.longitude); }
+    while (hi < hrRows.length && hrRows[hi].t <= r.t) { lastHr = hrRows[hi].bpm; hi++; }
+    while (ai < alts.length && alts[ai].t <= r.t) { lastAlt = alts[ai].alt; ai++; }
+    out.push({ t: r.t, distanceM, hr: lastHr, altitudeM: lastAlt,
+               moving: (r.speed || 0) >= 0.5 });
+  }
+  return out;
+}
+
+function renderRunDecoupling(D) {
+  const sec = document.getElementById('runDecouplingSection');
+  const body = document.getElementById('runDecouplingBody');
+  if (!sec || !body) return;
+  let r;
+  try { r = aerobicDecoupling(runDecouplingSamples(D)); }
+  catch (e) { console.warn('decoupling failed', e); sec.classList.add('hidden'); return; }
+
+  /* A refusal is shown, not hidden: "this run is too short to read" is information, and silently
+     dropping the panel looks like a bug on a run that simply did not qualify. */
+  if (r.decouplingPct == null) {
+    body.innerHTML = `<div class="strength-tablenote">No decoupling read for this run: ${escapeHtml(r.reason)}.</div>`;
+    sec.classList.remove('hidden');
+    return;
+  }
+  const pace = (v) => U.pace ? U.pace(v) : (v.toFixed(2) + ' m/s');
+  const sign = r.decouplingPct > 0 ? '+' : '';
+  const tone = r.verdict.key === 'decoupled' ? 'var(--accent)' : 'var(--text)';
+  body.innerHTML = `
+    <div class="swim-tiles">
+      <div><div class="stile-v" style="color:${tone}">${sign}${r.decouplingPct.toFixed(1)}%</div><div class="stile-l">decoupling</div></div>
+      <div><div class="stile-v">${escapeHtml(pace(r.first.speedMps))}</div><div class="stile-l">first half</div></div>
+      <div><div class="stile-v">${escapeHtml(pace(r.second.speedMps))}</div><div class="stile-l">second half</div></div>
+      <div><div class="stile-v">${Math.round(r.first.hrAvg)} &rarr; ${Math.round(r.second.hrAvg)}</div><div class="stile-l">hr avg</div></div>
+    </div>
+    <div class="strength-tablenote"><strong>${escapeHtml(r.verdict.label)}.</strong> ${escapeHtml(r.verdict.note)}</div>
+    <div class="strength-caveat">Speed per heartbeat over the ${Math.round(r.durationS / 60)} minutes after the warmup, split in half by time. It is a read on endurance, not on pace: slowing while your heart rate falls just as far is not a fade. Standing time is excluded from the distance but not from the heart-rate average. Only trustworthy on a steady, continuous effort.</div>`;
+  sec.classList.remove('hidden');
+}
+
+/* ---------- ported from analyzer/core/endurance/decoupling.js ----------
+   Aerobic decoupling: how much speed-per-heartbeat was lost between the halves of a steady effort.
+   Pinned to the module by the drift guard in decoupling.test.js -- edit both or neither. */
+const DECOUPLE_FLAG_PCT = 5;
+const TERRAIN_SKEW_M_PER_KM = 8;
+
+function aerobicDecoupling(samples, opts = {}) {
+  const warmupS = opts.warmupS ?? 300;
+  const minEffortS = opts.minEffortS ?? 1200;
+  const minHrCoverage = opts.minHrCoverage ?? 0.8;
+
+  const rows = (samples || [])
+    .filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.distanceM))
+    .sort((a, b) => a.t - b.t);
+  const none = (reason) => ({ decouplingPct: null, verdict: null, first: null, second: null,
+                              durationS: null, terrain: null, reason });
+
+  if (rows.length < 4) return none('this recording is too short to read');
+
+  const withHr = rows.filter(r => Number.isFinite(r.hr) && r.hr > 0);
+  if (!withHr.length) return none('this recording has no heart rate, and speed alone cannot tell a fade from a fast start');
+  if (withHr.length / rows.length < minHrCoverage) {
+    return none(`heart rate covers only ${Math.round(withHr.length / rows.length * 100)}% of this effort`);
+  }
+
+  /* Drop the warmup outright rather than weighting it down: the point is that the opening minutes
+     are not comparable to anything, not that they matter less. */
+  const t0 = withHr[0].t;
+  const body = withHr.filter(r => r.t - t0 >= warmupS);
+  if (body.length < 4) return none('the whole effort is warmup');
+
+  const durationS = body[body.length - 1].t - body[0].t;
+  if (durationS < minEffortS) {
+    return none(`needs ${Math.round(minEffortS / 60)} minutes of steady effort after the warmup (this has ${Math.round(durationS / 60)})`);
+  }
+
+  /* Split by TIME, not by distance or sample count: the halves have to represent equal amounts of
+     work-in-time for the heart-rate comparison to be fair. A distance split hands the slower half
+     more minutes and therefore more drift. */
+  const mid = body[0].t + durationS / 2;
+  const firstRows = body.filter(r => r.t <= mid);
+  const secondRows = body.filter(r => r.t >= mid);
+  if (firstRows.length < 2 || secondRows.length < 2) return none('not enough samples on both sides of the effort');
+
+  const half = (rs) => {
+    /* Speed over MOVING samples when the caller marks them, endpoints otherwise.
+       A run with a traffic light in one half and none in the other would otherwise report the wait
+       as lost efficiency: elapsed speed drops, heart rate does not fall as fast, and the arithmetic
+       calls that a fade. Heart rate still averages over the WHOLE half, because the recovery during
+       a stop is part of the effort even though the standing still is not part of the distance. */
+    const hasMoving = rs.some(r => r.moving !== undefined);
+    let dt, dd;
+    if (hasMoving) {
+      dt = 0; dd = 0;
+      for (let i = 1; i < rs.length; i++) {
+        if (!rs[i].moving || !rs[i - 1].moving) continue;
+        const sdt = rs[i].t - rs[i - 1].t, sdd = rs[i].distanceM - rs[i - 1].distanceM;
+        if (sdt > 0 && sdd >= 0) { dt += sdt; dd += sdd; }
+      }
+    } else {
+      dt = rs[rs.length - 1].t - rs[0].t;
+      dd = rs[rs.length - 1].distanceM - rs[0].distanceM;
+    }
+    if (!(dt > 0) || !(dd > 0)) return null;
+    const speedMps = dd / dt;
+    const hrAvg = rs.reduce((a, r) => a + r.hr, 0) / rs.length;
+    return { speedMps: +speedMps.toFixed(3), hrAvg: +hrAvg.toFixed(1),
+             ef: +(speedMps / hrAvg).toFixed(5), distanceM: +dd.toFixed(1), durationS: +dt.toFixed(1) };
+  };
+  const first = half(firstRows), second = half(secondRows);
+  if (!first || !second) return none('this effort has a stretch with no forward progress');
+
+  /* Terrain check BEFORE the verdict, because a skewed profile does not make the number smaller, it
+     makes it meaningless. Reported either way so the caller can show the figure and its caveat. */
+  const terrain = halfTerrain(firstRows, secondRows, first, second);
+
+  const decouplingPct = +(((first.ef - second.ef) / first.ef) * 100).toFixed(1);
+  return {
+    decouplingPct, first, second,
+    durationS: +durationS.toFixed(1),
+    terrain,
+    verdict: decouplingVerdict(decouplingPct, terrain),
+    reason: null,
+  };
+}
+
+function halfTerrain(firstRows, secondRows, first, second) {
+  const climb = (rs) => {
+    const alts = rs.map(r => r.altitudeM).filter(v => Number.isFinite(v));
+    return alts.length >= 2 ? alts[alts.length - 1] - alts[0] : null;
+  };
+  const c1 = climb(firstRows), c2 = climb(secondRows);
+  if (c1 == null || c2 == null || !(first.distanceM > 0) || !(second.distanceM > 0)) {
+    return { known: false, skewMPerKm: null, comparable: null };
+  }
+  const perKm1 = c1 / (first.distanceM / 1000), perKm2 = c2 / (second.distanceM / 1000);
+  const skew = Math.abs(perKm1 - perKm2);
+  return {
+    known: true,
+    firstMPerKm: +perKm1.toFixed(1),
+    secondMPerKm: +perKm2.toFixed(1),
+    skewMPerKm: +skew.toFixed(1),
+    comparable: skew <= TERRAIN_SKEW_M_PER_KM,
+  };
+}
+
+function decouplingVerdict(pct, terrain) {
+  if (pct == null) return null;
+  if (terrain && terrain.known && terrain.comparable === false) {
+    return {
+      key: 'terrain',
+      label: 'not comparable',
+      note: `The two halves of this effort had different gradients (${terrain.firstMPerKm} vs ${terrain.secondMPerKm} m of climb per km), and speed per heartbeat follows the hill far more strongly than it follows fatigue. Read this on a flat effort or a repeated loop instead.`,
+    };
+  }
+  if (pct > DECOUPLE_FLAG_PCT) {
+    return { key: 'decoupled', label: 'faded',
+             note: `You paid ${pct.toFixed(1)}% more heartbeats per metre in the second half. Above about ${DECOUPLE_FLAG_PCT}% is the usual sign that the effort was longer or harder than your current endurance base, rather than a pacing mistake.` };
+  }
+  if (pct >= 1) {
+    return { key: 'normal', label: 'held',
+             note: `Efficiency slipped ${pct.toFixed(1)}%, inside the ~${DECOUPLE_FLAG_PCT}% that is normal for a steady effort of this length.` };
+  }
+  return { key: 'strong', label: 'held strongly',
+           note: pct <= -1
+             ? `You finished ${Math.abs(pct).toFixed(1)}% MORE efficient than you started, which usually means the opening was harder than the pace suggested and your body settled into it.`
+             : 'Speed per heartbeat was flat end to end.' };
+}
+
 function analyzeRunningClimbs(segments, alts, cadSeries, hrRows) {
   const MIN_GAIN_M = 5;
   return (segments || [])
@@ -21147,7 +21344,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'af6a000cd · 2026-08-06';
+const LOAM_BUILD = '016bf952c · 2026-08-07';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
