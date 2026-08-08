@@ -1365,6 +1365,7 @@
   .golf-tempo-bar .d { background: var(--accent, #e87b3d); }
   .golf-trace svg { display: block; width: 100%; height: auto; }
   .golf-outlier { color: var(--accent, #e87b3d); font-weight: 600; }
+  .golf-good { color: #2f9e6f; font-weight: 600; }
   .golf-poses { display: flex; gap: 6px; justify-content: space-between; margin-top: 4px; }
   .golf-poses figure { flex: 1; margin: 0; text-align: center; }
   .golf-poses svg { display: block; width: 100%; height: auto; background: var(--surface, #f7fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 8px; }
@@ -6536,7 +6537,7 @@ function computeBestEfforts(loc, ride, distances) {
 
 const DB_NAME = 'loam-library';
 const DB_VERSION = 5;  // v4: 'sources' store (FIT bytes for re-openable GPS rides); v5: savedAt index on 'sources' so it can be oldest-first evicted like analyses/coaching
-const ANALYSIS_CACHE_VERSION = 10;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload)
+const ANALYSIS_CACHE_VERSION = 11;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -8284,10 +8285,11 @@ const LoamGolf = (function () {
    * position is sticky for a squat. Good / Mishit are momentary and attach to the
    * nearest swing in time.
    *
-   * Returns { marks, clubOf, qualityOf }: `marks` is the recognized golf annotations
-   * (used to decide a session is golf when the sport was not declared); clubOf(t) is
-   * the sticky club at time t; qualityOf(t) is the nearest quality tap within a few
-   * seconds of t. Matching is case-insensitive.
+   * Returns { marks, clubOf, qualityOf, qualityFor }: `marks` is the recognized golf
+   * annotations (used to decide a session is golf when the sport was not declared);
+   * clubOf(t) is the sticky club at time t; qualityOf(t) is the quality tap nearest
+   * the swing at t; qualityFor(swings) labels a whole session at once, which is what
+   * analyzeGolf uses. Matching is case-insensitive.
    */
 
   /* Every string that names a club, lowercased: the three generic chips first, then the specific clubs
@@ -8302,7 +8304,15 @@ const LoamGolf = (function () {
     '9 iron', 'pitching wedge', 'gap wedge', 'sand wedge', 'lob wedge', 'other club',
   ];
   const G_QUALITY = ['good', 'mishit'];
-  const G_QUALITY_WINDOW_S = 3.0;   // a Good / Mishit tap this close to a swing labels it
+  /* How far from a swing's IMPACT a Good / Mishit tap can sit and still label that swing. Asymmetric
+     on purpose, because the tap physically cannot happen during the swing: both hands are on the club,
+     so the golfer hits, watches the ball down, lowers the club, and only then reaches the watch. That
+     is several seconds, not one. The original single symmetric 3 s window therefore dropped ordinary
+     post-swing taps on the floor, which is exactly how a session tapped Good could come back with no
+     quality on any swing. A tap BEFORE impact is the rare case (tapping ahead of the swing about to be
+     hit) and keeps a short reach, so a late tap on one swing cannot stretch forward onto the next. */
+  const G_QUALITY_PRE_S = 1.5;
+  const G_QUALITY_POST_S = 8.0;
 
   function gGolfNorm(s) { return (s || '').trim().toLowerCase(); }
 
@@ -8322,18 +8332,41 @@ const LoamGolf = (function () {
       }
       return v;
     };
-    /* Nearest Good / Mishit tap within G_QUALITY_WINDOW_S of t (momentary). */
+    const qualityTaps = anns.filter(a => G_QUALITY.includes(gGolfNorm(a.text)));
+    /* Nearest Good / Mishit tap to the swing whose impact is at t (momentary). A tap AFTER impact wins
+       over one before it however close the earlier one sits: a tap the golfer made before hitting was
+       about some other swing. */
     const qualityOf = t => {
-      let best = null, bestDt = Infinity;
-      for (const a of anns) {
-        const n = gGolfNorm(a.text);
-        if (!G_QUALITY.includes(n)) continue;
-        const dt = Math.abs(a.t - t);
-        if (dt < bestDt && dt <= G_QUALITY_WINDOW_S) { bestDt = dt; best = n; }
+      let post = null, postDt = Infinity, pre = null, preDt = Infinity;
+      for (const a of qualityTaps) {
+        const dt = a.t - t;
+        if (dt >= 0) { if (dt <= G_QUALITY_POST_S && dt < postDt) { postDt = dt; post = a; } }
+        else if (-dt <= G_QUALITY_PRE_S && -dt < preDt) { preDt = -dt; pre = a; }
       }
-      return best;
+      const hit = post || pre;
+      return hit ? gGolfNorm(hit.text) : null;
     };
-    return { marks, clubOf, qualityOf };
+    /* Label a WHOLE session at once: every tap labels at most one swing, the one it was aimed at.
+       qualityOf answers per swing and so can hand the same tap to two swings that fall close together;
+       that double-counting is what a session is read through this instead. Accepts swing objects or
+       bare impact times. Two taps landing on one swing means the golfer changed their mind, so the
+       later tap wins. */
+    const qualityFor = swings => {
+      const ts = (swings || []).map(s => (s && s.tImpact != null) ? s.tImpact : s);
+      const out = ts.map(() => null);
+      for (const a of qualityTaps) {
+        let post = -1, postDt = Infinity, pre = -1, preDt = Infinity;
+        for (let i = 0; i < ts.length; i++) {
+          const dt = a.t - ts[i];
+          if (dt >= 0) { if (dt <= G_QUALITY_POST_S && dt < postDt) { postDt = dt; post = i; } }
+          else if (-dt <= G_QUALITY_PRE_S && -dt < preDt) { preDt = -dt; pre = i; }
+        }
+        const i = post >= 0 ? post : pre;
+        if (i >= 0) out[i] = gGolfNorm(a.text);
+      }
+      return out;
+    };
+    return { marks, clubOf, qualityOf, qualityFor };
   }
 
   /* ---- ported from analyzer/sports/golf/swing-dtw.js ---- */
@@ -8436,6 +8469,52 @@ const LoamGolf = (function () {
    * result with { swings, nSwings, hasHeadphone, hasPelvis, consistency }.
    */
 
+  /*
+   * Split the session by the golfer's OWN Good / Mishit taps.
+   *
+   * Those taps are the only thing in a range recording that knows anything about the SHOT: Loam
+   * measures the swing and never sees the ball, so "which ones did you like?" is information no sensor
+   * here can supply. That makes the worthwhile question "what did the swings I liked have in common?",
+   * and the honest answer is the same medians the rest of the view already reports, put side by side.
+   * No verdict, no score: the tap is a subjective label, and a difference here is a description of two
+   * groups of swings, not a cause.
+   *
+   * `comparable` is the gate the view reads before drawing the comparison at all. A single swing's
+   * tempo ratio carries about +/-0.3 of noise (measured against 120 fps video), so a good-vs-rest
+   * median over one or two swings a side is noise wearing a finding's clothes. Three a side is a
+   * floor, not a promise, which is why the caption still says to weigh it against the session spread.
+   */
+  function gQualitySplit(swings) {
+    const list = swings || [];
+    const good = list.filter(s => s.quality === 'good');
+    const rest = list.filter(s => s.quality !== 'good');
+    const top = s => (s.path && s.path.deg && s.path.deg.length) ? Math.max(...s.path.deg) : null;
+    const med = (a, f, n) => {
+      const v = a.map(f).filter(x => x != null && !isNaN(x));
+      return v.length ? +median(v).toFixed(n) : null;
+    };
+    const group = a => ({
+      n: a.length,
+      swings: a.map(s => s.index),
+      medianTempoRatio: med(a, s => s.tempoRatio, 2),
+      medianDownswingS: med(a, s => s.downswingS, 2),
+      medianHeadTurnDeg: med(a, s => s.headTurnDeg, 1),
+      medianRotationToTopDeg: med(a, top, 0),
+    });
+    const mishit = list.filter(s => s.quality === 'mishit');
+    return {
+      nGood: good.length,
+      nMishit: mishit.length,
+      /* Named separately from rest.swings: a mishit-tapped swing IS part of "the rest" for the medians
+         (it is not a good one), but the view still has to be able to point at it by number. */
+      mishitSwings: mishit.map(s => s.index),
+      nTapped: list.filter(s => s.quality != null).length,
+      good: group(good),
+      rest: group(rest),
+      /* Both sides need enough swings for a median to mean anything; see the note above. */
+      comparable: good.length >= 3 && rest.length >= 3,
+    };
+  }
 
   function computeGolfSummary(sensors, ride, R) {
     const swings = R.swings || [];
@@ -8489,7 +8568,12 @@ const LoamGolf = (function () {
     return {
       duration: ride.end - ride.start,
       nSwings: R.nSwings,
+      /* Both tap counts, not just the bad one: a golfer who taps Good on the swings they liked was
+         reporting something, and until this existed the only place that tap surfaced was one lowercase
+         word in a table cell. qualitySplit is what the view reads to say anything about them. */
+      nGood: swings.filter(s => s.quality === 'good').length,
       nMishits: swings.filter(s => s.quality === 'mishit').length,
+      qualitySplit: gQualitySplit(swings),
       medianTempoRatio: tempos.length ? +median(tempos).toFixed(2) : null,
       medianHeadTurnDeg: turns.length ? +median(turns).toFixed(1) : null,
       medianHeadSwayCm: sways.length ? +median(sways).toFixed(1) : null,
@@ -8878,7 +8962,13 @@ const LoamGolf = (function () {
 
 
   /* Tuning. Range swings run ~1-1.5 s and are spaced by a reset between shots. */
-  const G_FS = 50;            // wrist resample rate (Hz); matches the 50 Hz watch stream in this mode
+  /* Wrist resample rate (Hz) for swing SEGMENTATION only. The watch now streams golf at 100 Hz
+     (WatchStreamPolicy.swingRateHz), so this is deliberately a downsample: count and tempo are validated
+     on this grid (10/10 against the 120fps video), and re-tuning them to chase a rate the watch only
+     REQUESTS -- an older watch may deliver less -- would trade a settled result for nothing. Consumers
+     that want the finer samples read the raw wrist rows instead of this grid, which is what
+     gClubAngleTrace already does. */
+  const G_FS = 50;
   const G_ONSET = 2.0;        // rad/s; wrist angular speed above this is "in motion" (left address)
   const G_PEAK_THR = 10.0;    // rad/s; a real downswing peak clears this (a waggle or backswing does not)
   const G_MIN_SEP_S = 3.0;    // range swings are spaced; two peaks closer than this are one swing
@@ -9155,6 +9245,10 @@ const LoamGolf = (function () {
       } catch (e) { gyroBody = null; hasPelvis = false; }
     }
     const marks = opts.swingMarks || parseSwingMarks(sensors.annotations || [], ride);
+    /* Quality taps are assigned across the whole session in one pass, so a late tap on one swing
+       cannot also label the next one. Falls back to the per-swing lookup for a caller that handed in
+       its own marks object. */
+    const quals = marks.qualityFor ? marks.qualityFor(det.swings) : null;
     const swings = det.swings.map((sw, i) => {
       const h = hasHeadphone ? headStability(head, sw) : { headTurnDeg: null, headDipDeg: null, headSwayCm: null };
       const pel = hasPelvis ? pelvisSequence(gyroBody, sw) : { hipTurnDeg: null, sequence: null, sequenceLagMs: null };
@@ -9164,7 +9258,7 @@ const LoamGolf = (function () {
         headTurnDeg: h.headTurnDeg, headDipDeg: h.headDipDeg, headSwayCm: h.headSwayCm,
         hipTurnDeg: pel.hipTurnDeg, sequence: pel.sequence, sequenceLagMs: pel.sequenceLagMs,
         club: marks.clubOf ? marks.clubOf(sw.tImpact) : null,
-        quality: marks.qualityOf ? marks.qualityOf(sw.tImpact) : null,
+        quality: quals ? quals[i] : (marks.qualityOf ? marks.qualityOf(sw.tImpact) : null),
         trace: gSwingTrace(det, sw),
         /* Measured club angle through the swing, for the Swing Cam. Null on any recording without wrist
            attitude, so the animation is simply not offered there. */
@@ -9218,7 +9312,7 @@ function detectGolf(sensors, ride) {
   return { sport: 'unknown', confidence: 0, reasons: [...reasons, 'no repeated swing bursts found'] };
 }
 
-  return { parseSwingMarks, analyzeGolf, detectSwings, detectGolf, computeGolfSummary, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread,
+  return { parseSwingMarks, analyzeGolf, detectSwings, detectGolf, computeGolfSummary, gQualitySplit, compareSwings, headStability, pelvisSequence, gSwingTrace, gClubAngleTrace, gSwingPlaneSpread,
     gSwingClock, gvAt, gVideoTimeFor, gSyncFromAnchors, gClipCoverage, GV_MIN_ANCHOR_GAP_S,
     gPoseAt, gPoseAnchor, gPoseStageJoints, GPOSE_BONES, GPOSE_MIN_FRAMES };
 })();
@@ -12178,6 +12272,63 @@ function golfClubBreakdown(s) {
     </div>`;
 }
 
+/* The golfer's own Good / Mishit taps, given somewhere to land.
+ *
+ * Those taps used to reach exactly one surface: a lowercase word in the per-swing table's quality
+ * column, and a mishit tile. So a golfer who marked their good swings could look through the whole
+ * Range view and reasonably conclude nothing had read them (owner report, 2026-08-07). They are worth
+ * more than that, because they are the only thing in a range recording that knows anything about the
+ * SHOT: the sensors measure the swing and never see the ball, so "which ones did you like?" is
+ * information no metric here can supply.
+ *
+ * What it does with them is deliberately modest: it says how many landed, names the swings, and, only
+ * when there are enough on both sides, puts the same medians the rest of the view already reports
+ * side by side. No verdict and no ranking. The gate lives in gQualitySplit (three swings a side), and
+ * the caption still tells the golfer to weigh any gap against the session spread, because a single
+ * swing's tempo ratio carries about +/-0.3 of noise. */
+function golfQualityCard(s) {
+  const q = (s && s.qualitySplit) || null;
+  if (!q || !q.nTapped) return '';
+  const nums = a => (a && a.length) ? a.map(i => '#' + i).join(', ') : '&mdash;';
+  /* A difference is not the same shape as the value it came from: a gap between two tempo RATIOS is
+     not itself an "x : 1", and a rounded zero must not print as -0.0. Hence the separate delta
+     formatter rather than reusing the value one. */
+  const delta = (v, digits, unit) => {
+    const x = +v.toFixed(digits);
+    return (x > 0 ? '+' : '') + (x === 0 ? 0 : x).toFixed(digits) + unit;
+  };
+  const row = (label, key, fmt, dfmt) => {
+    const g = q.good[key], r = q.rest[key];
+    if (g == null && r == null) return '';
+    const d = (g != null && r != null) ? g - r : null;
+    return `<tr><td>${label}</td><td>${g == null ? '&mdash;' : fmt(g)}</td><td>${r == null ? '&mdash;' : fmt(r)}</td>
+      <td>${d == null ? '&mdash;' : dfmt(d)}</td></tr>`;
+  };
+  const compare = !q.comparable ? '' : `
+    <table class="strength-table" style="margin-top:6px">
+      <thead><tr><th></th><th>good (${q.good.n})</th><th>the rest (${q.rest.n})</th>
+        <th title="Good minus the rest. A positive number means the swings you liked measured higher.">difference</th></tr></thead>
+      <tbody>
+        ${row('tempo', 'medianTempoRatio', v => '&#8776; ' + v.toFixed(1) + ' : 1', d => delta(d, 1, ''))}
+        ${row('downswing', 'medianDownswingS', v => v.toFixed(2) + ' s', d => delta(d, 2, ' s'))}
+        ${row('backswing to the top', 'medianRotationToTopDeg', v => Math.round(v) + '&deg;', d => delta(d, 0, '&deg;'))}
+        ${row('head turn', 'medianHeadTurnDeg', v => Math.round(v) + '&deg;', d => delta(d, 0, '&deg;'))}
+      </tbody>
+    </table>`;
+  /* Below the gate there is nothing honest to compare, so say what would open it rather than
+     drawing a two-swing median and letting it read as a finding. */
+  const gateNote = q.comparable ? '' :
+    `<div class="golf-tablenote">Tap at least <strong>3 good</strong> swings and leave 3 untapped in one session and Loam will compare the two groups here. Below that a median is one or two swings, which is noise, not a pattern.</div>`;
+  return `<div class="golf-card" style="margin-bottom:20px">
+      <h4>Your Good / Mishit taps</h4>
+      <div>You tapped <strong>${q.nGood} good</strong>${q.nMishit ? ` and <strong>${q.nMishit} mishit</strong>` : ''} of ${s.nSwings} detected swing${s.nSwings === 1 ? '' : 's'}.</div>
+      <div class="golf-tablenote" style="padding-top:4px">${q.nGood ? `Good: ${nums(q.good.swings)}. ` : ''}${q.nMishit ? `Mishit: ${nums(q.mishitSwings)}.` : ''}</div>
+      ${compare}
+      ${gateNote}
+      <div class="golf-tablenote">These are <strong>your</strong> labels, and Loam never sees the ball, so this is a description of two groups of swings, not a cause. Weigh any gap against the session spread above: a tempo difference under about 0.3 is inside single-swing noise.</div>
+    </div>`;
+}
+
 /* ---- Self-reported swing count. The detector can only ever report swings it SAW: a swing it missed
    leaves no trace to correct, so unlike the lift's per-set rep fix this does not change any number. It
    records what the golfer actually hit, shows the gap plainly, and tells the coach the count may be
@@ -12840,7 +12991,7 @@ function golfSwingCamSection(D) {
     _swingCam.pose.track = window.LOAM_GOLF_POSE;
     _swingCam.pose.anchors = {}; _swingCam.pose.syncKey = '';
   }
-  const opts = swings.map((s, i) => `<option value="${i}" ${i === _swingCam.idx ? 'selected' : ''}>Swing ${s.index}${s.index === ref ? ' (reference)' : ''}${s.quality === 'mishit' ? ' · mishit' : ''}</option>`).join('');
+  const opts = swings.map((s, i) => `<option value="${i}" ${i === _swingCam.idx ? 'selected' : ''}>Swing ${s.index}${s.index === ref ? ' (reference)' : ''}${s.quality ? ' · ' + s.quality : ''}</option>`).join('');
   const speeds = [[0.5, '½×'], [0.25, '¼×'], [0.12, '⅛×']].map(([v, l]) =>
     `<button class="sc-speed ${v === _swingCam.speed ? 'on' : ''}" data-v="${v}" onclick="setSwingCamSpeed(${v})">${l}</button>`).join('');
   return `
@@ -12979,7 +13130,7 @@ function golfMetricsGuide(D) {
       ${def('sequence', '<em>Lower leads</em> means your hips started down before your hands, the efficient order. <em>Arms lead</em> suggests casting or coming over the top. <em>Unclear</em> means the two were within 40 ms, too close for us to call. Same caveat as hip turn: it is a hint from a pocketed phone, not a verdict.')}
       ${def('consistency', 'Instead of a score, you get the actual spread: the range your downswing time and tempo covered, and how tightly you repeated your swing plane (in degrees). Tighter is more repeatable. There is no grade out of 100 because nothing anywhere establishes what a repeatable swing should score, and a made-up number would read as a verdict.')}
       ${def('outlier swings', 'The swings whose overall shape differed most from your most representative swing of the session. It is a relative comparison against yourself, so an outlier is not automatically a bad shot.')}
-      ${def('quality', 'Your own Good / Mishit taps, carried through unchanged. Nothing here can tell a pure strike from a thin one on its own.')}
+      ${def('quality', 'Your own Good / Mishit taps, carried through unchanged: nothing here can tell a pure strike from a thin one on its own, so your tap is the only thing in the recording that knows how the shot came off. Tap a few each session and the <em>Your Good / Mishit taps</em> card puts your good swings side by side with the rest. A tap counts if it lands within a few seconds after the swing, which is where a tap naturally falls once you have watched the ball down.')}
       <div class="cant"><strong>What this cannot tell you:</strong> clubhead speed, ball speed, carry distance, spin, face angle, or club path. Those need a launch monitor or a camera; a watch measures how your body moved, not what happened to the ball. Everything above is an estimate, and golf is still BETA${s.nSwings ? ' (this session: ' + s.nSwings + ' swing' + (s.nSwings === 1 ? '' : 's') + ')' : ''}.</div>
     </dl>
   </details>`;
@@ -13041,6 +13192,10 @@ function renderGolf(D) {
     s.hasPelvis ? tile(s.medianHipTurnDeg != null ? f0(s.medianHipTurnDeg) + '°' : '—', 'hip turn') : tile('—', 'hip turn (phone)'),
     /* Measured from the wrist attitude: how tightly the golfer repeated their swing PLANE. */
     s.swingPlaneSpread && s.swingPlaneSpread.medianDeg != null ? tile('±' + f0(s.swingPlaneSpread.medianDeg) + '°', 'plane repeat') : '',
+    /* Both tap counts. The good tile appears only once something was tapped good, so an untapped
+       session does not grow a "0 good" tile, but a golfer who DID tap sees the count in the headline
+       row rather than having to read it out of the table one row at a time. */
+    s.nGood ? tile(s.nGood, 'good') : '',
     tile(s.nMishits || 0, 'mishits'),
     s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max') : '',
   ].filter(Boolean).join('');
@@ -13071,7 +13226,8 @@ function renderGolf(D) {
       <td>${sw.headTurnDeg != null ? Math.round(sw.headTurnDeg) + '°' : '—'}</td>
       <td>${sw.hipTurnDeg != null ? Math.round(sw.hipTurnDeg) + '°' : '—'}</td>
       <td>${seqLabel(sw.sequence)}</td>
-      <td>${sw.quality === 'mishit' ? '<span class="golf-outlier">mishit</span>' : (sw.quality || '')}</td>
+      <td>${sw.quality === 'mishit' ? '<span class="golf-outlier">mishit</span>'
+        : sw.quality === 'good' ? '<span class="golf-good">&#10003; good</span>' : (sw.quality || '')}</td>
     </tr>`;
   }).join('');
 
@@ -13095,6 +13251,7 @@ function renderGolf(D) {
     </div>
     <div class="golf-tiles" style="margin-bottom:20px">${tiles}</div>
     ${golfClubBreakdown(s)}
+    ${golfQualityCard(s)}
     ${golfTruthSection(D)}
     ${swingCam || `<div class="golf-card" style="margin-bottom:20px">
       <h4>Swing shape (address &middot; top &middot; impact &middot; finish)</h4>
@@ -16986,7 +17143,12 @@ function buildDigest(D, sport, metric) {
          self-report, so it is labeled as one; it exists so the coach does not present a short count as
          the whole session. */
       swings_reported_by_golfer: (() => { try { return golfTruthCount((D && D.key) || ''); } catch (e) { return null; } })(),
+      /* The golfer's own labels. They are the only shot-quality information in a range recording (the
+         sensors never see the ball), so the coach gets both counts and the good-vs-rest split, with the
+         comparability flag so it cannot build a story on two swings. */
+      goods_tapped: gs.nGood,
       mishits_tapped: gs.nMishits,
+      quality_split: gs.qualitySplit,
       median_tempo_ratio: r1(gs.medianTempoRatio, 1),
       median_head_turn_deg: r1(gs.medianHeadTurnDeg, 0),
       median_hip_turn_deg: r1(gs.medianHipTurnDeg, 0),
@@ -17010,6 +17172,7 @@ function buildDigest(D, sport, metric) {
         'BETA, estimate-only: no golf ground truth yet, so every number is an estimate. Swings come from wrist angular speed (Apple Watch); at 50 Hz a downswing is ~12 samples, so swing count and timing are usable but there is NO club-head speed or ball data (that needs a launch monitor). '
         + 'Tempo is the backswing:downswing ratio (tour swings run near 3:1 as a reference, not a target), good to about one decimal. Head turn is a direct AirPods attitude range; head sway is a raw double-integration UPPER BOUND in cm, not a measurement. '
         + (gs.hasPelvis ? 'Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone body frame and are the most speculative read; treat the sequence as a hint. ' : 'Hip turn and kinematic sequence are unavailable (no pocket-phone still window this session). ')
+        + 'goods_tapped / mishits_tapped and quality_split are the GOLFER\'S OWN labels, tapped at the range, not a measurement: Loam never sees the ball, so this is the only shot-quality information in the session and it is subjective. quality_split.good vs quality_split.rest are medians of the same numbers reported above, split by those taps. Use them ONLY when quality_split.comparable is true (at least 3 swings a side); below that say the labels are logged and ask for more of them rather than reading a median of one or two swings. Even when comparable, a tempo difference under about 0.3 is inside single-swing noise: describe what the two groups looked like, never claim the difference CAUSED the good shots. '
         + 'If swings_reported_by_golfer is present and higher than total_swings, the detector MISSED that many swings: say so plainly once, treat every metric here as covering only the swings it found, and never present the totals as the whole session. If it is absent, do not speculate about missed swings. '
         + 'Consistency is reported as MEASURED SPREAD, not a score: downswing_seconds_spread and tempo_ratio_spread give the low, high, and coefficient of variation (percent) across the session. There is deliberately no 0-100 repeatability grade, because nothing calibrates what value a repeatable swing should produce; do not invent one or imply the golfer scored badly. outlier_swing_numbers names the swings whose SHAPE diverged most from reference_swing (a relative DTW read, no absolute meaning).',
     };
@@ -17403,6 +17566,7 @@ Golf reference points:
 - Swing plane: swing_plane_spread_deg is how tightly the golfer repeated the plane their hand rotated in, in degrees, measured from wrist attitude. A few degrees is a repeatable plane; tens means it wandered. It says nothing about whether the plane is correct, only whether it was the same each time.
 - Kinematic sequence (only when pelvis_data_available): "lower body leads" is the efficient downswing order; "arms lead" suggests casting or an over-the-top move. It is a hedged hint, not a verdict.
 - Repeatability is the most valuable read for a range session, and it is reported as MEASURED SPREAD, never as a score. Coach downswing_seconds_spread and tempo_ratio_spread (low, high, and cvPct = coefficient of variation): a tight downswing spread means the golfer is delivering the club the same way each time, and a wide one is the highest-value thing to fix, more than any single-swing number. There is NO 0-100 repeatability grade in this data on purpose, because nothing calibrates one; never invent a score, a percentage "repeatable", or a pass/fail verdict, and never tell the golfer their consistency is "low" on the strength of a number that is not there. Name the actual outlier swings (outlier_swing_numbers) against reference_swing instead: that is a relative shape comparison and is honest.
+- Tapped quality (goods_tapped / mishits_tapped / quality_split): the golfer's own Good and Mishit taps. This is the only thing in the session that knows how the ball came off, so when it is there, use it: when quality_split.comparable is true, name what the good swings had in common against the rest (tempo, downswing time, backswing length, head turn) and turn that into the cue. It is a subjective label on a swing Loam measured but a shot it never saw, so describe the difference, never assert it caused the strike, and treat a tempo gap under about 0.3 as noise. When taps exist but comparable is false, acknowledge them and ask for a few more next session; when there are none, say tapping Good or Mishit is what would unlock this read, once.
 - Never invent a metric that is not in the data. There is no club-head speed, ball flight, face angle, or club path here (that needs a launch monitor); if the golfer would want those, say so at most once and move on.
 
 Rules:
@@ -21344,7 +21508,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '016bf952c · 2026-08-07';
+const LOAM_BUILD = 'de906286b · 2026-08-08';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
