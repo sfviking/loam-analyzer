@@ -10965,7 +10965,11 @@ async function analyzeMulti(sensorFiles) {
    the scrub/lean reads stay in-ride only (see ROADMAP, "Deeper cross-ride comparison"). Corners are
    numbered within the descent rather than ride-wide, because a turn number from another ride's
    numbering means nothing here. */
-function renderCrossTurnRead(hostId, subject, reference) {
+/* `onCorner` (optional): a function(n) called when a corner chip in the read is tapped, used by the
+   cross-ride view to frame that corner on the painted map. Omitted when there is no map to point at
+   (the two laps would not DTW-align, so nothing was painted); the corner then stays plain bold text
+   rather than a control that does nothing. */
+function renderCrossTurnRead(hostId, subject, reference, onCorner) {
   const host = document.getElementById(hostId);
   if (!host) return;
   const A = (subject && subject.turns) || [], F = (reference && reference.turns) || [];
@@ -10978,7 +10982,9 @@ function renderCrossTurnRead(hostId, subject, reference) {
   }
   const { deltas, countA, countF } = pbpDeltasFromTurns(A, F);
   const { noted, giveUps, gained, cmp } = pbpRankDeltas(deltas);
-  const corner = (d) => `<strong>Corner ${d.n}${d.dir}</strong>`;
+  const corner = (d) => typeof onCorner === 'function'
+    ? `<button type="button" class="pbp-turn" data-n="${d.n}" title="Show corner ${d.n} on the map above">Corner ${d.n}<span class="dir-${d.dir}">${d.dir}</span></button>`
+    : `<strong>Corner ${d.n}${d.dir}</strong>`;
   let html = `<div style="margin-bottom:8px;"><strong>${escapeHtml(subject.tag)}</strong> vs `
     + `<strong>${escapeHtml(reference.tag)}</strong>, corner by corner</div>`;
   if (countA !== countF)
@@ -11002,7 +11008,61 @@ function renderCrossTurnRead(hostId, subject, reference) {
     if (tail.length) html += `<div class="dim" style="font-size:12px; margin-top:6px;">${tail.join(' · ')}.</div>`;
   }
   host.innerHTML = html;
+  if (typeof onCorner === 'function')
+    host.querySelectorAll('.pbp-turn').forEach(b => { b.onclick = () => onCorner(+b.dataset.n); });
   host.classList.remove('hidden');
+}
+
+/* Place the reference lap's corners on the painted gain/loss track, so the corner numbers the read
+   above uses exist somewhere on the map instead of naming turns the view never draws (owner report,
+   2026-08-09: "Compare laps refers to turns but they are not shown on map in this view").
+
+   The map paints the REFERENCE lap's line, so these are its corners, numbered 1..N down the descent.
+   That is the same numbering the read and the apex-speed chart use, because all three pair the two
+   laps by order (pbpDeltasFromTurns), so "Corner 12L" means index 12 in both laps and the marker
+   sits at the reference lap's twelfth corner.
+
+   Position comes from the apex time each stored turn carries (tRel, re-based to the member window by
+   buildTagMember) looked up against locInWin; the descents saved by the multi-file drop path carry
+   no turns at all, so they simply produce no markers. Stored descent turns keep no entry speed or
+   radius (saveRideToLibrary), so turnRingColor's kept-vs-scrubbed read is unavailable here: the ring
+   encodes the lap-vs-lap apex delta instead, in the same green-faster / red-slower language as the
+   painted dots. A corner past the shorter lap's count has no pairing and is drawn neutral, and so is
+   one whose speeds never resolved (pbpSpeedUsable) - the map ENUMERATES every corner of the lap it
+   is painting, while only the paired ones get a claim attached. */
+function crossCornerMarkers(reference, subject) {
+  const F = (reference && reference.turns) || [];
+  const loc = (reference && reference.locInWin) || [];
+  if (!F.length || loc.length < 2) return [];
+  /* pbpDeltasFromTurns pairs subject-against-reference by index; deltas[i] therefore describes F[i]. */
+  const paired = (subject && subject !== reference && (subject.turns || []).length)
+    ? pbpDeltasFromTurns(subject.turns, F).deltas : [];
+  /* locInWin[].t is window-relative (0-based) for library members and absolute for the multi-file
+     drop path, so anchor on the first row rather than assuming either. */
+  const t0 = loc[0].t || 0;
+  const NEUTRAL = 'rgb(148,163,184)', GAIN = 'rgb(26,152,80)', LOSS = 'rgb(215,48,39)';
+  const out = [];
+  for (let i = 0; i < F.length; i++) {
+    const T = F[i];
+    if (T.tRel == null) continue;
+    const p = nearestByTime(loc, t0 + T.tRel);
+    if (!p || p.latitude == null || p.longitude == null) continue;
+    const d = paired[i] && paired[i].usable ? paired[i] : null;
+    const tip = [`Corner ${i + 1}${T.direction}`];
+    if (isFinite(T.vPeak) && T.vPeak > 1.8)
+      tip.push(`${escapeHtml(reference.tag)} apex ${U.speedNum(T.vPeak).toFixed(1)} ${U.speedUnit()}`);
+    let ring = NEUTRAL;
+    if (d) {
+      const subjTag = escapeHtml(subject.tag);
+      if (d.dApex <= -1.0) { ring = LOSS; tip.push(`${subjTag} braked harder, ${pbpSpeedFmt(d.dApex)} slower at the apex`); }
+      else if (d.dApex >= 1.0) { ring = GAIN; tip.push(`${subjTag} carried ${pbpSpeedFmt(d.dApex)} more through the apex`); }
+      else tip.push(`${subjTag} within ${pbpSpeedFmt(1.0)} at the apex`);
+    } else if (paired.length) {
+      tip.push(i < paired.length ? 'speeds unavailable, not compared' : 'no matching corner on the other lap');
+    }
+    out.push({ n: i + 1, dir: T.direction, lat: p.latitude, lon: p.longitude, ring, tip: tip.join(' · ') });
+  }
+  return out;
 }
 
 function renderCrossRide({ perRide, clusters }) {
@@ -11194,10 +11254,16 @@ function renderCrossRide({ perRide, clusters }) {
     };
     renderCmpRows();
 
+    /* The last painted gain/loss map and its corner markers, so the corner-by-corner read below can
+       frame a corner it names. Re-assigned on every draw and nulled while one is in flight, so a chip
+       from a superseded render cannot reach into a torn-down Leaflet instance. */
+    let deltaMapView = null;
+
     /* Draw (or redraw) the three comparison charts from the current checkbox selection: the speed
        overlay, the DTW time-lag chart, and the gain/loss-painted reference track. Re-invoked
        whenever a checkbox toggles. */
     const drawClusterCharts = () => {
+      deltaMapView = null;
       const selected = members.filter(m => selectedMembers.has(m));   /* fastest-first order preserved */
       /* Reference for the DTW lag chart and the painted map: keep the ranked reference when it is
          still selected (the default), else fall back to the fastest selected run. */
@@ -11297,8 +11363,6 @@ function renderCrossRide({ perRide, clusters }) {
       } else if (turnEl) {
         turnEl.innerHTML = `<div style="padding:24px; color:var(--text-muted); font-size:12px;">Apex speed by corner needs two selected laps that stored their turns. Rides saved before per-descent turns existed, and non-MTB rides, carry none.</div>`;
       }
-      /* Pairwise read, against the same lap the painted map uses. */
-      renderCrossTurnRead(`crossPbp_${ci}`, chartCmp, chartRef);
 
       let bestPaint = null;
       if (chartRef && chartCmp) {
@@ -11325,10 +11389,30 @@ function renderCrossRide({ perRide, clusters }) {
            near-identical pair is not collapsed to flat yellow nor a tiny spread amplified to noise. */
         const maxAbsDelta = col.length ? Math.max(...col.map(Math.abs)) : 0;
         const cap = Math.max(0.5, maxAbsDelta);
-        paintDeltaMap(deltaMapEl, refLat, refLon, lat, lon, col, soft, cap, m.tag, chartRef.tag, maxAbsDelta === 0);
+        /* Corners are keyed to the pair the READ describes (chartCmp), not to `m`: the two are the
+           same lap except in the rare fallback where that pair would not DTW-align, and a marker
+           tooltip must agree with the line of text it is there to answer. */
+        deltaMapView = paintDeltaMap(deltaMapEl, refLat, refLon, lat, lon, col, soft, cap, m.tag, chartRef.tag,
+                                     maxAbsDelta === 0, crossCornerMarkers(chartRef, chartCmp));
       } else if (deltaMapEl) {
         deltaMapEl.innerHTML = '<div style="padding:24px; color:var(--text-muted); font-size:12px;">Select two comparable runs to paint the gain/loss track.</div>';
       }
+
+      /* Pairwise read, against the same lap the painted map uses. Drawn AFTER the map so it knows
+         whether the corners it names are up there: with markers, each corner becomes a chip that
+         frames it (the same "the number you just read has a place on the trail" link the in-ride
+         play-by-play gives via pbpShowTurnOnMap); without them the corner stays plain text rather
+         than a control that would do nothing. */
+      const cornerFocus = (deltaMapView && Object.keys(deltaMapView.markers).length)
+        ? (n) => {
+            const mk = deltaMapView.markers[n];
+            if (!mk) return;
+            try { deltaMapEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+            focusMapOnTurn(deltaMapView.map, mk, null, null);
+            try { mk.openTooltip(); } catch (e) {}
+          }
+        : null;
+      renderCrossTurnRead(`crossPbp_${ci}`, chartCmp, chartRef, cornerFocus);
     };
     drawClusterCharts();
   });
@@ -11355,9 +11439,14 @@ let _crossDeltaMaps = [];
    each aligned point coloured by the DTW time delta (green = the comparison was faster there, red =
    slower). A custom HTML legend stands in for Plotly's colorbar. Markers flagged soft (steady-speed
    stretches, where the alignment rests on the position ramp alone) are faded and their tooltip is
-   prefixed "~" so a constant-speed road section does not assert per-second precision it lacks. */
-function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTag, flat) {
-  if (!el || typeof L === 'undefined') return;
+   prefixed "~" so a constant-speed road section does not assert per-second precision it lacks.
+
+   `corners` (optional, from crossCornerMarkers) draws the reference lap's numbered corners on top, in
+   the main ride map's exact marker language, so the corner numbers the comparison talks about are
+   locatable on the trail. Returns { map, markers } - markers keyed by corner number - so the caller
+   can frame one from elsewhere on the page. */
+function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTag, flat, corners) {
+  if (!el || typeof L === 'undefined') return null;
   el.innerHTML = '';
   el.style.padding = '0'; el.style.overflow = 'hidden'; el.style.position = 'relative';
   const mapDiv = document.createElement('div');
@@ -11379,33 +11468,54 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTa
       L.circleMarker([lat[i], lon[i]], { radius: isSoft ? 5 : 6, color: '#0a0d07', weight: 1, fillColor: rdylgnColor((col[i] + cap) / (2 * cap)), fillOpacity: isSoft ? 0.35 : 0.95 })
         .addTo(map).bindTooltip(`${isSoft ? '~' : ''}${col[i] > 0 ? '+' : ''}${col[i].toFixed(1)} s${isSoft ? ' · steady-speed stretch, approximate' : ''}`, { direction: 'top' });
     }
+    /* Corner markers last, so a numbered corner sits above the per-second delta dots it shares the
+       track with (identical divIcon + ring markup to drawRideOverlay / syncSegTurnMarkers). */
+    const markers = {};
+    for (const c of (corners || [])) {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div class="turn-marker ${c.dir === 'L' ? 'left' : ''}" style="outline:3px solid ${c.ring}; outline-offset:1px;">${c.n}</div>`,
+        iconSize: [26, 26], iconAnchor: [13, 13],
+      });
+      const mk = L.marker([c.lat, c.lon], { icon, zIndexOffset: 400 }).addTo(map);
+      mk.bindTooltip(c.tip, { direction: 'top' });
+      markers[c.n] = mk;
+    }
     const fit = track.length > 1 ? track : lat.map((la, i) => [la, lon[i]]);
     if (fit.length > 1) map.fitBounds(fit, { padding: [30, 30] });
     const titleEl = document.createElement('div');
     titleEl.style.cssText = 'position:absolute; top:8px; left:8px; z-index:500; max-width:62%; background:rgba(255,255,255,0.9); border-radius:6px; padding:4px 9px; font-size:12px; font-weight:600; color:#334155; box-shadow:0 1px 4px rgba(0,0,0,0.18);';
     titleEl.textContent = `Where ${mTag} gained / lost time vs ${refTag}`;
     el.appendChild(titleEl);
+    /* Say what a numbered ring means, once, wherever the box for it is. The corners are the
+       reference lap's, so name that lap: the numbers belong to the line the map is drawing. */
+    const cornerNote = (corners && corners.length)
+      ? `<div style="margin-top:3px; opacity:0.7;">numbered = ${escapeHtml(refTag)}'s corners; ring green = ${escapeHtml(mTag)} carried more speed, red = braked harder</div>`
+      : '';
     if (flat) {
       const note = document.createElement('div');
-      note.style.cssText = 'position:absolute; bottom:8px; left:8px; z-index:500; background:rgba(255,255,255,0.9); border-radius:6px; padding:4px 9px; font-size:11px; color:#64748b;';
-      note.textContent = 'Paced identically here, no measurable time delta to paint';
+      note.style.cssText = 'position:absolute; bottom:8px; left:8px; z-index:500; max-width:70%; background:rgba(255,255,255,0.9); border-radius:6px; padding:4px 9px; font-size:11px; color:#64748b;';
+      note.innerHTML = 'Paced identically here, no measurable time delta to paint' + cornerNote;
       el.appendChild(note);
     } else {
       const legend = document.createElement('div');
-      legend.style.cssText = 'position:absolute; bottom:8px; right:8px; z-index:500; background:rgba(255,255,255,0.92); border-radius:6px; padding:6px 9px; font-size:10px; color:#475569; box-shadow:0 1px 4px rgba(0,0,0,0.18); text-align:center;';
+      legend.style.cssText = 'position:absolute; bottom:8px; right:8px; z-index:500; max-width:70%; background:rgba(255,255,255,0.92); border-radius:6px; padding:6px 9px; font-size:10px; color:#475569; box-shadow:0 1px 4px rgba(0,0,0,0.18); text-align:center;';
       legend.innerHTML = '<div style="font-weight:600; margin-bottom:3px;">&Delta; time</div>'
         + '<div style="display:flex; align-items:center; gap:6px;"><span>faster</span>'
         + '<span style="display:inline-block; width:64px; height:9px; border-radius:3px; background:linear-gradient(to right,#1a9850,#91cf60,#ffffbf,#fc8d59,#d73027);"></span>'
         + '<span>slower</span></div>'
         + `<div style="margin-top:2px; opacity:0.7;">&plusmn;${cap.toFixed(1)}s</div>`
         + ((soft && soft.some(Boolean))
-            ? '<div style="margin-top:2px; opacity:0.7;">faded = steady speed, approximate</div>' : '');
+            ? '<div style="margin-top:2px; opacity:0.7;">faded = steady speed, approximate</div>' : '')
+        + cornerNote;
       el.appendChild(legend);
     }
     setTimeout(() => { try { map.invalidateSize(); if (fit.length > 1) map.fitBounds(fit, { padding: [30, 30] }); } catch (e) {} }, 0);
+    return { map, markers };
   } catch (e) {
     console.warn('paintDeltaMap failed', e);
     el.innerHTML = '<div style="padding:24px; color:var(--text-muted); font-size:12px;">Map unavailable.</div>';
+    return null;
   }
 }
 
@@ -15238,10 +15348,15 @@ function buildTagMember(r, d, targetTag) {
     speed: spd,
     /* Per-turn metrics for a cross-ride play-by-play, re-windowed to the clipped tag segment using the
        apex time each turn stored (tRel, seconds from the raw descent start). Absent on descents saved
-       before per-descent turns were stored. */
+       before per-descent turns were stored.
+       tRel is carried through, re-based to this member's own window (0 = the clipped start, the same
+       origin locInWin[].t uses), so a corner the comparison NAMES can also be PLACED: crossCornerMarkers
+       looks it up against locInWin to put a numbered marker on the painted track. Dropping it here was
+       why Compare laps could say "Corner 12L braked harder" with nothing on the map to point at. */
     turns: (d.turns || [])
       .filter(T => T.tRel != null && T.tRel >= (tStart - d.tStart) - 0.5 && T.tRel <= (tEnd - d.tStart) + 0.5)
-      .map(T => ({ direction: T.direction, vPeak: T.vPeak, vExit: T.vExit })),
+      .map(T => ({ direction: T.direction, vPeak: T.vPeak, vExit: T.vExit,
+                   tRel: +(T.tRel - (tStart - d.tStart)).toFixed(2) })),
     distSeries: dist, locInWin, label: targetTag.name,
   };
 }
@@ -21508,7 +21623,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'de906286b · 2026-08-08';
+const LOAM_BUILD = 'd146c0516 · 2026-08-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
