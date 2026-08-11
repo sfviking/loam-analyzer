@@ -1292,6 +1292,17 @@
   .swim-act { font-size: 12.5px; line-height: 1.6; color: var(--text, inherit); margin: 6px 0 0; }
   .swim-nograde { font-size: 12px; color: var(--text-muted, #94a3b8); margin: 8px 0 0; }
   .swim-tablewrap { overflow-x: auto; }
+  .swim-hist-card { border: 1px solid var(--border, #2a2f3a); border-radius: 8px; padding: 14px 16px; margin: 10px 0 12px; background: var(--bg-subtle, rgba(255,255,255,.02)); }
+  .swim-hist-h { font: 600 15px 'Bricolage Grotesque', sans-serif; margin-bottom: 8px; }
+  .swim-hist-h::first-letter { text-transform: uppercase; }
+  .swim-hist-n { display: flex; flex-wrap: wrap; gap: 6px 18px; font: 11px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); margin-bottom: 10px; }
+  .swim-hist-n b { font-size: 12px; margin-left: 4px; }
+  .swim-hist-card p { font-size: 12.5px; line-height: 1.6; color: var(--text-dim, #9aa0aa); margin: 0; }
+  .swim-hist-a { color: var(--text, inherit) !important; margin-top: 6px !important; }
+  .swim-hist-now td { background: var(--bg-subtle, rgba(255,255,255,.04)); }
+  .swim-good { color: #6b9e5f; }
+  .swim-bad  { color: #c2603c; }
+  .swim-flat { color: var(--text-muted, #7a808c); }
   .swim-rest { font: 11px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); margin: 0 0 8px 2px; }
   .strength-hero { display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; margin-bottom: 24px; }
   @media (max-width: 900px) { .strength-hero { grid-template-columns: 1fr; } }
@@ -10205,9 +10216,223 @@ function swimPaceLabel(pace100S, unit) {
 }
 
 
+
+/* ---------- Swim history (ported from analyzer/sports/swim/history.js) ----------
+   The same distance-per-stroke vs stroke-rate read, across sessions instead of across one
+   set. A swim used to be analyzed, rendered and forgotten, so week-vs-week -- which
+   analysis.js calls "the actual product" -- did not exist. Records live in localStorage
+   beside the ride library; nothing leaves the device. See the module for why the
+   cross-session read is on FIRMER ground than the per-set one, and for the pool-length and
+   stroke rules that decide what may be compared at all. */
+
+/* Pool lengths are floats off HealthKit metadata (a 25 yard pool arrives as 22.86, and a hand-entered
+   one can be 22.9), so equality has to be a tolerance rather than ===. Half a metre is far tighter
+   than the gap between any two real pool sizes (22.86 / 25 / 33.3 / 50) and far looser than the
+   rounding. Open water has no pool length at all, and two open-water swims are NOT comparable on
+   distance per stroke for the reasons in open-water.js, so they never match here. */
+const POOL_TOLERANCE_M = 0.5;
+
+function swimPoolsMatch(a, b) {
+  if (a == null || b == null) return false;
+  return Math.abs(a - b) <= POOL_TOLERANCE_M;
+}
+
+/*
+ * The compact record persisted for one imported swim.
+ *
+ * Deliberately small and deliberately DERIVED. It stores per-stroke medians, not the length ledger:
+ * a season of swims has to live in localStorage next to the ride library, and the cross-session read
+ * consumes exactly these medians. Keeping the ledger would multiply the size by the length count to
+ * support nothing this module asks for. The same reasoning the ride library applies when it stores
+ * per-turn scalars rather than a lean series (see the CLAUDE.md backlog), and it carries the same
+ * consequence, stated here so it is not rediscovered later: a future read that needs per-length data
+ * across sessions will need a schema change, not just a new function.
+ *
+ * `key` is the workout start in whole seconds. HealthKit workouts are immutable and start times are
+ * unique per swim, so re-importing the same session upserts rather than duplicating -- the same
+ * dedupe contract `saveRideToLibrary` gets from its content hash.
+ */
+function swimHistoryRecord(session, R) {
+  if (!session || !R) return null;
+  const start = Number(session.start);
+  if (!Number.isFinite(start)) return null;
+  return {
+    key: String(Math.round(start)),
+    start,
+    title: session.title || null,
+    locationType: session.locationType,
+    poolLengthM: session.poolLengthM,
+    displayUnit: session.displayUnit || 'm',
+    durationS: session.durationS,
+    totalDistanceM: R.totalDistanceM,
+    nLengths: R.nLengths,
+    nSets: R.nSets,
+    /* Per stroke, never pooled. A session median across strokes describes neither stroke, which is
+       the mistake swimStyleSplits exists to undo; storing the blend would bake it in permanently. */
+    byStyle: swimStyleSplits(session).map(s => ({
+      style: s.style,
+      nLengths: s.nLengths,
+      medianDps: s.medianDps,
+      medianStrokeRateSpm: s.medianStrokeRateSpm,
+      medianPace100S: s.medianPace100S,
+      medianSwolf: s.medianSwolf,
+    })),
+  };
+}
+
+/* Upsert a record into a history list, newest last. Pure, so the caller owns the storage. */
+function swimHistoryUpsert(records, record) {
+  if (!record) return (records || []).slice();
+  const out = (records || []).filter(r => r.key !== record.key);
+  out.push(record);
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/*
+ * The sessions that may honestly be compared with `current`, oldest first.
+ *
+ * Same water and same pool, per the module header. `current` is INCLUDED when it qualifies, because
+ * the point of the series is where today sits in it.
+ */
+function swimComparableSessions(records, current) {
+  if (!current) return [];
+  return (records || [])
+    .filter(r => r.locationType === current.locationType
+      && swimPoolsMatch(r.poolLengthM, current.poolLengthM))
+    .sort((a, b) => a.start - b.start);
+}
+
+/* The strokes that appear in enough of those sessions to trend, most-frequent first. A stroke swum
+   once is a data point, not a trend, and `minSessions` is the floor below which a slope through
+   session medians is a line through two swims and a mood. */
+function swimHistoryStyles(sessions, minSessions) {
+  const floor = minSessions || 3;
+  const counts = new Map();
+  for (const s of sessions || []) {
+    for (const st of s.byStyle || []) {
+      if (st.medianDps == null || st.medianStrokeRateSpm == null) continue;
+      counts.set(st.style, (counts.get(st.style) || 0) + 1);
+    }
+  }
+  return [...counts.entries()].filter(([, n]) => n >= floor)
+    .sort((a, b) => b[1] - a[1]).map(([style]) => style);
+}
+
+/*
+ * The cross-session trend for one stroke: a point per session, and the same divergence verdict the
+ * per-set read gives, fitted over sessions instead of over lengths.
+ *
+ * Returns null when there are fewer than `minSessions` points, rather than a slope with a shrug
+ * attached. Same refusal `analyzeSwimSet` makes below `minTrendLengths`.
+ */
+function swimHistoryTrend(sessions, style, opts) {
+  const minSessions = (opts && opts.minSessions) || 3;
+  const bandPct = (opts && opts.bandPct) || 3;
+
+  const points = [];
+  for (const s of sessions || []) {
+    const row = (s.byStyle || []).find(x => x.style === style);
+    if (!row || row.medianDps == null || row.medianStrokeRateSpm == null) continue;
+    points.push({
+      key: s.key, start: s.start, title: s.title,
+      nLengths: row.nLengths,
+      dps: row.medianDps,
+      strokeRateSpm: row.medianStrokeRateSpm,
+      pace100S: row.medianPace100S,
+      swolf: row.medianSwolf,
+      poolLengthM: s.poolLengthM,
+      displayUnit: s.displayUnit,
+    });
+  }
+  if (points.length < minSessions) return null;
+
+  const dpsT = swimTrend(points.map(p => p.dps));
+  const rateT = swimTrend(points.map(p => p.strokeRateSpm));
+  const paceT = swimTrend(points.map(p => p.pace100S));
+  if (!dpsT || !rateT) return null;
+
+  const kind = classifySwimEffort(dpsT.pctChange, rateT.pctChange, bandPct);
+  return {
+    style,
+    n: points.length,
+    points,
+    spanDays: +((points[points.length - 1].start - points[0].start) / 86400).toFixed(1),
+    dpsPctChange: dpsT.pctChange,
+    ratePctChange: rateT.pctChange,
+    pacePctChange: paceT ? paceT.pctChange : null,
+    bestDps: +Math.max(...points.map(p => p.dps)).toFixed(3),
+    kind,
+    read: swimHistoryRead(kind),
+  };
+}
+
+/*
+ * Mechanism and action for a cross-session verdict.
+ *
+ * Separate copy from `swimEffortRead` rather than shared, and the difference is not cosmetic. Within
+ * a set, a falling distance per stroke is FATIGUE: the catch slipping as the swimmer tires, over
+ * minutes. Across sessions the swimmer was rested at the start of every one of them, so the same
+ * shape means something structurally different -- a habit, or a training block doing what it was
+ * designed to do, over weeks. Handing the per-set wording to a season would tell a swimmer they were
+ * getting tired when what changed was their stroke.
+ *
+ * Hedged throughout, and one hedge is load-bearing enough to say why: a session-to-session series
+ * has an uncontrolled variable the per-set read does not, which is what the session WAS. A sprint
+ * day and a long aerobic day differ in stroke rate by design, so a series over a mixed training
+ * block reads as noise unless the sessions were similar. The copy names that rather than letting the
+ * verdict imply the swimmer changed.
+ */
+function swimHistoryRead(kind) {
+  switch (kind) {
+    case 'spinning': return {
+      label: 'shorter stroke, faster turnover',
+      mechanism: 'Across these swims your distance per stroke has fallen while your stroke rate has risen, so you are covering the pool with more, shorter strokes than you used to. Over weeks this is a change in the stroke itself rather than fatigue within a session.',
+      action: 'Worth a few stroke-count sets to see whether the longer stroke is still available to you. If these sessions were not all the same kind of swim, check that first: a block with more sprint work would move both numbers this way on its own.',
+    };
+    case 'lengthening': return {
+      label: 'longer stroke, slower turnover',
+      mechanism: 'Distance per stroke has risen across these swims while stroke rate has fallen, so your stroke has got longer over time.',
+      action: 'This is what stroke-count and distance-per-stroke work is meant to produce. Check pace went with it: a longer stroke that costs turnover is only a gain if the clock agrees.',
+    };
+    case 'fading': return {
+      label: 'slower across these swims',
+      mechanism: 'Distance per stroke, stroke rate, or both have fallen across these sessions, and neither has risen to hold pace, so the swims have got slower over time.',
+      action: 'Read it against what these sessions were before reading it as form: a run of easy aerobic swims will show exactly this, and would be the block working rather than failing.',
+    };
+    case 'building': return {
+      label: 'faster across these swims',
+      mechanism: 'Stroke rate, distance per stroke, or both have risen across these sessions and neither has fallen against it, so the swims have got faster over time.',
+      action: 'Worth noticing WHICH factor moved: a rising distance per stroke is the more durable of the two, since holding pace on turnover alone tends not to survive a longer swim.',
+    };
+    case 'holding': return {
+      label: 'steady across these swims',
+      mechanism: 'Distance per stroke and stroke rate have both stayed flat across these sessions, so the stroke you are swimming now is the stroke you were swimming then.',
+      action: 'Neither good nor bad on its own: it is what a maintenance block should look like, and what a progression block should not. Which one this was is the thing to compare it against.',
+    };
+    default: return null;
+  }
+}
+
+/* Median distance per stroke across the comparable sessions, for the "where does today sit" line.
+   Median rather than mean so one outlier swim (a drill day, a session cut short) does not move the
+   reference the current swim is being placed against. */
+function swimHistoryReference(trend) {
+  if (!trend || !trend.points || !trend.points.length) return null;
+  return {
+    medianDps: +median(trend.points.map(p => p.dps)).toFixed(3),
+    medianStrokeRateSpm: +median(trend.points.map(p => p.strokeRateSpm)).toFixed(1),
+    medianPace100S: (() => {
+      const vs = trend.points.map(p => p.pace100S).filter(v => v != null);
+      return vs.length ? +median(vs).toFixed(1) : null;
+    })(),
+  };
+}
+
   return { normalizeSwimImport, swimLengthMetrics, isStrokeStyle,
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
     swimEffortRead, swimPaceCv, isCountable, swimStyleSplits, swimPerStrokeSplit,
+    swimPoolsMatch, swimHistoryRecord, swimHistoryUpsert, swimComparableSessions,
+    swimHistoryStyles, swimHistoryTrend, swimHistoryRead, swimHistoryReference,
     computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel,
     swimDigest, swimCaveats, swimCoachPrompt,
     analyzeOpenWater, straightnessWindows, sliceStraightness, routeCumulative,
@@ -13597,6 +13822,106 @@ function renderStrength(D) {
    climbed 15% while distance per stroke fell 13% across a set, which is the difference between
    holding pace by gripping the water and holding it by spinning the arms.
    ============================================================================ */
+
+/* ============================================================================
+   "Across your swims": the same divergence read, fitted over sessions.
+
+   Placed after the per-set cards and before the by-stroke table, because it answers the question the
+   set cards raise and cannot settle. A set card tells you what happened in one set of one swim; this
+   tells you whether that is what you have been doing for a month. It is the half analysis.js calls
+   "the actual product" and which did not exist, since an imported swim was rendered and discarded.
+
+   Everything here is gated on comparability rather than shown with a caveat: a session in a
+   different pool, a different stroke, or open water is dropped, and the count of what was dropped is
+   stated. Showing it hedged would be the mistake the per-set trend already refuses to make when it
+   declines a mixed set.
+   ============================================================================ */
+function swimHistorySection(D, unit) {
+  const U = LoamSwim;
+  const history = D.history || [];
+  const current = U.swimHistoryRecord(D.session, D.swim);
+  if (!current) return '';
+
+  const usable = U.swimComparableSessions(history, current);
+  const styles = U.swimHistoryStyles(usable, 3);
+  const dropped = history.length - usable.length;
+
+  /* The empty state is worth as much as the populated one here: swimming is the one sport with no
+     Record screen, so a swimmer has no other way to learn that importing again builds something. */
+  if (!styles.length) {
+    const need = Math.max(0, 3 - usable.length);
+    return `<div class="section-title" style="margin-top:26px">Across your swims</div>
+      <div class="strength-tablenote">Loam keeps each swim you import on this device, and once there
+        are three in the same pool it fits the same distance-per-stroke and stroke-rate read across
+        them &mdash; whether your stroke is getting longer or shorter over weeks, which no single
+        session can show.
+        ${usable.length <= 1 ? 'This is the first one.'
+          : `You have ${usable.length} comparable so far${need ? `, so ${need} more to go` : ''}.`}
+        ${dropped > 0 ? `<br>${dropped} other swim${dropped === 1 ? ' is' : 's are'} stored but not
+          comparable with this one (a different pool length, or open water). Distance per stroke
+          depends on the push-off you get from each wall, so comparing across pools would show you a
+          change you did not make.` : ''}</div>`;
+  }
+
+  const style = styles[0];
+  const trend = U.swimHistoryTrend(usable, style, { minSessions: 3 });
+  if (!trend) return '';
+  const ref = U.swimHistoryReference(trend);
+  const read = trend.read;
+
+  const arrow = (p) => p > 0 ? '&uarr;' : p < 0 ? '&darr;' : '&rarr;';
+  const cls = (p, goodUp) => Math.abs(p) < 3 ? 'swim-flat' : ((p > 0) === goodUp ? 'swim-good' : 'swim-bad');
+  const when = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  const rows = trend.points.map((p, i) => {
+    const isNow = p.key === current.key;
+    const vsRef = ref && ref.medianDps ? (p.dps / ref.medianDps - 1) * 100 : null;
+    return `<tr class="${isNow ? 'swim-hist-now' : ''}">
+      <td>${escapeHtml(when(p.start))}${isNow ? ' <strong>&middot; this swim</strong>' : ''}</td>
+      <td>${p.nLengths}</td>
+      <td>${U.swimPaceLabel(p.pace100S, unit)}</td>
+      <td>${U.swimDpsLabel(p.dps, unit)}</td>
+      <td>${p.strokeRateSpm}</td>
+      <td>${p.swolf != null ? p.swolf : '&mdash;'}</td>
+      <td class="${vsRef == null ? '' : cls(vsRef, true)}">${vsRef == null ? '&mdash;'
+        : (vsRef > 0 ? '+' : '') + vsRef.toFixed(1) + '%'}</td>
+    </tr>`;
+  }).join('');
+
+  const others = styles.slice(1);
+  return `<div class="section-title" style="margin-top:26px">Across your swims
+      <span class="subtitle">${escapeHtml(style)} &middot; ${trend.n} sessions over ${Math.round(trend.spanDays)} days</span></div>
+    <div class="swim-hist-card">
+      <div class="swim-hist-h">${escapeHtml(read.label)}</div>
+      <div class="swim-hist-n">
+        <span>per stroke <b class="${cls(trend.dpsPctChange, true)}">${arrow(trend.dpsPctChange)}
+          ${trend.dpsPctChange > 0 ? '+' : ''}${trend.dpsPctChange}%</b></span>
+        <span>stroke rate <b class="${cls(trend.ratePctChange, false)}">${arrow(trend.ratePctChange)}
+          ${trend.ratePctChange > 0 ? '+' : ''}${trend.ratePctChange}%</b></span>
+        ${trend.pacePctChange == null ? '' : `<span>pace <b class="${cls(-trend.pacePctChange, true)}">${arrow(trend.pacePctChange)}
+          ${trend.pacePctChange > 0 ? '+' : ''}${trend.pacePctChange}%</b></span>`}
+      </div>
+      <p>${escapeHtml(read.mechanism)}</p>
+      <p class="swim-hist-a">${escapeHtml(read.action)}</p>
+    </div>
+    <div class="swim-tablewrap"><table class="strength-table">
+      <thead><tr><th>swim</th><th>lengths</th><th>pace</th><th>per stroke</th><th>spm</th><th>swolf</th><th>vs your median</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="strength-tablenote">Your ${escapeHtml(style)} lengths only, in
+      ${U.swimDistanceLabel(current.poolLengthM, unit)} water, because distance per stroke and SWOLF
+      only mean anything within one stroke and one pool length.
+      ${others.length ? `You also have enough ${others.map(escapeHtml).join(' and ')} to trend; only your
+        most-swum stroke is charted here.` : ''}
+      ${dropped > 0 ? `${dropped} stored swim${dropped === 1 ? '' : 's'} did not qualify (a different
+        pool, or open water).` : ''}
+      <br><strong>Still BETA.</strong> This is the same arithmetic as the per-set read, on the same
+      Apple-recorded numbers, fitted over sessions instead of lengths &mdash; and it is on firmer
+      ground than a single set's slope, because the first-length effect that biases one set is
+      present in every session here and largely cancels. It is not a controlled comparison: a sprint
+      day and a long aerobic day differ by design, so read a change against what these sessions
+      actually were before reading it as your stroke.</div>`;
+}
+
 function renderSwim(D) {
   _lastRender = { fn: renderSwim, D };
   const R = D.swim || {}, s = D.summary || {};
@@ -13658,7 +13983,8 @@ function renderSwim(D) {
     /* After the set cards, not before them: the set cards carry no heading of their own, so a
        "By stroke" title above them reads as though they are part of it. Sits with the ledger
        instead, which is the other per-length breakdown. */
-    ? swimDecompSection(R, unit) + swimSetCards(R, unit) + swimStyleSection(D.session, unit) + swimLedger(R, unit)
+    ? swimDecompSection(R, unit) + swimSetCards(R, unit) + swimHistorySection(D, unit)
+      + swimStyleSection(D.session, unit) + swimLedger(R, unit)
     : swimOpenWaterSection(R, unit);
 
   el.innerHTML = `
@@ -14567,16 +14893,60 @@ function swimLedger(R, unit) {
    through the sport detector would mean teaching that detector about a file type it will never see.
    Returns a small result object so the Swift side can tell a successful import from a rejected one
    without scraping the DOM. */
+
+/* ============================================================================
+   Swim history storage.
+
+   localStorage beside the ride library, same as every other persisted thing here: no backend, no
+   auth, nothing leaves the device (strategic decision #4). Records are the compact per-stroke
+   medians `swimHistoryRecord` builds, never the length ledger -- a season has to fit in a storage
+   quota, and the cross-session read consumes exactly those medians.
+
+   Every read and write is wrapped, because localStorage throws in private mode and when the quota is
+   full. A swim that cannot be remembered must still ANALYZE: the history section simply does not
+   appear, which is the same degradation the lift-weight and golf-count stores already choose.
+   ============================================================================ */
+const SWIM_HISTORY_KEY = 'loam-swim-history';
+const SWIM_HISTORY_MAX = 200;   /* a decade of weekly swimming; the cap is against unbounded growth */
+
+function swimHistoryLoad() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SWIM_HISTORY_KEY) || '[]');
+    return Array.isArray(raw) ? raw.filter(r => r && r.key && Number.isFinite(r.start)) : [];
+  } catch (e) { return []; }
+}
+
+function swimHistorySave(records) {
+  try {
+    /* Newest kept when the cap bites: a swimmer comparing this month against last month is the case
+       to protect, and the oldest records are the ones a moved pool or a changed stroke has most
+       likely made incomparable anyway. */
+    const keep = records.slice(-SWIM_HISTORY_MAX);
+    localStorage.setItem(SWIM_HISTORY_KEY, JSON.stringify(keep));
+    return keep;
+  } catch (e) { return records; }
+}
+
+/* Remember this swim and hand back the whole history including it. */
+function swimHistoryRemember(session, R) {
+  const rec = LoamSwim.swimHistoryRecord(session, R);
+  if (!rec) return swimHistoryLoad();
+  return swimHistorySave(LoamSwim.swimHistoryUpsert(swimHistoryLoad(), rec));
+}
+
 window.onSwimImport = function (payload) {
   try {
     const raw = typeof payload === 'string' ? JSON.parse(payload) : payload;
     const session = LoamSwim.normalizeSwimImport(raw);
     const swim = LoamSwim.analyzeSwim(session);
     const summary = LoamSwim.computeSwimSummary(session, swim);
+    /* Written down BEFORE rendering, so the history section can place this swim inside its own
+       series rather than against everything-except-today. */
+    const history = swimHistoryRemember(session, swim);
     hideAllSections();
     hide('loading'); hide('errorBox'); hide('dropzone'); hide('results');
     show('swimResults');
-    renderSwim({ session, swim, summary, sport: 'swimming', title: session.title });
+    renderSwim({ session, swim, summary, history, sport: 'swimming', title: session.title });
     setStatus(`Swim loaded (${LoamSwim.swimDistanceLabel(summary.totalDistanceM, summary.displayUnit)}`
       + `${swim.hasLengths ? ' · ' + summary.nLengths + ' lengths · ' + summary.nSets + ' sets' : ''})`, true);
     return { ok: true, nLengths: summary.nLengths, nSets: summary.nSets };
@@ -21650,7 +22020,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'b8aed080d · 2026-08-10';
+const LOAM_BUILD = 'b840bbeaa · 2026-08-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -21676,6 +22046,7 @@ const LOAM_WHATS_NEW = [
   ] },
   { h: 'Better', items: [
     ['Charts you can scope', 'the swim decomposition chart draws the whole session, one stroke, or one set, and re-bases on whatever you picked. A mixed session opens on its dominant stroke, because a breaststroke length and a freestyle length are not the same measurement and a chart that mixes them shows a step at every changeover that is the stroke changing, not you.'],
+    ['Your swims compared with each other', 'Loam now keeps each swim you import on this device and, once there are three in the same pool, fits the same read across them: whether your stroke is getting longer or shorter over weeks. This is the change a single session cannot show you, because your pace can sit still for a month while your stroke quietly shortens and your arms speed up to cover it. Only swims in the same pool and the same stroke are compared, since distance per stroke depends on the push-off you get from each wall.'],
     ['Per-stroke numbers, not a blend', 'a mixed swim reports distance per stroke, stroke rate and SWOLF for each stroke separately, and the headline tiles name which stroke they are quoting instead of averaging across strokes that do not compare.'],
     ['Long lists fold away', 'the length ledger and other long sections collapse, and your choice sticks. Imported swims in the Sessions list are collapsed by default, so a run of imports no longer pushes your recent recordings off the first screen.'],
     ['Segment timing you can trust', 'gates snap consistently (even on switchbacks), distance is geodesic, dead seconds at the start gate are trimmed, and a standing start is flagged.'],
