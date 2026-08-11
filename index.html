@@ -8282,7 +8282,290 @@ function detectStrength(sensors, ride) {
   return { sport: 'unknown', confidence: 0, reasons: [...reasons, 'no repeated rep oscillation found'] };
 }
 
-  return { parseSetMarks, analyzeStrength, detectStrength, classifyBarPositions, estimateConcentricVelocity, countRepsWrist, computeStrengthSummary };
+/* ==== ported from analyzer/sports/strength/history.js ==== */
+/*
+ * Lift history (BETA): what changed between this session and the last ones, per lift.
+ * Full rationale (why load-vs-reps, why no estimated 1RM, why an unweighed session is left out,
+ * and why the rep-count caveat is load-bearing) lives in the module. Pinned to it by
+ * analyzer/sports/strength/drift.test.js.
+ */
+/* Session-to-session moves are noisier than length-to-length ones inside a set (different day,
+   different food, different sleep), so the dead zone inside which a trend is called flat is wider
+   than swim's 3%. 5% of a working load is roughly one plate change on a barbell, which is the
+   smallest move a lifter actually makes. */
+const BAND_PCT = 5;
+
+/* Least-squares slope through session values, reported as the percent change the fitted line covers
+   end to end. Same shape as swimTrend, kept separate rather than imported across sports: the two
+   modules describe different quantities and a shared helper would invite one to be tuned for the
+   other. Sessions are the x-axis by INDEX, not by date, so a three-week gap and a three-day gap
+   count the same -- deliberate, because what is being trended is consecutive training sessions, not
+   time, and the span in days is reported alongside so a stale series is visible. */
+function liftTrend(values) {
+  const ys = (values || []).filter(v => v != null && Number.isFinite(v));
+  const n = ys.length;
+  if (n < 2) return null;
+  const xbar = (n - 1) / 2;
+  const ybar = ys.reduce((s, v) => s + v, 0) / n;
+  let sxy = 0, sxx = 0;
+  for (let i = 0; i < n; i++) { sxy += (i - xbar) * (ys[i] - ybar); sxx += (i - xbar) ** 2; }
+  if (sxx <= 0) return null;
+  const slope = sxy / sxx;
+  const intercept = ybar - slope * xbar;
+  if (!(intercept > 0)) return null;
+  return { n, slope: +slope.toFixed(4), intercept: +intercept.toFixed(4),
+           pctChange: +(slope * (n - 1) / intercept * 100).toFixed(1) };
+}
+
+/*
+ * The decomposition. Work = load x reps, so every combination of the two has to land somewhere and
+ * each verdict names which factor moved.
+ *
+ *   heavier        load up, reps not up: the shape a strength block is meant to make.
+ *   volume         both up: more total work, the shape of a build phase.
+ *   lighter        load down, reps up: fewer kilos moved more times, a hypertrophy or deload week.
+ *   receding       at least one down and neither up, so total work fell.
+ *   holding        both flat.
+ */
+function classifyLiftEffort(loadPct, repsPct, bandPct) {
+  const band = bandPct == null ? BAND_PCT : bandPct;
+  const loadUp = loadPct > band, loadDown = loadPct < -band;
+  const repsUp = repsPct > band, repsDown = repsPct < -band;
+  if (loadUp && !repsUp) return 'heavier';
+  if (loadDown && repsUp) return 'lighter';
+  if (loadUp || repsUp) return 'volume';
+  if (loadDown || repsDown) return 'receding';
+  return 'holding';
+}
+
+/*
+ * The compact record persisted for one lift session.
+ *
+ * Per LIFT, never pooled, for the same reason swim stores per stroke: a session median across a
+ * squat and a curl describes neither. Derived and small (a season has to fit in a storage quota
+ * beside the ride library), which carries the same consequence stated there: a future read that
+ * needs per-set data across sessions needs a schema change, not just a new function.
+ *
+ * `loadsKg` is the lifter's typed per-set load, positionally aligned with `sets` -- the same array
+ * `liftWeightsKg` reads out of localStorage, passed in rather than read here so this stays pure.
+ * A set with no typed load contributes no volume and is counted in `nSetsNoLoad`, so the view can
+ * say how much of the session it could not weigh.
+ */
+function liftHistoryRecord({ key, start, title, sets, loadsKg }) {
+  if (!key) return null;
+  const t = Number(start);
+  const rows = sets || [];
+  const loads = loadsKg || [];
+
+  const byLift = new Map();
+  rows.forEach((set, i) => {
+    /* Untapped sets default to squat everywhere else in the module (it is the default geometry), and
+       naming that here rather than inventing an "unknown" bucket keeps one session's sets together. */
+    const lift = set.lift || 'squat';
+    if (!byLift.has(lift)) byLift.set(lift, { lift, nSets: 0, nReps: 0, nSetsNoLoad: 0,
+                                              volumeKg: 0, topLoadKg: null, topLoadReps: null });
+    const row = byLift.get(lift);
+    row.nSets++;
+    row.nReps += set.reps || 0;
+    const w = loads[i];
+    if (!(typeof w === 'number' && Number.isFinite(w) && w > 0)) { row.nSetsNoLoad++; return; }
+    row.volumeKg += w * (set.reps || 0);
+    /* Top set is the heaviest LOAD, ties broken by reps: 100 kg x 5 is a bigger set than 100 kg x 3,
+       and calling either "the top set" arbitrarily would make the series jump on a tie. */
+    if (row.topLoadKg == null || w > row.topLoadKg
+        || (w === row.topLoadKg && (set.reps || 0) > (row.topLoadReps || 0))) {
+      row.topLoadKg = w;
+      row.topLoadReps = set.reps || 0;
+    }
+  });
+
+  return {
+    key: String(key),
+    start: Number.isFinite(t) ? t : null,
+    title: title || null,
+    byLift: [...byLift.values()].map(r => ({
+      ...r,
+      volumeKg: +r.volumeKg.toFixed(1),
+      /* Reps at the top load, which is the rep factor that pairs with the load factor. Session total
+         reps is kept too, but the pair that decomposes work at the working weight is this one. */
+      hasLoad: r.topLoadKg != null,
+    })).sort((a, b) => b.nSets - a.nSets),
+  };
+}
+
+/* Upsert by recording key, oldest first. Pure, so the caller owns the storage. Re-analyzing the
+   same file, or editing a set's load, rewrites that session's record rather than adding one. */
+function liftHistoryUpsert(records, record) {
+  if (!record) return (records || []).slice();
+  const out = (records || []).filter(r => r.key !== record.key);
+  out.push(record);
+  return out.sort((a, b) => (a.start || 0) - (b.start || 0));
+}
+
+/* The lifts that appear, WITH A TYPED LOAD, in enough sessions to trend; most-lifted first. A lift
+   done once is a data point, not a trend, and a lift done without ever entering a weight has no
+   series to draw however many times it appears. */
+function liftHistoryLifts(records, minSessions) {
+  const floor = minSessions || 3;
+  const counts = new Map();
+  for (const s of records || []) {
+    for (const r of s.byLift || []) {
+      if (!r.hasLoad) continue;
+      counts.set(r.lift, (counts.get(r.lift) || 0) + 1);
+    }
+  }
+  return [...counts.entries()].filter(([, n]) => n >= floor)
+    .sort((a, b) => b[1] - a[1]).map(([lift]) => lift);
+}
+
+/*
+ * The cross-session trend for one lift: a point per session that recorded a load for it, and the
+ * load-vs-reps verdict fitted over sessions.
+ *
+ * Returns null below `minSessions` rather than a slope with a shrug attached, the same refusal the
+ * per-set reads make.
+ */
+function liftHistoryTrend(records, lift, opts) {
+  const minSessions = (opts && opts.minSessions) || 3;
+  const bandPct = (opts && opts.bandPct) != null ? opts.bandPct : BAND_PCT;
+
+  const points = [];
+  for (const s of records || []) {
+    const row = (s.byLift || []).find(x => x.lift === lift);
+    if (!row || !row.hasLoad) continue;
+    points.push({
+      key: s.key, start: s.start, title: s.title,
+      nSets: row.nSets, nReps: row.nReps, nSetsNoLoad: row.nSetsNoLoad,
+      topLoadKg: row.topLoadKg, topLoadReps: row.topLoadReps, volumeKg: row.volumeKg,
+    });
+  }
+  if (points.length < minSessions) return null;
+
+  const loadT = liftTrend(points.map(p => p.topLoadKg));
+  const repsT = liftTrend(points.map(p => p.topLoadReps));
+  const volT = liftTrend(points.map(p => p.volumeKg));
+  if (!loadT) return null;
+  /* A lifter who does the same rep count every session (5x5 is a whole training philosophy) gives
+     `liftTrend` a flat series, which is a real answer of 0% rather than missing data. */
+  const repsPct = repsT ? repsT.pctChange : 0;
+
+  const kind = classifyLiftEffort(loadT.pctChange, repsPct, bandPct);
+  const spanDays = points[0].start != null && points[points.length - 1].start != null
+    ? +((points[points.length - 1].start - points[0].start) / 86400).toFixed(1) : null;
+
+  return {
+    lift,
+    n: points.length,
+    points,
+    spanDays,
+    loadPctChange: loadT.pctChange,
+    repsPctChange: repsPct,
+    volumePctChange: volT ? volT.pctChange : null,
+    bestLoadKg: +Math.max(...points.map(p => p.topLoadKg)).toFixed(1),
+    kind,
+    read: liftHistoryRead(kind),
+  };
+}
+
+/*
+ * Mechanism and action for a cross-session verdict.
+ *
+ * Every one of these names the rep-count caveat where the rep factor is doing the work, rather than
+ * parking it once in a footnote: "heavier for fewer reps" is both what a strength block produces and
+ * what the counter's own under-count on a grinding set produces, and a lifter reading the sentence
+ * has to be told that in the sentence.
+ */
+function liftHistoryRead(kind) {
+  switch (kind) {
+    case 'heavier': return {
+      label: 'heavier on the bar',
+      mechanism: 'Your top set has got heavier across these sessions without the reps going up with it, which is the shape a strength block is meant to make.',
+      action: 'Worth checking the rep count is real before reading it as intent: Loam counts reps from the wrist and its known weak spot is a slow grinding rep, which is exactly the one a heavy top set produces. Correct any set that reads short and this reading firms up.',
+    };
+    case 'volume': return {
+      label: 'more work, heavier and more of it',
+      mechanism: 'Load and reps have both risen across these sessions, so total work is up on both factors rather than one paying for the other.',
+      action: 'The pleasant one, and the one to watch: both factors climbing at once is how a build phase runs out of road. Compare it against how the last few sessions actually felt.',
+    };
+    case 'lighter': return {
+      label: 'lighter, more reps',
+      mechanism: 'The load has come down across these sessions while the reps have gone up, so you are moving less weight more times.',
+      action: 'Deliberate in a deload or a hypertrophy block and worth nothing to worry about there. If it was not deliberate, the thing to look at is whether the heavy sessions were the ones you skipped.',
+    };
+    case 'receding': return {
+      label: 'less on the bar',
+      mechanism: 'Load, reps, or both have fallen across these sessions and neither has risen against it, so total work is down.',
+      action: 'Read it against what these sessions were before reading it as strength: a deload week, a session cut short, or a set whose weight never got typed in all look like this.',
+    };
+    case 'holding': return {
+      label: 'holding steady',
+      mechanism: 'Load and reps have both stayed flat across these sessions, so the work you are doing now is the work you were doing then.',
+      action: 'Exactly right for a maintenance block and exactly wrong for a progression one. Which this was is the thing to compare it against.',
+    };
+    default: return null;
+  }
+}
+
+/*
+ * Why there is no chart yet, when there is no chart yet.
+ *
+ * The gate is sessions PER LIFT that recorded a LOAD, and neither of those is the session count a
+ * lifter can see, so an empty state that counted sessions would be wrong in two directions at once:
+ * a lifter with five sessions across five different lifts has nothing to trend, and a lifter with
+ * five squat sessions who never typed a weight has nothing to trend either, for a completely
+ * different reason and with a completely different fix.
+ *
+ *   needSessions  fewer than `minSessions` recorded lift sessions at all. `need` is how many more.
+ *   needLoads     enough sessions, but the closest lift has too few with a typed load. `best` names
+ *                 it, and `best.nNoLoad` is how many of its sessions were unweighed.
+ *   needLift      enough sessions and loads are being typed, but no ONE lift recurs enough.
+ *   null          nothing is missing; a lift clears the floor and the trend can be drawn.
+ */
+function liftHistoryGap(records, minSessions) {
+  const floor = minSessions || 3;
+  const all = records || [];
+  if (liftHistoryLifts(all, floor).length) return null;
+  if (all.length < floor) {
+    return { reason: 'needSessions', sessions: all.length, need: floor - all.length, best: null };
+  }
+
+  /* Enough sessions. Rank each lift by how many of its sessions carry a load, so the shortfall can
+     name the lift that is closest and say which of the two things it is short of. */
+  const stats = new Map();
+  for (const s of all) {
+    for (const r of s.byLift || []) {
+      if (!stats.has(r.lift)) stats.set(r.lift, { lift: r.lift, n: 0, nWithLoad: 0 });
+      const st = stats.get(r.lift);
+      st.n++;
+      if (r.hasLoad) st.nWithLoad++;
+    }
+  }
+  const ranked = [...stats.values()].sort((a, b) => (b.nWithLoad - a.nWithLoad) || (b.n - a.n));
+  const top = ranked[0];
+  if (!top) return { reason: 'needLift', sessions: all.length, need: floor, best: null };
+
+  const best = { lift: top.lift, n: top.n, nWithLoad: top.nWithLoad,
+                 nNoLoad: top.n - top.nWithLoad, need: Math.max(0, floor - top.nWithLoad) };
+  /* The lift recurs often enough; what is missing is the weights. That is a one-tap fix and a very
+     different sentence from "do this lift more often". */
+  if (top.n >= floor) return { reason: 'needLoads', sessions: all.length, need: best.need, best };
+  return { reason: 'needLift', sessions: all.length, need: floor - top.n, best };
+}
+
+/* Median top load across the series, for the "where does today sit" column. Median rather than mean
+   so one deload session does not move the reference this session is being placed against. */
+function liftHistoryReference(trend) {
+  if (!trend || !trend.points || !trend.points.length) return null;
+  return {
+    medianTopLoadKg: +median(trend.points.map(p => p.topLoadKg)).toFixed(1),
+    medianTopLoadReps: +median(trend.points.map(p => p.topLoadReps)).toFixed(1),
+    medianVolumeKg: +median(trend.points.map(p => p.volumeKg)).toFixed(1),
+  };
+}
+
+  return { parseSetMarks, analyzeStrength, detectStrength, classifyBarPositions, estimateConcentricVelocity, countRepsWrist, computeStrengthSummary,
+           liftTrend, classifyLiftEffort, liftHistoryRecord, liftHistoryUpsert, liftHistoryLifts,
+           liftHistoryTrend, liftHistoryRead, liftHistoryGap, liftHistoryReference };
 })();
 
 /* Golf swing analysis, ported verbatim from analyzer/sports/golf/ (see golf/drift.test.js, which
@@ -12434,6 +12717,150 @@ function kgToDisp(kg) { return kg == null ? '' : +(liftUnit() === 'kg' ? kg : kg
 function dispToKg(v) { return (v == null || v === '' || isNaN(+v)) ? null : (liftUnit() === 'kg' ? +v : +v * KG_PER_LB); }
 function fmtVol(kg) { const v = liftUnit() === 'kg' ? kg : kg / KG_PER_LB; return Math.round(v).toLocaleString() + ' ' + liftUnit(); }
 function liftVolumeKg(D) { const w = liftWeightsKg(D.key || ''); return (D.strength.sets || []).reduce((s, set, i) => s + (w[i] != null ? w[i] * set.reps : 0), 0); }
+
+/* ============================================================================
+   Lift history storage.
+
+   localStorage beside the swim history and the ride library: no backend, no auth, nothing leaves the
+   device (strategic decision #4). Records are the compact per-lift rows `liftHistoryRecord` builds,
+   never the per-set detail -- a season has to fit in a storage quota, and the cross-session read
+   consumes exactly those rows.
+
+   Written from renderStrength rather than from the analyze path, and that is the point rather than a
+   shortcut: the loads are TYPED by the lifter after the session renders, and a rep miscount is
+   corrected the same way. Both edits re-render, so recording here means the stored session always
+   reflects the numbers currently on screen instead of whatever was known the instant the file was
+   opened. Upsert is by recording key, so re-opening or re-analyzing a session rewrites its row.
+
+   Every read and write is wrapped, because localStorage throws in private mode and when the quota is
+   full. A lift that cannot be remembered must still ANALYZE: the history panel simply does not
+   appear, the same degradation the lift-weight and golf-count stores already choose.
+   ============================================================================ */
+const LIFT_HISTORY_KEY = 'loam-lift-history';
+const LIFT_HISTORY_MAX = 300;   /* a couple of years of thrice-weekly lifting; a cap against unbounded growth */
+
+function liftHistoryLoad() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LIFT_HISTORY_KEY) || '[]');
+    return Array.isArray(raw) ? raw.filter(r => r && r.key && Array.isArray(r.byLift)) : [];
+  } catch (e) { return []; }
+}
+
+function liftHistorySave(records) {
+  try {
+    /* Newest kept when the cap bites: a lifter comparing this month against last month is the case
+       to protect, and a two-year-old session is describing a different body anyway. */
+    const keep = records.slice(-LIFT_HISTORY_MAX);
+    localStorage.setItem(LIFT_HISTORY_KEY, JSON.stringify(keep));
+    return keep;
+  } catch (e) { return records; }
+}
+
+/* Remember this session (with whatever loads and rep corrections are currently entered) and hand
+   back the whole history including it. `start` is the recording's real clock where the filename
+   carries one, which is what makes the series a series rather than a list. */
+function liftHistoryRemember(D, sets, weightsKg) {
+  const key = D.key || '';
+  if (!key) return liftHistoryLoad();
+  const dt = parseUTCFromFilename(D.title || '');
+  const rec = LoamStrength.liftHistoryRecord({
+    key,
+    start: dt ? Math.round(dt.getTime() / 1000) : null,
+    title: D.title || null,
+    sets, loadsKg: weightsKg,
+  });
+  if (!rec) return liftHistoryLoad();
+  return liftHistorySave(LoamStrength.liftHistoryUpsert(liftHistoryLoad(), rec));
+}
+
+/* ---------------------------------------------------------------------------
+   "Across your lifts": the cross-session panel.
+
+   The empty state carries as much weight as the populated one, because the only way a lifter
+   discovers this exists is by lifting again, and the two things it can be waiting for have two
+   completely different fixes: more sessions, or the weights actually typed in. `liftHistoryGap`
+   answers which, and the copy says which.
+   --------------------------------------------------------------------------- */
+function liftHistorySection(history) {
+  const U = LoamStrength;
+  const recs = history || [];
+  const lifts = U.liftHistoryLifts(recs, 3);
+  const title = `<div class="section-title" style="margin-top:26px">Across your lifts</div>`;
+
+  if (!lifts.length) {
+    const gap = U.liftHistoryGap(recs, 3);
+    if (!gap) return '';
+    const wait = gap.reason === 'needLoads'
+      ? `You have ${gap.sessions} lift sessions saved, but this read is work done &mdash; weight on the
+         bar times reps &mdash; and ${gap.best.nNoLoad === 1 ? 'one of them has' : `${gap.best.nNoLoad} of them have`}
+         no weight typed in. Fill in the Weight column on ${gap.best.need} more
+         ${escapeHtml(gap.best.lift)} session${gap.best.need === 1 ? '' : 's'} and this fills in.`
+      : gap.reason === 'needLift'
+        ? `You have ${gap.sessions} lift sessions saved, but a lift is only compared against itself
+           (a squat and a curl share no scale), and no single lift has come up three times yet.`
+        : `${gap.sessions <= 1 ? 'This is the first one.' : `You have ${gap.sessions} so far, so ${gap.need} more to go.`}`;
+    return `${title}
+      <div class="strength-tablenote">Loam keeps each lift you analyze on this device, and once one
+        lift has come up in three sessions with the weight filled in, it shows what actually changed
+        between them: heavier bar, more reps, or neither. ${wait}</div>`;
+  }
+
+  const lift = lifts[0];
+  const trend = U.liftHistoryTrend(recs, lift, { minSessions: 3 });
+  if (!trend) return '';
+  const ref = U.liftHistoryReference(trend);
+  const read = trend.read;
+  const u = liftUnit();
+
+  const arrow = (p) => p > 0 ? '&uarr;' : p < 0 ? '&darr;' : '&rarr;';
+  /* Up is good for load and for reps alike here, unlike swim's pace: more weight and more reps are
+     both more work. The verdict above is what says whether more work was the goal. */
+  const cls = (p) => Math.abs(p) < 5 ? 'swim-flat' : (p > 0 ? 'swim-good' : 'swim-bad');
+  const when = (t) => t == null ? '&mdash;' : new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  const rows = trend.points.map(p => {
+    const vsRef = ref && ref.medianTopLoadKg ? (p.topLoadKg / ref.medianTopLoadKg - 1) * 100 : null;
+    return `<tr>
+      <td>${when(p.start)}</td>
+      <td>${p.nSets}</td>
+      <td>${kgToDisp(p.topLoadKg)} ${u} &times; ${p.topLoadReps}</td>
+      <td>${fmtVol(p.volumeKg)}</td>
+      <td class="${vsRef == null ? '' : cls(vsRef)}">${vsRef == null ? '&mdash;'
+        : (vsRef > 0 ? '+' : '') + vsRef.toFixed(1) + '%'}</td>
+    </tr>`;
+  }).join('');
+
+  const others = lifts.slice(1);
+  const span = trend.spanDays != null ? ` over ${Math.round(trend.spanDays)} days` : '';
+  return `${title.replace('</div>', ` <span class="subtitle">${escapeHtml(lift)} &middot; ${trend.n} sessions${span}</span></div>`)}
+    <div class="swim-hist-card">
+      <div class="swim-hist-h">${escapeHtml(read.label)}</div>
+      <div class="swim-hist-n">
+        <span>top set <b class="${cls(trend.loadPctChange)}">${arrow(trend.loadPctChange)}
+          ${trend.loadPctChange > 0 ? '+' : ''}${trend.loadPctChange}%</b></span>
+        <span>reps at it <b class="${cls(trend.repsPctChange)}">${arrow(trend.repsPctChange)}
+          ${trend.repsPctChange > 0 ? '+' : ''}${trend.repsPctChange}%</b></span>
+        ${trend.volumePctChange == null ? '' : `<span>total work <b class="${cls(trend.volumePctChange)}">${arrow(trend.volumePctChange)}
+          ${trend.volumePctChange > 0 ? '+' : ''}${trend.volumePctChange}%</b></span>`}
+      </div>
+      <p>${escapeHtml(read.mechanism)}</p>
+      <p class="swim-hist-a">${escapeHtml(read.action)}</p>
+    </div>
+    <div class="swim-tablewrap"><table class="strength-table">
+      <thead><tr><th>session</th><th>sets</th><th>top set</th><th>work</th><th>vs your median</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="strength-tablenote">Your ${escapeHtml(lift)} sets only, because a lift is only
+      comparable against itself.
+      ${others.length ? `You also have enough ${others.map(escapeHtml).join(' and ')} to trend; only your
+        most-lifted one is charted here.` : ''}
+      <br><strong>Still BETA, and the two halves are not equally solid.</strong> The weight is exactly
+      what you typed. The rep count is Loam's estimate from wrist travel, and its documented weak spot
+      is the slow grinding rep &mdash; which is the one a heavy top set produces &mdash; so a reading of
+      "heavier, fewer reps" is both what a real strength block looks like and what an under-count looks
+      like, and nothing here can tell those apart. Correct any set in the table above and this updates.
+      No estimated one-rep max is shown: that would be a formula fitted to other people, and this
+      project does not put a number on screen it cannot stand behind.</div>`;
+}
 function onLiftWeight(i, val) {
   const key = _liftD.key || '';
   const w = liftWeightsKg(key); w[i] = dispToKg(val);
@@ -13728,6 +14155,12 @@ function renderStrength(D) {
   }
   const weights = liftWeightsKg(D.key || '');
   const volKg = sets.reduce((s, set, i) => s + (weights[i] != null ? weights[i] * set.reps : 0), 0);
+  /* Written down BEFORE the panel renders, so this session appears inside its own series rather than
+     against everything-except-today. Recorded from here rather than from the analyze path because the
+     loads and the rep corrections are entered AFTER a session first renders, and both re-render: the
+     stored row therefore always matches what is on screen. `sets` is the corrected view (Dc), so a
+     rep the lifter fixed is the rep the history keeps. */
+  const liftHistory = liftHistoryRemember(D, sets, weights);
   const HIGH = '#37c6b5', LOW = '#f0954f', UNC = '#9aa0aa';
   const barColor = p => p === 'high' ? HIGH : p === 'low' ? LOW : UNC;
   const f = (x, d = 2) => (x == null || isNaN(x)) ? '—' : (+x).toFixed(d);
@@ -13863,6 +14296,7 @@ function renderStrength(D) {
       <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.</span></div>
       <div class="rep-detail-grid">${repBlocks}</div>
     </div>` : ''}
+    ${liftHistorySection(liftHistory)}
     <div class="strength-caveat"><strong>Beta:</strong> lift analysis is validated on synthetic sessions only, not yet against a ground-truth recording, so treat rep counts, depth, bar position and bar speed as estimates. Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}The rep counter keys on vertical wrist travel, so support depends on the lift: squat and deadlift count reliably (checked against real sessions); overhead press counts cleanly but is unproven; standalone curls are noisier; bench press undercounts by about half; chin-ups and pull-ups do not count at all (the wrist is the anchor and never travels). Very slow near-max grinds can drop below the counting gate on any lift. Lift type is never auto-detected: it comes from your lift-chip taps, and a set without one is analyzed as a squat (high/low bar and depth are squat-only reads). A lift is stationary, so there is no GPS map, turns, or jumps.</div>
   `;
   renderLiftSignature(Dc);
@@ -22107,7 +22541,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'b5e6faaf0 · 2026-08-11';
+const LOAM_BUILD = 'e965f3b8d · 2026-08-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
