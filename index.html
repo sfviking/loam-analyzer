@@ -1562,7 +1562,7 @@
   <section id="runsSection" class="hidden">
     <div class="section-title">
       <span id="runsTitle">Runs</span>
-      <span class="subtitle" id="runsSubtitle">tap a row to focus it · tag a segment to track it across rides</span>
+      <span class="subtitle" id="runsSubtitle">tap a row to focus it · tag a segment to track it across sessions</span>
       <select id="runsMode" style="margin-left:auto;">
         <option value="auto">Auto</option>
         <option value="descents">Descents</option>
@@ -2629,16 +2629,21 @@ function isMtbFamily(sport) { return sport === 'mtb' || sport === 'emtb'; }
    canonical sport; the render paths pass seven raw strings (mtb/emtb/road/running/walking/ride and
    the GPS gpsSport), so route them through normalizeSport() before lookup. Nouns only, no analysis. */
 const SPORT_LEX = {
-  mtb:  { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns' },
-  emtb: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns' },
-  road: { activity: 'Ride', signature: 'ROAD', ctaVerb: 'ride', legend: 'grade' },
-  run:  { activity: 'Run',  signature: 'RUN',  ctaVerb: 'run',  legend: 'grade' },
-  walk: { activity: 'Walk', signature: 'WALK', ctaVerb: 'walk', legend: 'grade' },
-  ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'grade' },   /* GPS-only generic */
-  lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', legend: 'sets' },
-  golf: { activity: 'Range', signature: 'GOLF', ctaVerb: 'swing', legend: 'swings' },
-  swim: { activity: 'Swim', signature: 'SWIM', ctaVerb: 'swim', legend: 'lengths' },
+  mtb:  { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns', noun: 'ride', nounPlural: 'rides' },
+  emtb: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns', noun: 'ride', nounPlural: 'rides' },
+  road: { activity: 'Ride', signature: 'ROAD', ctaVerb: 'ride', legend: 'grade', noun: 'ride', nounPlural: 'rides' },
+  run:  { activity: 'Run',  signature: 'RUN',  ctaVerb: 'run',  legend: 'grade', noun: 'run',  nounPlural: 'runs' },
+  walk: { activity: 'Walk', signature: 'WALK', ctaVerb: 'walk', legend: 'grade', noun: 'walk', nounPlural: 'walks' },
+  ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'grade', noun: 'ride', nounPlural: 'rides' },   /* GPS-only generic */
+  lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', legend: 'sets', noun: 'lift', nounPlural: 'lifts' },
+  golf: { activity: 'Range', signature: 'GOLF', ctaVerb: 'swing', legend: 'swings', noun: 'range session', nounPlural: 'range sessions' },
+  swim: { activity: 'Swim', signature: 'SWIM', ctaVerb: 'swim', legend: 'lengths', noun: 'swim', nounPlural: 'swims' },
 };
+/* `noun`/`nounPlural` name a whole RECORDING, for the copy that talks about OTHER recordings: "drop
+   another ride covering this segment", "N rides", "past rides keep their label". Every one of those
+   said "ride" until 2026-08-12, so a runner who tapped Compare laps under their own run was told to
+   drop another RIDE (owner report). Distinct from `activity` (a title-case label, "Range") and from
+   the runs panel's row noun (descent / lap / run), which is the segmentation MODE, not the sport. */
 /* One predicate for "is this a weightlifting session". Two identifiers legitimately reach here: a
    declared/tapped lift is tagged 'weightlifting' (the sport picker's value), while an AUTO-detected lift
    carries 'strength' (detectStrength's return), and either can be persisted in an older cached entry. So
@@ -2665,6 +2670,24 @@ function normalizeSport(sport) {
   return 'ride';
 }
 function sportLex(sport) { return SPORT_LEX[normalizeSport(sport)]; }
+/* The sport a shared surface should SPEAK as. A GPS-only foot activity carries run/walk in gpsSport
+   while D.sport stays 'ride', so reading D.sport alone calls a GPS-only run a ride. */
+function displaySport(D) { return (D && D.gpsOnly && D.gpsSport) ? D.gpsSport : (D && D.sport); }
+/* A set of recordings whose sports may differ or be unlabeled (the library, a multi-file compare
+   drop, a segment ridden AND run). normalizeSport's catch-all turns anything unrecognized into
+   'ride', which is exactly the bug the nouns above fix, so a mixed or unknown set must not go
+   through it: it gets the neutral word instead of MTB's. */
+const MIXED_SPORT_LEX = { activity: 'Session', ctaVerb: 'record', noun: 'session', nounPlural: 'sessions' };
+function sportsLex(sports) {
+  const known = [...new Set((sports || []).filter(s => s && s !== 'unknown').map(normalizeSport))];
+  return known.length === 1 ? sportLex(known[0]) : MIXED_SPORT_LEX;
+}
+function lexNoun(lex, { plural = false, cap = false } = {}) {
+  const w = (plural ? lex.nounPlural : lex.noun) || 'session';
+  return cap ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+}
+function sportNoun(sport, opts) { return lexNoun(sportLex(sport), opts); }
+function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 function detectSport(sensors, ride) {
   const inRide = sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
   if (!inRide.length) return { sport: 'unknown', confidence: 0, reasons: ['no GPS speed in ride window'] };
@@ -3740,13 +3763,14 @@ function drawRuns() {
          rides, only the GPS-based features (auto-match, Compare past laps, leaderboard) work, so do
          not promise the turn features the same page says are unavailable. */
       /* GPS-only foot activities carry run/walk in gpsSport while D.sport stays 'ride', so resolve it
-         to say "run/walk it" not "ride it". */
-      const verb = sportLex((D.gpsOnly && D.gpsSport) ? D.gpsSport : D.sport).ctaVerb;
+         to say "run/walk it" not "ride it" (displaySport), and to track it across runs, not rides. */
+      const verb = sportLex(displaySport(D)).ctaVerb;
+      const across = sportNoun(displaySport(D), { plural: true });
       cta.innerHTML = isMtbFamily(D.sport)
-        ? `Tag a ${nounSingular} below (Tag as…) to track it across rides: next time you ${verb} it,
+        ? `Tag a ${nounSingular} below (Tag as…) to track it across ${across}: next time you ${verb} it,
            Loam auto-recognizes it and unlocks Compare past laps and the segment leaderboard.
            Riding the same trail twice in one session unlocks the turn-by-turn play-by-play and ghost race.`
-        : `Tag a ${nounSingular} below (Tag as…) to track it across rides: next time you ${verb} it, Loam
+        : `Tag a ${nounSingular} below (Tag as…) to track it across ${across}: next time you ${verb} it, Loam
            auto-recognizes it and unlocks Compare past laps and the segment leaderboard.`;
       cta.classList.remove('hidden');
     } else { cta.innerHTML = ''; cta.classList.add('hidden'); }
@@ -3759,9 +3783,12 @@ function drawRuns() {
      rebuild the header to match, instead of showing three columns of zeros. */
   const showTurns = isMtbFamily(D.sport);
   const thead = document.querySelector('#runsTable thead');
+  /* The name column's header follows the same mode noun the title, the subtitle and the rows use, so
+     the table cannot read "Run" over rows called "Descent 4" under a heading called "Descents". */
+  const nounCap = capitalize(nounSingular);
   if (thead) thead.innerHTML = showTurns
-    ? `<tr><th>#</th><th>Run</th><th>Time</th><th>Dist</th><th>Top</th><th>Turns</th><th>L/R</th><th title="Median apex radius">Radius</th><th>Drop</th><th></th></tr>`
-    : `<tr><th>#</th><th>Run</th><th>Time</th><th>Dist</th><th>Top</th><th>Avg</th><th>Drop</th><th></th></tr>`;
+    ? `<tr><th>#</th><th>${nounCap}</th><th>Time</th><th>Dist</th><th>Top</th><th>Turns</th><th>L/R</th><th title="Median apex radius">Radius</th><th>Drop</th><th></th></tr>`
+    : `<tr><th>#</th><th>${nounCap}</th><th>Time</th><th>Dist</th><th>Top</th><th>Avg</th><th>Drop</th><th></th></tr>`;
   document.querySelector('#runsTable tbody').innerHTML = runs.map(r => {
     const m = r.metrics;
     const label = runLabel(r.tStart) || r.label;
@@ -3806,7 +3833,7 @@ function drawRuns() {
     /* The classes + data-n/data-l attributes drive the phone card reflow (max-width 700px CSS):
        data-n prefixes the name with the run number, data-l becomes each metric tile's label. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
-      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}>${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this run">✎</span>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
+      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}>${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this ${nounSingular}">✎</span>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
       <td data-l="Time" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist">${U.dist(m.distance)}</td>
       <td data-l="Top" ${m.maxSpeed === bestTop ? hi : ''}>${U.speed(m.maxSpeed)}</td>
@@ -3834,7 +3861,9 @@ function drawRuns() {
       e.stopPropagation();
       const r = runs[+btn.dataset.idx];
       if (!r || !r.src) return;
-      if (btn.dataset.act === 'compare') compareWithPastLaps(r.src);
+      /* The compare flow talks about the LIBRARY ("drop another run covering this segment"), so hand
+         it this activity's noun and this panel's row noun rather than letting it default to MTB. */
+      if (btn.dataset.act === 'compare') compareWithPastLaps(r.src, { sport: displaySport(D), rowNoun: nounSingular });
       else promptTagDescent(r.src, D.libraryRideId);
     };
   });
@@ -3851,7 +3880,7 @@ function drawRuns() {
     btn.onclick = (e) => {
       e.stopPropagation();
       const r = runs[+btn.dataset.idx];
-      const name = prompt('Name this run (e.g. Mellow Mile)', runLabel(r.tStart) || r.label);
+      const name = prompt(`Name this ${nounSingular} (e.g. Mellow Mile)`, runLabel(r.tStart) || r.label);
       if (name != null) { setRunLabel(r.tStart, name.trim()); drawRuns(); }
     };
   });
@@ -4360,7 +4389,7 @@ function renderPlayByPlay(run, ref, D) {
     + `<strong>${labF}</strong> (${refWhat}): `
     + `<span style="color:${faster ? '#7fb069' : 'var(--accent)'};">${faster ? '' : '+'}${dt.toFixed(1)}s ${faster ? 'faster' : 'slower'}</span></div>`;
   if (ref.crossRide)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across rides, lined up turn-for-turn on the same trail.</div>`;
+    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across ${sportNoun(displaySport(D), { plural: true })}, lined up turn-for-turn on the same trail.</div>`;
   if (countA !== countF)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These runs have different turn counts (${countA} vs ${countF}). The turns are lined up in order, so a missed or extra turn can shift the pairing; the per-turn notes below read best for repeated runs of the same segment.</div>`;
   /* Speed deltas follow the Units toggle like the turn table (they used to hardcode mph). The delta
@@ -4529,7 +4558,7 @@ async function setupPlayByPlay(allRuns, D) {
   const comparable = runs.filter(r => refOf.has(r.n));
   if (!comparable.length) {
     sel.classList.add('hidden');
-    body.innerHTML = `<div class="dim" style="font-size:13px;">No lap to compare yet. The turn-by-turn lines up two laps of the same trail: repeated laps in this ride, or, once you tag a trail and ride it again, your fastest lap from a past ride. Then it shows where you gained or lost time on each turn.</div>`;
+    body.innerHTML = `<div class="dim" style="font-size:13px;">No lap to compare yet. The turn-by-turn lines up two laps of the same trail: repeated laps in this ${sportNoun(displaySport(D))}, or, once you tag a trail and ${sportLex(displaySport(D)).ctaVerb} it again, your fastest lap from a past ${sportNoun(displaySport(D))}. Then it shows where you gained or lost time on each turn.</div>`;
     return;
   }
   sel.classList.remove('hidden');
@@ -4614,7 +4643,7 @@ function setupGhostRace(runs, D) {
     sel.classList.add('hidden');
     if (play) { play.classList.add('hidden'); play.onclick = null; }
     if (scrub) { scrub.classList.add('hidden'); scrub.oninput = null; }
-    if (note) { note.classList.remove('hidden'); note.textContent = 'No repeated segments in this ride. The ghost race replays a run against your fastest lap of the same trail; once you have two runs down one segment you can race them.'; }
+    if (note) { note.classList.remove('hidden'); note.textContent = `No repeated segments in this ${sportNoun(displaySport(D))}. The ghost race replays a run against your fastest lap of the same trail; once you have two runs down one segment you can race them.`; }
     return;
   }
   sel.classList.remove('hidden');
@@ -11529,8 +11558,12 @@ async function analyzeMulti(sensorFiles) {
       perRide.push({ file: file.name, fileObj: file, ride, descents, nLocation: sensors.location.length, libraryRideId: saved && saved.id });
     }
 
+    /* This path deliberately skips per-sport analysis (it only needs baro/GPS descents), so every row
+       is saved 'unknown' above and nothing here knows whether these are rides or runs. Say the
+       neutral word, and say the SAME one renderCrossRide will land on. */
+    const multiWord = lexNoun(sportsLex([]), { plural: true });
     const allDescents = perRide.flatMap(r => r.descents || []);
-    onProgress(`clustering ${allDescents.length} descents across ${perRide.length} rides`);
+    onProgress(`clustering ${allDescents.length} descents across ${perRide.length} ${multiWord}`);
     const clusters = clusterDescents(allDescents, 75);
 
     onProgress('rendering');
@@ -11538,7 +11571,7 @@ async function analyzeMulti(sensorFiles) {
     renderCrossRide({ perRide, clusters });
     const matched = clusters.length;
     const totalDescents = allDescents.length;
-    setStatus(`Compare loaded · ${perRide.length} rides · ${matched}/${totalDescents} descents matched`, true);
+    setStatus(`Compare loaded · ${perRide.length} ${multiWord} · ${matched}/${totalDescents} descents matched`, true);
   } catch (e) {
     console.error(e);
     if (superseded()) return;   /* a newer analysis owns the UI; don't clobber it with this error */
@@ -11663,6 +11696,13 @@ function renderCrossRide({ perRide, clusters }) {
   for (const mp of _crossDeltaMaps) { try { mp.remove(); } catch (e) {} }
   _crossDeltaMaps = [];
   const palette = ['#e87b3d', '#6da7c4', '#8caa6d', '#d4a574', '#c54b3c', '#a78bd9', '#5fb0b0', '#d97593'];
+  /* What to CALL the compared recordings. Library-backed entries carry their row's sport on the
+     member (buildTagMember); a multi-file compare drop saves everything as 'unknown' and carries
+     none, and a segment covered on foot and on a bike is genuinely mixed. All three land on the
+     neutral "session", which is the point: only a set that agrees on one sport gets that sport's
+     word, so this view stops calling a pair of runs "2 rides". */
+  const xLex = sportsLex(perRide.map(r => r.sport || (r.descents && r.descents[0] && r.descents[0].sport)));
+  const xOne = lexNoun(xLex), xMany = lexNoun(xLex, { plural: true }), xCap = lexNoun(xLex, { cap: true });
   /* Distinct label + color per ride ENTRY, not per filename. The iOS app serves
      every recording to the analyzer at the virtual path recording.csv, so keying the
      summary table and the chart colors on the filename collapsed different rides into
@@ -11674,7 +11714,7 @@ function renderCrossRide({ perRide, clusters }) {
     const l = rsLabel(r.file);
     if (l && l !== 'RECORDING') return l;
     const d = r.descents && r.descents[0] ? memberDate(r.descents[0]) : null;
-    return d ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Ride';
+    return d ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : xCap;
   };
   const baseCounts = {};
   perRide.forEach(r => { const b = baseLabel(r); baseCounts[b] = (baseCounts[b] || 0) + 1; });
@@ -11688,7 +11728,7 @@ function renderCrossRide({ perRide, clusters }) {
 
   /* Header summary. */
   const subtitle = document.getElementById('crossSummarySubtitle');
-  subtitle.textContent = `${perRide.length} rides · ${clusters.length} descent${clusters.length === 1 ? '' : 's'} matched across ≥2 rides · GPS proximity 75m`;
+  subtitle.textContent = `${perRide.length} ${xMany} · ${clusters.length} descent${clusters.length === 1 ? '' : 's'} matched across ≥2 ${xMany} · GPS proximity 75m`;
 
   /* A new cross-ride render exits any single-ride drill-in context. */
   { const bb = document.getElementById('backToCompareBtn'); if (bb) bb.classList.add('hidden'); }
@@ -11701,8 +11741,8 @@ function renderCrossRide({ perRide, clusters }) {
   const skipped = perRide.filter(r => r.error);
   const noMatchNote = clusters.length === 0 ? `
     <div style="color: var(--text-dim); margin-bottom:14px;">
-      No descents matched across rides. Each ride's descents were further than 75m apart at the start.
-      Either the rides covered different trails, or no descents met the threshold (grade > 3% sustained for 20s+).
+      No descents matched across ${xMany}. Each ${xOne}'s descents were further than 75m apart at the start.
+      Either the ${xMany} covered different trails, or no descents met the threshold (grade > 3% sustained for 20s+).
     </div>` : '';
   const rideRows = rideable.map(r => {
     const idx = perRide.indexOf(r);
@@ -11710,7 +11750,7 @@ function renderCrossRide({ perRide, clusters }) {
     return `<tr class="cross-ride-row" data-idx="${idx}"${canOpen ? ' style="cursor:pointer;"' : ''}>
       <td style="color:${r._color}; font-weight:600; text-align:left;" title="${escapeHtml(r.file || '')}">${escapeHtml(r._label)}</td>
       <td>${r.descents ? r.descents.length : 0}</td>
-      <td style="text-align:right;">${canOpen ? '<span class="cross-open">Open ride &rarr;</span>' : ''}</td>
+      <td style="text-align:right;">${canOpen ? `<span class="cross-open">Open ${xOne} &rarr;</span>` : ''}</td>
     </tr>`;
   }).join('');
   const skippedBlock = skipped.length ? `
@@ -11720,8 +11760,8 @@ function renderCrossRide({ perRide, clusters }) {
     </details>` : '';
   summaryPanel.innerHTML = noMatchNote + `
     <table style="width:100%; font-size:12px;">
-      <thead><tr style="color:var(--text-muted);"><th style="text-align:left;">Ride</th><th style="text-align:left;">Descents</th><th></th></tr></thead>
-      <tbody>${rideRows || '<tr><td colspan="3" style="color:var(--text-muted);">No rides with a moving window.</td></tr>'}</tbody>
+      <thead><tr style="color:var(--text-muted);"><th style="text-align:left;">${xCap}</th><th style="text-align:left;">Descents</th><th></th></tr></thead>
+      <tbody>${rideRows || `<tr><td colspan="3" style="color:var(--text-muted);">No ${xMany} with a moving window.</td></tr>`}</tbody>
     </table>` + skippedBlock;
   summaryPanel.querySelectorAll('.cross-ride-row').forEach(row => {
     const r = perRide[+row.dataset.idx];
@@ -11774,7 +11814,7 @@ function renderCrossRide({ perRide, clusters }) {
     section.innerHTML = `
       <div class="section-title">
         ${escapeHtml(title)}
-        <span class="subtitle">${members.length} rides · ${U.dist(ref.distance)} reference distance · ${U.small(haversineMeters(cluster.centroidLatStart, cluster.centroidLonStart, ref.latStart, ref.lonStart))} start spread</span>
+        <span class="subtitle">${members.length} ${xMany} · ${U.dist(ref.distance)} reference distance · ${U.small(haversineMeters(cluster.centroidLatStart, cluster.centroidLonStart, ref.latStart, ref.lonStart))} start spread</span>
       </div>
       <div class="panel" style="padding:20px; margin-bottom:12px;">
         <div style="display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-bottom:8px;">
@@ -11787,7 +11827,7 @@ function renderCrossRide({ perRide, clusters }) {
         <div style="overflow-x:auto;">
           <table style="width:100%; font-size:12px;">
             <thead><tr style="color:var(--text-muted);">
-              <th style="width:24px;" title="Show on charts"></th><th style="text-align:left;">Ride</th><th>Duration</th><th>Distance</th><th>Avg speed</th><th>Max speed</th><th>Avg grade</th>
+              <th style="width:24px;" title="Show on charts"></th><th style="text-align:left;">${xCap}</th><th>Duration</th><th>Distance</th><th>Avg speed</th><th>Max speed</th><th>Avg grade</th>
             </tr></thead>
             <tbody id="crossCmpBody_${ci}"></tbody>
           </table>
@@ -15935,16 +15975,24 @@ async function promptTagDescent(descent, sourceRideId) {
   }
 }
 
-async function compareWithPastLaps(descent) {
-  if (!descent.autoTag) { alert('Tag this descent first to compare with past laps.'); return; }
+/* opts carries the calling panel's vocabulary: `sport` is the activity this recording IS (already
+   resolved through displaySport), `rowNoun` is that panel's row noun (descent / lap / run). Both are
+   optional so any other caller degrades to the neutral wording rather than to MTB's. */
+async function compareWithPastLaps(descent, opts = {}) {
+  const lex = sportsLex([opts.sport]);
+  const rowNoun = opts.rowNoun || 'segment';
+  if (!descent.autoTag) { alert(`Tag this ${rowNoun} first to compare with past laps.`); return; }
   const targetId = descent.autoTag.taggedSegmentId;
   await dedupeRides();
   const [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]);
   const targetTag = allTags.find(t => t.id === targetId);
-  if (!targetTag) { alert('That tag no longer exists. Re-tag this descent.'); return; }
+  if (!targetTag) { alert(`That tag no longer exists. Re-tag this ${rowNoun}.`); return; }
   const members = buildTagMembers(targetTag, allRides);
   if (members.length < 2) {
-    alert(`Only ${members.length} ride contains "${descent.autoTag.name}" in your library. Drop another ride covering this segment to compare.`);
+    const one = lexNoun(lex), many = lexNoun(lex, { plural: true });
+    alert(members.length === 1
+      ? `Only 1 ${one} in your library contains "${descent.autoTag.name}". Drop another ${one} covering this segment to compare.`
+      : `No ${many} in your library contain "${descent.autoTag.name}" yet. Drop another ${one} covering this segment to compare.`);
     return;
   }
   /* Centroid for the synthetic cluster (used by the cluster header). */
@@ -15964,7 +16012,12 @@ async function compareWithPastLaps(descent) {
      path leaves this button hidden because there is no single ride to return to. */
   { const b = document.getElementById('crossBackBtn'); if (b) b.classList.remove('hidden'); }
   renderCrossRide({ perRide, clusters: [cluster] });
-  setStatus(`Comparing "${descent.autoTag.name}" across ${members.length} rides`, true);
+  /* The alert above names what the RIDER should go do next, so it speaks in this recording's sport.
+     This line describes the SET now on screen, so it reads the members' own sports -- the same
+     computation renderCrossRide runs, so the status and the header it sits above cannot disagree
+     when the library holds rows saved before sport detection. */
+  const setLex = sportsLex(members.map(m => m.sport));
+  setStatus(`Comparing "${descent.autoTag.name}" across ${members.length} ${lexNoun(setLex, { plural: true })}`, true);
 }
 
 /* Date of a comparison member's ride. Prefer the UTC stamped in the source filename; in the iOS
@@ -16260,6 +16313,10 @@ function buildTagMember(r, d, targetTag) {
   const standingStart = entryVals.length ? Math.min(...entryVals) < SEG_STANDING_START_MPS : false;
   return {
     file: r.filename, recordedAt: r.recordedAt || r.savedAt || null,
+    /* The library row's sport, so surfaces built from members (the cross-ride view, the leaderboard)
+       can say "3 runs" instead of the hardcoded "3 rides". Absent on rows saved before sport
+       detection, and 'unknown' on a multi-file compare drop; sportsLex treats both as unlabeled. */
+    sport: r.sport || null,
     tStart, tEnd, duration, distance, distanceGps, standingStart,
     latStart, lonStart, latEnd, lonEnd,
     gradeAvg: d.gradeAvg, maxSpeed, avgSpeed,
@@ -16319,14 +16376,18 @@ function buildTagMembers(targetTag, allRides) {
 function tagProgression(tag, rides) {
   const members = buildTagMembers(tag, rides);
   const laps = members.length;
-  if (!laps) return { laps: 0 };
+  if (!laps) return { laps: 0, sports: [] };
   const durations = members.map(m => m.duration).filter(v => v != null && !isNaN(v));
   const prSec = durations.length ? Math.min(...durations) : null;
   const dated = members.map(m => ({ sec: m.duration, date: memberDate(m) }))
     .filter(o => o.sec != null && o.date && !isNaN(o.date)).sort((a, b) => a.date - b.date);
   const firstSec = dated.length ? dated[0].sec : (durations.length ? durations[0] : null);
   const improvedSec = (firstSec != null && prSec != null) ? firstSec - prSec : null;   /* + = best faster than first */
-  return { laps, prSec, firstSec, improvedSec };
+  /* The sports this segment has been covered on, so the Library can say "run it again" under a
+     runner's segment. Returned from here rather than re-derived because this is the one place that
+     already has the members. */
+  const sports = [...new Set(members.map(m => m.sport).filter(Boolean))];
+  return { laps, prSec, firstSec, improvedSec, sports };
 }
 
 /* Open a cross-ride leaderboard for a tagged segment straight from the Library (no current ride
@@ -16338,8 +16399,17 @@ async function renderSegmentLeaderboard(tagId) {
   const tag = allTags.find(t => t.id === tagId);
   if (!tag) { alert('That tagged segment no longer exists.'); return; }
   const members = buildTagMembers(tag, allRides);
+  /* Opened from the Library with no loaded recording, so the noun comes from the segment's own
+     history: the sports it has been covered on, falling back to the ride it was tagged from when
+     nothing matches it yet. */
+  const srcRide = allRides.find(r => r.id === tag.sourceRideId);
+  const lex = sportsLex([...members.map(m => m.sport), srcRide && srcRide.sport]);
   if (members.length < 2) {
-    alert(`Only ${members.length} ride contains "${tag.name}" in your library. Ride it again (or drop another ride covering it) to build a leaderboard.`);
+    const one = lexNoun(lex), many = lexNoun(lex, { plural: true });
+    alert(`${members.length === 1
+      ? `Only 1 ${one} in your library contains "${tag.name}".`
+      : `No ${many} in your library contain "${tag.name}" yet.`
+      } ${capitalize(lex.ctaVerb)} it again (or drop another ${one} covering it) to build a leaderboard.`);
     return;
   }
   const lat0 = members.reduce((s,m)=>s+m.latStart,0)/members.length;
@@ -22341,8 +22411,10 @@ function wireRideRowActions(host, rides, cachedByRide, sourceByRide) {
   });
   host.querySelectorAll('button[data-action="delete-ride"]').forEach(b => {
     b.onclick = async () => {
-      if (!confirm('Delete this ride from the library?')) return;
       const ride = rides.find(r => r.id === +b.dataset.id);
+      /* The library is cross-sport, so the row's own sport names it; a row saved before sport
+         detection (or by the multi-file compare drop) is 'unknown' and gets the neutral word. */
+      if (!confirm(`Delete this ${lexNoun(sportsLex([ride && ride.sport]))} from the library?`)) return;
       await deleteRide(+b.dataset.id);
       if (ride && ride.dedupKey) {
         await deleteRideSource(ride.dedupKey);
@@ -22461,13 +22533,16 @@ async function renderLibraryContents() {
   }
   tagsSection.innerHTML = `
     <h4 style="font-size:13px; color:var(--text); margin-bottom:8px; margin-top:24px;">Tagged segments (${tags.length})</h4>
-    ${tags.length === 0 ? '<p style="color:var(--text-muted); font-size:12px;">No tagged segments yet. After analyzing a ride, tap "Tag as…" on a descent to remember it. Once you have ridden it twice, open its leaderboard here.</p>' : `
+    ${tags.length === 0 ? '<p style="color:var(--text-muted); font-size:12px;">No tagged segments yet. After analyzing a session, tap "Tag as…" on a descent to remember it. Once you have covered it twice, open its leaderboard here.</p>' : `
     <table>
       <thead><tr><th>Name</th><th>Laps</th><th>Best</th><th>Progress</th><th>Grade</th><th></th></tr></thead>
       <tbody>
         ${tags.sort((a,b) => (b.createdAt||'').localeCompare(a.createdAt||'')).map(t => {
           const prog = tagProgression(t, rides);
           const laps = prog.laps;
+          /* "Ride this segment at least twice" under a runner's segment was the same hardcoded noun;
+             the verb comes from whatever this segment has actually been covered on. */
+          const tVerb = capitalize(sportsLex(prog.sports).ctaVerb);
           let progCell = '<span style="color:var(--text-muted);">—</span>';
           if (laps >= 2 && prog.improvedSec != null) {
             if (prog.improvedSec >= 0.5) progCell = `<span style="color:#6b9e5f; font-weight:600;" title="Your best lap is faster than your first lap">&#9660; ${prog.improvedSec.toFixed(1)}s faster</span>`;
@@ -22482,7 +22557,7 @@ async function renderLibraryContents() {
             <td>${progCell}</td>
             <td>${t.gradeAvg != null ? t.gradeAvg.toFixed(1) + '%' : '—'}</td>
             <td style="white-space:nowrap;">
-              ${laps >= 2 ? `<button data-action="segment-leaderboard" data-id="${t.id}" style="background:var(--accent); border:none; color:var(--on-accent); border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer; margin-right:6px;">Leaderboard</button>` : `<span style="color:var(--text-muted); font-size:11px; margin-right:6px;" title="Ride this segment at least twice to compare">${laps === 1 ? 'ride again to compare' : ''}</span>`}
+              ${laps >= 2 ? `<button data-action="segment-leaderboard" data-id="${t.id}" style="background:var(--accent); border:none; color:var(--on-accent); border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer; margin-right:6px;">Leaderboard</button>` : `<span style="color:var(--text-muted); font-size:11px; margin-right:6px;" title="${tVerb} this segment at least twice to compare">${laps === 1 ? `${tVerb.toLowerCase()} again to compare` : ''}</span>`}
               <button data-action="adjust-tag" data-id="${t.id}" style="background:transparent; border:1px solid var(--border); color:var(--text-muted); border-radius:4px; padding:3px 8px; font-size:11px; cursor:pointer; margin-right:6px;" title="Move the segment's start and finish points">Adjust</button>
               <button data-action="delete-tag" data-id="${t.id}" style="background:transparent; border:1px solid var(--border); color:var(--text-muted); border-radius:4px; padding:3px 8px; font-size:11px; cursor:pointer;">Delete</button>
             </td>
@@ -22495,7 +22570,7 @@ async function renderLibraryContents() {
      working buttons. Tag actions are wired here since the tags table is rendered once. */
   document.querySelectorAll('#libraryModal button[data-action="delete-tag"]').forEach(b => {
     b.onclick = async () => {
-      if (!confirm('Delete this tagged segment? Past rides keep their auto-match label until you re-analyze.')) return;
+      if (!confirm('Delete this tagged segment? Past sessions keep their auto-match label until you re-analyze.')) return;
       await deleteTaggedSegment(+b.dataset.id);
       await renderLibraryContents();
     };
@@ -22541,7 +22616,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'e965f3b8d · 2026-08-11';
+const LOAM_BUILD = '7f44af832 · 2026-08-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
