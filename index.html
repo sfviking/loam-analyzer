@@ -3874,6 +3874,13 @@ function drawRuns() {
       setRunSkipped(r.tStart, !runSkipped(r.tStart));
       drawRuns();                       /* re-renders the rows, the lap picker, and the scrub chips */
       try { if (_runsD) formRenderScrubChips(_runsD); } catch (e2) {}
+      /* And the hero card, which is the loudest thing the label is meant to silence: it reads
+         turnsOnLabelledTrails at render time, so without this the rider marks the drive home as
+         "not a trail" and the card above still calls one of its corners the ride's hardest braking
+         until the ride is opened again. Cheap and idempotent (it just rewrites the card).
+         The AI coach's digest is NOT refreshed here: rebuilding it means rebuilding coachState,
+         which throws away an in-progress conversation, so that one still waits for the next render. */
+      try { if (_runsD && isMtbFamily(_runsD.sport)) renderCoachHighlights(_runsD, _runsD.sport); } catch (e2) {}
     };
   });
   document.querySelectorAll('#runsTable .run-rename').forEach(btn => {
@@ -5329,6 +5336,43 @@ function turnsOnLabelledTrails(D) {
     return (D.turns || []).filter(T => !inSkipped(T));
   } catch (e) { return D.turns || []; }
 }
+/* The ride the AI coach is handed: the same corners the headline tiles counted, and no others.
+
+   buildDigest reads turn COUNTS out of D.summary (total, left, right, median apex radius) and the
+   turn LIST out of D.turns, and those were two different sets. The summary is descent-scoped; D.turns
+   is every turn in the ride. So a climb-heavy ride handed the coach "58 turns, median radius 2.9 m"
+   next to a radius_distribution of 283 values whose own median is 0.8 ft, and a tightest_radius taken
+   from an uphill weave. The coach could quote either, and they disagree.
+
+   The "not a trail" label is the second half of the same problem and the reason this is being fixed
+   now. CLAUDE.md draws the line at surfaces that make a COACHING CLAIM about a corner: those read the
+   label, surfaces that merely enumerate corners do not. The digest is the most claim-making surface
+   there is, and it was the one place still unscoped, so the coach could name the freeway offramp on
+   the drive home as a corner to work on after the hero card above it stopped doing exactly that.
+   Rescoping only its mechanics block (the treatment mtbHighlights gets) would have left the counts
+   contradicting the corners, which is why it waited for the summary side to be rescoped with it.
+
+   Both filters applied at the CALL SITE. buildDigest and turnMechanics are pinned to
+   analyzer/core/coaching/coaching.js by the drift guard and read D.turns / D.summary, so handing them
+   a filtered copy rescopes every read at once without touching a pinned body. The four turn counts
+   are recomputed here from the same set, so the digest agrees with itself in every direction.
+
+   Not MTB: returned unchanged. Running, road and the stationary sports have no turn census. */
+function coachDigestD(D, sport) {
+  if (!isMtbFamily(sport) || !D || !D.turns || !D.turns.length || !D.summary || !D.ride || !D.sensors) return D;
+  try {
+    const { turns: scoped } = descentScopedTurns(
+      D.sensors.location, D.sensors.baro, D.ride, turnsOnLabelledTrails(D));
+    if (scoped.length === D.turns.length) return D;
+    const radii = scoped.map(T => T.radius).filter(r => !isNaN(r));
+    return { ...D, turns: scoped, summary: { ...D.summary,
+      nTurns: scoped.length,
+      leftTurns: scoped.filter(T => T.direction === 'L').length,
+      rightTurns: scoped.filter(T => T.direction === 'R').length,
+      medianRadius: radii.length ? median(radii) : null } };
+  } catch (e) { return D; }
+}
+
 /* Quick-pick chips for the biggest scrubbers: click to load + play that turn's replay directly.
    Renders from the whole ride by default; the segment page passes its windowed turns (and a label
    suffix) so the chips only reference corners of the descent on screen, and Back restores the
@@ -11462,6 +11506,23 @@ function detectAirtime(sensors, ride) {
   return { jumps, status: jumps.length ? 'ok' : 'none', scaledFromG: scale !== 1, hasWatch };
 }
 
+/* The turn set the headline stats describe: descents only, or all turns when no descent was found.
+
+   Turn detection also fires on slow uphill weaving, whose tiny-radius micro-turns pollute the median
+   (a climb-heavy ride showed 283 turns / 0.8 ft median, vs ~58 turns / sane radii on the descents).
+   The per-descent Runs table is already descent-scoped; this keeps the headline tile honest too.
+
+   Lifted out of computeSummary so the coach digest can be built over EXACTLY the set the tiles
+   counted rather than over a second copy of this rule (see coachDigestD). Returns the flag too,
+   because "no descent found, so this is every turn" is a different statement from "these are the
+   descent turns" and the summary reports which. */
+function descentScopedTurns(loc, baro, ride, turns) {
+  const descentSegs = detectGradeSegments(baro, loc, ride).filter(s => s.dir === 'down');
+  if (!descentSegs.length) return { turns: turns || [], scoped: false };
+  const onDescent = (t) => descentSegs.some(s => t >= s.tStart && t <= s.tEnd);
+  return { turns: (turns || []).filter(T => onDescent(T.tPeak)), scoped: true };
+}
+
 function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
@@ -11493,14 +11554,7 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
     const alts = inRide.map(r => r.altitude).filter(v => v != null);
     if (alts.length) altDrop = Math.max(...alts) - Math.min(...alts);
   }
-  /* Headline turn stats are scoped to descents. Turn detection also fires on slow uphill
-     weaving, whose tiny-radius micro-turns pollute the median (a climb-heavy ride showed
-     283 turns / 0.8 ft median, vs ~58 turns / sane radii on the descents). The per-descent
-     Runs table is already descent-scoped; this keeps the headline tile honest too. Falls
-     back to all turns when no descent segment is found. */
-  const descentSegs = detectGradeSegments(baro, loc, ride).filter(s => s.dir === 'down');
-  const onDescent = (t) => descentSegs.some(s => t >= s.tStart && t <= s.tEnd);
-  const descentTurns = descentSegs.length ? turns.filter(T => onDescent(T.tPeak)) : turns;
+  const { turns: descentTurns, scoped: turnsScopedToDescents } = descentScopedTurns(loc, baro, ride, turns);
   const radii = descentTurns.map(T => T.radius).filter(r => !isNaN(r));
   const medianRadius = radii.length ? median(radii) : null;
   const rightTurns = descentTurns.filter(T => T.direction === 'R').length;
@@ -11511,7 +11565,7 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
   return {
     duration: ride.end - ride.start, distance, maxSpeed, altDrop,
     nTurns: descentTurns.length, nTurnsAll: turns.length,
-    turnsScopedToDescents: descentSegs.length > 0,
+    turnsScopedToDescents,
     rightTurns, leftTurns, medianRadius, calibWin,
     nJumps, totalAirtime, maxAirtime,
   };
@@ -12830,11 +12884,19 @@ function liftHistorySection(history) {
   if (!lifts.length) {
     const gap = U.liftHistoryGap(recs, 3);
     if (!gap) return '';
+    /* Two things this sentence used to get wrong, both of which sent the lifter after the wrong fix.
+       It counted ALL saved sessions against a shortfall measured on ONE lift ("you have 5 sessions,
+       2 of them have no weight"), which is a different 5 and a different 2. And "on N more sessions"
+       reads as sessions not yet lifted, when the sessions that need the weights are already saved:
+       loads are keyed by the recording's content hash, so opening one of them again brings back
+       whatever was typed and takes the rest. Name the lift, count within it, and say which fix. */
     const wait = gap.reason === 'needLoads'
-      ? `You have ${gap.sessions} lift sessions saved, but this read is work done &mdash; weight on the
-         bar times reps &mdash; and ${gap.best.nNoLoad === 1 ? 'one of them has' : `${gap.best.nNoLoad} of them have`}
-         no weight typed in. Fill in the Weight column on ${gap.best.need} more
-         ${escapeHtml(gap.best.lift)} session${gap.best.need === 1 ? '' : 's'} and this fills in.`
+      ? `Your ${escapeHtml(gap.best.lift)} has come up in ${gap.best.n} of your ${gap.sessions} saved
+         sessions, which is enough. What is missing is the weight, because this read is work done
+         &mdash; weight on the bar times reps &mdash; and
+         ${gap.best.nNoLoad === 1 ? 'one of those has' : `${gap.best.nNoLoad} of those have`} none typed in.
+         Fill the Weight column on ${gap.best.need} more of them and this fills in. The weights are
+         saved per recording, so opening one of those sessions again picks up where you left off.`
       : gap.reason === 'needLift'
         ? `You have ${gap.sessions} lift sessions saved, but a lift is only compared against itself
            (a squat and a curl share no scale), and no single lift has come up three times yet.`
@@ -12908,6 +12970,16 @@ function onLiftWeight(i, val) {
   const volKg = liftVolumeKg(_liftDc);   // corrected reps drive volume
   const el = document.getElementById('liftVolTile'); if (el) el.textContent = volKg > 0 ? fmtVol(volKg) : '—';
   renderLiftSignature(_liftDc);   // refresh the card's VOLUME stat (with corrected reps)
+  /* And the stored history row, which is the whole reason the loads are typed. Unlike onLiftReps
+     this handler deliberately does NOT re-render (a full re-render rebuilds the table and takes the
+     focus out of the cell being typed into, which makes entering six weights in a row unusable), so
+     the record has to be rewritten here or it never learns the weights at all: renderStrength ran
+     BEFORE any load existed, so the row it stored says the session was unweighed. That is the state
+     "Across your lifts" reads, so a lifter who typed their weights was told to type their weights.
+     Same targeted-refresh shape as onGolfTruthCount: rewrite the row, repaint just its panel. */
+  const hist = liftHistoryRemember(_liftDc, (_liftDc.strength && _liftDc.strength.sets) || [], w);
+  const panel = document.getElementById('liftHistoryPanel');
+  if (panel) panel.innerHTML = liftHistorySection(hist);
 }
 
 /* ---- Per-set rep correction. The wrist rep counter is BETA and can miscount (racking the bar can
@@ -14336,7 +14408,7 @@ function renderStrength(D) {
       <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.</span></div>
       <div class="rep-detail-grid">${repBlocks}</div>
     </div>` : ''}
-    ${liftHistorySection(liftHistory)}
+    <div id="liftHistoryPanel">${liftHistorySection(liftHistory)}</div>
     <div class="strength-caveat"><strong>Beta:</strong> lift analysis is validated on synthetic sessions only, not yet against a ground-truth recording, so treat rep counts, depth, bar position and bar speed as estimates. Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}The rep counter keys on vertical wrist travel, so support depends on the lift: squat and deadlift count reliably (checked against real sessions); overhead press counts cleanly but is unproven; standalone curls are noisier; bench press undercounts by about half; chin-ups and pull-ups do not count at all (the wrist is the anchor and never travels). Very slow near-max grinds can drop below the counting gate on any lift. Lift type is never auto-detected: it comes from your lift-chip taps, and a set without one is analyzed as a squat (high/low bar and depth are squat-only reads). A lift is stationary, so there is no GPS map, turns, or jumps.</div>
   `;
   renderLiftSignature(Dc);
@@ -16784,7 +16856,9 @@ function carrySet(v) {
 function renderGeekStats(D, sport) {
   if (!document.getElementById('geekStatsSection')) return;
   let dg;
-  try { dg = buildDigest(D, sport, U.metric()); } catch (e) { hide('geekStatsSection'); return; }
+  /* Same digest the coach gets, scoped the same way: this panel IS that digest, and a debug dump
+     that disagreed with what the model was told would be worse than no dump. */
+  try { dg = buildDigest(coachDigestD(D, sport), sport, U.metric()); } catch (e) { hide('geekStatsSection'); return; }
   const rows = [];
   const human = k => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   const walk = (obj, prefix) => {
@@ -18997,7 +19071,7 @@ function renderCoachPanel(D, sport) {
   if (!sec) return;
   /* The digest carries the athlete's chosen units (U.metric()); flipping the toggle re-renders through
      _lastRender, which rebuilds this panel, so the coach never holds a digest in the other system. */
-  coachState = { sport, digest: buildDigest(D, sport, U.metric()), messages: [], streaming: false };
+  coachState = { sport, digest: buildDigest(coachDigestD(D, sport), sport, U.metric()), messages: [], streaming: false };
   show('coachSection');
   /* Fold recent same-sport sessions from the library into the digest so coaching can speak to a
      trend ("your weak-side radius improved since last week"), not just this one ride. Async and
@@ -22616,7 +22690,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '7f44af832 · 2026-08-12';
+const LOAM_BUILD = 'acd84e896 · 2026-08-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -22650,6 +22724,7 @@ const LOAM_WHATS_NEW = [
     ['e-MTB reads', 'a cadence-vs-motor-power panel with a per-climb breakdown, and the AI coach sees it.'],
     ['Form Replay', 'replay whole segments, jump to your most-scrubbed turns, steadier AirPods gaze, and a heading-up mini-map over real imagery.'],
     ['Honest weightlifting scope', 'the Lift view opens with what counts reliably and why set labeling matters; the activity is marked beta everywhere.'],
+    ['Your lifts compared with each other', 'Loam now keeps each lift session on this device and, once one lift has come up in three sessions with the weights filled in, shows what actually changed between them: heavier bar, more reps, both, or neither. Work done is weight times reps, so those two factors account for the whole of a change and the verdict names which one moved. No estimated one-rep max (that is a formula fitted to other people), and no comparison across different lifts, because a squat and a curl share no scale.'],
   ] },
   { h: 'Fixed', items: [
     ['The coach knows which sport it is reading', 'a swim was described as a ride, and the coach could suggest recording your swim in Loam — advice to do something impossible. It also no longer offers an open-water swim questions about "sets", which open water does not have.'],
