@@ -826,6 +826,27 @@
   .coach-highlights .ch-cta { margin-top: 10px; font-size: 12px; color: var(--accent); cursor: pointer; background: none; border: 0; font-family: inherit; padding: 0; }
   .coach-highlights .ch-cta:hover { text-decoration: underline; }
 
+  /* Crash card. Red-edged like the capture chip that made it (AnnotationPreset.isAlert), so the
+     surface and the tap that produced it read as the same thing. */
+  .crash-card { border: 1px solid rgba(197,75,60,0.42); border-left: 4px solid #c14e2e; border-radius: 12px;
+    background: linear-gradient(135deg, rgba(197,75,60,0.09), rgba(197,75,60,0.02)); padding: 15px 20px; margin-bottom: 12px; }
+  .crash-card h3 { font-family: 'Bricolage Grotesque', sans-serif; font-size: 14px; font-weight: 600;
+    margin: 0 0 4px; color: var(--text); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .crash-when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); font-weight: 400; }
+  .crash-lede { font-size: 14px; line-height: 1.6; margin: 6px 0 0; color: var(--text); }
+  .crash-lede strong { color: #b3422f; }
+  .crash-facts { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 5px; }
+  .crash-facts li { font-size: 13px; line-height: 1.55; color: var(--text); padding-left: 15px; position: relative; }
+  .crash-facts li::before { content: '·'; position: absolute; left: 4px; color: #c14e2e; font-weight: 700; }
+  .crash-facts .cf-cmp { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
+  .crash-jump { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .crash-mount { margin-top: 11px; padding: 9px 12px; border-radius: 6px; font-size: 12.5px; line-height: 1.55;
+    background: rgba(214,158,46,0.13); border: 1px solid rgba(214,158,46,0.42); color: var(--text); }
+  .crash-caveat { margin-top: 11px; font-size: 11.5px; line-height: 1.6; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 9px; }
+  .crash-marker { width: 26px; height: 26px; border-radius: 50%; background: #c14e2e; color: #fff;
+    border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.45); display: flex; align-items: center;
+    justify-content: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; }
+
   /* Jumps summary: a "biggest air" hero card spanning the grid, then the stat tiles. */
   .jump-summary { gap: 16px 16px; }
   .jump-hero { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
@@ -1547,6 +1568,13 @@
 
   <section id="coachHighlights" class="hidden">
     <div id="coachHighlightsCard" class="coach-highlights"></div>
+  </section>
+
+  <!-- One card per Crash chip tapped during the ride. Sits above the map because a rider who marked
+       a crash came here to look at it, and it is the only surface on the page describing an event
+       the rider reported rather than one the analyzer detected. -->
+  <section id="crashSection" class="hidden">
+    <div id="crashCards"></div>
   </section>
 
   <section id="overviewSection">
@@ -3488,7 +3516,13 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 function extractRideDescents(sensors, ride, fileLabel, minDropM) {
   const segments = detectGradeSegments(sensors.baro, sensors.location, ride);
   const descents = segments.filter(s => s.dir === 'down');
-  const annotations = sensors.annotations || [];
+  /* A Crash mark is an EVENT, not a name for the trail it happened on. It was reaching this label
+     purely by being the annotation nearest a descent start, so a rider who went down near the top of
+     a run had that run titled "Crash" -- in the runs table, in the saved library, and as the
+     suggested name the next time they tagged the segment. The crash is reported by its own card,
+     map marker and timeline mark; it has no business naming the trail. Matched through the shared
+     isCrashMark so this and parseCrashMarks can never disagree about what counts as one. */
+  const annotations = (sensors.annotations || []).filter(a => !isCrashMark(a && a.text));
   const out = [];
   for (const seg of descents) {
     const loc = sensors.location.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.latitude != null);
@@ -3571,6 +3605,225 @@ function pairRunMarks(annotations, tActivityStart) {
     }
   }
   return runs;
+}
+
+/* ========== Crash marks ==========
+   Ported from analyzer/sports/mtb/crash.js and pinned to it by that module's drift guard.
+
+   The one thing this exists to get right: A CRASH MARK IS NOT A CRASH TIME. The chip is tapped by a
+   rider who has just come off the bike, so the tap lands after the crash, after the slide, after
+   getting up, and often after checking the bike over. mtb-capture-protocol.md says to tap it
+   "immediately, before anything else"; nobody does, and reading the tap as the event would describe
+   a rider standing in the dirt rather than the corner they went down in. So the event is ANCHORED to
+   the last moment the GPS still says the rider was moving before the tap, and everything is read off
+   the RUN-IN before that anchor. See the module header for the full rationale.
+
+   NOTHING HERE DETECTS A CRASH. Every event comes from a rider's own tap. The comparisons against
+   the rider's own medians are DESCRIPTIVE and n=1 by construction: they say what was different about
+   that corner, never why the rider went down. */
+
+/* Below this the rider is not riding (m/s). Lower than detectRidingWindow's 2.0 gate on purpose:
+   that one decides where the RIDE is and wants to exclude a wobble in the parking lot, this one
+   decides where the RIDING STOPPED and a crash that ends in a slow slide should anchor at the slide,
+   not before it. */
+const CRASH_STOP_MPS = 1.5;
+/* How far back from the tap to look for that last moving moment. Long enough for a real get-up
+   (untangle, walk back for the bike, find the phone), short enough that a tap forgotten until the
+   bottom of the trail fails to anchor rather than anchoring somewhere meaningless. */
+const CRASH_LOOKBACK_S = 45;
+/* The rider was still rolling at the tap if the last moving GPS sample is this recent. At 1 Hz GPS
+   anything under a couple of seconds is indistinguishable from "never stopped". */
+const CRASH_ROLLING_S = 2.0;
+/* The run-in: how much riding before the anchor gets characterized. */
+const CRASH_RUNIN_S = 6;
+/* A turn that ended this recently before the anchor is still "the corner it happened in". Beyond it
+   the corner had been exited and the crash belongs to whatever came next. */
+const CRASH_TURN_GAP_S = 5;
+/* Two taps closer than this are one crash. */
+const CRASH_DEDUPE_S = 20;
+/* Fewest same-side corners needed before "your typical lean" is a number worth printing. */
+const CRASH_MIN_BASELINE = 3;
+/* Mount-shift threshold, mirroring CALIB_POSE_MISMATCH_DEG (the calibration-vs-riding pose notice).
+   Same quantity -- an angle between two mean gravity directions -- so the same 12 deg applies. */
+const CRASH_MOUNT_SHIFT_DEG = 12;
+/* Only riding samples feed the mount-shift comparison, at the ride-window gate rather than the
+   stop gate: standing over the bike puts the phone at a different angle to gravity than riding does,
+   and comparing a riding pose to a standing one would report a mount shift on every crash. */
+const CRASH_MOUNT_RIDING_MPS = 2.0;
+/* And enough of them on each side to mean anything. A crash near the end of a ride simply cannot
+   answer the question, and says null rather than guessing from four seconds of coasting. */
+const CRASH_MOUNT_MIN_RIDING_S = 30;
+
+/* GPS rows reduced to sorted, valid speed samples. A dropout is logged as speed -1 (and the wrist
+   cadence work in CLAUDE.md documents whole minutes of it), so a bare `!= null` test would read an
+   invalid fix as a hard stop and anchor the crash there. */
+function crashSpeedTrack(location) {
+  const pts = [];
+  for (const r of (location || [])) {
+    if (!r || r.t == null || r.speed == null || !(r.speed >= 0)) continue;
+    pts.push({ t: r.t, v: r.speed, lat: r.latitude, lon: r.longitude });
+  }
+  pts.sort((a, b) => a.t - b.t);
+  return pts;
+}
+
+function crashMedian(arr) {
+  if (!arr.length) return null;
+  const s = arr.slice().sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/* The one place the Crash chip's text is recognized. Shared with extractRideDescents, which must
+   agree with this exactly: a mark that counts as a crash here and as ordinary descent-naming text
+   there would put "Crash" on a trail in the library. Substring, not equality, so voice-to-text
+   ("crashed", "big crash") still lands. */
+function isCrashMark(text) {
+  return String(text == null ? '' : text).toLowerCase().includes('crash');
+}
+
+function parseCrashMarks(annotations, ride) {
+  const hits = [];
+  for (const a of (annotations || [])) {
+    if (!a || a.text == null || a.t == null) continue;
+    if (ride && (a.t < ride.start || a.t > ride.end)) continue;
+    if (!isCrashMark(a.text)) continue;
+    hits.push({ t: a.t, text: String(a.text).trim() });
+  }
+  hits.sort((a, b) => a.t - b.t);
+  /* Keep the FIRST of a burst, not the last: the earliest tap is the one closest to the event, and
+     the later ones are the rider double-checking that it registered. */
+  const out = [];
+  for (const h of hits) if (!out.length || h.t - out[out.length - 1].t >= CRASH_DEDUPE_S) out.push(h);
+  return out;
+}
+
+function crashMountShift(gravityRows, location, anchorT, tapT, ride) {
+  if (!gravityRows || gravityRows.length < 2 || !ride) return null;
+  const pts = crashSpeedTrack(location);
+  if (pts.length < 2) return null;
+  /* Nearest GPS sample by time, and only trusted within a couple of seconds: a gravity sample in the
+     middle of a GPS gap has no speed to speak for it and is left out of both means. */
+  const movingAt = (tq) => {
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (pts[m].t <= tq) lo = m; else hi = m; }
+    const p = Math.abs(pts[hi].t - tq) < Math.abs(pts[lo].t - tq) ? pts[hi] : pts[lo];
+    return Math.abs(p.t - tq) <= 2 && p.v >= CRASH_MOUNT_RIDING_MPS;
+  };
+  /* Sample interval estimated across the whole channel rather than per window, so the two windows
+     are measured on the same ruler; the seconds it produces are approximate by construction and are
+     used only to decide whether there is ENOUGH riding to compare, never reported as a duration. */
+  const dt = (gravityRows[gravityRows.length - 1].t - gravityRows[0].t) / (gravityRows.length - 1);
+  const meanUnit = (lo, hi) => {
+    let sx = 0, sy = 0, sz = 0, n = 0;
+    for (const r of gravityRows) {
+      if (r.t < lo) continue;
+      if (r.t > hi) break;
+      if (!movingAt(r.t)) continue;
+      sx += r.x; sy += r.y; sz += r.z; n++;
+    }
+    if (!n) return null;
+    const m = Math.hypot(sx, sy, sz);
+    if (!(m > 1e-9)) return null;
+    return { u: [sx / m, sy / m, sz / m], secs: n * dt };
+  };
+  const before = meanUnit(ride.start, anchorT);
+  const after = meanUnit(tapT, ride.end);
+  if (!before || !after) return null;
+  if (before.secs < CRASH_MOUNT_MIN_RIDING_S || after.secs < CRASH_MOUNT_MIN_RIDING_S) return null;
+  const dot = Math.max(-1, Math.min(1, before.u[0] * after.u[0] + before.u[1] * after.u[1] + before.u[2] * after.u[2]));
+  return {
+    deg: Math.acos(dot) * 180 / Math.PI,
+    beforeS: +before.secs.toFixed(1),
+    afterS: +after.secs.toFixed(1),
+  };
+}
+
+function crashContexts(sensors, ride, turns, baselineTurns) {
+  if (!sensors || !ride) return [];
+  const marks = parseCrashMarks(sensors.annotations || [], ride);
+  if (!marks.length) return [];
+  const pts = crashSpeedTrack(sensors.location);
+  const all = turns || [];
+  /* The comparison baseline is the caller's choice, and the call site hands it the same corners the
+     other coaching surfaces use (turnsOnLabelledTrails), so "your typical lean" means the same thing
+     on this card as it does on the hero card above it. The crash event itself is NOT scoped that way:
+     the rider marked this exact moment, so it is reported wherever it happened, including on a run
+     they have labelled "not a trail". */
+  const base = (baselineTurns && baselineTurns.length) ? baselineTurns : all;
+  const out = [];
+
+  for (const mk of marks) {
+    /* --- anchor: the last moment the rider was still moving (see the header note) --- */
+    let anchor = mk.t, anchorSource = 'tap', stopped = false;
+    if (pts.length) {
+      const lo = mk.t - CRASH_LOOKBACK_S;
+      let last = null;
+      for (const p of pts) {
+        if (p.t < lo) continue;
+        if (p.t > mk.t) break;
+        if (p.v >= CRASH_STOP_MPS) last = p;
+      }
+      if (last) {
+        anchor = last.t;
+        anchorSource = 'gps';
+        stopped = (mk.t - last.t) > CRASH_ROLLING_S;
+        if (!stopped) anchor = mk.t;   /* still rolling at the tap: the tap IS the moment */
+      }
+    }
+
+    /* --- the run-in --- */
+    let speedIn = null, lat = null, lon = null;
+    if (pts.length) {
+      let best = null;
+      for (const p of pts) {
+        if (p.t >= anchor - CRASH_RUNIN_S && p.t <= anchor && (speedIn == null || p.v > speedIn)) speedIn = p.v;
+        if (p.lat == null || p.lon == null) continue;
+        if (best == null || Math.abs(p.t - anchor) < Math.abs(best.t - anchor)) best = p;
+      }
+      if (best) { lat = best.lat; lon = best.lon; }
+    }
+
+    /* --- the corner, if there was one --- */
+    let turn = null, turnRelation = null, turnGapS = null;
+    for (const T of all) {
+      if (anchor >= T.tStart && anchor <= T.tEnd) { turn = T; turnRelation = 'in'; turnGapS = 0; break; }
+    }
+    if (!turn) {
+      for (const T of all) {
+        if (T.tEnd > anchor) continue;
+        const gap = anchor - T.tEnd;
+        if (gap > CRASH_TURN_GAP_S) continue;
+        if (!turn || gap < turnGapS) { turn = T; turnRelation = 'after'; turnGapS = gap; }
+      }
+    }
+
+    /* --- what "usual" looked like for this rider, today, on this side --- */
+    let leanBaselineDeg = null, leanBaselineN = 0, entryBaselineMps = null, entryBaselineN = 0;
+    if (turn) {
+      const sameSide = base
+        .filter(T => T !== turn && T.direction === turn.direction && T.leanDelta != null && !isNaN(T.leanDelta))
+        .map(T => Math.abs(T.leanDelta));
+      leanBaselineN = sameSide.length;
+      if (leanBaselineN >= CRASH_MIN_BASELINE) leanBaselineDeg = crashMedian(sameSide);
+    }
+    /* Entry speed is not side-specific, so every other corner counts toward it. */
+    const entries = base.filter(T => T !== turn && T.vEntry != null && !isNaN(T.vEntry)).map(T => T.vEntry);
+    entryBaselineN = entries.length;
+    if (entryBaselineN >= CRASH_MIN_BASELINE) entryBaselineMps = crashMedian(entries);
+
+    out.push({
+      t: mk.t, text: mk.text,
+      anchor, anchorSource, stopped,
+      reportDelayS: +(mk.t - anchor).toFixed(1),
+      lat, lon, speedIn,
+      turn, turnRelation, turnGapS,
+      leanBaselineDeg, leanBaselineN,
+      entryBaselineMps, entryBaselineN,
+      mountShift: crashMountShift(sensors.gravity, sensors.location, anchor, mk.t, ride),
+    });
+  }
+  return out;
 }
 
 /* Dominant period (seconds) of a signal sampled at fs, searched in [minP, maxP]
@@ -4365,24 +4618,25 @@ function closeSegmentPage() {
 }
 
 function showTurnsForRun(r, D) {
-  focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline }, D.ride);
-  /* Turn-by-turn is an MTB-only feature (needs body-frame turns). On running and GPS-only rides
-     there are no turns, so do NOT show a "0 turns" filter tag or force-scroll to the map (both read
-     as broken). Just tag the map focus in place; the row stays highlighted for feedback. */
-  const label = escapeHtml(runLabel(r.tStart) || r.label);
+  const label = runLabel(r.tStart) || r.label;
+  focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline, label }, D.ride);
   const mapTag = document.getElementById('mapFocusTag');
   if (mapTag) {
-    mapTag.innerHTML = `showing <strong>${label}</strong> · <a id="mapFocusReset">show full ride</a>`;
+    mapTag.innerHTML = `showing <strong>${escapeHtml(label)}</strong> · <a id="mapFocusReset">show full ride</a>`;
     mapTag.classList.remove('hidden');
     document.getElementById('mapFocusReset').onclick = () => clearTurnFilter(D);
   }
-  if (!isMtbFamily(D.sport)) return;
-  filterTurnTableToRun(r, D);
-  /* The point of tapping a run is to see it in place, so bring the map (which just zoomed to this
-     segment) into view rather than jumping down to the turn table; the table stays filtered for
-     when the rider scrolls to it. The legend chip names the focus and offers the way back out. */
+  /* The point of tapping a row is to see WHERE it was, so bring the map (which just framed this
+     segment) into view rather than leaving the reader looking at the table with the answer drawn
+     off-screen above them. The runs table sits well below the map on a long page, so without this
+     the focus was invisible on a foot activity even once the map started moving.
+     Turn-by-turn is MTB-only (it needs body-frame turns): on running and GPS-only rides the filter
+     tag would read "0 turns", which is why only THAT half is skipped here. Scrolling was skipped
+     with it, which is the half that should not have been. */
   const mapSec = document.getElementById('overviewSection');
   if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!isMtbFamily(D.sport)) return;
+  filterTurnTableToRun(r, D);
 }
 /* Filter the per-turn table to one run's window, with the filter tag naming the run and offering
    the way back. Shared by the run-row focus above and the play-by-play's turn links. */
@@ -5565,6 +5819,151 @@ function coachDigestD(D, sport) {
       rightTurns: scoped.filter(T => T.direction === 'R').length,
       medianRadius: radii.length ? median(radii) : null } };
   } catch (e) { return D; }
+}
+
+/* The ride's crash marks, with the context the analyzer can honestly put around them.
+
+   Call-site glue over the pinned crashContexts (analyzer/sports/mtb/crash.js), doing the two things
+   that need this page's state rather than the pure function's arguments:
+
+   1. The comparison BASELINE is turnsOnLabelledTrails(D), the same corner set the hero card and the
+      coach digest use, so "your typical lean today" means one thing across the whole page. The EVENT
+      is deliberately not scoped that way -- the rider marked this exact moment, so a crash on a run
+      they later labelled "not a trail" is still reported, on the road it actually happened on. That
+      is the CLAUDE.md rule read correctly rather than mechanically: the label exists to stop the app
+      RECOMMENDING a freeway offramp as a line to study, not to delete a crash the rider took there.
+
+   2. The second lean gate. detectTurns already nulls leanDelta past a 70 deg roll delta, but the form
+      replay applies a stricter whole-window range check (formTurnRollRange <= 65) before it will
+      animate a corner, and a crash is exactly the situation that breaks roll: the phone can be
+      knocked, the rider can end up on the ground, and a tumbling roll trace produces a large, entirely
+      fictional "lean". A corner that the replay would refuse to draw must not have its lean quoted
+      here either, so it is flagged and the card says nothing about lean instead. */
+function crashesForD(D) {
+  try {
+    if (!D || !D.sensors || !D.ride) return [];
+    const cs = crashContexts(D.sensors, D.ride, D.turns || [], turnsOnLabelledTrails(D));
+    const canGate = !!(D.t && D.t.length && D.rollSmooth && D.rollSmooth.length);
+    for (const c of cs) {
+      c.leanUnreliable = !!(c.turn && canGate && formTurnRollRange(D, c.turn) > 65);
+      /* Thresholded here rather than inside buildDigest: that function is pinned to
+         analyzer/core/coaching/coaching.js and its drift guard rebuilds it with no surrounding
+         scope, so it cannot see a module-level constant. */
+      c.mountShifted = !!(c.mountShift && c.mountShift.deg >= CRASH_MOUNT_SHIFT_DEG);
+    }
+    return cs;
+  } catch (e) { console.warn('crash context failed', e); return []; }
+}
+
+/* One card per marked crash. Reads only what crashesForD produced; every number on it is either a
+   measurement of the run-in or a comparison against the rider's own other corners in the same ride. */
+function renderCrashSection(D) {
+  const sec = document.getElementById('crashSection');
+  const host = document.getElementById('crashCards');
+  if (!sec || !host) return;
+  const crashes = (D && D.crashes) || [];
+  if (!crashes.length) { sec.classList.add('hidden'); host.innerHTML = ''; return; }
+  const ride = D.ride;
+  const replayable = new Set(formCriticalTurns(D).map(T => T.n));
+
+  host.innerHTML = crashes.map((c, i) => {
+    const T = c.turn;
+    const sideWord = T ? (T.direction === 'L' ? 'left' : 'right') : null;
+
+    /* The lede is the honest account of WHEN, and it changes shape with what the GPS could support.
+       Each branch states its own anchor so the rider is never left guessing which one they got. */
+    let lede;
+    if (c.anchorSource === 'gps' && c.stopped) {
+      lede = `You <strong>stopped moving</strong> at ${fmtClock(c.anchor - ride.start)}, and tapped Crash `
+        + `${c.reportDelayS < 60 ? Math.round(c.reportDelayS) + ' s' : fmtDuration(c.reportDelayS)} later. `
+        + `Everything below describes the ${CRASH_RUNIN_S} s of riding before that stop, not the tap.`;
+    } else if (c.anchorSource === 'gps') {
+      lede = `You were <strong>still rolling</strong> when you tapped, so there is no stop to anchor to and `
+        + `the tap time is the best available moment. Everything below describes the ${CRASH_RUNIN_S} s before it.`;
+    } else {
+      lede = `<strong>No GPS movement</strong> in the ${CRASH_LOOKBACK_S} s before this tap, so the tap time is the `
+        + `only anchor there is. Read the timing loosely: the crash may have been well before it.`;
+    }
+
+    const facts = [];
+    if (T) {
+      const where = c.turnRelation === 'in'
+        ? `Inside turn <strong>T${T.n}</strong> (${sideWord}-hander)`
+        : `Just out of turn <strong>T${T.n}</strong> (${sideWord}-hander), ${c.turnGapS.toFixed(1)} s past the exit`;
+      facts.push(where);
+      if (T.vEntry != null) {
+        const scrub = turnScrubMph(T);
+        facts.push(`Entered at <strong>${U.speed(T.vEntry)}</strong>`
+          + (T.vPeak != null ? `, ${U.speed(T.vPeak)} at the apex` : '')
+          + (scrub > 0 ? ` (${U.speedNum(scrub / 2.23694).toFixed(1)} ${U.speedUnit()} scrubbed)` : '')
+          + (c.entryBaselineMps != null
+            ? ` — <span class="cf-cmp">your median corner entry today was ${U.speed(c.entryBaselineMps)}</span>`
+            : ''));
+      }
+      if (T.radius != null && !isNaN(T.radius)) facts.push(`Apex radius <strong>${U.small(T.radius)}</strong>`);
+      if (c.leanUnreliable) {
+        facts.push(`Lean is <strong>not reported</strong> for this corner: the phone's roll trace swings too far `
+          + `across it to be a body angle, which is what a knock or a tumble looks like.`);
+      } else if (T.leanDelta != null && !isNaN(T.leanDelta)) {
+        const lean = Math.abs(T.leanDelta);
+        let cmp;
+        if (c.leanBaselineDeg != null) {
+          const d = lean - c.leanBaselineDeg;
+          cmp = ` — <span class="cf-cmp">${Math.abs(d).toFixed(0)}&deg; ${d >= 0 ? 'more' : 'less'} than your median `
+            + `${sideWord}-hander today (${c.leanBaselineDeg.toFixed(0)}&deg;, over ${c.leanBaselineN} corners)</span>`;
+        } else {
+          cmp = ` — <span class="cf-cmp">too few other ${sideWord}-handers today (${c.leanBaselineN}) to say what your usual is</span>`;
+        }
+        facts.push(`Peak body lean <strong>${lean.toFixed(0)}&deg;</strong>${cmp}`);
+      }
+    } else {
+      facts.push(`<strong>No corner detected</strong> at that moment — by the turn detector this was a straight, `
+        + `or a lean too gentle to register as a turn.`);
+    }
+    if (c.speedIn != null) facts.push(`Fastest point of the run-in: <strong>${U.speed(c.speedIn)}</strong>`);
+
+    /* The mount-shift warning outranks everything else on the card when it fires: it says the ride's
+       own numbers changed meaning partway through, which the rider cannot see any other way. */
+    const ms = c.mountShift;
+    const mount = c.mountShifted
+      ? `<div class="crash-mount"><strong>Your phone moved in the crash.</strong> Its riding pose sits `
+        + `${Math.round(ms.deg)}&deg; differently after this than before it, so the body-frame calibration the `
+        + `analysis is built on no longer matches how the phone is being carried. Lean angles and turn sides `
+        + `after ${fmtClock(c.anchor - ride.start)} are measured against a stale reference and should not be trusted; `
+        + `the numbers on this card come from before the crash and are unaffected.</div>`
+      : '';
+
+    const replay = (T && replayable.has(T.n))
+      ? ` <button type="button" class="crash-jump" data-turn="${T.n}">Replay this corner</button>`
+      : '';
+
+    return `<div class="crash-card">
+      <h3>Crash you marked${crashes.length > 1 ? ' #' + (i + 1) : ''}
+        <span class="crash-when">${fmtClock(c.anchor - ride.start)} into the ride${c.lat != null ? ' · marked on the map' : ''}</span></h3>
+      <p class="crash-lede">${lede}</p>
+      <ul class="crash-facts">${facts.map(f => `<li>${f}${f.startsWith('Inside turn') || f.startsWith('Just out of turn') ? replay : ''}</li>`).join('')}</ul>
+      ${mount}
+      <div class="crash-caveat"><strong>How to read this.</strong> The Crash chip is a tap, not a detection —
+        there is no crash detector here, so this describes a moment you reported and nothing else. Timing is
+        anchored to the last GPS-confirmed movement before the tap, which at 1 Hz is good to a second or two.
+        Lean is the phone's gravity-roll, so it is your torso, not the bike. And this is <em>one</em> corner
+        against your own averages: it says what was different about it, not what caused the crash.</div>
+    </div>`;
+  }).join('');
+
+  host.querySelectorAll('.crash-jump').forEach(b => {
+    b.onclick = () => {
+      const T = (D.turns || []).find(x => x.n === +b.dataset.turn);
+      if (!T) return;
+      const sel = document.getElementById('formTurn');
+      if (sel) sel.value = String(T.n);
+      formMarkActiveChip(T.n);
+      formSelectTurn(D, T);
+      if (_form) { _form.tau = 0; formSetPlaying(true); }
+      try { const s = document.getElementById('formReplaySection'); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
+    };
+  });
+  sec.classList.remove('hidden');
 }
 
 /* Quick-pick chips for the biggest scrubbers: click to load + play that turn's replay directly.
@@ -12722,7 +13121,7 @@ function hideAllSections() {
       if (fs && fs.parentNode !== _segFormHome.parent) _segFormHome.parent.insertBefore(fs, _segFormHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -17245,6 +17644,9 @@ function renderRunMap(loc, ride, segments) {
      stale _mapData would let focusSegment/showTurnsForRun draw the old ride onto this one. */
   mapOverlay = null;
   window._mapData = null;
+  /* The highlight belonged to the map just destroyed, so the handle is stale rather than removable. */
+  runFocusLayer = null;
+  window._runMapData = null;
   mapInstance = L.map('map', { zoomControl: true, attributionControl: true });
   addBasemap(mapInstance);
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end && r.latitude != null);
@@ -17264,6 +17666,62 @@ function renderRunMap(loc, ride, segments) {
   L.circleMarker(latlngs[latlngs.length-1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 }).addTo(mapInstance).bindTooltip('End');
   mapInstance.fitBounds(latlngs, { padding: [40, 40] });
   window._fullRideBounds = latlngs;
+  /* What focusSegment needs to highlight ONE run on this map. The MTB path redraws the whole
+     overlay from _mapData, which this map deliberately does not populate (its track is coloured by
+     grade, not by speed, and it has no turns or jumps to re-place), so tapping a row in the runs
+     table used to reach `if (mapInstance && D)` with D null and do nothing at all: the focus tag
+     said "showing Descent 3" over a map that never moved (owner report, 2026-08-13). Keeping the
+     rows here rather than re-filtering `loc` on every tap also means the highlight is drawn from
+     exactly the samples the track was drawn from. */
+  window._runMapData = { loc: inRide, ride, segments };
+}
+
+/* The highlight drawn over one focused run. A layerGroup so it lifts off in one call, and held in a
+   module var (not on the map) so a re-focus replaces it instead of stacking bands. */
+let runFocusLayer = null;
+
+/* Highlight one run / descent / lap on the RUN map, in place, and frame it.
+ *
+ * In place, rather than redrawing the map to show only this stretch (what the MTB path does): the
+ * question a rider is asking when they tap a row is WHERE this was, and an answer that erases the
+ * rest of the track shows the shape of the segment while throwing away the context that locates it.
+ * A translucent band over the existing grade-coloured track keeps both -- the colours still read
+ * through it -- and the start marker names the row so the map and the table cannot be mismatched.
+ *
+ * Returns false when there is no run map or too few fixes to bound, so the caller can fall through.
+ */
+function focusRunSegment(win, label) {
+  const D = window._runMapData;
+  if (!mapInstance || !D) return false;
+  clearRunFocus();
+  const pts = D.loc.filter(r => r.t >= win.tStart && r.t <= win.tEnd && r.latitude != null)
+                   .map(r => [r.latitude, r.longitude]);
+  /* The polyline fallback matches focusSegment's: a short segment can hold fewer than two 1 Hz
+     fixes, and a band needs two points to exist. */
+  const fit = pts.length >= 2 ? pts
+            : (win.polyline && win.polyline.length >= 2 ? win.polyline : null);
+  if (!fit) return false;
+  runFocusLayer = L.layerGroup().addTo(mapInstance);
+  /* Default (SVG) renderer, deliberately, where the track underneath uses an explicit canvas one: a
+     fresh L.canvas() per focus leaves its <canvas> in the overlay pane after the layer is removed,
+     so tapping through a table of runs would stack one dead canvas per tap. This is a single
+     polyline; it does not need the canvas path, and SVG appended after the track draws on top. */
+  L.polyline(fit, { color: '#ffd166', weight: 12, opacity: 0.55, lineCap: 'round' }).addTo(runFocusLayer);
+  /* Permanent on the start marker only. Both ends labelled permanently collides on a short descent,
+     and "where does this begin" is the question; the end is a hover away. */
+  L.circleMarker(fit[0], { radius: 7, color: '#1a202c', fillColor: '#ffd166', fillOpacity: 1, weight: 2 })
+    .addTo(runFocusLayer)
+    .bindTooltip(label ? `${label} starts here` : 'starts here', { permanent: true, direction: 'top' });
+  L.circleMarker(fit[fit.length - 1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 })
+    .addTo(runFocusLayer)
+    .bindTooltip(label ? `${label} ends here` : 'ends here');
+  mapInstance.fitBounds(fit, { padding: [40, 40] });
+  return true;
+}
+
+function clearRunFocus() {
+  if (runFocusLayer && mapInstance) mapInstance.removeLayer(runFocusLayer);
+  runFocusLayer = null;
 }
 
 function renderRunTimeline(D) {
@@ -18849,6 +19307,52 @@ function buildDigest(D, sport, metric) {
      scrubbed. These are the body-motion signals that separate Loam from a GPS tracker. */
   const mech = turnMechanics(D, metric);
   if (mech) digest.mechanics = mech;
+  /* Crashes the rider TAPPED with the capture app's Crash chip. This is the only block in the digest
+     describing an event the analyzer did not detect, and the one most likely to be over-read into a
+     cause, so every clause of the note is load-bearing. See analyzer/sports/mtb/crash.js for how the
+     timing is anchored (the tap lands after the get-up, so it is not the crash time). */
+  const crashes = D.crashes || [];
+  if (crashes.length) {
+    digest.crashes = {
+      count: crashes.length,
+      events: crashes.map(c => ({
+        at_min: r1((c.anchor - D.ride.start) / 60),
+        anchored_to: c.anchorSource === 'gps'
+          ? (c.stopped ? 'the last GPS-confirmed movement before the tap' : 'the tap itself; the rider never stopped, so there is no stop to anchor to')
+          : 'the tap itself; no GPS movement was found in the window before it, so the timing is loose',
+        rider_stopped: c.stopped,
+        tapped_s_after_anchor: c.reportDelayS,
+        ...u.speed('run_in_top_speed', c.speedIn),
+        corner: c.turn ? {
+          turn: c.turn.n,
+          direction: c.turn.direction,
+          relation: c.turnRelation === 'in' ? 'went down inside this corner' : 'went down just after exiting this corner',
+          ...u.speed('entry_speed', c.turn.vEntry),
+          ...u.speed('apex_speed', c.turn.vPeak),
+          ...u.len('apex_radius', c.turn.radius),
+          peak_lean_deg: (c.leanUnreliable || c.turn.leanDelta == null || isNaN(c.turn.leanDelta)) ? null : r1(Math.abs(c.turn.leanDelta)),
+          lean_unreliable: !!c.leanUnreliable,
+          typical_lean_this_side_deg: r1(c.leanBaselineDeg),
+          lean_baseline_corner_count: c.leanBaselineN,
+        } : null,
+        no_corner_detected: !c.turn,
+        ...u.speed('typical_corner_entry', c.entryBaselineMps),
+        phone_moved_deg: c.mountShifted ? r1(c.mountShift.deg, 0) : null,
+      })),
+      note: 'These are crashes the RIDER TAPPED during the ride, not detected events: this project has no crash detector, '
+        + 'so a crash that was not tapped is invisible here and a mis-tap is taken at face value. The tap lands after the '
+        + 'rider gets up, so at_min is anchored to the last moment they were still moving (see anchored_to), good to a '
+        + 'second or two at 1 Hz GPS. Every comparison is against the rider\'s OWN other corners in THIS ride, so each '
+        + 'crash is n=1: it describes what was different about that corner, NOT what caused the crash. Do not assert a '
+        + 'cause, do not score it, and do not tell the rider a lean angle or an entry speed was "too much" on this '
+        + 'evidence -- if they ask why they crashed, say plainly that the sensors cannot answer that and talk about what '
+        + 'the numbers do show. peak_lean_deg is phone gravity-roll, so it is torso lean, not bike lean; when '
+        + 'lean_unreliable is true the roll trace is not a body angle at all (a knock or a tumble) and must not be quoted. '
+        + 'If phone_moved_deg is present the phone shifted in its mount during the crash, so EVERY lean and turn-side '
+        + 'number from that point to the end of the ride is measured against a stale calibration: say so, and do not coach '
+        + 'on them.',
+    };
+  }
   if (cp) {
     digest.ebike = {
       avg_cadence_rpm: r1(cp.avgCad, 0),
@@ -19733,6 +20237,7 @@ function buildSectionNav() {
     ? pbp
     : visible('runCompareSection');
   const entries = [
+    { el: visible('crashSection'), label: 'Crash' },
     { el: visible('overviewSection'), label: 'Map' },
     { el: visible('timelineSection'), label: 'Timeline' },
     { el: visible('runsSection'), label: 'Runs' },
@@ -19772,13 +20277,19 @@ function renderAll(D) {
   show('turnSection'); show('radiusSection');
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'yaw rate + speed · turns shaded · jump airtime shaded';
+  /* Recomputed here rather than in the analysis path so a ride reopened from the analysis cache (or
+     one analyzed before this shipped) still gets its crash cards, and so there is exactly one place
+     the crash context is derived. Assigned onto D because buildDigest reads it off the same object
+     the coach panel and the geek-stats dump are handed. */
+  D.crashes = crashesForD(D);
   renderSampleRateNotice(D);
   renderCalibNotice(D);
   renderRideSignature(D, 'mtb');
   renderStats(D.summary, D.hasFit);
   renderCoachHighlights(D, 'mtb');
-  renderMap(D.sensors.location, D.turns, D.ride, D.ridingJumps);
-  renderTimeline(D.t, D.yawSeg, D.sensors.location, D.turns, D.ride, D.fitInRide, D.ridingJumps);
+  renderCrashSection(D);
+  renderMap(D.sensors.location, D.turns, D.ride, D.ridingJumps, D.crashes);
+  renderTimeline(D.t, D.yawSeg, D.sensors.location, D.turns, D.ride, D.fitInRide, D.ridingJumps, D.crashes);
   renderTurnTable(D.turns);
   setupFormReplay(D);
   renderRadiusChart(D.turns);
@@ -19808,10 +20319,16 @@ function focusSegment(descent, ride) {
      is too thin to bound. */
   const D = window._mapData;
   if (mapInstance && D) {
-    const latlngs = drawRideOverlay(D.loc, D.turns, D.ride || ride, D.ridingJumps, { start: descent.tStart, end: descent.tEnd });
+    const latlngs = drawRideOverlay(D.loc, D.turns, D.ride || ride, D.ridingJumps, { start: descent.tStart, end: descent.tEnd }, D.crashes);
     const fit = (latlngs && latlngs.length >= 2) ? latlngs
               : (descent.polyline && descent.polyline.length >= 2 ? descent.polyline : null);
     if (fit) mapInstance.fitBounds(fit, { padding: [40, 40] });
+  } else {
+    /* The run map draws itself (grade-coloured, no turns) and so populates _runMapData instead of
+       _mapData. Without this branch the whole map half of "focus" was skipped on every foot
+       activity and GPS-only ride: the tag read "showing Descent 3 · show full ride" beside a map
+       that had not moved, which is worse than doing nothing because it claims otherwise. */
+    focusRunSegment(descent, descent.label);
   }
 }
 
@@ -19823,9 +20340,14 @@ function resetSegmentFocus(ride) {
   /* Restore the full-ride track + all turns, then fit the whole ride. */
   const D = window._mapData;
   if (mapInstance && D) {
-    const latlngs = drawRideOverlay(D.loc, D.turns, D.ride || ride, D.ridingJumps, null);
+    const latlngs = drawRideOverlay(D.loc, D.turns, D.ride || ride, D.ridingJumps, null, D.crashes);
     if (latlngs && latlngs.length) mapInstance.fitBounds(latlngs, { padding: [40, 40] });
     else if (window._fullRideBounds) mapInstance.fitBounds(window._fullRideBounds, { padding: [40, 40] });
+  } else if (mapInstance) {
+    /* Run map: lift the highlight and pull back to the whole track. "show full ride" was as dead as
+       the focus it was offering to undo. */
+    clearRunFocus();
+    if (window._fullRideBounds) mapInstance.fitBounds(window._fullRideBounds, { padding: [40, 40] });
   }
 }
 
@@ -19934,7 +20456,7 @@ function turnRingColor(T) {
    overlay group, leaving the basemap tiles untouched. `win` ({start,end}) scopes the draw to one
    selected segment; null draws the whole ride. Speed color rescales to the window's own max so a
    focused segment shows its internal speed variation. Returns the drawn latlngs (for fitBounds). */
-function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
+function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
   if (!mapInstance) return null;
   if (!mapOverlay) mapOverlay = L.featureGroup().addTo(mapInstance);
   mapOverlay.clearLayers();
@@ -19982,6 +20504,27 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win) {
         { direction: 'top' });
       jumpMarkers[i+1] = m;
     }
+  }
+
+  /* Crash marks, drawn last and highest so nothing sits on top of the one thing the rider came to
+     find. Placed at the ANCHOR (the last moment they were moving), not at the tap: the tap can be
+     tens of metres and tens of seconds down the trail, and a marker there points at where they
+     picked the bike up rather than where they went down. */
+  for (let i = 0; i < (crashes || []).length; i++) {
+    const c = crashes[i];
+    if (c.lat == null || c.lon == null) continue;
+    if (c.anchor < lo || c.anchor > hi) continue;
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="crash-marker" title="Crash you marked">!</div>`,
+      iconSize: [26, 26], iconAnchor: [13, 13]
+    });
+    const m = L.marker([c.lat, c.lon], { icon, zIndexOffset: 1200 }).addTo(mapOverlay);
+    m.bindTooltip(
+      `<strong>Crash you marked</strong><br>${fmtClock(c.anchor - ride.start)} into the ride`
+      + (c.turn ? `<br>turn T${c.turn.n} (${c.turn.direction === 'L' ? 'left' : 'right'})` : '<br>no corner detected here')
+      + (c.stopped ? `<br><span style="opacity:0.75">tapped ${Math.round(c.reportDelayS)}s later</span>` : ''),
+      { direction: 'top' });
   }
   return latlngs;
 }
@@ -20066,10 +20609,14 @@ function setMapLegend(kind, opts = {}) {
   }
 }
 
-function renderMap(loc, turns, ride, ridingJumps) {
+function renderMap(loc, turns, ride, ridingJumps, crashes) {
   _linkCursor = null; _linkPinned = false;
   setMapLegend('turns');
   if (mapInstance) { mapInstance.remove(); mapInstance = null; mapOverlay = null; }
+  /* Mirror of what renderRunMap does to _mapData: a stale run-focus handle would send focusSegment
+     down the run branch on a ride that has a full MTB overlay to redraw. */
+  runFocusLayer = null;
+  window._runMapData = null;
   mapInstance = L.map('map', { zoomControl: true, attributionControl: true });
   addBasemap(mapInstance);
   /* Tap the map to dismiss a pinned timeline marker (touch has no "hover out"). */
@@ -20078,8 +20625,8 @@ function renderMap(loc, turns, ride, ridingJumps) {
     if (_linkCursor && mapInstance.hasLayer(_linkCursor)) mapInstance.removeLayer(_linkCursor);
   });
   /* Cache the full data so the segment picker can redraw a scoped or full view without re-analysis. */
-  window._mapData = { loc, turns, ride, ridingJumps };
-  const latlngs = drawRideOverlay(loc, turns, ride, ridingJumps, null);
+  window._mapData = { loc, turns, ride, ridingJumps, crashes };
+  const latlngs = drawRideOverlay(loc, turns, ride, ridingJumps, null, crashes);
   if (latlngs && latlngs.length) {
     mapInstance.fitBounds(latlngs, { padding: [40, 40] });
     window._fullRideBounds = latlngs;
@@ -20418,7 +20965,7 @@ function saveRideSignature() {
   try { rideSigCompose(); } catch (e) { console.warn('save ride signature failed', e); }
 }
 
-function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps) {
+function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, crashes) {
   const stride = 5;
   const tSub = [], ySub = [];
   for (let i = 0; i < t.length; i += stride) {
@@ -20471,6 +21018,30 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps) {
       });
     }
   }
+
+  /* Crash marks. TWO lines per crash, because the distinction between them is the whole point: a
+     solid red line at the anchor (the last moment the rider was moving, which is the event) and a
+     faint dotted one at the tap. Drawn together they show the get-up gap the card describes, and a
+     rider who remembers the crash being earlier than the solid line can see immediately that the
+     anchor is what to argue with. The label rides on the anchor. */
+  const crashAnnos = [];
+  for (const c of (crashes || [])) {
+    const xA = c.anchor - ride.start;
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xA, x1: xA, y0: 0, y1: 1,
+      line: { color: '#c14e2e', width: 2 } });
+    if (c.stopped) {
+      const xT = c.t - ride.start;
+      shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xT, x1: xT, y0: 0, y1: 1,
+        line: { color: '#c14e2e', width: 1, dash: 'dot' } });
+      crashAnnos.push({ x: xT, y: 1.03, yref: 'paper', xref: 'x', text: 'tap', showarrow: false,
+        font: { family: 'JetBrains Mono', size: 9, color: '#c14e2e' }, opacity: 0.75 });
+    }
+    crashAnnos.push({
+      x: xA, y: 1.09, yref: 'paper', xref: 'x', text: 'CRASH', showarrow: false,
+      font: { family: 'JetBrains Mono', size: 10, color: '#ffffff' },
+      bgcolor: '#c14e2e', borderpad: 3,
+    });
+  }
   let fullLo = Infinity, fullHi = -Infinity;
   for (const x of tSub) { if (x < fullLo) fullLo = x; if (x > fullHi) fullHi = x; }
   for (const x of tSpGps) { if (x < fullLo) fullLo = x; if (x > fullHi) fullHi = x; }
@@ -20487,7 +21058,9 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps) {
       if (lab.x - lastX < minGapData) continue;
       out.push(turnAnno(lab)); lastX = lab.x;
     }
-    return out.concat(jumpAnnos);
+    /* Crash labels are never thinned away: a turn number lost to crowding costs nothing, the one
+       marker the rider is looking for costs the feature. */
+    return out.concat(jumpAnnos, crashAnnos);
   }
   const annotations = thinnedAnnotations(fullLo, fullHi);
 
@@ -22964,7 +23537,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '4c06ae3f9 · 2026-08-13';
+const LOAM_BUILD = 'ad5cf50a9 · 2026-08-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -22987,6 +23560,7 @@ const LOAM_WHATS_NEW = [
     ['Lap comparison reads as an assignment', 'the three corners that cost you the most, worst first, with the full turn-by-turn list one tap away; tapping a corner opens it on its segment page, framed on the corner.'],
     ['Mark a run "not a trail"', 'a road transit or the ride home can look like a descent to grade detection; label it once and its corners drop out of the lap comparison and the most-scrubbed picks.'],
     ['Strava from the app', 'upload rides (with visibility and default bike/shoes), compare starred-segment PRs, and share a FIT straight into Loam.'],
+    ['The Crash chip finally tells you something', 'tapping Crash used to leave a timestamp nothing read. A marked ride now opens with the corner you went down in, what you carried into it, and your lean against your own median for that side, plus a marker on the map and the timeline and the whole thing in the AI coach. The tap is not the crash — nobody taps mid-slide — so it anchors to the last second you were still moving and tells you how long the get-up took. It also checks whether the crash moved your phone in your pocket, which would quietly invalidate every lean angle for the rest of the ride. It says what was different about that corner, not why you crashed; Loam has no crash detector and does not pretend to.'],
   ] },
   { h: 'Better', items: [
     ['Cadence comes from your watch', 'if you carry your phone in your hand, the cadence you were shown could collapse — holding the phone still to take a photo stops its step counter outright, and on the run this was built from the live number read more than 20 spm low a third of the time, once bottoming out at 26 spm while the runner was doing 177. Loam now reads cadence from the watch on your wrist instead, live and in the analysis, and says which sensor it used. Your arm keeps swinging whatever the phone is doing. Falls back to the phone when you run without the watch.'],
@@ -23005,6 +23579,7 @@ const LOAM_WHATS_NEW = [
     ['Your lifts compared with each other', 'Loam now keeps each lift session on this device and, once one lift has come up in three sessions with the weights filled in, shows what actually changed between them: heavier bar, more reps, both, or neither. Work done is weight times reps, so those two factors account for the whole of a change and the verdict names which one moved. No estimated one-rep max (that is a formula fitted to other people), and no comparison across different lifts, because a squat and a curl share no scale.'],
   ] },
   { h: 'Fixed', items: [
+    ['Tap a run to see where it was', 'on a run, a walk or a GPS-only ride, tapping a row in the Runs panel said "showing Descent 3" and left the map exactly where it was, so there was no way to tell which stretch of trail it meant — and recognising it is the whole point of tagging it. The tapped stretch is now highlighted on the map, named where it starts, and scrolled into view.'],
     ['The coach knows which sport it is reading', 'a swim was described as a ride, and the coach could suggest recording your swim in Loam — advice to do something impossible. It also no longer offers an open-water swim questions about "sets", which open water does not have.'],
     ['Sharing a card sends the picture', 'on some targets a card arrived as a link rather than as the image, and every card was exported under the same filename regardless of sport or session.'],
     ['Controls next to what they control', 'the smooth toggle now sits above the graph it changes rather than above the table (and is no longer set in heading type), the swim card\'s share button sits on the card, and the calibration-pose notice can be hidden per ride.'],
