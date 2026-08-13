@@ -504,10 +504,21 @@
      back out, since the turn table's own reset link sits far below the fold. */
   #mapFocusTag { color: var(--accent); margin-left: auto; }
   #mapFocusTag a { cursor: pointer; text-decoration: underline; }
-  .run-rename { cursor: pointer; opacity: 0.55; font-size: 12px; padding-left: 5px; }
+  /* Real <button>s rather than styled spans. They look like the glyphs they were, but a rename and a
+     "not a trail" mark are the only way to correct what the analyzer got wrong about a run, and as
+     spans they had no tab stop, no role and no accessible name: a keyboard or screen-reader user
+     could not reach either one at all. The row's own click target is separate (see the tr handler). */
+  .run-rename, .run-skip {
+    background: none; border: 0; padding: 0 0 0 5px; font: inherit; font-size: 12px;
+    color: inherit; cursor: pointer; line-height: inherit;
+  }
+  .run-rename { opacity: 0.55; }
   .run-rename:hover { opacity: 1; }
-  .run-skip { cursor: pointer; opacity: 0.45; font-size: 12px; padding-left: 5px; }
+  .run-skip { opacity: 0.45; }
   .run-skip:hover { opacity: 1; color: var(--accent); }
+  .run-rename:focus-visible, .run-skip:focus-visible {
+    opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px;
+  }
   /* Beats the accent colour #runsTable tbody tr.opens-detail .run-name sets on drillable rows. */
   #runsTable tbody tr .run-name[data-skipped],
   #runsTable tbody tr.opens-detail .run-name[data-skipped] { color: var(--text-muted); }
@@ -3719,6 +3730,9 @@ function drawRuns() {
   currentLibraryRideId = D.libraryRideId;
   const { mode, runs, lapInfo } = segmentRuns(D, _runsMode);
   if (!runs.length) { drawRunsEmpty(mode); return; }
+  /* Read once for the whole table: the rider's "not a trail" marks, as time windows, so a mark made
+     in one segmentation mode is still visible (and still clearable) from another. */
+  const skipWins = skippedRunWindows(D);
   show('runsSection');
   /* Title and count-noun follow the segmentation MODE (the row noun), not the sport, so the panel
      never reads "N runs (descents)": descents -> Descents, laps -> Laps, marks -> Runs. */
@@ -3808,13 +3822,16 @@ function drawRuns() {
       : '';
     /* Marked "not a trail": a road transit or the ride home that grade segmentation admitted as a
        descent. Muted badge, so an excluded run reads as excluded rather than missing. */
-    const skipped = runSkipped(r.tStart);
+    const skipped = runIsSkipped(r, skipWins);
     const skipBadge = skipped
       ? ` <span class="tag-badge" style="background:rgba(127,176,105,0.10);color:var(--text-muted);"
            title="Excluded from corner coaching: no lap comparison, and its corners are not offered as lines to study">not a trail</span>`
       : '';
-    const skipToggle = ` <span class="run-skip" data-idx="${r.n - 1}" title="${skipped
-      ? 'Count this as a trail again' : 'Not a trail (a road transit or the ride home): skip it for corner coaching'}">${skipped ? '↩' : '⊘'}</span>`;
+    const skipHint = skipped
+      ? `Count ${nounSingular} ${r.n} as a trail again`
+      : `Mark ${nounSingular} ${r.n} as not a trail (a road transit or the ride home): skip it for corner coaching`;
+    const skipToggle = ` <button type="button" class="run-skip" data-idx="${r.n - 1}"
+      title="${skipHint}" aria-label="${skipHint}">${skipped ? '↩' : '⊘'}</button>`;
     let actions = '';
     if (r.src) {
       actions = r.src.autoTag
@@ -3833,7 +3850,7 @@ function drawRuns() {
     /* The classes + data-n/data-l attributes drive the phone card reflow (max-width 700px CSS):
        data-n prefixes the name with the run number, data-l becomes each metric tile's label. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
-      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}>${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}<span class="run-rename" data-idx="${r.n - 1}" title="Rename this ${nounSingular}">✎</span>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
+      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}>${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}<button type="button" class="run-rename" data-idx="${r.n - 1}" title="Rename this ${nounSingular}" aria-label="Rename ${nounSingular} ${r.n}">✎</button>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
       <td data-l="Time" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist">${U.dist(m.distance)}</td>
       <td data-l="Top" ${m.maxSpeed === bestTop ? hi : ''}>${U.speed(m.maxSpeed)}</td>
@@ -3871,7 +3888,7 @@ function drawRuns() {
     btn.onclick = (e) => {
       e.stopPropagation();
       const r = runs[+btn.dataset.idx];
-      setRunSkipped(r.tStart, !runSkipped(r.tStart));
+      toggleRunSkipped(r, D);
       drawRuns();                       /* re-renders the rows, the lap picker, and the scrub chips */
       try { if (_runsD) formRenderScrubChips(_runsD); } catch (e2) {}
       /* And every surface that makes a coaching CLAIM about a corner, because the mark exists to
@@ -3926,9 +3943,74 @@ function setRunLabel(tStart, name) {
    the repo already made for lift type and club type - the athlete labels it, the label sticks, and
    every mark is the ground truth a future detector would need. */
 function runSkipKey(tStart) { return `loam_runskip:${_currentRunKey || 'x'}:${Math.round(tStart)}`; }
-function runSkipped(tStart) { try { return localStorage.getItem(runSkipKey(tStart)) === '1'; } catch (e) { return false; } }
-function setRunSkipped(tStart, skip) {
-  try { skip ? localStorage.setItem(runSkipKey(tStart), '1') : localStorage.removeItem(runSkipKey(tStart)); } catch (e) {}
+/* The stored VALUE is the run's end time, not a bare flag, and that is the whole point.
+
+   A mark used to be `'1'` under a key carrying only the run's START, and every surface that read it
+   re-derived the run list with `segmentRuns(D, 'auto')` and looked for a matching tStart. But the
+   rider marks the row in whatever mode the Runs selector is on, and the modes do not share
+   boundaries: on the two-lap reference ride, auto/descents give [25-61, 103-146] while laps gives
+   [25-95, 95-146]. So marking the second LAP wrote `...:95`, no auto run started at 95, and the
+   mark silently did nothing to the coach, the hero card or the scrub chips -- while the row still
+   showed the "not a trail" badge and the lap comparison still dropped it. Marking the FIRST lap was
+   worse than nothing: it matched auto run 1 by tStart and withdrew 25-61, leaving the corners
+   between 61 and 95 (inside the very lap the rider had just disowned) still being coached.
+
+   Storing the end makes the mark what it always meant -- this STRETCH OF THE RIDE is not a trail --
+   so every reader resolves it without knowing or caring which segmentation produced it. */
+function setRunSkipped(tStart, skip, tEnd) {
+  try {
+    if (!skip) { localStorage.removeItem(runSkipKey(tStart)); return; }
+    localStorage.setItem(runSkipKey(tStart), tEnd != null && isFinite(tEnd) && tEnd > tStart
+      ? String(Math.round(tEnd)) : '1');
+  } catch (e) {}
+}
+/* Every marked window in this recording, read straight out of storage rather than re-derived from a
+   run list, so the answer does not depend on the segmentation mode the reader happens to use.
+   Returns [{ key, tStart, tEnd }]; `key` so a toggle can clear the exact entry that covers a run
+   even when that entry was written from a different mode.
+
+   Marks written before the end time was stored carry `'1'`. Those are resolved the way they always
+   were -- against the auto-mode runs -- so an existing mark keeps behaving exactly as it did instead
+   of quietly becoming a no-op on upgrade. The auto run list is built only if such a mark turns up. */
+function skippedRunWindows(D) {
+  const prefix = `loam_runskip:${_currentRunKey || 'x'}:`;
+  const out = [];
+  let autoRuns = null;
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.indexOf(prefix) === 0) keys.push(k);
+    }
+    for (const k of keys) {
+      const tStart = +k.slice(prefix.length);
+      if (!isFinite(tStart)) continue;
+      const tEnd = +localStorage.getItem(k);
+      if (isFinite(tEnd) && tEnd > tStart) { out.push({ key: k, tStart, tEnd }); continue; }
+      if (autoRuns === null) { try { autoRuns = segmentRuns(D, 'auto').runs || []; } catch (e) { autoRuns = []; } }
+      const r = autoRuns.find(x => Math.round(x.tStart) === tStart);
+      if (r) out.push({ key: k, tStart: r.tStart, tEnd: r.tEnd });
+    }
+  } catch (e) { /* storage blocked; an unmarkable ride is simply an unmarked one */ }
+  return out;
+}
+/* Is this run disowned? By MIDPOINT rather than by boundary equality, for the same reason the
+   windows carry an end: the run in front of the rider may be a different segmentation's view of the
+   stretch that was marked. A lap that contains a marked descent, and a descent that sits inside a
+   marked lap, both read as marked, which is what a rider who marked "the ride home" means. */
+function runIsSkipped(r, wins) {
+  if (!r || !wins || !wins.length) return false;
+  const mid = (r.tStart + r.tEnd) / 2;
+  return wins.some(w => mid >= w.tStart && mid <= w.tEnd);
+}
+/* Flip the mark on a run. Clearing goes by covering WINDOW, not by this run's own key: a badge the
+   rider can see but cannot clear (because the mark was made on a lap and they are now looking at
+   descents) is worse than the bug this replaced. */
+function toggleRunSkipped(r, D) {
+  const mid = (r.tStart + r.tEnd) / 2;
+  const covering = skippedRunWindows(D).filter(w => mid >= w.tStart && mid <= w.tEnd);
+  if (covering.length) { covering.forEach(w => { try { localStorage.removeItem(w.key); } catch (e) {} }); return; }
+  setRunSkipped(r.tStart, true, r.tEnd);
 }
 
 /* Focus one run: zoom the map to its segment, and (MTB only) filter the per-turn table to it. */
@@ -4525,8 +4607,11 @@ async function setupPlayByPlay(allRuns, D) {
   const sel = document.getElementById('pbpRun');
   const body = document.getElementById('pbpBody');
   /* A run marked "not a trail" is neither compared nor offered as a reference lap: comparing the
-     ride home against itself produces a wall of corner notes about turning off a road. */
-  const runs = (allRuns || []).filter(r => !runSkipped(r.tStart));
+     ride home against itself produces a wall of corner notes about turning off a road. Matched by
+     window rather than by tStart so a mark survives a change of segmentation mode (see
+     skippedRunWindows); allRuns is whatever mode the panel is currently showing. */
+  const skipWins = skippedRunWindows(D);
+  const runs = (allRuns || []).filter(r => !runIsSkipped(r, skipWins));
   if (runs.length < 2) { panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
   // Each run's reference is a normalized { label, turns, duration, crossRide, sameSegmentOK }. Prefer
@@ -5308,10 +5393,23 @@ function formInRunTurns(D) {
     const { runs } = segmentRuns(D, 'auto');
     if (!runs || !runs.length) return D.turns || [];
     /* Runs the rider marked "not a trail" drop out too: grade segmentation cannot tell a canyon
-       road home from a descent, so the label is the only thing that can. */
-    const keep = runs.filter(r => !runSkipped(r.tStart));
-    if (!keep.length) return D.turns || [];
-    const inAny = (T) => { const t = T.tPeak != null ? T.tPeak : T.tStart; return keep.some(r => t >= r.tStart && t <= r.tEnd); };
+       road home from a descent, so the label is the only thing that can. Resolved as WINDOWS
+       (skippedRunWindows) rather than by matching each auto run's tStart against a stored key: the
+       mark may have been made in laps or descents mode, whose boundaries do not line up with
+       auto's, and a per-turn window test is the one form that is right in every mode. */
+    const wins = skippedRunWindows(D);
+    const keep = runs.filter(r => !runIsSkipped(r, wins));
+    /* No fallback when every run is disowned. The "no segmentation" fallback above exists because a
+       ride with no runs has nothing to scope BY; a ride where the rider has marked every run has
+       been scoped, to nothing. Falling back there handed the scrub chips the whole ride, so marking
+       both descents of a road transit turned corner coaching back ON over exactly the corners just
+       disowned -- the reported bug, reached by marking one run too many. */
+    if (!keep.length) return [];
+    const inAny = (T) => {
+      const t = T.tPeak != null ? T.tPeak : T.tStart;
+      return keep.some(r => t >= r.tStart && t <= r.tEnd)
+        && !wins.some(w => t >= w.tStart && t <= w.tEnd);
+    };
     return (D.turns || []).filter(inAny);
   } catch (e) { return D.turns || []; }
 }
@@ -5333,13 +5431,14 @@ function formInRunTurns(D) {
    when one of them was a freeway offramp. */
 function turnsOnLabelledTrails(D) {
   try {
-    const { runs } = segmentRuns(D, 'auto');
-    if (!runs || !runs.length) return D.turns || [];
-    const skipped = runs.filter(r => runSkipped(r.tStart));
-    if (!skipped.length) return D.turns || [];
+    /* Straight off the marks, with no run list at all. This used to intersect the marks with the
+       auto-mode runs, which made the answer depend on a segmentation the rider never chose; the
+       marked window IS the answer, and it is the only one that holds in every mode. */
+    const wins = skippedRunWindows(D);
+    if (!wins.length) return D.turns || [];
     const inSkipped = (T) => {
       const t = T.tPeak != null ? T.tPeak : T.tStart;
-      return skipped.some(r => t >= r.tStart && t <= r.tEnd);
+      return wins.some(w => t >= w.tStart && t <= w.tEnd);
     };
     return (D.turns || []).filter(T => !inSkipped(T));
   } catch (e) { return D.turns || []; }
@@ -12745,7 +12844,12 @@ function liftWaveformSVG(sets, bx, by, bw, bh) {
   return out + labels.join('');
 }
 
-function liftSignatureSVG(D, charKey) {
+/* No character on the card, deliberately: this is the shareable poster (waveform + four stats), and
+   the mannequin belongs to the Spotter Cam, which animates one rep and has its own picker. The
+   parameter and the `_liftSigChar` state behind it were left over from an earlier draft where the
+   card drew an avatar; neither had selected anything for some time, and a `setLiftChar` nothing
+   could call read as a picker somebody forgot to wire up rather than as a decision. */
+function liftSignatureSVG(D) {
   const sum = D.summary, sets = D.strength.sets, W = 800, H = 460;
   const bx = 36, by = 108, bw = W - 72, bh = H - 108 - 100;
   const wave = liftWaveformSVG(sets, bx, by, bw, bh);
@@ -12784,16 +12888,15 @@ function liftSignatureSVG(D, charKey) {
   </svg>`;
 }
 
-let _liftSigChar = 'cleaner', _liftSigD = null;
+let _liftSigD = null;
 function renderLiftSignature(D) {
   _liftSigD = D;
   const el = document.getElementById('liftSignature');
-  if (el) el.innerHTML = liftSignatureSVG(D, _liftSigChar);
+  if (el) el.innerHTML = liftSignatureSVG(D);
 }
-function setLiftChar(key) { _liftSigChar = key; if (_liftSigD) renderLiftSignature(_liftSigD); }
 function saveLiftSignature() {
   if (!_liftSigD) return;
-  const svg = liftSignatureSVG(_liftSigD, _liftSigChar);
+  const svg = liftSignatureSVG(_liftSigD);
   const img = new Image();
   img.onload = () => {
     const cv = document.createElement('canvas'); cv.width = 1600; cv.height = 920;
@@ -22729,7 +22832,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '89d63463f · 2026-08-13';
+const LOAM_BUILD = '8053926c0 · 2026-08-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
