@@ -1707,7 +1707,7 @@
   <section id="runMountNotice" class="hidden">
     <div class="mount-notice">
       <strong>Phone in hand detected.</strong> Arm-swing energy at half cadence
-      dominates the horizontal accel. Cadence and pace are reliable; vertical
+      dominates the horizontal accel. <span id="runMountCadenceNote">Cadence and pace are reliable</span>; vertical
       oscillation may be inflated by hand motion (treat it as an upper bound).
       For cleanest form metrics, switch to a hip pack or armband on your next run.
     </div>
@@ -1722,7 +1722,7 @@
   <section id="runCadenceSection" class="hidden">
     <div class="section-title">
       Cadence
-      <span class="subtitle">10s windows · FFT peak on |accel| (rotation-invariant)
+      <span class="subtitle"><span id="runCadenceMethod">10s windows · FFT peak on |accel| (rotation-invariant)</span>
         <label class="smooth-lbl" title="Rolling median that suppresses the spikes from stops; also smooths oscillation and pace"><input type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> smooth</label>
       </span>
     </div>
@@ -3061,6 +3061,93 @@ function applyWalkBandCadence(running, walkCadSeries) {
     const segCads = walkCadSeries.filter(c => c.t >= seg.tStart && c.t <= seg.tEnd && c.conf > 0.05);
     seg.cadAvg = segCads.length ? segCads.reduce((s, c) => s + c.spm, 0) / segCads.length : null;
   }
+  return running;
+}
+
+/*
+ * Cadence from the WATCH instead of the phone. See analyzer/sports/running/wrist-cadence.js for the
+ * full reasoning and the measurements; the short version:
+ *
+ * The phone is the one cadence sensor that can be put down. A runner carrying it in a hand holds it
+ * still for a photo or swings that arm out of phase, and both phone routes degrade at once -- the DFT
+ * loses its peak, and CMPedometer (which feeds the LIVE number on the watch) stops counting steps
+ * outright. The watch is strapped to a limb that keeps swinging through all of it.
+ *
+ * Measured 2026-08-13 on a 30-minute walk/run with the watch on the left wrist and the phone
+ * hand-carried in the right: the phone pedometer read >20 spm low in 31% of its live updates (worst
+ * 26 spm against an actual 177) and went flat for an 8 s stretch of running, while the wrist produced
+ * a confident answer in 196 of 203 moving windows with none off by more than 10 spm. Session medians
+ * agreed: wrist 174.6, phone DFT 175.2, pedometer 175.4.
+ *
+ * |w| is RECTIFIED, which is why its fundamental is the step rate and not the stride rate: an arm
+ * swings once per stride, but the forward and back halves each peak, so the magnitude completes two
+ * cycles per stride. Verified rather than assumed -- the signed dominant-axis projection of the same
+ * gyro (no rectification, so no 2:1 ambiguity) doubled to within 0.30 spm median of this peak across
+ * the session, and a zero-crossing count of that trace agreed.
+ *
+ * One band (1.3-3.6 Hz = 78-216 spm) covers walking and running, where the phone needs two, because
+ * the wrist measures the step rate directly rather than something that must be told from its own
+ * harmonic. Confidence is the only gate, deliberately: GPS was INVALID for the whole ten-minute
+ * standing stretch of the reference recording, and confidence alone rejected all 120 of those windows.
+ */
+const W_WIN_S = 10, W_HOP_S = 2;
+const W_BAND_LO_HZ = 1.3, W_BAND_HI_HZ = 3.6, W_BAND_STEP_HZ = 0.02;
+const W_MIN_CONF = 0.30, W_MIN_SAMPLES = 100, W_MIN_SPAN_S = 6, W_MIN_WINDOWS = 10;
+
+function wristCadenceSeries(wristRows, ride) {
+  const rows = (wristRows || []).filter(
+    r => r && r.t >= ride.start && r.t <= ride.end && Number.isFinite(r.rx) && Number.isFinite(r.ry) && Number.isFinite(r.rz));
+  if (rows.length < W_MIN_SAMPLES) return [];
+  const tArr = rows.map(r => r.t);
+  /* Rectified on purpose (see above), and mount-invariant: it does not care which wrist the watch is
+     on or which way round it is worn. */
+  const mag = rows.map(r => Math.hypot(r.rx, r.ry, r.rz));
+  const lower = (arr, x) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; };
+  const series = [];
+  for (let w0 = ride.start; w0 + W_WIN_S <= ride.end; w0 += W_HOP_S) {
+    const w1 = w0 + W_WIN_S;
+    const i0 = lower(tArr, w0), i1 = lower(tArr, w1);
+    if (i1 - i0 < W_MIN_SAMPLES) continue;
+    if (tArr[i1 - 1] - tArr[i0] < W_MIN_SPAN_S) continue;
+    const sig = mag.slice(i0, i1);
+    const m = sig.reduce((s, v) => s + v, 0) / sig.length;
+    const detr = sig.map(v => v - m);
+    const ts = tArr.slice(i0, i1).map(t => t - w0);
+    const fPeak = dftPeakFreq(detr, ts, W_BAND_LO_HZ, W_BAND_HI_HZ, W_BAND_STEP_HZ);
+    const magPeak = dftMagAt(detr, ts, fPeak);
+    const rms = Math.sqrt(detr.reduce((s, v) => s + v * v, 0) / detr.length);
+    const conf = rms > 0 ? Math.min(magPeak / rms, 1) : 0;
+    /* A low-confidence wrist window is not a low cadence, it is the absence of a reading. Emitting it
+       anyway is what puts the phantom dips in the chart this exists to remove. */
+    if (conf < W_MIN_CONF) continue;
+    series.push({ t: (w0 + w1) / 2, freq: fPeak, spm: fPeak * 60, conf });
+  }
+  return series;
+}
+
+/*
+ * Whether the wrist series should replace the phone's for this run. Both conditions are about
+ * COVERAGE, not about the two agreeing: the whole point is the case where the phone is wrong, so a
+ * rule that only accepted the wrist when it confirmed the phone would decline exactly when it matters.
+ */
+function preferWristCadence(wristSeries, phoneSeries) {
+  if (!wristSeries || wristSeries.length < W_MIN_WINDOWS) return false;
+  const phoneConfident = (phoneSeries || []).filter(c => c && c.conf > 0.15).length;
+  return wristSeries.length >= phoneConfident * 0.5;
+}
+
+/*
+ * Swap the wrist series in everywhere a cadence is carried. Delegates to applyWalkBandCadence rather
+ * than repeating it: that function's BODY is band-blind (it takes a cadence series and re-derives
+ * every figure computed from one), and only its name and docs are about walks. Sharing it keeps the
+ * two swaps from drifting on the part that has already bitten once -- the walk-band fix originally
+ * updated the series and the medians but not the per-segment cadence, so the climb table and the AI
+ * coach quoted a harmonic under a headline that did not.
+ */
+function applyWristCadence(running, wristSeries) {
+  if (!running || !wristSeries || !wristSeries.length) return running;
+  applyWalkBandCadence(running, wristSeries);
+  running.cadSource = 'wrist';
   return running;
 }
 
@@ -6432,6 +6519,11 @@ function computeRunSummary(loc, baro, ride, R, hr) {
     movingPaceMinPerKm: movingSpeed > 0 ? (1000 / movingSpeed) / 60 : null,
     altGain, altLoss,
     cadMedian: R.cadMedian, cadMean: R.cadMean,
+    /* Which sensor the cadence above came from ('wrist' when the watch's series was preferred,
+       undefined for the phone). Carried into the summary rather than left on the analysis object
+       because the summary is what gets SAVED to the library and what the tiles read, and a stored
+       cadence whose provenance was dropped cannot be re-derived later. */
+    cadSource: R.cadSource,
     oscMedian: R.oscMedian,
     mount: R.mount, mountConfidence: R.mountConfidence,
     nSegments: R.segments.length,
@@ -11291,8 +11383,20 @@ async function analyze(files) {
          inline here and touched only the series and the medians, leaving the climb/descent table and
          the coach digest quoting the harmonic under a headline that did not. */
       if (sport === 'walking') applyWalkBandCadence(running, gait.walkCadSeries);
+      /* The watch is the better cadence sensor whenever it was worn, because the phone is the one
+         that can be put down: hand-carried, it loses the peak the moment it is held still for a
+         photo. Applied AFTER the walk-band swap so it supersedes it when it is usable -- the wrist
+         needs no band choice at all, since what it measures is already the step rate rather than
+         something that has to be told apart from its own harmonic. Falls through to whatever the
+         phone said when there is no watch, or when the watch was too still to speak for the run. */
+      const wristCad = wristCadenceSeries(sensors.wrist || [], ride);
+      if (preferWristCadence(wristCad, running.cadSeries)) {
+        applyWristCadence(running, wristCad);
+        dbg('[cadence] wrist series preferred:', wristCad.length, 'windows, median', running.cadMedian.toFixed(0), 'spm');
+      }
       /* Per-climb read from the up-segments (uses whatever cadSeries is current, so a walk gets its
-         walk-band cadence). Geometric gain/grade/VAM plus GPS pace, cadence and HR as context. */
+         walk-band cadence, and any session gets the wrist's when it was preferred above). Geometric
+         gain/grade/VAM plus GPS pace, cadence and HR as context. */
       running.climbs = analyzeRunningClimbs(
         running.segments,
         climbAltSeries(sensors.baro, sensors.location, ride),
@@ -11322,7 +11426,8 @@ async function analyze(files) {
       renderAllRunning(runRender);
       const cmpStr = comparison && comparison.dtw ? ` · DTW: ${descents.length} descents` : '';
       const breakStr = sport === 'running' && gait.breaks.length ? ` · ${gait.breaks.length} walk break${gait.breaks.length > 1 ? 's' : ''}` : '';
-      setStatus(`${sport === 'walking' ? 'Walk' : 'Run'} loaded (${runSummary.cadMedian ? runSummary.cadMedian.toFixed(0) + ' SPM' : 'no cadence'} · phone ${running.mount}${cmpStr}${breakStr})`, true);
+      const cadFromStr = running.cadSource === 'wrist' ? ' from watch' : '';
+      setStatus(`${sport === 'walking' ? 'Walk' : 'Run'} loaded (${runSummary.cadMedian ? runSummary.cadMedian.toFixed(0) + ' SPM' + cadFromStr : 'no cadence'} · phone ${running.mount}${cmpStr}${breakStr})`, true);
       return;
     }
 
@@ -15738,7 +15843,7 @@ function renderAllRunning(D) {
   renderCoachHighlights(D, sport);
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
   renderRunTimeline(D);
-  renderRunCadence(D.running.cadSeries);
+  renderRunCadence(D.running.cadSeries, D.running.cadSource);
   /* Splits follow the athlete's unit setting: an imperial runner gets miles, not a metric table
      under an imperial headline. Computed off the same GPS rows the summary walks. */
   (() => {
@@ -15765,7 +15870,16 @@ function renderAllRunning(D) {
   renderRunParams(D);
   currentRide = D.ride;
   renderRunsPanel(D);
-  if (D.running.mount === 'hand') show('runMountNotice');
+  if (D.running.mount === 'hand') {
+    show('runMountNotice');
+    /* A hand-carried phone is precisely the case the wrist series exists for, so when it was
+       preferred this notice must not go on implying the cadence beside it came from the phone it is
+       warning about. */
+    const note = document.getElementById('runMountCadenceNote');
+    if (note) note.textContent = D.running.cadSource === 'wrist'
+      ? 'Cadence came from your watch instead, so hand motion did not touch it, and pace is reliable'
+      : 'Cadence and pace are reliable';
+  }
   if (D.comparison && D.comparison.dtw) renderDescentComparison(D);
   else hide('runCompareSection');
   renderGeekStats(D, sport);
@@ -17061,11 +17175,16 @@ function renderRunStats(s, detection, mount, ped) {
      it is the walk-band swap above doing its job. Skip that swap and the running band reports 169
      for that same walk; the pedometer would then have flagged it. Confirming a correction already in
      place is exactly what a second instrument is for. */
+  /* Naming the SENSOR matters more than usual here, because the two do not fail together: on the
+     recording this was built from, the phone was hand-carried and its pedometer read >20 spm low in
+     31% of its updates while the wrist tracked throughout. A reader who cannot tell which instrument
+     produced the headline cannot weigh the disagreement the rest of this caption reports. */
   const agr = ped && ped.agreement;
-  const cadSub = !agr ? 'median · FFT on |accel|'
+  const cadFrom = s.cadSource === 'wrist' ? 'median · watch (wrist motion)' : 'median · FFT on |accel|';
+  const cadSub = !agr ? cadFrom
     : agr.agrees
-      ? `median · FFT on |accel| · pedometer agrees (${agr.pedSpm.toFixed(0)} spm)`
-      : `median · FFT on |accel| · <span style="color:var(--accent-4)">pedometer says ${agr.pedSpm.toFixed(0)} spm</span>`;
+      ? `${cadFrom} · pedometer agrees (${agr.pedSpm.toFixed(0)} spm)`
+      : `${cadFrom} · <span style="color:var(--accent-4)">pedometer says ${agr.pedSpm.toFixed(0)} spm</span>`;
   /* Heart rate, when the watch streamed it. Omitted entirely rather than shown as a dash: a run
      recorded without the watch has no HR to report, and an empty tile in the grid reads as a
      measurement that failed rather than a sensor that was not worn. */
@@ -17243,8 +17362,16 @@ function renderRunTimeline(D) {
   linkTimelineToMap(D.sensors.location, ride);
 }
 
-function renderRunCadence(cadSeries) {
+function renderRunCadence(cadSeries, cadSource) {
   show('runCadenceSection');
+  /* The chart's own subtitle names the instrument, because the two sources do not just differ in
+     accuracy, they differ in what a GAP in the trace means: the phone series carries every window it
+     computed and dips on the low-confidence ones, while the wrist series omits them outright (a wrist
+     that was not swinging periodically is a missing reading, not a slow cadence). */
+  const method = document.getElementById('runCadenceMethod');
+  if (method) method.textContent = cadSource === 'wrist'
+    ? '10s windows · FFT peak on watch |rotation rate| · low-confidence windows omitted'
+    : '10s windows · FFT peak on |accel| (rotation-invariant)';
   if (!cadSeries.length) {
     Plotly.purge('runCadenceChart');
     document.getElementById('runCadenceChart').innerHTML = '<div style="padding:40px; text-align:center; color:#475569;">No cadence detected (run too short or noisy?)</div>';
@@ -18670,6 +18797,7 @@ function buildDigest(D, sport, metric) {
       ...u.speed('avg_speed', s.movingSpeed != null ? s.movingSpeed : s.avgSpeed),
       cadence_spm_median: r1(s.cadMedian, 0),
       cadence_spm_mean: r1(s.cadMean, 0),
+      cadence_source: run.cadSource === 'wrist' ? 'apple watch wrist motion' : 'phone accelerometer',
       vertical_oscillation_cm_median: r1(s.oscMedian),
       ...u.elev('elevation_gain', s.altGain),
       ...u.elev('elevation_loss', s.altLoss),
@@ -18681,6 +18809,10 @@ function buildDigest(D, sport, metric) {
       })),
       data_caveats: 'Cadence and oscillation are derived from AirPods/phone IMU; oscillation is head bob (a proxy for hip vertical motion). Phone mount detected as "' + run.mount + '" (confidence ' + r1(run.mountConfidence, 2) + ').'
         + (run.mount === 'hand' ? ' The phone was HAND-CARRIED, so vertical_oscillation_cm is inflated by arm swing and is an UPPER BOUND, not a measurement; do not coach oscillation targets or read the number as real hip motion.' : '')
+        /* Said explicitly because it changes which caveat applies to which number: a hand-carried
+           phone makes oscillation an upper bound but leaves a wrist-sourced cadence untouched, and a
+           coach told only "the phone was in a hand" would reasonably hedge both. */
+        + (run.cadSource === 'wrist' ? ' Cadence (and per-segment cadence_spm) came from the APPLE WATCH on the wrist, not the phone, so it is unaffected by how the phone was carried; it is the step rate, not the arm-swing rate.' : '')
         + (sport === 'walking' ? ' This is a WALK: cadence is walking step rate (typical 100-120 spm); do not coach running form, pace zones, or oscillation targets.' : '')
     };
   }
@@ -22832,7 +22964,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '8053926c0 · 2026-08-13';
+const LOAM_BUILD = '4c06ae3f9 · 2026-08-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -22857,6 +22989,8 @@ const LOAM_WHATS_NEW = [
     ['Strava from the app', 'upload rides (with visibility and default bike/shoes), compare starred-segment PRs, and share a FIT straight into Loam.'],
   ] },
   { h: 'Better', items: [
+    ['Cadence comes from your watch', 'if you carry your phone in your hand, the cadence you were shown could collapse — holding the phone still to take a photo stops its step counter outright, and on the run this was built from the live number read more than 20 spm low a third of the time, once bottoming out at 26 spm while the runner was doing 177. Loam now reads cadence from the watch on your wrist instead, live and in the analysis, and says which sensor it used. Your arm keeps swinging whatever the phone is doing. Falls back to the phone when you run without the watch.'],
+    ['Distance on your wrist while you run', 'the watch showed pace but never how far you had gone, which is the number most runs are actually organised around. It now leads the running screen, in your own units, next to pace.'],
     ['Charts you can scope', 'the swim decomposition chart draws the whole session, one stroke, or one set, and re-bases on whatever you picked. A mixed session opens on its dominant stroke, because a breaststroke length and a freestyle length are not the same measurement and a chart that mixes them shows a step at every changeover that is the stroke changing, not you.'],
     ['Your swims compared with each other', 'Loam now keeps each swim you import on this device and, once there are three in the same pool, fits the same read across them: whether your stroke is getting longer or shorter over weeks. This is the change a single session cannot show you, because your pace can sit still for a month while your stroke quietly shortens and your arms speed up to cover it. Only swims in the same pool and the same stroke are compared, since distance per stroke depends on the push-off you get from each wall.'],
     ['Per-stroke numbers, not a blend', 'a mixed swim reports distance per stroke, stroke rate and SWOLF for each stroke separately, and the headline tiles name which stroke they are quoting instead of averaging across strokes that do not compare.'],
