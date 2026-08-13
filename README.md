@@ -1,8 +1,6 @@
 # Loam analyzer
 
-Loam's in-browser activity analyzer for outdoor sports motion (MTB now, running next). Drop a
-Sensor Logger zip or a Loam Capture Combined CSV on the page; all processing happens locally in
-your browser. No backend, no account, nothing uploaded.
+Sports motion analysis from phone, Apple Watch and AirPods — MTB, road, running, lifting, golf and swimming. Native iOS capture app plus a single-file browser analyzer. Everything runs on device or in the browser: no backend, no accounts, data stays local.
 
 **Use it:** https://sfviking.github.io/loam-analyzer/
 
