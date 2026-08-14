@@ -12084,12 +12084,24 @@ async function analyze(files) {
     const declaredSportKey = ((typeof window !== 'undefined' && window.LOAM_SPORT)
       || (document.getElementById('sportOverride') && document.getElementById('sportOverride').value) || '').toLowerCase();
     const sportSuffix = (declaredSportKey && declaredSportKey !== 'auto') ? ':sport=' + declaredSportKey : '';
+    /* The POOL LENGTH is the same kind of input and was missing from the key. It is the single value
+       that turns detected blocks into a distance, and it multiplies every distance, pace and
+       distance-per-stroke in the render, so a cached analysis is only valid for the pool it was
+       computed in. Without it, naming a pool for the first time -- or correcting a wrong one -- replays
+       the stale render, so the swim comes back looking exactly as it did and the pick appears to have
+       done nothing. That is the same failure the sport suffix above was added for, on the input the
+       Swim view most often asks the swimmer to change.
+       Only added where a swim is possible (declared, or still undecided on Auto). A declared ride or
+       run is unaffected by a pool length, so it must not take a cache miss for one it once picked. */
+    const poolKeyM = loamPoolLengthM();
+    const poolSuffix = (poolKeyM && (!declaredSportKey || declaredSportKey === 'auto' || isSwimSport(declaredSportKey)))
+      ? ':pool=' + poolKeyM : '';
     let cacheKey = null, contentHash = null;
     if (!fitFile && /\.csv$/i.test(sensorFile.name)) {
       try { contentHash = await analysisCacheKeyForFile(sensorFile); }
       catch (e) { console.warn('analysis cache: hashing failed', e); contentHash = null; }
       if (superseded()) return;
-      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix);
+      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix + poolSuffix);
       _currentRunKey = contentHash;
       if (cacheKey) {
         try {
@@ -15864,11 +15876,27 @@ function swimCapturedNote(D) {
       <p class="swim-mech">${facts}. Your ${t.blocks} lengths are the stretches of unbroken stroking between pauses at the wall &mdash; Loam cannot see a turn, only a rest, so this works because you stopped at every wall. Swim a set continuously and it will read as one long block.</p>
     </div>`;
   }
+  /* The one case the swimmer can actually fix: lengths were found, the pool was never named.
+     The picker that answers it lives on the DROPZONE, which `hideAllSections` hides the moment
+     results render -- so this paragraph used to say "pick your pool on the drop screen, then drop
+     this recording again", which asks someone to discard the analysis they are reading and redo it,
+     and in the app (where a recording is opened from the Sessions list, not dropped) describes a
+     gesture that does not exist. The picker is offered HERE instead, inside the sentence that says
+     what is missing, and re-runs the analysis in place.
+
+     Its options are CLONED from the dropzone's select rather than written out again: three places
+     already have to agree on which pools exist (the Record screen, the Sessions re-tag menu, this
+     page), and a fourth copy is the one that would drift. Offered only when a re-run is possible --
+     a library or cache replay has no File to re-analyze, and the old instruction is right for it. */
+  const poolSel = document.getElementById('poolLength');
+  const fix = t.blocks > 1 && poolSel && _lastSensorFile
+    ? `No pool length was set, and nothing in wrist motion reveals how long a pool is. Name it and the lengths above become a distance and a pace: <select id="swimPoolFix" aria-label="Pool length">${poolSel.innerHTML}</select>`
+    : 'No pool length was set, and nothing in wrist motion reveals how long a pool is. Pick <strong>Swimming</strong> and your pool length on the drop screen, then drop this recording again, and the lengths above become a distance and a pace.';
   return `<div class="swim-set">
     <div class="swim-set-head"><span class="swim-set-n">No length count for this swim</span></div>
     <p class="swim-mech">${facts || 'No organized stroking was found in this recording.'}. ${t.blocks === 1
       ? 'You swam without pausing at the walls, and Loam detects <em>rests</em>, not turns &mdash; so there is no way to know how many lengths that was. Multiplying one block by one pool length would report a 50 m swim for a 400 m one, so no distance is shown at all.'
-      : 'No pool length was set, and nothing in wrist motion reveals how long a pool is. Pick <strong>Swimming</strong> and your pool length on the drop screen, then drop this recording again, and the lengths above become a distance and a pace.'}</p>
+      : fix}</p>
   </div>`;
 }
 
@@ -23765,20 +23793,44 @@ function loamSwimDisplayUnit() {
   /* Only meaningful for a swim, so it appears with the pick rather than sitting on the dropzone
      asking every rider about pools. A swim that auto-detects on Auto still gets whatever pool the
      swimmer picked previously (the value persists and is read even while hidden) and gets no
-     distance at all otherwise, which is the honest outcome for a question nobody answered. */
+     distance at all otherwise, which is the honest outcome for a question nobody answered.
+
+     AND it is hidden outright when the HOST declared one. In the app the swimmer names their pool on
+     the Record screen, that answer is injected as window.LOAM_POOL_LENGTH_M, and loamPoolLengthM
+     reads it FIRST -- so this control was visible, changeable, and completely inert, while showing
+     whatever value the page had last stored rather than the pool actually in use. Two different
+     answers to "which pool" on one screen, the exact thing injecting it was meant to stop. */
   const syncPool = () => {
     if (!poolWrap || !sportSel) return;
-    poolWrap.classList.toggle('hidden', (sportSel.value || '').toLowerCase() !== 'swimming');
+    const hostDeclared = Number.isFinite(Number(window.LOAM_POOL_LENGTH_M)) && Number(window.LOAM_POOL_LENGTH_M) > 0;
+    poolWrap.classList.toggle('hidden', hostDeclared || (sportSel.value || '').toLowerCase() !== 'swimming');
   };
   if (poolSel) {
     const stored = localStorage.getItem('loam_pool_m');
     if (stored != null && poolSel.querySelector(`option[value="${stored}"]`)) poolSel.value = stored;
     poolSel.addEventListener('change', () => {
       try { localStorage.setItem('loam_pool_m', poolSel.value); } catch (e) { /* private mode / quota */ }
+      /* Re-analyze, the same way the Calibration selector does. The pool length is read once, during
+         analysis, so picking one AFTERWARDS used to do nothing at all -- and the swimmer who most
+         needs this control is precisely the one already looking at a swim with no distance on it,
+         being told by the status line to name their pool. Guarded on a loaded recording: an IMPORTED
+         swim gets its distances from Apple and never consults this. */
+      if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
     });
   }
   if (sportSel) sportSel.addEventListener('change', syncPool);
   syncPool();
+
+  /* The same pick, made from inside the Swim view (see swimCapturedNote). Delegated on the document
+     because that select is written into innerHTML on every render, so nothing can hold a reference
+     to it. It writes through the dropzone's select, which is what loamPoolLengthM reads, so the two
+     controls cannot end up disagreeing about which pool this swim was in. */
+  document.addEventListener('change', (e) => {
+    if (!e.target || e.target.id !== 'swimPoolFix' || !poolSel) return;
+    poolSel.value = e.target.value;
+    try { localStorage.setItem('loam_pool_m', poolSel.value); } catch (err) { /* private mode / quota */ }
+    if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+  });
 }
 
 const fileInput = document.getElementById('fileInput');
@@ -24238,15 +24290,19 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '34967099a · 2026-08-13';
+const LOAM_BUILD = '47f48ef2b · 2026-08-14';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
-       channel that drops that sport from the Record screen's Activity picker -- but swimming is
-       never in that picker on ANY channel, because it cannot be recorded at all. Tagging it would
-       mean "hide this whenever swimming cannot be recorded", which is always, so the one sport that
-       most needs explaining would be the one never announced. */
-    ['Swimming, imported from Apple Health (beta)', 'Loam cannot record a swim — a phone cannot come in the pool, AirPods are not submersible, and Water Lock disables the watch screen — so it reads a swim your Apple Watch already recorded and adds the part the Fitness app does not show. Pace is exactly distance per stroke times stroke rate, and Loam fits both across every set, so you can see whether you held a pace by taking a better hold of the water or by spinning your arms faster. Per-set verdicts, a per-stroke breakdown, and the AI coach. Open water gets a different read rather than a worse one: how straight you held the line, and what the wandering cost you.'],
+       channel that drops that sport from the Record screen's Activity picker, and swimming reached
+       that picker only late in this release; an untagged item is announced on every channel, which
+       is what the sport that most needs explaining should get. */
+    ['Swimming (beta)', 'a pool swim reads from your Apple Watch, either one it already recorded (import it from the Sessions tab) or one you record with Loam: phone on the deck, watch on your wrist. A phone cannot come in the pool and AirPods are not submersible, so the wrist is the whole instrument either way. What Loam adds is the part the Fitness app does not show. Pace is exactly distance per stroke times stroke rate, and Loam fits both across every set, so you can see whether you held a pace by taking a better hold of the water or by spinning your arms faster. Per-set verdicts, a per-stroke breakdown, and the AI coach. Open water gets a different read rather than a worse one: how straight you held the line, and what the wandering cost you.'],
+    /* The capture path is its own item rather than a clause in the one above, because everything a
+       swimmer must know BEFORE the swim is here: where to leave the phone, that the pool length is
+       asked for, and the two limits (rest at the walls, one arm) that decide whether the recording
+       is readable at all. Learning those afterwards is learning them too late. */
+    ['Record a pool swim yourself (beta)', 'pick Swim on the Record screen, name your pool, and leave the phone at the end of the lane. Your watch counts the lengths and Loam records your stroke motion alongside, then opens the session in the Swim view. Two things to know before you push off: rest a moment at each wall, because Loam finds lengths from those pauses and never from turns, so a continuous swim reports no distance at all; and the strokes are peaks in your watch arm only, about half what Apple counts for the same swim. Importing is still the better source for a pool, and both live side by side.'],
     ['A swim card worth sending', 'a 4:5 poster of the session: what you swam up top, the two factors of your pace pulling apart underneath, and the read named. Open water gets your track instead, with the stretches where the line wandered picked out.'],
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
     /* Third element = the sport this item announces, so a build that hides that sport hides the item
@@ -24276,7 +24332,7 @@ const LOAM_WHATS_NEW = [
     ['Your swims compared with each other', 'Loam now keeps each swim you import on this device and, once there are three in the same pool, fits the same read across them: whether your stroke is getting longer or shorter over weeks. This is the change a single session cannot show you, because your pace can sit still for a month while your stroke quietly shortens and your arms speed up to cover it. Only swims in the same pool and the same stroke are compared, since distance per stroke depends on the push-off you get from each wall.'],
     ['Per-stroke numbers, not a blend', 'a mixed swim reports distance per stroke, stroke rate and SWOLF for each stroke separately, and the headline tiles name which stroke they are quoting instead of averaging across strokes that do not compare.'],
     ['Long lists fold away', 'the length ledger and other long sections collapse, and your choice sticks. Imported swims in the Sessions list are collapsed by default, so a run of imports no longer pushes your recent recordings off the first screen.'],
-    ['Importing a swim moved to Sessions', 'it was buried in Settings, two taps deep on a screen you open twice a year. It now sits on the Sessions tab, next to the swims it has already imported. Still not on the Record screen, because Loam cannot record a swim.'],
+    ['Importing a swim moved to Sessions', 'it was buried in Settings, two taps deep on a screen you open twice a year. It now sits on the Sessions tab, next to the swims it has already imported, and next to the swims you record yourself.'],
     ['Walks and runs count toward Cardio Fitness again', 'recording on Auto-detect logged the workout to Apple Health as "Other" with no route, and Apple only scores VO2 max from an outdoor walk, run or hike carrying its real type. A watch workout cannot be relabelled once it starts, and the Activity picker forgets your pick on every launch, so this was every session. Loam now starts the watch workout as your last walk or run, learning from both the activity you pick and the one it detects. It still starts on Auto-detect and still detects the sport itself; only what Health is told changes. Apple Watch only.'],
     ['Segment timing you can trust', 'gates snap consistently (even on switchbacks), distance is geodesic, dead seconds at the start gate are trimmed, and a standing start is flagged.'],
     ['Segment starts up the approach', 'drag Start above the detected drop-in; re-tagging upgrades the segment in place, keeping its history.'],
