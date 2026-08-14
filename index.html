@@ -1244,6 +1244,32 @@
       <option value="walking">Walking</option>
       <option value="weightlifting">Weightlifting (beta)</option>
       <option value="golf">Golf (beta)</option>
+      <option value="swimming">Swimming (beta)</option>
+    </select>
+  </div>
+  <!-- Pool length is asked, never inferred: nothing in a wrist stream reveals how long the pool is,
+       and it is the one input that turns detected blocks into a distance. Hidden until Swimming is
+       picked, since it is meaningless for every other sport. "Not sure" is a real option and not a
+       cop-out: without it the analysis still reports strokes, rate and duration, which is the honest
+       output rather than a degraded one. -->
+  <div class="sport-picker hidden" id="poolPickerWrap">
+    <label>Pool length</label>
+    <!-- "Not sure" is FIRST and is the default, deliberately. Defaulting to 25 m would put a
+         plausible distance on screen for a swimmer who never answered, and a wrong pool length is
+         not a small error: it scales every distance, pace and distance-per-stroke in the session by
+         a constant. Once a swimmer picks their pool it persists, so the cost is one choice, once. -->
+    <!-- data-unit is the pool's OWN unit, and it beats the page's Units toggle for this one session.
+         A swimmer who picks a 25 yd pool thinks in yards even if the rest of the app is metric, and
+         one who picks 50 m thinks in metres even on imperial: the pool is the more specific answer to
+         "which unit does this person read". Same principle as the import path, which takes the unit
+         from HKHealthStore.preferredUnits rather than from anything of ours. -->
+    <select id="poolLength">
+      <option value="">Not sure</option>
+      <option value="25" data-unit="m">25 m</option>
+      <option value="50" data-unit="m">50 m</option>
+      <option value="22.86" data-unit="yd">25 yd</option>
+      <option value="45.72" data-unit="yd">50 yd</option>
+      <option value="33.33" data-unit="m">33⅓ m</option>
     </select>
   </div>
   <div class="or">— or —</div>
@@ -1369,6 +1395,18 @@
   .rep-tempo { font: 400 10px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); margin-top: 4px; font-variant-numeric: tabular-nums; }
   .rep-tempo .rt-ecc { color: #6ab0f0; } .rep-tempo .rt-con { color: #37c6b5; }
   .strength-caveat { font-size: 12px; color: var(--text-dim, #9aa0aa); margin-top: 16px; max-width: 82ch; line-height: 1.6; }
+  /* The tail of a beta caveat, folded away. These paragraphs ran to 1000+ characters of unbroken
+     small grey text, which is the shape a reader skips -- and skipping them is exactly what must not
+     happen, since every clause is a limit on how far to trust a number. So the LIMIT leads, in full
+     sight, and the reasoning behind it sits one click down. Not `details.fold`: that one is styled
+     for whole sections with a section-title summary, and persists its state globally. */
+  .caveat-more { margin-top: 7px; }
+  .caveat-more > summary { cursor: pointer; list-style: none; color: var(--accent, #e87b3d); font-weight: 600; display: inline-block; }
+  .caveat-more > summary::-webkit-details-marker { display: none; }
+  .caveat-more > summary::marker { content: ''; }
+  .caveat-more > summary::after { content: ' +'; }
+  .caveat-more[open] > summary::after { content: ' \2013'; }
+  .caveat-more[open] > summary { margin-bottom: 5px; }
   /* Supported-lift scope + labeling requirement, up top where the caveat at the bottom never lands.
      Amber-bordered like the beta badge so it reads as the view's honesty banner, not an error. */
   .strength-scope { font-size: 12.5px; color: var(--text-dim, #9aa0aa); line-height: 1.6; max-width: 92ch;
@@ -2427,8 +2465,16 @@ function addCombinedRow(out, r) {
      wrap and the body-frame rotation rate flips sign as the arm turns over, so the golf swing path
      (gClubAngleTrace) needs the quaternion to trace a club angle that stays continuous through a
      200-degree backswing and past impact. The watch has always exported it; it was simply dropped
-     here. Absent rides simply leave sensors.wrist empty. */
-  if (r.wristMotion_pitch != null || r.wristMotion_roll != null || r.wristMotion_yaw != null || r.wristMotion_accelerationX != null)
+     here. Absent rides simply leave sensors.wrist empty.
+
+     The gate lists rotationRate too, which it did not until 2026-08-14. It read as harmless while
+     every consumer also wanted attitude or acceleration (a real watch streams all of them in one
+     row, so the four listed were never absent alone), but a swim is read from rotationRate ALONE --
+     it is the channel a stroke is a peak in -- and a row carrying only that was silently dropped,
+     which surfaces as "no watch motion in this recording" for a recording full of it. A gate that
+     admits a row should name every channel that row might be wanted for. */
+  if (r.wristMotion_pitch != null || r.wristMotion_roll != null || r.wristMotion_yaw != null
+      || r.wristMotion_accelerationX != null || r.wristMotion_rotationRateX != null)
     out.wrist.push({ t, pitch: r.wristMotion_pitch, roll: r.wristMotion_roll, yaw: r.wristMotion_yaw,
       ax: r.wristMotion_accelerationX, ay: r.wristMotion_accelerationY, az: r.wristMotion_accelerationZ,
       gx: r.wristMotion_gravityX, gy: r.wristMotion_gravityY, gz: r.wristMotion_gravityZ,
@@ -10440,6 +10486,13 @@ function normalizeSwimImport(raw) {
     totalDistanceM, totalStrokes,
     activeEnergyKcal: Number.isFinite(kcalRaw) && kcalRaw > 0 ? Math.round(kcalRaw) : null,
     lengths, hr, route, strokeSamples,
+    /* Provenance for the length ledger, and only a CAPTURED swim ever sets them (see
+       captured-payload.js). An Apple import's lengths are lap events the watch recorded at the wall;
+       a captured swim's are a REST detector's blocks, which is a weaker claim and one every surface
+       downstream has to be able to make differently. Defaulted rather than passed through blindly so
+       an import can never accidentally describe itself as inferred. */
+    lengthsInferred: raw.lengthsInferred === true,
+    restBased: raw.restBased === true,
   };
 }
 
@@ -10998,8 +11051,17 @@ function swimDigest(D) {
      rule about it can be applied rather than guessed at. */
   const poolM = session.poolLengthM != null ? r1(session.poolLengthM, 1) : null;
 
+  /* Which of the two swims this is, and it changes what the coach may say rather than only how it
+     phrases things. An import has Apple's lengths and no motion; a capture has Loam's wrist motion
+     and no lengths anybody measured. The prompt below forbids opposite things in the two cases, so
+     this rides on the digest and is read back out at the call site. */
+  const captured = session.source === 'captured';
+
   return {
-    sport: 'swimming (imported from Apple Health)',
+    source: captured ? 'captured' : 'apple-health',
+    sport: captured
+      ? 'swimming (RECORDED by Loam: Apple Watch wrist motion, no Apple Health data)'
+      : 'swimming (imported from Apple Health)',
     pool_length_m: poolM,
     location: session.locationType || 'unknown',
     display_unit: session.displayUnit || 'm',
@@ -11024,23 +11086,42 @@ function swimDigest(D) {
     heart_rate_avg_unreliable: s.hrAvg,
     heart_rate_max_unreliable: s.hrMax,
     active_energy_kcal: s.activeEnergyKcal,
+    /* A capture's lengths were inferred from rests at the wall, not measured. Stated as data so the
+       coach hedges the per-length reads rather than treating them as Apple's lap events. */
+    lengths_inferred_from_rests: captured ? (session.lengthsInferred === true) : undefined,
     sets,
-    data_caveats: swimCaveats(poolM, s),
+    data_caveats: swimCaveats(poolM, s, captured ? 'captured' : 'apple-health', session),
   };
 }
 
 /* Built as its own function so the caveats are testable and so the two that depend on THIS session
    (a short pool, and a session with no stroke counts) are stated as facts rather than as a generic
    disclaimer the coach can skim past. */
-function swimCaveats(poolM, s) {
-  const parts = [
+function swimCaveats(poolM, s, source = 'apple-health', session = null) {
+  /* The two swims share four caveats and contradict each other on three. An import has no motion
+     stream and Apple's measured lengths; a capture has Loam's wrist motion and lengths that a REST
+     detector inferred. Telling a swimmer who just recorded a swim that Loam cannot record swims is
+     the specific failure this branch exists to prevent. */
+  const captured = source === 'captured';
+  const parts = captured ? [
+    'BETA, estimate-only. This session was RECORDED by Loam: an Apple Watch on the wrist streaming rotation rate, with the phone on the pool deck. It did NOT come from Apple Health, so there are no Apple lengths, no Apple stroke counts, and no stroke-style labels anywhere in this data.',
+    'Every stroke here is a PEAK IN WRIST ROTATION of the watch arm only. Apple counts both arms; these counts are roughly half of an Apple figure for the same swim and must never be compared to one, to a published stroke count, or to an imported Loam swim.',
+    'There is no stroke classifier: every length is style "unknown". Never name a stroke, and never compare two lengths as though you knew they were the same stroke.',
+    'SWOLF here is time plus ONE-ARM strokes, so it is not the SWOLF anyone else means by the word. Use it only to compare this swimmer\'s lengths within this one session, never against a published figure, a watch reading, or another pool.',
+    session && session.lengthsInferred
+      ? 'The lengths were INFERRED FROM RESTS AT THE WALL, not from detected turns: a pause long enough to break the stroke rhythm ended each one. That was graded 4/4 on the one swim behind this feature, but only because the swimmer stopped at every wall. A continuous swimmer produces no such gaps, and a slow open turn can over-split one length into two. Hedge the length count and anything derived from it.'
+      : 'This swim did not break into separate lengths, so there is NO length count and NO distance at all: the swimmer did not pause at the walls and nothing here can detect a turn. Coach the stroke rate, the rhythm and the duration only, and do not estimate a distance, a pace, or a distance per stroke from anything.',
+    'There is NO push-off or glide measurement, NO stroke-to-stroke consistency read, NO body roll, and nothing about the non-watch arm, the kick, breathing, or head position. Those need analysis that does not exist yet, not data that is missing. Never infer or invent them.',
+    'Heart rate during a swim is unreliable: optical HR reads poorly through water. Treat it as indicative at most.',
+    'No swim ground truth exists for this project beyond a single 4 x 50 m session, so the stroke detector, the rest threshold and the trend thresholds are unverified heuristics.',
+  ] : [
     'BETA, estimate-only. This session was IMPORTED from Apple Health, not recorded by Loam: there is no motion stream of any kind, only Apple Watch per-length aggregates.',
     'Lengths, stroke counts and stroke styles are Apple\'s and are treated as ground truth; everything derived from them (distance per stroke, stroke rate, SWOLF, and the per-set trends) is arithmetic on those.',
     'There is NO push-off or glide measurement, NO stroke-to-stroke consistency, NO body roll, and nothing about the non-watch arm, the kick, breathing, or head position. HealthKit does not store the raw wrist motion those would need. Never infer or invent them.',
     'SWOLF is time plus strokes for one length, so it is only comparable within this one pool length and must not be compared to a published figure or to a session in a different pool.',
     'Heart rate during a swim is unreliable: optical HR reads poorly through water. Treat it as indicative at most.',
     'No swim ground truth exists for this project yet, so the set segmentation (a rest gap above 10 s) and the trend thresholds are unverified heuristics.',
-    'Loam CANNOT record a swim, and this is permanent rather than a missing feature: a phone cannot come in the pool, AirPods are not submersible, and Water Lock disables the watch screen. Importing from Apple Health is the ONLY path there is.',
+    'A swim can be recorded by Loam only with the phone left on the pool deck and the Apple Watch on the wrist, and even then it yields wrist motion alone. This session is not that: it is an Apple Health import, which is the richer path for a pool swim and the only path for one Loam did not record.',
   ];
   if (poolM != null && poolM <= 15) {
     parts.push(
@@ -11052,7 +11133,8 @@ function swimCaveats(poolM, s) {
   return parts.join(' ');
 }
 
-function swimCoachPrompt(level) {
+function swimCoachPrompt(level, source = 'apple-health') {
+  if (source === 'captured') return swimCapturedCoachPrompt(level);
   return `You are Loam, an expert swim coach reading an Apple Watch pool session that was IMPORTED from Apple Health. Turn the numbers into specific, honest, actionable coaching.
 
 Method - for every point, follow "metric -> mechanism -> action":
@@ -11069,7 +11151,48 @@ Swimming reference points:
 - Respect pool_length_m. In a short pool the push-off is a large fraction of every length (see data_caveats); hedge distance per stroke hard there.
 - NEVER invent a metric that is not in the data. There is no catch, no body roll, no kick, no breathing pattern, no head position, no glide length, and no stroke-to-stroke consistency here, because a HealthKit import has no motion stream at all. If the swimmer would want those, say so at most once and move on. Do not describe their technique as though you watched it.
 - Apple's stroke labels and length counts are ground truth. Do not second-guess them.
-- Loam CANNOT record a swim, so NEVER suggest recording one in Loam, capturing it with the Loam app, or that richer data would be available if they recorded it differently. That is not a gap waiting to be filled: a phone cannot come in the pool, AirPods are not submersible and Bluetooth does not cross water, and Water Lock disables the watch screen. An import is the only path that exists. If the athlete would want catch, kick, breathing or turn data, say once that no wrist device exposes it and move on -- do not point them at a capture mode that does not and will not exist.
+- NEVER suggest that recording this swim in Loam instead would have given richer data. Loam can record a swim (phone on the pool deck, watch on the wrist), but that path yields ONE ARM's wrist motion and no stroke styles, no Apple lengths and no two-arm stroke counts, so for a pool swim it is strictly thinner than the import you are reading. This is already the better source. If the athlete would want catch, kick, breathing or turn data, say once that no wrist device exposes it and move on -- do not point them at a capture mode that would not provide it either.
+
+Rules:
+- Ground every claim in the numbers provided. Respect the data_caveats and hedge when a read is confounded.
+- Report distances and paces in the session's own unit (display_unit): metres, or yards if that is what the pool was. Pace is per 100.
+- The athlete is at ${level} level - pitch depth and vocabulary accordingly.
+- Be direct and encouraging, never fluffy. Do not restate the whole dataset.
+
+Format your FIRST analysis as compact markdown:
+- One bold headline takeaway (a single line).
+- 2-4 bullets, each a single metric -> mechanism -> action.
+- A final line "**Next session:** ..." naming one focus.
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+}
+
+/* The CAPTURED swim's prompt, kept whole rather than assembled from the import prompt by
+   substitution. The two agree on the coaching method and on almost nothing else: this one has motion
+   and no stroke labels, that one has stroke labels and no motion, and the rule each needs most is
+   the rule the other must not be given. Splicing them would make every future edit ask which half it
+   belonged to. */
+function swimCapturedCoachPrompt(level) {
+  return `You are Loam, an expert swim coach reading a pool session Loam RECORDED itself: an Apple Watch on the wrist streaming rotation rate, with the phone on the pool deck. This is NOT an Apple Health import and it contains none of Apple's data. Turn the numbers into specific, honest, actionable coaching.
+
+Method - for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies about the swim.
+3. Action: give one concrete cue or set for next time.
+
+What this data IS, and it is thinner than an Apple Health swim in exactly three ways:
+- Every stroke is a peak in the rotation rate of the WATCH ARM. One arm, not two. An Apple stroke count for the same swim would be roughly double, so never compare these counts to a watch reading, to a published figure, or to an imported Loam swim.
+- There is no stroke classifier, so every length reads style "unknown". Never name a stroke and never compare lengths as though you knew they matched.
+- The lengths, when there are any, came from RESTS AT THE WALL rather than from detected turns. Read lengths_inferred_from_rests: when it is false there is no length count and no distance at all, and you must not estimate either.
+
+What this data has that an import does not: the motion itself, at 25 Hz. Today that buys the stroke timing and the rhythm. It does NOT yet buy push-off and glide quality, stroke-to-stroke consistency, or body roll - those analyses are not built. Say so at most once if the swimmer would want them; never describe their technique as though you watched it.
+
+Swimming reference points:
+- Speed is EXACTLY distance per stroke times stroke rate. Those two factors account for every pace change between them, and separating them is the entire reason this view exists. Holding a pace by taking a better hold of the water and holding it by spinning the arms faster are completely different sessions.
+- The per-set verdicts mean: "spinning" = distance per stroke fell while rate rose, the arms turned over faster for less water, usually the catch slipping as the swimmer tires. "fading" = at least one factor fell and neither rose. "lengthening" = a longer, slower stroke, usually deliberate. "building" = the swim got faster. "holding" = neither factor moved, which on a hard set is the outcome you want.
+- pace_spread_cv_pct is the spread of per-length times within a set, and it is the most trustworthy number here: it needs only the length boundaries and the clock, not the stroke counts.
+- Respect pool_length_m. In a short pool the push-off is a large fraction of every length (see data_caveats); hedge distance per stroke hard there.
+- NEVER invent a metric that is not in the data. There is no catch, no body roll, no kick, no breathing pattern, no head position, no glide length, and no turn quality.
+- Loam CAN record a swim and did record this one, so do not tell the swimmer otherwise. What is worth saying, ONCE and only if it is relevant: an Apple Watch swim workout imported from Apple Health carries Apple's own lengths, two-arm stroke counts and stroke styles, so importing the same swim would give a richer read than this one. Do not repeat it and do not turn it into an apology for the data.
 
 Rules:
 - Ground every claim in the numbers provided. Respect the data_caveats and hedge when a read is confounded.
@@ -11443,13 +11566,354 @@ function swimHistoryReference(trend) {
   };
 }
 
+
+  /* ---- ported from analyzer/sports/swim/captured.js ---- */
+/* `median` is the LoamSwim helper above, not a copy: captured.js declares its own so the module
+   stands alone, and every call here is guarded non-empty, so the two agree. Same arrangement as the
+   open-water port. */
+/** Sample rate the detector resamples onto. The watch streams a swim at 25 Hz
+ * (`WatchStreamPolicy.companionRateHz`), and a 1.7 s stroke is ~42 samples there. */
+const FS = 25;
+/** Centered smoothing window, in seconds. A stroke cycle is ~1.7 s, so 0.4 s kills sample jitter
+ * while leaving the cycle intact. The live counterpart (`LiveStrokeDetector`) uses the same figure
+ * as a causal EMA time constant, and lags slightly because of it. */
+const SMOOTH_S = 0.4;
+/** Minimum gap between strokes. The fastest interval observed on the validated swim was ~1.3 s, so
+ * this rejects a double-count on a two-peaked pull without touching a real stroke. */
+const MIN_STROKE_SEP_S = 0.9;
+/** No stroke for this long ends a block. Above the slowest observed stroke interval (2.1 s at the
+ * p90) with margin, and far above a flip turn, which is exactly why this finds rests and not turns.
+ *
+ * One subtlety, found while testing: the gap thresholded here is between STROKES, not between
+ * motion. A pause of X seconds sits inside an inter-stroke gap of up to X + one stroke period
+ * (~1.7 s), because it starts somewhere after one pull and ends somewhere before the next. So 3.0 s
+ * here can be tripped by a real pause of about 1.3 s, and a slow open turn CAN over-split a length.
+ * The validated swim's rests were 3.8-16 s, comfortably clear of that, so it did not bite there --
+ * a continuous-swim recording is what would measure how often it does. */
+const REST_GAP_S = 3.0;
+/** Below this a block is a detector artifact rather than a length: the validated swim produced two
+ * such fragments (1.8 s and 5.1 s) from false strokes during rests. */
+const MIN_BLOCK_S = 10;
+
+/**
+ * Wrist rotation magnitude on a uniform grid.
+ *
+ * Magnitude rather than one axis on purpose: which axis carries the stroke depends on how the watch
+ * sits and which arm it is on, and a swimmer's forearm rotates through the pull, so any single axis
+ * drops out at some point in the cycle. The magnitude does not care about orientation.
+ */
+function strokeSignal(wrist, opts = {}) {
+  const fs = opts.fs || FS;
+  const rows = (wrist || [])
+    .filter((r) => r && Number.isFinite(r.t))
+    .map((r) => ({
+      t: r.t,
+      m: Math.hypot(Number(r.rx) || 0, Number(r.ry) || 0, Number(r.rz) || 0),
+    }))
+    .sort((a, b) => a.t - b.t);
+  if (rows.length < 2) return { t0: 0, fs, values: [] };
+
+  const t0 = rows[0].t;
+  const t1 = rows[rows.length - 1].t;
+  const n = Math.floor((t1 - t0) * fs);
+  if (n < 2) return { t0, fs, values: [] };
+
+  const grid = new Array(n);
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    const tt = t0 + i / fs;
+    while (k + 1 < rows.length && rows[k + 1].t < tt) k++;
+    grid[i] = rows[k].m;
+  }
+
+  // Centered moving average. Offline can afford a symmetric window; the live detector cannot, which
+  // is the one deliberate difference between the two.
+  const w = Math.round((opts.smoothS || SMOOTH_S) * fs);
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let sum = 0;
+    let c = 0;
+    for (let j = Math.max(0, i - w); j <= Math.min(n - 1, i + w); j++) {
+      sum += grid[j];
+      c++;
+    }
+    out[i] = sum / c;
+  }
+  return { t0, fs, values: out };
+}
+
+/**
+ * Stroke times, as local maxima of the smoothed magnitude above the session median.
+ *
+ * The median as the threshold (rather than a fixed rad/s) is what makes this work across swimmers
+ * and strokes: it scales with however hard this particular person moves their arm, and half the
+ * samples sit below it by construction, so it separates the pull from the recovery rather than
+ * encoding an absolute effort.
+ */
+function detectStrokes(wrist, opts = {}) {
+  const { t0, fs, values } = strokeSignal(wrist, opts);
+  if (values.length < 3) return [];
+  const thresh = median(values);
+  const minSep = Math.round((opts.minSepS || MIN_STROKE_SEP_S) * fs);
+  const peaks = [];
+  for (let i = 1; i < values.length - 1; i++) {
+    if (values[i] > values[i - 1] && values[i] >= values[i + 1] && values[i] > thresh) {
+      if (!peaks.length || i - peaks[peaks.length - 1] >= minSep) peaks.push(i);
+    }
+  }
+  return peaks.map((i) => t0 + i / fs);
+}
+
+/**
+ * Split stroke times into blocks of continuous swimming, separated by rests.
+ *
+ * Named `blocks` and not `lengths` throughout, deliberately: a block is a stretch of unbroken
+ * stroking, which equals a length only when the swimmer stops at the wall. The caller decides
+ * whether that assumption holds; this function never claims it does.
+ */
+function segmentBlocks(strokeTimes, opts = {}) {
+  const gap = opts.restGapS || REST_GAP_S;
+  const minBlock = opts.minBlockS ?? MIN_BLOCK_S;
+  if (!strokeTimes || strokeTimes.length < 2) return [];
+
+  const raw = [];
+  let start = strokeTimes[0];
+  let prev = strokeTimes[0];
+  let count = 1;
+  for (let i = 1; i < strokeTimes.length; i++) {
+    if (strokeTimes[i] - prev > gap) {
+      raw.push({ start, end: prev, strokes: count });
+      start = strokeTimes[i];
+      count = 0;
+    }
+    prev = strokeTimes[i];
+    count++;
+  }
+  raw.push({ start, end: prev, strokes: count });
+
+  // Drop fragments. On the validated swim these were 1.8 s and 5.1 s of false strokes during rests;
+  // counted as lengths they would have turned a 200 m swim into 300 m.
+  return raw
+    .filter((b) => b.end - b.start >= minBlock)
+    .map((b, i) => ({ index: i, start: b.start, end: b.end, durationS: b.end - b.start, strokes: b.strokes }));
+}
+
+/**
+ * The full read for a captured swim.
+ *
+ * `poolLengthM` is what turns blocks into distance, and it has to come from the swimmer: nothing in
+ * a wrist stream reveals how long the pool is. Without it the result is honest but thin (strokes,
+ * rate, duration) — which is the correct output, not a degraded one.
+ */
+function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
+  const strokeTimes = detectStrokes(wrist, opts);
+  const blocks = segmentBlocks(strokeTimes, opts);
+
+  const swimmingS = blocks.reduce((a, b) => a + b.durationS, 0);
+  const inBlockStrokes = blocks.reduce((a, b) => a + b.strokes, 0);
+
+  /* Distance is offered only when BOTH hold: a pool length was supplied, and the swim broke into
+     more than one block. A single block means either a genuinely continuous swim (whose length count
+     this cannot know) or a swimmer who never paused, and in both cases multiplying one block by one
+     pool length would report a 50 m swim for a 400 m one. */
+  const lengthsInferred = poolLengthM > 0 && blocks.length > 1;
+  const distanceM = lengthsInferred ? blocks.length * poolLengthM : null;
+
+  const lengths = blocks.map((b) => {
+    const dist = lengthsInferred ? poolLengthM : null;
+    return {
+      index: b.index,
+      start: b.start,
+      end: b.end,
+      durationS: b.durationS,
+      strokes: b.strokes,
+      distanceM: dist,
+      // Distance per stroke and stroke rate: the two factors whose product IS speed, which is the
+      // decomposition the whole Swim view is built around (swim-spec.md, "What Loam adds").
+      distancePerStrokeM: dist && b.strokes > 0 ? dist / b.strokes : null,
+      strokeRateSpm: b.durationS > 0 ? (b.strokes / b.durationS) * 60 : null,
+      paceSecPer100m: dist > 0 ? (b.durationS / dist) * 100 : null,
+    };
+  });
+
+  return {
+    source: 'captured',
+    strokeTimes,
+    lengths,
+    lengthsInferred,
+    /* The caveat the surface must carry. What was graded is rest detection: a swimmer who does not
+       pause at the wall yields one block and no length count at all. */
+    restBased: true,
+    totals: {
+      blocks: blocks.length,
+      strokes: inBlockStrokes,
+      swimmingS,
+      distanceM,
+      distancePerStrokeM: distanceM && inBlockStrokes > 0 ? distanceM / inBlockStrokes : null,
+      strokeRateSpm: swimmingS > 0 ? (inBlockStrokes / swimmingS) * 60 : null,
+      paceSecPer100m: distanceM > 0 ? (swimmingS / distanceM) * 100 : null,
+    },
+  };
+}
+
+  /* ---- ported from analyzer/sports/swim/detect.js ---- */
+/** A swim's phone is stationary on the deck, so its GPS speed sits at the noise floor. Generous
+ * against a wandering fix; a walk is an order of magnitude above it. */
+const S_MAX_MED_SPEED = 0.6;
+/** And it never has a sustained fast stretch. A single bad fix can spike, so this is checked at the
+ * p90 rather than the max. */
+const S_MAX_P90_SPEED = 1.2;
+/** Net displacement over the session. A phone on the deck goes nowhere; GPS wander on a 7 minute
+ * session measured 7 m. */
+const S_MAX_NET_DISPLACEMENT_M = 60;
+/** Stroke rate band. The validated swimmer sat at 33-44 strokes/min; the band is wide enough for a
+ * fast pool swimmer (~60) and a slow breaststroker (~20) without reaching a runner's arm swing,
+ * which is ~90/min per arm and would be rejected by the GPS test anyway. */
+const S_MIN_STROKE_RATE = 15;
+const S_MAX_STROKE_RATE = 75;
+/** Enough stroking to be a swim rather than a few arm movements at a bus stop. */
+const S_MIN_STROKES = 30;
+/** And enough of the session spent doing it. */
+const S_MIN_SWIMMING_FRACTION = 0.25;
+
+/* Great-circle metres between two `{lat, lon}` fixes. Written self-contained (radius and the degree
+ * conversion inlined rather than hoisted to module constants) because this is ported verbatim into
+ * loam-mtb-analyzer.html, where a bare `R` at the enclosing scope would sit alongside a dozen
+ * functions that already use `R` for the swim analysis object. */
+function swimHaversineM(a, b) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat);
+  const dLon = rad(b.lon - a.lon);
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(x));
+}
+
+/**
+ * @param sensors  `{ location: [{t, lat, lon, speed}], wristMotion: [{t, rx, ry, rz}] }`
+ * @param ride     `{ start, end }` the analyzed window
+ * @returns `{ sport: 'swimming' | 'unknown', confidence, reasons }`
+ */
+function detectSwim(sensors, ride) {
+  const reasons = [];
+  const dur = Math.max(0, (ride?.end ?? 0) - (ride?.start ?? 0));
+  if (dur < 60) return { sport: 'unknown', confidence: 0, reasons: ['session too short to read as a swim'] };
+
+  /* 1. GPS present but not moving. This is the test that separates a swim from everything else, so
+        an ABSENCE of GPS is not treated as evidence for a swim -- that is a lift or a range session,
+        and `detectStrength` / `detectGolf` own those. */
+  const loc = (sensors.location || [])
+    .filter((r) => r && r.t >= ride.start && r.t <= ride.end)
+    .map((r) => ({ t: r.t, speed: r.speed, lat: r.lat ?? r.latitude, lon: r.lon ?? r.longitude }))
+    .filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lon));
+  if (loc.length < 20) {
+    return { sport: 'unknown', confidence: 0, reasons: ['no sustained GPS: a stationary indoor sport, not a pool swim'] };
+  }
+  const speeds = loc.map((r) => r.speed).filter((v) => Number.isFinite(v) && v >= 0);
+  if (speeds.length >= 10) {
+    const s = [...speeds].sort((a, b) => a - b);
+    const med = s[Math.floor(s.length / 2)];
+    const p90 = s[Math.floor(s.length * 0.9)];
+    if (med > S_MAX_MED_SPEED || p90 > S_MAX_P90_SPEED) {
+      return {
+        sport: 'unknown',
+        confidence: 0,
+        reasons: [`GPS median ${med.toFixed(2)} / p90 ${p90.toFixed(2)} m/s: moving, not a phone on the deck`],
+      };
+    }
+    reasons.push(`GPS median ${med.toFixed(2)} m/s over ${loc.length} fixes: stationary`);
+  }
+  const net = swimHaversineM(loc[0], loc[loc.length - 1]);
+  if (net > S_MAX_NET_DISPLACEMENT_M) {
+    return { sport: 'unknown', confidence: 0, reasons: [`${net.toFixed(0)} m net displacement: the phone travelled`] };
+  }
+  reasons.push(`${net.toFixed(0)} m net displacement: the phone stayed put`);
+
+  /* 2. A wrist stroking rhythmically. Without this a phone left on a table for ten minutes with a
+        watch on the wrist would read as a swim. */
+  const wrist = (sensors.wrist || sensors.wristMotion || []).filter((r) => r.t >= ride.start && r.t <= ride.end);
+  if (wrist.length < 100) {
+    return { sport: 'unknown', confidence: 0, reasons: ['no wrist motion: nothing to read a stroke from'] };
+  }
+  const strokeTimes = detectStrokes(wrist);
+  const blocks = segmentBlocks(strokeTimes);
+  const swimmingS = blocks.reduce((a, b) => a + b.durationS, 0);
+  const inBlock = blocks.reduce((a, b) => a + b.strokes, 0);
+  if (inBlock < S_MIN_STROKES) {
+    return { sport: 'unknown', confidence: 0, reasons: [`only ${inBlock} organized strokes`] };
+  }
+  const frac = swimmingS / dur;
+  if (frac < S_MIN_SWIMMING_FRACTION) {
+    return { sport: 'unknown', confidence: 0, reasons: [`stroking only ${(frac * 100).toFixed(0)}% of the session`] };
+  }
+  const rate = swimmingS > 0 ? (inBlock / swimmingS) * 60 : 0;
+  if (rate < S_MIN_STROKE_RATE || rate > S_MAX_STROKE_RATE) {
+    return { sport: 'unknown', confidence: 0, reasons: [`${rate.toFixed(0)} strokes/min is outside a swimming rhythm`] };
+  }
+  reasons.push(`${inBlock} strokes at ${rate.toFixed(0)}/min across ${blocks.length} block(s)`);
+
+  /* Confidence rises with how much of the session was spent stroking and how many blocks it broke
+     into: a multi-block session is a set with rests at the wall, which is the shape this was graded
+     on. Capped below 1 -- one recording is not a validated classifier, the same trap called out for
+     lift type and club type. */
+  const confidence = Math.min(0.9, 0.45 + Math.min(0.3, frac * 0.4) + Math.min(0.15, (blocks.length - 1) * 0.05));
+  return { sport: 'swimming', confidence, reasons };
+}
+
+  /* ---- ported from analyzer/sports/swim/captured-payload.js ---- */
+/**
+ * @param wrist        `[{t, rx, ry, rz}]` wrist rotation samples, epoch seconds
+ * @param poolLengthM  the swimmer's pool length, or null
+ * @param title        session name for the view's header
+ * @param displayUnit  'm' | 'yd', presentation only -- every value here stays metric
+ */
+function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayUnit = 'm' } = {}) {
+  const a = analyzeCapturedSwim({ wrist, poolLengthM });
+  const lengths = a.lengths.map((L) => ({
+    t0: L.start,
+    t1: L.end,
+    strokes: L.strokes > 0 ? L.strokes : null,
+    // Never guessed. See the header: there is no stroke classifier behind this.
+    style: 'unknown',
+  }));
+
+  const first = a.lengths[0];
+  const last = a.lengths[a.lengths.length - 1];
+
+  return {
+    /* NOT 'apple-health'. Every downstream surface needs to be able to tell these apart: the stroke
+       counts are one-wrist here and two-arm there, so a chart mixing them would be wrong by 2x. */
+    source: 'captured',
+    title,
+    start: first ? first.start : null,
+    end: last ? last.end : null,
+    /* 'pool' only when lengths were actually inferred. A single-block swim has no walls we can
+       demonstrate, and claiming 'pool' would invite the per-length reads it cannot support. */
+    locationType: a.lengthsInferred ? 'pool' : 'unknown',
+    poolLengthM: a.lengthsInferred ? poolLengthM : null,
+    displayUnit,
+    totalDistanceM: a.totals.distanceM,
+    totalStrokes: a.totals.strokes > 0 ? a.totals.strokes : null,
+    activeEnergyKcal: null,
+    lengths: a.lengthsInferred ? lengths : [],
+    hr: [],
+    route: [],
+    strokeSamples: [],
+    /* Carried so the view can label what it is showing rather than presenting an inference as a
+       measurement: lengths came from rests at the wall, not from detected turns. */
+    lengthsInferred: a.lengthsInferred,
+    restBased: true,
+    capturedTotals: a.totals,
+  };
+}
+
   return { normalizeSwimImport, swimLengthMetrics, isStrokeStyle,
+    analyzeCapturedSwim, detectStrokes, segmentBlocks, strokeSignal, capturedSwimPayload, detectSwim,
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
     swimEffortRead, swimPaceCv, isCountable, swimStyleSplits, swimPerStrokeSplit,
     swimPoolsMatch, swimHistoryRecord, swimHistoryUpsert, swimComparableSessions,
     swimHistoryStyles, swimHistoryGap, swimHistoryTrend, swimHistoryRead, swimHistoryReference,
     computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel,
-    swimDigest, swimCaveats, swimCoachPrompt,
+    swimDigest, swimCaveats, swimCoachPrompt, swimCapturedCoachPrompt,
     analyzeOpenWater, straightnessWindows, sliceStraightness, routeCumulative,
     strokeRateSeries, seriesTrendPct, navigationRead, routePoints };
 })();
@@ -11469,7 +11933,15 @@ function swimHistoryReference(trend) {
    because the two detectors share the same "no sustained GPS" evidence and the wrist swing burst is
    the more specific signal (analyzeStrength reads pocket-tilt oscillation, which a swing also
    produces). Returns the dashboard's sport id, not the detector's, since detectStrength says
-   'strength' where the routing here says 'weightlifting'. */
+   'strength' where the routing here says 'weightlifting'.
+
+   SWIMMING joins them here for the same reason and by a different route. A pool swim is not indoors
+   and is not tap-labelled: the phone sits on the deck in open air, so it records a full, healthy GPS
+   track that never moves, which is a shape no other sport in Loam produces. It reaches this function
+   because a stationary phone yields no moving window, and until detectSwim existed it fell past both
+   detectors to renderMinimalSummary -- a duration, ~0 m, and a map of the deck. It is asked LAST
+   because its evidence is the weakest of the three (a stroking wrist is a rhythm, not a burst) and
+   because both of the others reject on GPS the swim provides, so neither can be stolen by it. */
 function detectStationarySport(sensors, span) {
   if (!span || span.start == null || span.end == null) return null;
   try {
@@ -11480,6 +11952,10 @@ function detectStationarySport(sensors, span) {
     const s = LoamStrength.detectStrength(sensors, span);
     if (s.sport === 'strength') { dbg('[stationary detect]', JSON.stringify(s)); return 'weightlifting'; }
   } catch (e) { /* no gravity stream: not a lift */ }
+  try {
+    const w = LoamSwim.detectSwim(sensors, span);
+    if (w.sport === 'swimming') { dbg('[stationary detect]', JSON.stringify(w)); return 'swimming'; }
+  } catch (e) { /* no wrist stream: not a swim */ }
   return null;
 }
 
@@ -11696,11 +12172,23 @@ async function analyze(files) {
     const golfSwingMarks = canInfer ? LoamGolf.parseSwingMarks(sensors.annotations || [], spanRide) : null;
     let isGolf = /^golf$/.test(userSport)
       || (golfSwingMarks != null && golfSwingMarks.clubOf(spanRide.end) != null);
+    /* A captured swim takes the span window for the same reason a lift does, arrived at from the
+       opposite direction: the PHONE is stationary (on the pool deck) while the athlete is not, so
+       GPS ride-window detection finds nothing to segment and would discard the entire session. There
+       is no tap to infer from -- Water Lock makes the watch untappable mid-swim, which is why this
+       is declared-only and the auto path goes through detectSwim further down. */
+    let isSwim = /^(swim|swimming)$/.test(userSport);
 
     const phoneStartUTC = parseUTCFromFilename(sensorFile.name);
 
     let ride;
-    if (isLift || isGolf) {
+    if (isLift || isGolf || isSwim) {
+      /* A swim is the one stationary sport with no phone-side fallback: the phone is on the deck, so
+         its accelerometer recorded a table, and the WRIST is the only channel carrying the swim.
+         Named as its own error because "no motion data" would be false and unactionable here -- the
+         recording is full of phone motion data, all of it useless. */
+      if (isSwim && !(sensors.wrist && sensors.wrist.length))
+        throw new Error('No Apple Watch motion in this recording. A swim is read entirely from the wrist, so it needs a watch streaming to the phone; the phone itself only sat on the deck.');
       if (!sensors.gravity.length && !sensors.accel.length && !(sensors.wrist && sensors.wrist.length))
         throw new Error('No motion data found in this recording');
       ride = spanRide;
@@ -11720,6 +12208,7 @@ async function analyze(files) {
         const stationary = autoSport ? detectStationarySport(sensors, spanRide) : null;
         if (stationary === 'golf') { isGolf = true; ride = spanRide; }
         else if (stationary === 'weightlifting') { isLift = true; ride = spanRide; }
+        else if (stationary === 'swimming') { isSwim = true; ride = spanRide; }
         else if (!sensors.location.length) {
           throw new Error('No GPS in this recording. If it was a lift or golf, pick Weightlifting or Golf in the sport selector so it analyzes as a stationary session.');
         } else {
@@ -11741,6 +12230,8 @@ async function analyze(files) {
       ? { sport: 'golf', confidence: 1, reasons: ['declared or club-tagged golf'] }
       : isLift
       ? { sport: 'weightlifting', confidence: 1, reasons: ['declared or Set-tap-labeled lift'] }
+      : isSwim
+      ? { sport: 'swimming', confidence: 1, reasons: ['declared swim, or detectSwim on a stationary phone'] }
       : detectSport(sensors, ride);
     /* Auto: prefer detected sport. If unknown, default to running, since MTB needs a stable
        body-frame, which would silently produce garbage on a non-MTB recording, while the
@@ -11752,6 +12243,8 @@ async function analyze(files) {
       sport = 'golf';
     } else if (isLift) {
       sport = 'weightlifting';
+    } else if (isSwim) {
+      sport = 'swimming';
     } else {
       sport = detection.sport === 'unknown' ? 'running' : detection.sport;
     }
@@ -11888,6 +12381,55 @@ async function analyze(files) {
       /* Measured spread, not the uncalibrated 0-100 score (see golfConsistencyHeadline). */
       const repStr = summary.downswingSpread && summary.downswingSpread.cvPct != null ? ` · downswing ±${Math.round(summary.downswingSpread.cvPct)}%` : '';
       setStatus(`Range session loaded (${summary.nSwings} swings${tempoStr}${repStr})`, true);
+      return;
+    }
+
+    /* Swim path: a pool swim Loam RECORDED, phone on the deck and the watch on the wrist. The only
+       sport whose analysis reads a single channel -- the phone contributed nothing but a GPS fix
+       proving it did not move, and there is no calibration, no map and no turn detection.
+
+       It reuses the IMPORTED swim's view and analysis wholesale, via capturedSwimPayload, rather
+       than getting a parallel one. renderSwim and normalizeSwimImport are already written against
+       the HealthKit payload shape and are drift-pinned; a second Swim view would have started as a
+       copy and diverged on the first edit to either. What the adapter must NOT do is launder a
+       capture into looking like an import, so `source: 'captured'` rides on the payload and every
+       surface that says "Apple" branches on it. See analyzer/sports/swim/captured-payload.js. */
+    if (isSwimSport(sport)) {
+      onProgress('detecting strokes');
+      const poolLengthM = loamPoolLengthM();
+      const payload = LoamSwim.capturedSwimPayload({
+        wrist: (sensors.wrist || []).filter(r => r.t >= ride.start && r.t <= ride.end),
+        poolLengthM, title: sensorFile && sensorFile.name, displayUnit: loamSwimDisplayUnit(),
+      });
+      /* capturedTotals is attached HERE rather than passed through normalizeSwimImport, which
+         validates a foreign payload field by field and would have to either trust a nested object
+         wholesale or grow a validator for numbers it just computed locally. The two provenance
+         booleans do go through it: those are contract, and an import must be able to state that it
+         is NOT inferred. */
+      const session = { ...LoamSwim.normalizeSwimImport(payload), capturedTotals: payload.capturedTotals };
+      const swim = LoamSwim.analyzeSwim(session);
+      const summary = LoamSwim.computeSwimSummary(session, swim);
+      if (superseded()) return;
+      onProgress('rendering');
+      /* Deliberately NOT written to the swim history. That series is keyed on comparable pools and
+         mixes freely across sessions, and a captured swim's strokes count ONE arm against an
+         import's two, so a swimmer with both would see their distance-per-stroke halve on the weeks
+         they recorded instead of imported. Comparing the two is a real feature and needs a decision
+         about which number is the series; until then a capture is shown on its own. */
+      hideAllSections(); hide('loading'); hide('results'); show('swimResults');
+      const swimRender = { session, swim, summary, history: swimHistoryLoad(), sport: 'swimming',
+        title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name), imuRateHz };
+      if (cacheKey) { putCachedAnalysis(cacheKey, sport, swimRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+      renderSwim(swimRender);
+      const blocks = payload.capturedTotals.blocks;
+      /* Two different reasons produce no distance and the status must not confuse them: a swimmer
+         who never named a pool can fix it in one pick, while a swimmer who did not pause at the
+         walls cannot fix it at all (Loam detects rests, not turns). Blaming the pool length for the
+         second sends them to a picker that will not help. */
+      const why = blocks > 1 ? 'no distance without a pool length'
+        : 'no length count: swum without pausing at the walls';
+      setStatus(`Swim loaded (${blocks} block${blocks === 1 ? '' : 's'} · ${payload.capturedTotals.strokes} strokes`
+        + `${payload.totalDistanceM ? ' · ' + LoamSwim.swimDistanceLabel(payload.totalDistanceM, session.displayUnit) : ' · ' + why})`, true);
       return;
     }
 
@@ -14848,7 +15390,9 @@ function renderGolf(D) {
         <th title="Your own Good / Mishit taps.">quality</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <div class="strength-caveat"><strong>Beta:</strong> golf is new and only partly validated. Swings are detected from wrist angular speed (Apple Watch); at 50 Hz a downswing is only about 12 samples, so swing count and timing are usable but there is no club-head speed or ball data. Against a synced 120&nbsp;fps video of one real 10-swing session, swing count was exactly right and the session-average tempo was accurate to about 2%, but <strong>a single swing's tempo ratio is not</strong>: it carries roughly &plusmn;0.3 of noise, so read the average and ignore the row-to-row differences. Head turn is a direct AirPods attitude range; head sway (in the coach digest) is a double-integration upper bound, not a measurement, and neither has been shown to separate a swing from standing around. Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone and are the most speculative read; they are withheld entirely when the phone was not on your body. Consistency is a relative swing-to-swing score, honest without any absolute reference. Promotion past BETA still needs a stationary non-swing recording to measure false positives, and a session with an actual ball strike (every golf recording so far is rehearsal swings through empty air).</div>
+    ${betaCaveat(
+      `golf is new and only partly validated. Swings come from wrist angular speed (Apple Watch), so the count and the timing are usable, but there is <strong>no club-head speed and no ball data</strong>, and <strong>a single swing's tempo ratio is noise</strong> &mdash; roughly &plusmn;0.3 of it &mdash; so read the session average and ignore the row-to-row differences.`,
+      `Against a synced 120&nbsp;fps video of one real 10-swing session, swing count was exactly right and the session-average tempo was accurate to about 2%, while the per-swing ratios did not track the video at all: at 50&nbsp;Hz a downswing is only about 12 samples. Head turn is a direct AirPods attitude range; head sway (in the coach digest) is a double-integration upper bound, not a measurement, and neither has been shown to separate a swing from standing around. Hip turn and the lower-body-leads / arms-lead sequence come from the pocket phone and are the most speculative read; they are withheld entirely when the phone was not on your body. Consistency is a relative swing-to-swing score, honest without any absolute reference. Promotion past BETA still needs a stationary non-swing recording to measure false positives, and a session with an actual ball strike (every golf recording so far is rehearsal swings through empty air).`)}
   `;
   /* Start the Swing Cam once its stage is in the DOM (the section markup is built above). */
   if (swingCam) { renderSwingCamFacts(); swingCamStart(); }
@@ -15024,7 +15568,9 @@ function renderStrength(D) {
       <div class="rep-detail-grid">${repBlocks}</div>
     </div>` : ''}
     <div id="liftHistoryPanel">${liftHistorySection(liftHistory)}</div>
-    <div class="strength-caveat"><strong>Beta:</strong> lift analysis is validated on synthetic sessions only, not yet against a ground-truth recording, so treat rep counts, depth, bar position and bar speed as estimates. Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}The rep counter keys on vertical wrist travel, so support depends on the lift: squat and deadlift count reliably (checked against real sessions); overhead press counts cleanly but is unproven; standalone curls are noisier; bench press undercounts by about half; chin-ups and pull-ups do not count at all (the wrist is the anchor and never travels). Very slow near-max grinds can drop below the counting gate on any lift. Lift type is never auto-detected: it comes from your lift-chip taps, and a set without one is analyzed as a squat (high/low bar and depth are squat-only reads). A lift is stationary, so there is no GPS map, turns, or jumps.</div>
+    ${betaCaveat(
+      `treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.`,
+      `Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus one ground-truth squat session, not yet against a stationary non-lift recording, which is what would measure its false-positive rate. A lift is stationary, so there is no GPS map, turns, or jumps.`)}
   `;
   renderLiftSignature(Dc);
   renderLiftForm(Dc);
@@ -15205,13 +15751,30 @@ function renderSwim(D) {
   const dom = splits.length > 1 ? U.swimPerStrokeSplit(splits) : null;
   const perStroke = dom || s;
   const strokeTag = dom ? ' · ' + dom.style : '';
-  const tiles = (R.hasLengths ? [
+  /* A captured swim that produced no lengths (a continuous swimmer, or no pool length set) has no
+     distance and no pace, and the open-water tile set below would print "0 m" for the first and a
+     dash for the second. A zero is not a missing value: it reads as a measurement, and it is the
+     one number this path is most careful never to invent. So it gets its own three tiles, all of
+     which need nothing but the wrist. */
+  const capturedNoLengths = (D.session && D.session.source) === 'captured' && !R.hasLengths;
+  const cTot = (D.session && D.session.capturedTotals) || {};
+  const tiles = (capturedNoLengths ? [
+    tile(cTot.strokes != null ? cTot.strokes : '—', 'strokes (one arm)'),
+    tile(cTot.strokeRateSpm != null ? cTot.strokeRateSpm.toFixed(0) : '—', 'strokes/min'),
+    tile(fmtDuration(cTot.swimmingS || 0), 'swimming'),
+    tile(fmtDuration(s.durationS || 0), 'duration'),
+    s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max ~') : '',
+  ] : R.hasLengths ? [
     tile(U.swimDistanceLabel(s.totalDistanceM, unit), 'distance'),
     tile(fmtDuration(s.swimmingS || 0), 'swimming'),
     tile(U.swimPaceLabel(s.medianPace100S, unit).replace(/\/100(m|yd)$/, ''), `pace /100${unit}`),
-    tile(U.swimDpsLabel(perStroke.medianDps, unit), 'per stroke' + strokeTag),
-    tile(perStroke.medianStrokeRateSpm != null ? perStroke.medianStrokeRateSpm : '—', 'strokes/min' + strokeTag),
-    tile(perStroke.medianSwolf != null ? perStroke.medianSwolf : '—', 'swolf' + strokeTag),
+    /* On a CAPTURED swim a "stroke" is one pull of the watch arm, so distance-per-stroke is roughly
+       double the figure a watch would report and SWOLF is not the SWOLF anyone else means. The label
+       carries that, because these are exactly the numbers a swimmer would otherwise compare against
+       their watch. There is never a stroke tag here: a capture has no stroke styles at all. */
+    tile(U.swimDpsLabel(perStroke.medianDps, unit), (D.session && D.session.source) === 'captured' ? 'per arm-stroke' : 'per stroke' + strokeTag),
+    tile(perStroke.medianStrokeRateSpm != null ? perStroke.medianStrokeRateSpm : '—', (D.session && D.session.source) === 'captured' ? 'arm-strokes/min' : 'strokes/min' + strokeTag),
+    tile(perStroke.medianSwolf != null ? perStroke.medianSwolf : '—', (D.session && D.session.source) === 'captured' ? 'swolf (one arm)' : 'swolf' + strokeTag),
     tile(s.nLengths, 'lengths'),
     tile(s.nSets, 'sets'),
     s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max ~') : '',
@@ -15226,8 +15789,19 @@ function renderSwim(D) {
 
   /* Open water gets a DIFFERENT read, not a degraded pool one. Distance per stroke is confounded
      three ways there (current, sighting, zigzag) badly enough to invert a verdict, so the pool
-     decomposition is withheld and navigation takes its place. See analyzer/sports/swim/open-water.js. */
-  const body = R.hasLengths
+     decomposition is withheld and navigation takes its place. See analyzer/sports/swim/open-water.js.
+
+     A CAPTURED swim is a third case and must not fall into either. It is a pool swim, so the
+     open-water branch (a route map and a navigation read) has nothing to draw; and its lengths came
+     from rests rather than from Apple's lap events, so the pool branch's history series and stroke
+     split do not apply -- history mixes one-arm counts with two-arm ones, and every captured length
+     is style "unknown", which is a table with one row saying nothing. */
+  const captured = (D.session && D.session.source) === 'captured';
+  const body = captured
+    ? (R.hasLengths
+        ? swimCapturedNote(D) + swimDecompSection(R, unit) + swimSetCards(R, unit) + swimLedger(R, unit)
+        : swimCapturedNote(D))
+    : R.hasLengths
     /* After the set cards, not before them: the set cards carry no heading of their own, so a
        "By stroke" title above them reads as though they are part of it. Sits with the ledger
        instead, which is the other per-length breakdown. */
@@ -15237,8 +15811,10 @@ function renderSwim(D) {
 
   el.innerHTML = `
     <div class="section-title">Swim <span class="beta-badge">BETA</span></div>
-    <div class="strength-scope"><strong>Imported from Apple Health, not recorded by Loam.</strong>
-      Your watch already counts ${R.hasLengths ? 'lengths, strokes and stroke type' : 'distance, strokes and your GPS track'} better than a phone in a locker ever could, so Loam takes those as given and adds the part Apple does not show.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA) pending swim ground truth.</div>
+    ${captured ? `<div class="strength-scope"><strong>Recorded by Loam, not imported from Apple Health.</strong>
+      Everything here comes from the Apple Watch on your wrist, with your phone on the pool deck: each stroke is a peak in wrist rotation of <em>that arm only</em>, so these counts are roughly half what your watch would report for both arms and are not comparable to one. There is no stroke type, because nothing here can tell freestyle from breaststroke.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA).</div>`
+    : `<div class="strength-scope"><strong>Imported from Apple Health, not recorded by Loam.</strong>
+      Your watch already counts ${R.hasLengths ? 'lengths, strokes and stroke type' : 'distance, strokes and your GPS track'} better than a phone in a locker ever could, so Loam takes those as given and adds the part Apple does not show.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA) pending swim ground truth.</div>`}
     <div class="swim-tiles">${tiles}</div>
     <div id="swimSigWrap" class="swim-sig-wrap hidden">
       <div class="swim-sig-frame">
@@ -15249,12 +15825,51 @@ function renderSwim(D) {
     </div>
     <div class="strength-tablenote">${escapeHtml(where)}${s.styles && s.styles.length ? ' · ' + escapeHtml(s.styles.join(', ')) : ''}${s.restS ? ' · ' + fmtDuration(s.restS) + ' rest' : ''}${s.activeEnergyKcal ? ' · ' + s.activeEnergyKcal + ' kcal' : ''}</div>
     ${body}
-    <div class="strength-caveat"><strong>Beta:</strong> swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from Apple Watch and are shown as recorded. What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are not estimated here rather than being guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water. ${R.hasLengths ? 'SWOLF is only comparable within one pool length.' : 'Out here your GPS track is sparse (the watch only fixes when your wrist surfaces), so the navigation read is windowed over a full minute and single wobbles mean nothing.'}${swimShortPoolNote(s)}</div>
+    ${captured
+      ? betaCaveat(
+        `this swim was recorded by Loam and graded against exactly one real session, so every number here is an estimate. Strokes are peaks in <em>one wrist's</em> rotation &mdash; about half an Apple Watch stroke count for the same swim &mdash; so the SWOLF built on them is not the SWOLF anyone else means. Lengths come from <em>rests at the wall</em>, never from detected turns: swim continuously and this finds one long block and reports no distance at all.${swimShortPoolNote(s)}`,
+        `That one graded session was 4 x 50 m, and all four lengths were found. Reporting nothing for a continuous swim is the honest answer rather than a guess: a flip turn is over in a second or two and nothing in this data can see one. What Loam does not yet read from a captured swim: push-off and glide quality, stroke-to-stroke consistency, and body roll. The wrist motion for all three is here &mdash; the analysis is not built, which is a different thing from an import, where the data itself is missing.`)
+      : betaCaveat(
+        `swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from your Apple Watch and are shown as recorded. ${R.hasLengths ? 'SWOLF is only comparable within one pool length.' : 'Out here your GPS track is sparse (the watch only fixes when your wrist surfaces), so the navigation read is windowed over a full minute and single wobbles mean nothing.'}${swimShortPoolNote(s)}`,
+        `What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are left out rather than guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water.`)}
   `;
   renderSwimCard(D);
   if (R.hasLengths) { drawSwimDecomp(R, unit); drawSwimQuadrant(R); }
-  else { drawSwimRouteMap(R); drawSwimStrokeRate(R); }
+  /* A captured swim with no lengths has neither a route to map nor Apple stroke samples to plot; the
+     open-water charts would draw two empty axes. Its own note carries the read instead. */
+  else if (!captured) { drawSwimRouteMap(R); drawSwimStrokeRate(R); }
   renderCoachPanel(D, 'swimming');
+}
+
+/* The captured swim's own header block: what was measured, and — when there is no length count —
+   why, plus the one thing the swimmer can do about it.
+ *
+ * This exists because the failure mode for a captured swim is silent. A continuous swimmer, or one
+ * who never picked a pool length, gets a Swim view with a blank distance tile and no explanation,
+ * and the natural reading is that Loam is broken rather than that it is refusing to invent a number.
+ * The refusal is the feature, so it is stated. */
+function swimCapturedNote(D) {
+  const t = (D.session && D.session.capturedTotals) || {};
+  const inferred = D.session && D.session.lengthsInferred;
+  const rate = t.strokeRateSpm != null ? t.strokeRateSpm.toFixed(0) : null;
+  const facts = [
+    t.strokes ? `<strong>${t.strokes}</strong> strokes of your watch arm` : null,
+    rate ? `<strong>${rate}</strong> per minute while swimming` : null,
+    t.swimmingS ? `<strong>${fmtDuration(t.swimmingS)}</strong> of stroking` : null,
+  ].filter(Boolean).join(' &middot; ');
+
+  if (inferred) {
+    return `<div class="swim-set">
+      <div class="swim-set-head"><span class="swim-set-n">Lengths from your rests</span></div>
+      <p class="swim-mech">${facts}. Your ${t.blocks} lengths are the stretches of unbroken stroking between pauses at the wall &mdash; Loam cannot see a turn, only a rest, so this works because you stopped at every wall. Swim a set continuously and it will read as one long block.</p>
+    </div>`;
+  }
+  return `<div class="swim-set">
+    <div class="swim-set-head"><span class="swim-set-n">No length count for this swim</span></div>
+    <p class="swim-mech">${facts || 'No organized stroking was found in this recording.'}. ${t.blocks === 1
+      ? 'You swam without pausing at the walls, and Loam detects <em>rests</em>, not turns &mdash; so there is no way to know how many lengths that was. Multiplying one block by one pool length would report a 50 m swim for a 400 m one, so no distance is shown at all.'
+      : 'No pool length was set, and nothing in wrist motion reveals how long a pool is. Pick <strong>Swimming</strong> and your pool length on the drop screen, then drop this recording again, and the lengths above become a distance and a pace.'}</p>
+  </div>`;
 }
 
 
@@ -15740,6 +16355,28 @@ function swimShortPoolNote(s) {
  * must not spring back open), and it is deliberately GLOBAL rather than per-session: a reader who
  * folds the ledger away wants it folded away, not folded away for one swim. `defaultOpen` only
  * decides what happens before they have ever expressed a preference. */
+/* A beta caveat that leads with the limit and folds the reasoning away.
+ *
+ * The three beta views (golf, lift, swim) each closed with a single paragraph of 950 to 1200
+ * characters in small grey type. Everything in them is load-bearing -- they are what keeps an
+ * estimate from reading as a measurement -- and that is precisely why the format was wrong: a wall
+ * of small grey text is skimmed to nothing, so the caveats were least likely to be read exactly
+ * where they mattered most.
+ *
+ * The split is a rule, not a layout preference. `lead` carries anything that changes whether you
+ * TRUST A NUMBER (this is beta; a single swing's tempo is noise; pull-ups do not count), and it is
+ * always visible. `rest` carries why, how it was measured, and what would lift the limitation.
+ * Nothing is deleted, and nothing that a reader needs in order to read the numbers correctly may
+ * move into `rest`.
+ *
+ * Deliberately NOT persisted, unlike foldSection: this is two sentences of context, not a screen of
+ * ledger, and a reader who opened it once on a golf session has said nothing about swims. */
+function betaCaveat(lead, rest) {
+  return `<div class="strength-caveat"><strong>Beta:</strong> ${lead}
+    <details class="caveat-more"><summary>Why, and what would change it</summary>${rest}</details>
+  </div>`;
+}
+
 function foldSection(key, title, subtitle, bodyHtml, defaultOpen) {
   let open = defaultOpen;
   try {
@@ -19470,10 +20107,14 @@ function coachUnitsRule(metric) {
   return sys + ' Cadence (spm/rpm), power (W), W/kg, heart rate (bpm), grades (%), angles (degrees), bar speed (m/s), and centimetre-scale form numbers (vertical oscillation, head sway) are unit-neutral by convention and stay exactly as given.';
 }
 
-function coachSystemPrompt(sport, level, metric) {
+function coachSystemPrompt(sport, level, metric, source) {
   const units = coachUnitsRule(metric);
-  /* Swim carries its own unit rule (the pool's, not the athlete's toggle), so it takes `level` only. */
-  if (isSwimSport(sport)) return LoamSwim.swimCoachPrompt(level);
+  /* Swim carries its own unit rule (the pool's, not the athlete's toggle), so it takes `level` only
+     -- plus `source`, which selects between two prompts that forbid opposite things. The imported
+     prompt tells the coach not to send the swimmer off to record a swim in Loam; giving that to
+     someone who just recorded one is the specific failure the split exists to prevent, so the source
+     is threaded from the digest at both call sites rather than defaulted here. */
+  if (isSwimSport(sport)) return LoamSwim.swimCoachPrompt(level, source);
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
   if (isGolfSport(sport)) {
     return `You are Loam, an expert golf coach reading sensor-derived metrics from a single driving-range session (Apple Watch on the lead wrist, AirPods in, phone in a pocket). Turn them into specific, honest, actionable coaching.
@@ -20025,7 +20666,7 @@ function coachKeyDigest(digest) {
    model + system prompt so any of them changing yields a fresh key. Callers must attach history
    (await digestReady) first so descent_history is present in the key on both paths. */
 function coachFirstTurnKey(state, level, model, text) {
-  return analysisCacheKey([coachKeyDigest(state.digest), level, model, coachSystemPrompt(state.sport, level, U.metric()), text].join('|'));
+  return analysisCacheKey([coachKeyDigest(state.digest), level, model, coachSystemPrompt(state.sport, level, U.metric(), state.digest && state.digest.source), text].join('|'));
 }
 
 /* On (re)opening a ride, if the deterministic first insight was generated before (this session or a
@@ -20102,7 +20743,7 @@ async function sendCoach(text) {
   coachState.messages.push({ role: 'user', content: text });
 
   const system = [
-    { type: 'text', text: coachSystemPrompt(coachState.sport, level, U.metric()) },
+    { type: 'text', text: coachSystemPrompt(coachState.sport, level, U.metric(), coachState.digest && coachState.digest.source) },
     { type: 'text', text: 'SESSION DATA (JSON):\n' + JSON.stringify(coachState.digest), cache_control: { type: 'ephemeral' } }
   ];
   const bubble = appendCoachBubble('assistant', '');
@@ -22872,6 +23513,14 @@ function renderCachedAnalysis(cached) {
     renderGolf(d);
     return;
   }
+  /* A CAPTURED swim, cached by the analyze() swim path. An imported one never reaches the cache at
+     all (window.onSwimImport renders straight through), so this branch only ever replays a
+     recording, and it reopens into #swimResults the same way the other two do. */
+  if (isSwimSport(cached.sport)) {
+    hideAllSections(); hide('results'); show('swimResults');
+    renderSwim(d);
+    return;
+  }
   if (d && d.gpsOnly) { renderAllGps(d); return; }
   /* Route to the road renderer only when the cached data actually carries the power-pipeline fields
      (session/metrics/mmp). A phone recording merely tagged 'road' (Road picked, or LOAM_SPORT=road
@@ -23078,6 +23727,54 @@ function updateAttachFitVisibility(sport, hasFit) {
   const btn = document.getElementById('attachFitBtn');
   if (!btn) return;
   btn.classList.toggle('hidden', !(sport === 'mtb' && !hasFit && _lastSensorFile && !LOAM_EMBEDDED));
+}
+
+/* The pool length the swimmer swam in, in metres, or null for "not sure". Asked rather than
+   inferred: nothing in a wrist stream reveals how long the pool is, and it is the single input that
+   turns detected blocks into a distance. Persisted because a swimmer swims the same pool most weeks,
+   and read by window.LOAM_POOL_LENGTH_M first so the iOS host's own setting wins when it declared
+   one for this recording. */
+function loamPoolLengthM() {
+  const host = typeof window !== 'undefined' ? Number(window.LOAM_POOL_LENGTH_M) : NaN;
+  if (Number.isFinite(host) && host > 0) return host;
+  const sel = document.getElementById('poolLength');
+  if (sel) { const v = Number(sel.value); return Number.isFinite(v) && v > 0 ? v : null; }
+  const stored = Number(localStorage.getItem('loam_pool_m'));
+  return Number.isFinite(stored) && stored > 0 ? stored : null;
+}
+/* The unit this swim should READ in, which is the pool's own and not the page's Units toggle. A
+   swimmer who picked a 25 yd pool thinks in yards even on a metric page, and one who picked 50 m
+   thinks in metres even on an imperial one -- the pool is the more specific answer to "what does
+   this person read", the same way the import path takes it from HKHealthStore.preferredUnits rather
+   than from anything of ours. Falls back to the toggle only when no pool was named. */
+function loamSwimDisplayUnit() {
+  const sel = document.getElementById('poolLength');
+  const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+  const declared = opt && opt.getAttribute('data-unit');
+  if (declared === 'yd' || declared === 'm') return declared;
+  return loamUnits() === 'metric' ? 'm' : 'yd';
+}
+{
+  const sportSel = document.getElementById('sportOverride');
+  const poolSel = document.getElementById('poolLength');
+  const poolWrap = document.getElementById('poolPickerWrap');
+  /* Only meaningful for a swim, so it appears with the pick rather than sitting on the dropzone
+     asking every rider about pools. A swim that auto-detects on Auto still gets whatever pool the
+     swimmer picked previously (the value persists and is read even while hidden) and gets no
+     distance at all otherwise, which is the honest outcome for a question nobody answered. */
+  const syncPool = () => {
+    if (!poolWrap || !sportSel) return;
+    poolWrap.classList.toggle('hidden', (sportSel.value || '').toLowerCase() !== 'swimming');
+  };
+  if (poolSel) {
+    const stored = localStorage.getItem('loam_pool_m');
+    if (stored != null && poolSel.querySelector(`option[value="${stored}"]`)) poolSel.value = stored;
+    poolSel.addEventListener('change', () => {
+      try { localStorage.setItem('loam_pool_m', poolSel.value); } catch (e) { /* private mode / quota */ }
+    });
+  }
+  if (sportSel) sportSel.addEventListener('change', syncPool);
+  syncPool();
 }
 
 const fileInput = document.getElementById('fileInput');
@@ -23537,7 +24234,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'ad5cf50a9 · 2026-08-13';
+const LOAM_BUILD = 'd45d58246 · 2026-08-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -23563,6 +24260,12 @@ const LOAM_WHATS_NEW = [
     ['The Crash chip finally tells you something', 'tapping Crash used to leave a timestamp nothing read. A marked ride now opens with the corner you went down in, what you carried into it, and your lean against your own median for that side, plus a marker on the map and the timeline and the whole thing in the AI coach. The tap is not the crash — nobody taps mid-slide — so it anchors to the last second you were still moving and tells you how long the get-up took. It also checks whether the crash moved your phone in your pocket, which would quietly invalidate every lean angle for the rest of the ride. It says what was different about that corner, not why you crashed; Loam has no crash detector and does not pretend to.'],
   ] },
   { h: 'Better', items: [
+    /* No sport tag, and deliberately no sport NAMED that a channel might hide: this item is about
+       every activity's guide, so wording it around one of them would make the whole entry vanish on
+       a build that hides that sport (see whatsNewVisibleSections). */
+    ['A set-up guide for your sport', 'the tips screen opened on mountain biking and stayed there, so a runner or a lifter scrolled through somebody else\'s sport looking for their own. Every activity now has its own guide — where the phone goes, which wearable matters, which taps the analysis needs — and the info button on the Record screen opens the one you declared. Swimming is in there too, explaining why it is the one sport Loam imports rather than records.'],
+    ['Where your data goes, in one place', 'the privacy story was true and invisible: stated once during the welcome walkthrough, then nowhere, so the next thing a new user met was a background-location prompt from an app they had known for ninety seconds. Settings now has a Your data screen that lists everything which can leave the phone — iCloud, Strava, the AI coach, weather — each showing whether you have switched it on, plus what every permission buys you and what saying no actually costs. The short version of that answer now sits under the permission prompts themselves, where the decision is made.'],
+    ['Explanations you can skim', 'several help footers had grown to a paragraph or more of unbroken text under a toggle, which is a wall people skip rather than read. They now lead with one line that answers the question and keep the reasoning and caveats behind a More tap. Nothing was deleted; a limit that would change whether you trust a number still leads.'],
     ['Cadence comes from your watch', 'if you carry your phone in your hand, the cadence you were shown could collapse — holding the phone still to take a photo stops its step counter outright, and on the run this was built from the live number read more than 20 spm low a third of the time, once bottoming out at 26 spm while the runner was doing 177. Loam now reads cadence from the watch on your wrist instead, live and in the analysis, and says which sensor it used. Your arm keeps swinging whatever the phone is doing. Falls back to the phone when you run without the watch.'],
     ['Distance on your wrist while you run', 'the watch showed pace but never how far you had gone, which is the number most runs are actually organised around. It now leads the running screen, in your own units, next to pace.'],
     ['Charts you can scope', 'the swim decomposition chart draws the whole session, one stroke, or one set, and re-bases on whatever you picked. A mixed session opens on its dominant stroke, because a breaststroke length and a freestyle length are not the same measurement and a chart that mixes them shows a step at every changeover that is the stroke changing, not you.'],
