@@ -1142,6 +1142,8 @@
   .coach-bubble code { background:var(--bg); padding:1px 4px; border-radius:3px; font-family:'JetBrains Mono',monospace; font-size:12px; }
   .coach-typing { color:var(--text-dim); font-style:italic; }
   .coach-err { color:var(--critical); }
+  .coach-cut { color:var(--text-muted); font-size:11px; font-style:italic; margin-top:6px; }
+  .coach-retry { margin-top:8px; }
   .coach-cta { margin-top:12px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
   .coach-start-btn { background:var(--accent); color:var(--on-accent); border:none; border-radius:var(--radius); padding:9px 18px; font-weight:600; font-family:inherit; font-size:14px; cursor:pointer; }
   .coach-start-btn:hover { filter:brightness(1.08); }
@@ -1712,15 +1714,16 @@
   <section id="jumpsSection" class="hidden">
     <div class="section-title">
       Jumps
-      <span class="subtitle">from Levo/Specialized FIT · ground truth, no algorithm</span>
+      <span class="subtitle">hang + takeoff from Levo/Specialized FIT · landing measured by phone or wrist</span>
     </div>
     <div class="panel stats-panel jump-summary" id="jumpSummary"></div>
+    <div id="jumpLapsCard" class="hidden"></div>
     <details class="panel jumps-details" id="jumpsDetails">
       <summary><span id="jumpsTableToggle">All jumps</span></summary>
       <div style="overflow-x:auto;">
         <table id="jumpsTable">
           <thead><tr>
-            <th>#</th><th>Time</th><th>Hang</th><th>Distance</th><th>Takeoff speed</th><th>Lat / Lon</th>
+            <th>#</th><th>Time</th><th>Hang</th><th title="Your bike computer's takeoff speed x hang time, not a measured landing point">Distance</th><th>Takeoff speed</th><th title="Peak impact on landing, measured by the phone or the bar-locked wrist -- the FIT does not record this">Landing</th><th>Lat / Lon</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -1940,6 +1943,21 @@
       <div id="formNote" class="dim" style="font-size:12px; margin:8px 2px 4px;"></div>
       <div class="dim" style="font-size:12px; margin-top:6px;">Left: rear view, the bike+rider tilts with your measured lean; the ghost needle marks this turn's peak lean, the arc and tint go grey (approach), green (cornering), amber (exit). Right: the turn from above on the real map, rotated so your direction of travel points up (so a left turn bends left here too, matching the rider, and you can still recognize the trail); the marker advances along the track in step with the replay, and the small compass shows where north ended up. When AirPods are clean the gaze needle shows where you look relative to where the bike is going (green = into the corner). The <strong>Most scrubbed</strong> chips above jump to the turns where you bled the most speed (braking or sliding).</div>
     </div>
+  </section>
+
+  <section id="analogSection" class="hidden">
+    <div class="section-title">
+      Motor off
+      <span class="subtitle">stretches you rode analog</span>
+    </div>
+    <div class="panel stats-panel" id="analogSummary"></div>
+    <div class="panel" style="overflow-x:auto; margin-top:12px;">
+      <table id="analogTable">
+        <thead><tr><th>#</th><th>Time</th><th>Duration</th><th>Pedaling</th><th>Dist</th><th>Gain</th><th>Cadence</th><th>Your watts</th><th>Avg HR</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="analogCaveat" class="dim" style="font-size:12px; margin-top:8px;"></div>
   </section>
 
   <section id="cadPowerSection" class="hidden">
@@ -2295,6 +2313,23 @@ function extractFitData(messages) {
       hr:  f[3], cad: f[4],
       dist: f[5] != null ? f[5] / 100.0 : null,
       speed, power: f[7], altitude: alt,
+      /* The FIT e-bike block (fields 82, 117-120), which a Specialized Levo populates and a
+         non-assisted bike does not. `power` (field 7) is the RIDER's watts and `motorPower`
+         (field 82) is the MOTOR's; Loam read field 7 and called it "motor assist" until
+         2026-08-14, which inverted every e-MTB read on the page. Both proofs, measured on
+         data/mtb/Evening Ride.fit and boyscout-2026-06-20.fit, are worth keeping because the
+         two channels look interchangeable at a glance (both are watts, both peak near 730):
+           - Assist mode scales field 82 by 10.2x from eco to turbo (56 -> 572 W median), which
+             is what an assist multiplier does. Field 7 moves 1.85x (80 -> 148 W), which is a
+             rider working a bit harder on the steeper stuff.
+           - Integrating field 82 over a ride accounts for 82-92% of the battery energy drained
+             (700 Wh pack), i.e. a normal mid-drive efficiency. Field 7 accounts for 20-30%,
+             which no motor could be, since the missing energy has nowhere to go.
+         assistMode is the bike's own per-second label (1 Eco, 2 Trail, 3 Turbo on this Levo,
+         6 seen rarely). Its OFF value is unknown: no recording in data/ has the motor off, so
+         nothing may assume 0 means off without a ride that proves it. batteryPct is monotonic
+         and is the independent witness that the motor did or did not do work. */
+      motorPower: f[82], batteryPct: f[118], assistMode: f[119],
       // Road-cycling record fields. temp is degC direct; TE/PS are FIT scale 2
       // (percent). balanceRaw is the undecoded uint8 (see decodeLrBalance in
       // garmin-fit.js): its right-vs-left flag convention needs verifying
@@ -4296,6 +4331,11 @@ function drawRuns() {
           renderCoachHighlights(_runsD, 'mtb');
           renderGeekStats(_runsD, 'mtb');
           refreshCoachFacts(_runsD, 'mtb');
+          /* The lap-to-lap jump card is a claim-making surface for the same reason: it names a
+             specific feature and says which pass was further. A jump logged on the road home must
+             leave it on the tap, not at the next open. Idempotent, and a no-op on rides with no
+             repeated jump. */
+          renderJumpLaps(_runsD);
         }
       } catch (e2) {}
     };
@@ -5861,11 +5901,35 @@ function turnsOnLabelledTrails(D) {
 function coachDigestD(D, sport) {
   if (!isMtbFamily(sport) || !D || !D.turns || !D.turns.length || !D.summary || !D.ride || !D.sensors) return D;
   try {
+    let out = D;
+    /* Jumps get the same treatment the turns below have, and for the same two reasons.
+
+       Scoping: the digest's jump block would otherwise contradict itself, because
+       same_jump_across_runs reads the rider's "not a trail" marks (it makes a claim about one
+       feature) while count / longest_distance / detail came straight off the unscoped summary. A
+       coach handed "12 jumps, longest 20 ft" beside a comparison set that had already disowned the
+       road home is being handed two different rides.
+
+       Placement: this is resolved at the CALL SITE because buildDigest is pinned to
+       analyzer/core/coaching/coaching.js and must stay pure, while both jumpsOnLabelledTrails and
+       jumpLapClusters need the dashboard's run segmentation and the rider's stored marks. The
+       pinned body just reads the finished fields. */
+    const scopedJumps = jumpsOnLabelledTrails(D);
+    const jumpLaps = jumpLapClusters(D);
+    if (jumpLaps.length || scopedJumps.length !== (D.ridingJumps || []).length) {
+      let totalAirtime = 0, maxAirtime = 0;
+      for (const j of scopedJumps) if (j.hang != null) { totalAirtime += j.hang; if (j.hang > maxAirtime) maxAirtime = j.hang; }
+      const longest = topJumps(scopedJumps, 1)[0] || null;
+      out = { ...out, ridingJumps: scopedJumps, jumpLaps, summary: { ...out.summary,
+        nJumps: scopedJumps.length, totalAirtime, maxAirtime,
+        maxJumpDist: longest && longest.dist != null ? longest.dist : null,
+        nBigJumps: bigJumpCount(scopedJumps) } };
+    }
     const { turns: scoped } = descentScopedTurns(
       D.sensors.location, D.sensors.baro, D.ride, turnsOnLabelledTrails(D));
-    if (scoped.length === D.turns.length) return D;
+    if (scoped.length === D.turns.length) return out;
     const radii = scoped.map(T => T.radius).filter(r => !isNaN(r));
-    return { ...D, turns: scoped, summary: { ...D.summary,
+    return { ...out, turns: scoped, summary: { ...out.summary,
       nTurns: scoped.length,
       leftTurns: scoped.filter(T => T.direction === 'L').length,
       rightTurns: scoped.filter(T => T.direction === 'R').length,
@@ -7272,7 +7336,7 @@ function computeBestEfforts(loc, ride, distances) {
 
 const DB_NAME = 'loam-library';
 const DB_VERSION = 5;  // v4: 'sources' store (FIT bytes for re-openable GPS rides); v5: savedAt index on 'sources' so it can be oldest-first evicted like analyses/coaching
-const ANALYSIS_CACHE_VERSION = 11;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read)
+const ANALYSIS_CACHE_VERSION = 12;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -12512,10 +12576,13 @@ async function analyze(files) {
       }
     }
 
-    /* e-MTB when the FIT carries a motor-power channel (Specialized logs motor assist as `power`).
-       Same analysis as MTB; only the stored/displayed/Strava sport label changes, so the ride matches
-       Ride segments and uploads as an e-bike ride. Manual "e-MTB"/"MTB" picks are left as chosen. */
-    if (userSport === 'auto' && sport === 'mtb' && fitInRide && fitInRide.filter(r => r.power != null && r.power > 0).length >= 20) {
+    /* e-MTB when the FIT carries the motor-power channel (FIT field 82, which only an assisted bike
+       populates). Same analysis as MTB; only the stored/displayed/Strava sport label changes, so the
+       ride matches Ride segments and uploads as an e-bike ride. Manual "e-MTB"/"MTB" picks are left
+       as chosen. This used to test `power` (field 7), which is the RIDER's watts on every bike, so an
+       analog MTB ridden with a power meter would have labelled itself an e-MTB and been uploaded to
+       Strava as one. Motor power is the channel that actually means "there is a motor here". */
+    if (userSport === 'auto' && sport === 'mtb' && fitInRide && fitInRide.filter(r => r.motorPower != null && r.motorPower > 0).length >= 20) {
       sport = 'emtb';
       dbg('[sport detect] FIT has motor power -> emtb');
       if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
@@ -12557,9 +12624,28 @@ async function analyze(files) {
       ridingJumps = deduped;
     }
 
-    // Phone-only airtime estimate. The Specialized FIT is ground truth, so only fall back to the
-    // phone when no FIT supplies jumps; otherwise the two would compete for the same air.
-    const airtime = ridingJumps.length ? { jumps: [], status: 'has-fit' } : detectAirtime(sensors, ride);
+    /* The phone's freefall detector now runs EITHER WAY, but it is never a second jump list.
+       With no FIT it is the jump source, as before, and the Airtime section shows it. With a FIT
+       the FIT stays the only list -- it is ground truth for hang and takeoff -- and the phone
+       contributes the one thing the FIT structurally cannot carry: what the landing felt like.
+
+       That distinction is the point. The FIT's distance is takeoff x hang (see the jump reads
+       block), so a short jump and a jump that came up short look identical in it. The landing g
+       separates them: short hang with a soft landing is a smaller jump, short hang with a hard
+       landing is a case. Both computations already existed; suppressing one of them wholesale was
+       throwing that read away on exactly the rides equipped to make it. */
+    const phoneAir = detectAirtime(sensors, ride);
+    let airtime = phoneAir;
+    if (ridingJumps.length) {
+      ridingJumps = attachJumpLandings(ridingJumps, phoneAir.jumps);
+      /* jumps stays EMPTY so nothing double-lists and the Airtime section stays hidden; the
+         status carries how many of the FIT's jumps the phone could actually corroborate, which is
+         what the jumps card reports rather than implying every row has a measured landing. */
+      airtime = {
+        jumps: [], status: 'has-fit', hasWatch: phoneAir.hasWatch,
+        landingsMatched: ridingJumps.filter(j => j.landingG != null).length,
+      };
+    }
 
     onProgress('computing summary');
     const summary = computeSummary(sensors.location, sensors.baro, ride, turns, calibWin, ridingJumps);
@@ -12677,6 +12763,117 @@ function detectAirtime(sensors, ride) {
   return { jumps, status: jumps.length ? 'ok' : 'none', scaledFromG: scale !== 1, hasWatch };
 }
 
+/* ========== Jump reads (pinned to analyzer/sports/mtb/jumps.js) ==========
+
+   The one thing this block exists to get right: the Specialized FIT's `dist` IS NOT A MEASURED
+   DISTANCE, IT IS `takeoff x hang`. Measured across all 45 GPS-carrying jumps in
+   data/mtb/boyscout-2026-06-20.fit and data/mtb/Evening Ride.fit, `dist` equals `speed_mps * hang`
+   to a maximum relative error of 0.009%, which is rounding. The head unit never sees where the bike
+   landed; it multiplies. So hang, takeoff and distance are TWO facts, not three, and every read
+   here is a DECOMPOSITION (distance = takeoff speed x hang time) rather than a leaderboard over a
+   third independent achievement. See jumps.js for the full derivation, the measured reason GPS
+   alone cannot say two jumps are the same jump, and the standing rule that none of this may be
+   promoted to a cause or a target. */
+
+const JUMP_LANDING_MATCH_S = 2.0;
+const JUMP_BIG_M = 4.572;
+const JUMP_SAME_SPOT_M = 20;
+const JUMP_MIN_HITS = 2;
+
+function jumpGapMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (lat2 - lat1) * r, dLon = (lon2 - lon1) * r;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function attachJumpLandings(fitJumps, airJumps) {
+  const out = (fitJumps || []).map(j => ({ ...j }));
+  const air = (airJumps || []).filter(a => a && a.t_phone != null && a.landingG != null);
+  if (!out.length || !air.length) return out;
+  const pairs = [];
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].t_phone == null) continue;
+    for (let k = 0; k < air.length; k++) {
+      const dt = Math.abs(out[i].t_phone - air[k].t_phone);
+      if (dt <= JUMP_LANDING_MATCH_S) pairs.push({ i, k, dt });
+    }
+  }
+  pairs.sort((a, b) => a.dt - b.dt || a.i - b.i || a.k - b.k);
+  const usedFit = new Set(), usedAir = new Set();
+  for (const p of pairs) {
+    if (usedFit.has(p.i) || usedAir.has(p.k)) continue;
+    usedFit.add(p.i); usedAir.add(p.k);
+    const a = air[p.k];
+    out[p.i].landingG = a.landingG;
+    out[p.i].landingFromWatch = !!a.landingFromWatch;
+    out[p.i].depthG = a.depthG != null ? a.depthG : null;
+    out[p.i].landingDt = +(out[p.i].t_phone - a.t_phone).toFixed(3);
+  }
+  return out;
+}
+
+function jumpSplit(from, to) {
+  if (!from || !to) return null;
+  const v1 = from.speed_mps, t1 = from.hang, v2 = to.speed_mps, t2 = to.hang;
+  if (v1 == null || t1 == null || v2 == null || t2 == null) return null;
+  const dSpeed = v2 - v1, dHang = t2 - t1;
+  return {
+    dDist: v2 * t2 - v1 * t1,
+    dSpeed, dHang,
+    fromSpeed: dSpeed * (t1 + t2) / 2,
+    fromHang: dHang * (v1 + v2) / 2,
+  };
+}
+
+function clusterJumpHits(jumps) {
+  const usable = (jumps || [])
+    .filter(j => j && j.lat != null && j.lon != null && j.dist != null && j.run != null && j.t_phone != null)
+    .slice().sort((a, b) => a.t_phone - b.t_phone);
+  const clusters = [];
+  for (const j of usable) {
+    let best = null;
+    for (const c of clusters) {
+      if (c.runs.has(j.run)) continue;
+      const d = jumpGapMeters(j.lat, j.lon, c.lat, c.lon);
+      if (d <= JUMP_SAME_SPOT_M && (!best || d < best.d)) best = { c, d };
+    }
+    if (best) {
+      const c = best.c;
+      c.hits.push(j); c.runs.add(j.run);
+      c.lat += (j.lat - c.lat) / c.hits.length;
+      c.lon += (j.lon - c.lon) / c.hits.length;
+    } else {
+      clusters.push({ lat: j.lat, lon: j.lon, hits: [j], runs: new Set([j.run]) });
+    }
+  }
+  return clusters
+    .filter(c => c.hits.length >= JUMP_MIN_HITS)
+    .map(c => {
+      const hits = c.hits.slice().sort((a, b) => a.t_phone - b.t_phone);
+      let best = hits[0], worst = hits[0];
+      for (const h of hits) { if (h.dist > best.dist) best = h; if (h.dist < worst.dist) worst = h; }
+      return {
+        lat: c.lat, lon: c.lon, hits, best, worst,
+        spread: best.dist - worst.dist,
+        split: jumpSplit(worst, best),
+      };
+    })
+    .sort((a, b) => b.best.dist - a.best.dist);
+}
+
+function topJumps(jumps, n) {
+  return (jumps || [])
+    .filter(j => j && j.dist != null)
+    .slice()
+    .sort((a, b) => b.dist - a.dist || (a.t_phone || 0) - (b.t_phone || 0))
+    .slice(0, n || 3);
+}
+
+function bigJumpCount(jumps) {
+  return (jumps || []).filter(j => j && j.dist != null && j.dist >= JUMP_BIG_M).length;
+}
+
 /* The turn set the headline stats describe: descents only, or all turns when no descent was found.
 
    Turn detection also fires on slow uphill weaving, whose tiny-radius micro-turns pollute the median
@@ -12733,12 +12930,18 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
   const nJumps = ridingJumps ? ridingJumps.length : 0;
   let totalAirtime = 0, maxAirtime = 0;
   if (ridingJumps) for (const j of ridingJumps) if (j.hang != null) { totalAirtime += j.hang; if (j.hang > maxAirtime) maxAirtime = j.hang; }
+  /* Distance headline. Null rather than 0 when no jump carried one (phone-only airtime has hang and
+     landing g but no takeoff speed, so it can never produce a distance), which is what lets the hero
+     card tell "no jumps" apart from "jumps, but this channel cannot measure how far". */
+  const longestJump = ridingJumps && ridingJumps.length ? (topJumps(ridingJumps, 1)[0] || null) : null;
+  const maxJumpDist = longestJump && longestJump.dist != null ? longestJump.dist : null;
   return {
     duration: ride.end - ride.start, distance, maxSpeed, altDrop,
     nTurns: descentTurns.length, nTurnsAll: turns.length,
     turnsScopedToDescents,
     rightTurns, leftTurns, medianRadius, calibWin,
     nJumps, totalAirtime, maxAirtime,
+    maxJumpDist, nBigJumps: bigJumpCount(ridingJumps || []),
   };
 }
 function median(arr) {
@@ -19488,7 +19691,30 @@ function mtbHighlights(D) {
     if (cp && cp.lugPct != null && cp.lugPct >= 25) cands.push(`You lugged below 60 rpm on <strong>${cp.lugPct}%</strong> of your loaded climbing, the motor was carrying you. Spin lighter to save the legs.`);
   }
   if (s.nTurns) cands.push(`<strong>${s.nTurns} turns</strong> (${s.rightTurns}R / ${s.leftTurns}L), median apex radius ${U.small(s.medianRadius)}.`);
-  if (s.nJumps) cands.push(`<strong>${s.nJumps} jumps</strong>, biggest air ${(s.maxAirtime || 0).toFixed(2)}s.`);
+  /* Jumps. Scoped off the labelled-trail set rather than read from s.maxJumpDist, which is over
+     every jump in the ride, for the same reason the mechanics block above is rescoped: this card
+     makes a claim, and a jump logged on the road home is not the ride's headline.
+
+     PLACEMENT, not presence, was what made jumps invisible here. This line has always existed, but
+     it sat 5th of 5 candidates in front of the .slice(0, 3) below, so on any ride that produced a
+     lean asymmetry and a braking finding it was never once shown. A jump that clears JUMP_BIG_M is
+     a headline fact and is spliced in at index 1 -- after the lead mechanics finding, because
+     mechanics are the differentiator and go first, but ahead of the third-ranked one, which is the
+     slot it has to take from. Anything shorter stays a volume stat at the back: the reference set's
+     MEDIAN jump is 9.9 ft, so promoting those would push a real mechanics finding off the card on
+     essentially every jump ride. */
+  const heroJumps = jumpsOnLabelledTrails(D);
+  const longest = topJumps(heroJumps, 1)[0] || null;
+  if (longest && longest.dist != null && longest.dist >= JUMP_BIG_M) {
+    const nBig = bigJumpCount(heroJumps);
+    const landed = longest.landingG != null ? `, landed ${longest.landingG.toFixed(1)} g` : '';
+    cands.splice(1, 0,
+      `Longest jump <strong>${U.small(longest.dist)}</strong> `
+      + `(${U.speed(longest.speed_mps)} takeoff &times; ${Math.round(longest.hang * 1000)} ms hang${landed})`
+      + `${nBig > 1 ? `, ${nBig} of ${heroJumps.length} over ${U.small(JUMP_BIG_M)}` : ''}.`);
+  } else if (s.nJumps) {
+    cands.push(`<strong>${s.nJumps} jumps</strong>, biggest air ${(s.maxAirtime || 0).toFixed(2)}s.`);
+  }
   return cands.slice(0, 3);
 }
 
@@ -19967,12 +20193,33 @@ function buildDigest(D, sport, metric) {
       count: s.nJumps || 0,
       total_airtime_s: r1(s.totalAirtime),
       max_airtime_s: r1(s.maxAirtime, 2),
+      ...u.len('longest_distance', s.maxJumpDist),
+      big_jumps: s.nBigJumps || 0,
       detail: jumps.filter(j => j.hang != null).map(j => ({
-        hang_ms: r1(j.hang * 1000, 0), ...u.speed('takeoff', j.speed_mps), ...u.len('distance', j.dist)
+        hang_ms: r1(j.hang * 1000, 0), ...u.speed('takeoff', j.speed_mps), ...u.len('distance', j.dist),
+        landing_g: r1(j.landingG, 1),
       })),
-      source: D.hasFit ? 'Specialized FIT (ground truth)' : 'none'
+      /* Hits of one jump on more than one pass, with the change split into its two exact factors.
+         This is the only jump block that compares rather than lists, so it is the one the coach can
+         say anything with -- and the note below is what stops it saying the wrong thing. */
+      same_jump_across_runs: (D.jumpLaps || []).map(c => ({
+        hits: c.hits.length,
+        ...u.len('furthest', c.best.dist), ...u.len('shortest', c.worst.dist),
+        ...u.len('spread', c.spread),
+        ...(c.split ? {
+          ...u.len('from_takeoff_speed', c.split.fromSpeed),
+          ...u.len('from_hang', c.split.fromHang),
+          ...u.speed('takeoff_speed_change', c.split.dSpeed),
+          hang_change_ms: r1(c.split.dHang * 1000, 0),
+        } : {}),
+      })),
+      source: D.hasFit ? 'Specialized FIT (ground truth)' : 'none',
+      /* Written into the digest rather than only the system prompt because it is a fact about the
+         DATA, and a coach that treats distance as a third achievement will produce sentences like
+         "great distance AND great speed" that double-count one thing. */
+      note: 'jump distance is NOT measured. The bike computer computes it as takeoff_speed x hang_time, verified to 0.009% on this project\'s reference rides, so distance, takeoff and hang are TWO independent facts, not three: never praise or fault distance and speed as separate achievements. Distance also assumes a level landing, so a downhill landing clears more ground than reported. landing_g is measured by the phone or the bar-locked wrist (the FIT does not record it) and is present only on jumps the phone could corroborate; a missing landing_g means unmatched, NOT a soft landing. NEVER tell the rider to carry more speed into a jump, to go bigger, or to change their approach to a specific feature: nothing here observed the lip, the landing, the transition or the rider, a longer jump is not a better one, and this is the one topic in Loam where bad advice injures someone. Describe what changed between hits; do not prescribe.',
     },
-    data_caveats: 'Turns and apex radius are derived from a torso-mounted phone (body-frame yaw rate), so they reflect body motion, not bar inputs. Jumps come from the Specialized FIT when present; phone-only jump detection is not used.'
+    data_caveats: 'Turns and apex radius are derived from a torso-mounted phone (body-frame yaw rate), so they reflect body motion, not bar inputs. Jump hang and takeoff speed come from the Specialized FIT when present; phone-only jump detection is not used for the jump list, though the phone does supply the measured landing impact. See jumps.note before saying anything about jump distance.'
   };
   /* Turn mechanics the coach could not see before: left/right lean symmetry and where speed was
      scrubbed. These are the body-motion signals that separate Loam from a GPS tracker. */
@@ -20038,6 +20285,40 @@ function buildDigest(D, sport, metric) {
       })),
       note: 'Motor power is the e-bike motor assist (not rider watts). Efficient e-MTB technique is a high spin (~70-95 rpm); lugging a low cadence (<60 rpm) under heavy assist is less efficient and tires the legs. The climbs array breaks this down per climb (biggest first).'
     };
+    /* Only when the rider actually rode some of it analog, so a normal e-MTB ride carries nothing
+       and the model is never invited to comment on the absence of a thing. */
+    const an = analogSummary(D.fitInRide);
+    if (an && an.count) {
+      digest.ebike.motor_off = {
+        stretches: an.count,
+        total_min: r1(an.analogS / 60, 1),
+        pct_of_ride: an.analogPct,
+        ...u.dist('total', an.dist),
+        ...u.elev('total_gain', an.gain),
+        segments: an.segments.slice(0, 5).map(s => ({
+          at_min: r1(s.tStart / 60, 1), duration_min: r1(s.duration / 60, 1),
+          pedaling_pct: s.pedalingPct,
+          ...u.dist('dist', s.dist), ...u.elev('gain', s.gain),
+          cadence_rpm: s.avgCad != null ? r1(s.avgCad, 0) : null,
+          rider_w: s.avgRiderW != null ? r1(s.avgRiderW, 0) : null,
+          avg_hr: s.avgHr != null ? r1(s.avgHr, 0) : null,
+        })),
+        note: 'Stretches the rider covered with the MOTOR OFF, riding the e-bike as an analog bike -- a '
+          + 'deliberate choice they made, so treat it as training intent and not as a mistake or a low '
+          + 'battery. rider_w here is the RIDER\'s own watts (the one channel that does not go quiet when '
+          + 'the motor does), so unlike the rest of this block it IS a fitness signal and can be coached '
+          + 'as effort. Three limits, all binding. (1) Durations are LOWER BOUNDS: a stretch ends where '
+          + 'the recording can first prove the motor was back on, so a coast after switching it on is '
+          + 'still counted inside it -- never quote a duration as exact or compare two of them to a '
+          + 'precision they do not have. (2) The detector has never been graded against a real motor-off '
+          + 'ride; its thresholds only guarantee it does not fire on assisted riding. Do not present a '
+          + 'stretch as certain, and if the rider says it is wrong, believe them. (3) Above ~20 mph the '
+          + 'motor stops assisting anyway, so nothing here describes fast descending. Do NOT compare '
+          + 'these times or speeds against the rider\'s assisted efforts on the same trail as if the '
+          + 'difference were fitness: an assisted lap and an analog lap are different activities, and '
+          + 'this ride alone cannot separate the motor from the legs, the line, or the day.',
+      };
+    }
   }
   return digest;
 }
@@ -20324,61 +20605,131 @@ Format your FIRST analysis as compact markdown:
 For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
 }
 
-/* Streaming browser-direct call to the Claude Messages API. */
-async function callClaude({ system, messages, onText, onDone, onError, signal }) {
+/* Backoff between coach attempts, and the HTTP statuses worth a second attempt: overload and the
+   transient 5xx family. Everything else (401 bad key, 400 bad request, 404 unknown model) fails the
+   same way every time, so retrying it only spends the rider's time. */
+const COACH_RETRY_DELAYS_MS = [800, 2500];
+const COACH_RETRY_STATUS = [408, 429, 500, 502, 503, 504, 529];
+
+/* Every network-level failure inside a WKWebView surfaces as the same opaque WebKit string, "Load
+   failed", with no status, no host and no reason. On a phone on a trailhead that is almost always the
+   cell link rather than anything wrong with Loam, and "Stream error: Load failed" reads as a bug in
+   the app. Lead with what the rider can do about it and KEEP the raw text: it is the only diagnostic
+   this path has, and dropping it would make a genuine failure indistinguishable from a lost bar. */
+const COACH_NET_ERR_RE = /load failed|network connection was lost|failed to fetch|networkerror|connection appears to be offline|timed out|timeout/i;
+function coachErrorText(msg) {
+  const raw = String(msg == null ? '' : msg);
+  return COACH_NET_ERR_RE.test(raw) ? `Lost the connection to Claude — check your signal and try again. (${raw})` : raw;
+}
+
+/* Wait between attempts, and stay abortable while waiting: the rider can hit Stop mid-backoff, and a
+   sleep that ignored that would fire a paid call after they asked for silence. Resolves false if the
+   wait was cut short by an abort. */
+function coachRetryPause(ms, signal) {
+  return new Promise(resolve => {
+    let timer = null;
+    const finish = (ok) => { if (timer) clearTimeout(timer); if (signal) signal.removeEventListener('abort', onAbort); resolve(ok); };
+    const onAbort = () => finish(false);
+    if (signal && signal.aborted) { resolve(false); return; }
+    timer = setTimeout(() => finish(true), ms);
+    if (signal) signal.addEventListener('abort', onAbort);
+  });
+}
+
+/* Streaming browser-direct call to the Claude Messages API.
+   Transient failures are RETRIED here rather than reported, because in the app this runs inside a
+   WKWebView on a phone: a cell handoff or a dead spot mid-answer is ordinary, and the rider's only
+   recourse was to retype the question. The retry is deliberately limited to attempts that have
+   produced NO TEXT YET -- nothing is on screen, so a fresh attempt cannot duplicate or visibly
+   restart an answer being read, and the ephemeral cache_control on the session-data block makes the
+   second attempt cheap. Once text has streamed, the drop is reported with the partial kept and the
+   decision left to the rider, since re-asking is a paid call and half an answer is still information. */
+async function callClaude({ system, messages, onText, onDone, onError, onNotice, signal }) {
   const key = coachKey();
   const model = coachModel();
   if (!key) { onError('No API key set.'); return; }
-  let resp;
-  try {
-    resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', signal,
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      /* max_tokens bounds thinking AND the visible answer together, so adaptive thinking spends from
-         the same budget the coaching text needs. 4096 was tight enough on the newer models (which
-         think by default and write longer) that a deep MTB analysis could run out mid-bullet; the
-         per-sport prompts already cap the format at a handful of bullets, so the extra headroom buys
-         completeness rather than length. Streaming, so a big ceiling costs no latency. */
-      body: JSON.stringify({ model, max_tokens: 8192, stream: true, thinking: { type: 'adaptive' }, system, messages })
-    });
-  } catch (e) { if (e.name === 'AbortError') { onDone(''); return; } onError('Network error: ' + e.message); return; }
-  if (!resp.ok || !resp.body) {
-    let msg = 'HTTP ' + resp.status;
-    try { const j = await resp.json(); if (j.error && j.error.message) msg = j.error.message; } catch (e) {}
-    onError(msg); return;
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '', full = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t.startsWith('data:')) continue;
-        const data = t.slice(5).trim();
-        let ev; try { ev = JSON.parse(data); } catch (e) { continue; }
-        if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
-          full += ev.delta.text; onText(ev.delta.text, full);
-        } else if (ev.type === 'error') {
-          onError((ev.error && ev.error.message) || 'stream error'); return;
+  /* max_tokens bounds thinking AND the visible answer together, so adaptive thinking spends from
+     the same budget the coaching text needs. 4096 was tight enough on the newer models (which
+     think by default and write longer) that a deep MTB analysis could run out mid-bullet; the
+     per-sport prompts already cap the format at a handful of bullets, so the extra headroom buys
+     completeness rather than length. Streaming, so a big ceiling costs no latency. */
+  const body = JSON.stringify({ model, max_tokens: 8192, stream: true, thinking: { type: 'adaptive' }, system, messages });
+
+  for (let attempt = 0; ; attempt++) {
+    let full = '';
+    /* Retryable only while this attempt has shown nothing and the rider has not stopped us. */
+    const mayRetry = () => attempt < COACH_RETRY_DELAYS_MS.length && !full && !(signal && signal.aborted);
+    const pause = () => coachRetryPause(COACH_RETRY_DELAYS_MS[attempt], signal);
+
+    let resp;
+    try {
+      resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST', signal,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true'
+        },
+        body
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') { onDone(''); return; }
+      if (mayRetry()) {
+        if (onNotice) onNotice('Connection dropped — retrying…');
+        if (!await pause()) { onDone(''); return; }
+        continue;
+      }
+      onError(coachErrorText('Network error: ' + e.message)); return;
+    }
+    if (!resp.ok || !resp.body) {
+      let msg = 'HTTP ' + resp.status;
+      try { const j = await resp.json(); if (j.error && j.error.message) msg = j.error.message; } catch (e) {}
+      if (COACH_RETRY_STATUS.indexOf(resp.status) !== -1 && mayRetry()) {
+        if (onNotice) onNotice('Claude is busy — retrying…');
+        if (!await pause()) { onDone(''); return; }
+        continue;
+      }
+      onError(msg); return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', streamErr = null;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith('data:')) continue;
+          const data = t.slice(5).trim();
+          let ev; try { ev = JSON.parse(data); } catch (e) { continue; }
+          if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
+            full += ev.delta.text; onText(ev.delta.text, full);
+          } else if (ev.type === 'error') {
+            /* An error EVENT is the server ending the answer on purpose (overloaded, or the request
+               was rejected after headers). Report it as-is: unlike a dropped socket it says why. */
+            onError((ev.error && ev.error.message) || 'stream error'); return;
+          }
         }
       }
+    } catch (e) {
+      if (e.name === 'AbortError') { onDone(full); return; }
+      streamErr = e;
     }
-  } catch (e) {
-    if (e.name === 'AbortError') { onDone(full); return; }
-    onError('Stream error: ' + e.message); return;
+    if (streamErr) {
+      if (mayRetry()) {
+        if (onNotice) onNotice('Connection dropped — retrying…');
+        if (!await pause()) { onDone(''); return; }
+        continue;
+      }
+      onError(coachErrorText('Stream error: ' + streamErr.message)); return;
+    }
+    onDone(full); return;
   }
-  onDone(full);
 }
 
 function mdToHtml(md) {
@@ -20773,7 +21124,7 @@ async function sendCoach(text) {
 
   if (!coachKey()) { promptCoachKey(); if (!coachKey()) { coachState.streaming = false; return; } }
   setCoachSending(true);
-  appendCoachBubble('user', text);
+  const userBubble = appendCoachBubble('user', text);
   coachState.messages.push({ role: 'user', content: text });
 
   const system = [
@@ -20784,9 +21135,12 @@ async function sendCoach(text) {
   bubble.innerHTML = '<span class="coach-typing">thinking…</span>';
   coachAbort = new AbortController();
 
+  let streamed = '';   /* what actually reached the screen, so a drop can keep it */
+
   await callClaude({
     system, messages: coachState.messages.slice(), signal: coachAbort.signal,
-    onText: (_d, full) => { bubble.innerHTML = mdToHtml(full); document.getElementById('coachThread').scrollTop = 1e9; },
+    onText: (_d, full) => { streamed = full; bubble.innerHTML = mdToHtml(full); document.getElementById('coachThread').scrollTop = 1e9; },
+    onNotice: (msg) => { bubble.innerHTML = `<span class="coach-typing">${escapeHtml(msg)}</span>`; },
     onDone: (full) => {
       if (full) {
         coachState.messages.push({ role: 'assistant', content: full });
@@ -20797,7 +21151,23 @@ async function sendCoach(text) {
       coachState.streaming = false; setCoachSending(false);
     },
     onError: (msg) => {
-      bubble.innerHTML = `<span class="coach-err">Error: ${escapeHtml(msg)}</span>`;
+      /* Keep whatever streamed before the failure. Replacing a half-written answer with a red line
+         was the worst of both: the rider loses the part that arrived AND has nothing to act on. */
+      bubble.innerHTML =
+        (streamed ? mdToHtml(streamed) + '<div class="coach-cut">…cut off here.</div>' : '') +
+        `<div class="coach-err">${escapeHtml(coachErrorText(msg))}</div>` +
+        `<button type="button" class="coach-chip coach-retry">Try again</button>`;
+      const again = bubble.querySelector('.coach-retry');
+      /* The retry is the only way back to the FIRST analysis after a failure: by then the Start
+         button is hidden and the chips offer follow-ups, not the opening prompt, so a dropped
+         connection left the rider retyping "Analyze this ride and coach me" by hand. Drop the failed
+         exchange from the thread first, or the retry stacks a second copy of the same question. */
+      if (again) again.onclick = () => {
+        const asked = userBubble && userBubble.parentElement, failed = bubble.parentElement;
+        if (asked) asked.remove();
+        if (failed) failed.remove();
+        sendCoach(text);
+      };
       coachState.messages.pop();   /* drop the user turn so a retry stays clean */
       coachState.streaming = false; setCoachSending(false);
     }
@@ -20969,9 +21339,9 @@ function renderAll(D) {
   setupFormReplay(D);
   renderRadiusChart(D.turns);
   renderParams(D.summary, D.hasFit);
-  if (D.ridingJumps && D.ridingJumps.length) { show('jumpsSection'); renderJumpSummary(D); renderJumpsTable(D.ridingJumps); }
+  if (D.ridingJumps && D.ridingJumps.length) { show('jumpsSection'); renderJumpSummary(D); renderJumpLaps(D); renderJumpsTable(D.ridingJumps); }
   else if (D.airtime && D.airtime.jumps && D.airtime.jumps.length) { show('airtimeSection'); renderAirtime(D); }
-  if (D.fitInRide && D.fitInRide.length) { show('fitDataSection'); renderFitChart(D.fitInRide, D.ride); renderCadPower(D.fitInRide, D.ride); }
+  if (D.fitInRide && D.fitInRide.length) { show('fitDataSection'); renderFitChart(D.fitInRide, D.ride); renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
   currentRide = D.ride;
   renderRunsPanel(D);
   renderGeekStats(D, 'mtb');
@@ -21781,9 +22151,16 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
   linkTimelineToMap(loc, ride);
 }
 
-/* Headline strip above the jumps table: the biggest air as a hero, then total airtime,
-   top takeoff speed, longest gap cleared, and average hang. Reads only fields already on
-   each FIT jump, so it adds no analysis cost and degrades gracefully when a field is absent. */
+/* Headline strip above the jumps table: the ride's LONGEST jump as the hero, shown as the
+   decomposition it actually is, then total airtime, top takeoff, biggest air, and the top-3 board.
+
+   The hero leads with distance rather than hang because that is the number riders talk in, but it
+   is immediately written out as `takeoff x hang` because that is literally how the head unit
+   produced it (see the jump reads block: the identity holds to 0.009% over the 45-jump reference
+   set). Showing the product and its two factors as one line is the honest presentation; showing
+   distance, hang and takeoff as three separate trophies would imply three independent achievements
+   where there are two. When no jump carries a distance -- the phone-only channel measures hang and
+   landing g and has no takeoff speed -- the hero falls back to hang and says nothing about gaps. */
 function renderJumpSummary(D) {
   const el = document.getElementById('jumpSummary');
   if (!el) return;
@@ -21792,22 +22169,44 @@ function renderJumpSummary(D) {
   if (!n) { el.innerHTML = ''; el.style.display = 'none'; return; }
   el.style.display = '';
   const withHang = all.filter(j => j.hang != null);
-  let totalAir = 0, maxHang = 0, maxSpeed = null, maxDist = null;
+  let totalAir = 0, maxHang = 0, maxSpeed = null;
   for (const j of withHang) { totalAir += j.hang; if (j.hang > maxHang) maxHang = j.hang; }
   for (const j of all) {
     if (j.speed_mps != null && (maxSpeed == null || j.speed_mps > maxSpeed)) maxSpeed = j.speed_mps;
-    if (j.dist != null && (maxDist == null || j.dist > maxDist)) maxDist = j.dist;
   }
+  const top = topJumps(all, 3);
+  const longest = top[0] || null;
+  const maxDist = longest && longest.dist != null ? longest.dist : null;
   const heroMs = maxHang ? Math.round(maxHang * 1000) : null;
   const avgMs = withHang.length ? Math.round(totalAir / withHang.length * 1000) : null;
   const dup = D.jumpDupsRemoved ? ` · ${D.jumpDupsRemoved} duplicate${D.jumpDupsRemoved > 1 ? 's' : ''} merged` : '';
+  const nBig = bigJumpCount(all);
+  /* How many rows can actually show a landing. The phone cushions impacts the bar-locked wrist
+     feels, and the freefall detector favours precision, so a partial match is the normal case and
+     the card says so rather than letting a reader assume every jump was corroborated. */
+  const nLanded = all.filter(j => j.landingG != null).length;
+  const heroBlock = maxDist != null
+    ? `<div class="lbl">Longest jump</div>
+       <div class="big">${U.small(maxDist)}</div>
+       <div class="dim" style="font-size:11px; margin-top:4px;">
+         ${U.speed(longest.speed_mps)} takeoff × ${Math.round(longest.hang * 1000)} ms hang</div>`
+    : `<div class="lbl">Biggest air</div>
+       <div class="big">${heroMs != null ? heroMs : '—'}<span class="unit">ms hang</span></div>`;
+  const board = top.length > 1 && maxDist != null
+    ? `<div class="stat" style="grid-column: 1 / -1;">
+         <div class="label">Top ${top.length}</div>
+         <div class="dim" style="font-size:12px; margin-top:4px; line-height:1.7;">
+           ${top.map((j, i) => `${i + 1}. <strong style="color:var(--text);">${U.small(j.dist)}</strong>`
+             + ` <span style="opacity:.75;">(${U.speed(j.speed_mps)} × ${Math.round(j.hang * 1000)} ms`
+             + `${j.landingG != null ? `, landed ${j.landingG.toFixed(1)} g` : ''})</span>`
+             + ` <span style="opacity:.6;">ride+${j.t_phone.toFixed(0)}s</span>`).join('<br>')}
+         </div>
+       </div>`
+    : '';
   el.innerHTML = `
     <div class="jump-hero">
-      <div>
-        <div class="lbl">Biggest air</div>
-        <div class="big">${heroMs != null ? heroMs : '—'}<span class="unit">ms hang</span></div>
-      </div>
-      <div class="meta">${n} jump${n > 1 ? 's' : ''}${dup}</div>
+      <div>${heroBlock}</div>
+      <div class="meta">${n} jump${n > 1 ? 's' : ''}${dup}${nBig ? `<br>${nBig} over ${U.small(JUMP_BIG_M)}` : ''}${nLanded ? `<br>${nLanded} with a measured landing` : ''}</div>
     </div>
     <div class="stat accent4">
       <div class="label">Total airtime</div>
@@ -21820,15 +22219,19 @@ function renderJumpSummary(D) {
       <div class="sub">fastest into a lip</div>
     </div>
     <div class="stat">
-      <div class="label">Longest gap</div>
-      <div class="value">${maxDist != null ? U.small(maxDist) : '—'}</div>
-      <div class="sub">furthest cleared</div>
+      <div class="label">Biggest air</div>
+      <div class="value">${heroMs != null ? heroMs : '—'}<span class="unit">ms</span></div>
+      <div class="sub">longest hang</div>
     </div>
     <div class="stat">
       <div class="label">Average hang</div>
       <div class="value">${avgMs != null ? avgMs : '—'}<span class="unit">ms</span></div>
       <div class="sub">per jump</div>
-    </div>`;
+    </div>
+    ${board}
+    ${maxDist != null ? `<div class="dim" style="grid-column: 1 / -1; font-size:11px; margin-top:2px;">
+      Distance is your bike computer's <strong>takeoff speed × hang time</strong>, not a measured landing point, so it assumes level ground: a downhill landing clears more than this and a step-up less.${nLanded ? ' Landing g is measured by the phone (or the bar-locked wrist), which the FIT does not record.' : ''}
+    </div>` : ''}`;
   const tog = document.getElementById('jumpsTableToggle');
   if (tog) tog.textContent = `All ${n} jumps`;
 }
@@ -21888,6 +22291,114 @@ function renderAirtime(D) {
   });
 }
 
+/* The jumps a claim may be made about: everything except jumps inside a run the rider marked "not a
+   trail". Mirrors turnsOnLabelledTrails, straight off the stored marks with no run list, so the
+   answer does not depend on the segmentation mode the Runs selector happens to be on. */
+function jumpsOnLabelledTrails(D) {
+  try {
+    const all = D.ridingJumps || [];
+    const wins = skippedRunWindows(D);
+    if (!wins.length) return all;
+    return all.filter(j => !wins.some(w => j.t_phone >= w.tStart && j.t_phone <= w.tEnd));
+  } catch (e) { return D.ridingJumps || []; }
+}
+
+/* Hits of the same jump on different passes of the same trail.
+
+   Reads the "not a trail" label, per the rule in CLAUDE.md: this card makes a coaching claim about
+   one feature ("you cleared it 2.5 ft further the second time"), and a jump logged on a road
+   transit is not a line to study. The corner ledger enumerates and does not read the label; this
+   recommends, so it does.
+
+   Runs come from 'auto', not from the Runs selector's current mode. Clustering only needs a
+   consistent partition into passes, and reading the selector would make the same ride produce
+   different jump comparisons depending on a dropdown the rider set for an unrelated purpose. */
+function jumpLapClusters(D) {
+  try {
+    const jumps = jumpsOnLabelledTrails(D);
+    if (jumps.length < JUMP_MIN_HITS) return [];
+    /* segmentRuns returns { mode, runs, lapInfo }, not a bare array -- it resolves 'auto' to a
+       concrete mode and reports which one it picked. Only the run windows matter here. */
+    const runs = (segmentRuns(D, 'auto') || {}).runs || [];
+    if (runs.length < JUMP_MIN_HITS) return [];
+    const runOf = (t) => {
+      for (let i = 0; i < runs.length; i++) if (t >= runs[i].tStart && t <= runs[i].tEnd) return i;
+      return null;
+    };
+    return clusterJumpHits(jumps.map(j => ({ ...j, run: runOf(j.t_phone) })));
+  } catch (e) { return []; }
+}
+
+/* One clause per factor, phrased so the sign is unmissable: a rider who went SLOWER and still went
+   further is the interesting case, and "1.0 ft from speed" would hide it. Reads in the athlete's
+   units via U.small / U.speed. */
+function jumpSplitPhrase(s) {
+  if (!s) return '';
+  const part = (metres, drive) => {
+    const gained = metres >= 0;
+    return `<strong style="color:${gained ? 'var(--accent-4)' : 'var(--text-muted)'};">`
+      + `${gained ? '+' : '−'}${U.small(Math.abs(metres))}</strong> ${drive}`;
+  };
+  const speedDelta = `${s.dSpeed >= 0 ? '+' : '−'}${U.speed(Math.abs(s.dSpeed))}`;
+  const hangDelta = `${s.dHang >= 0 ? '+' : '−'}${Math.round(Math.abs(s.dHang) * 1000)} ms`;
+  return `${part(s.fromSpeed, `from takeoff speed (${speedDelta})`)}, `
+    + `${part(s.fromHang, `from hang (${hangDelta})`)}`;
+}
+
+/* Same jump, lap to lap. Only appears when a jump was actually hit on more than one pass, which is
+   the only situation in which any of this is a comparison rather than a list. */
+function renderJumpLaps(D) {
+  const el = document.getElementById('jumpLapsCard');
+  if (!el) return;
+  const clusters = jumpLapClusters(D);
+  if (!clusters.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const rows = clusters.map((c) => {
+    const bestRun = c.best.run + 1, worstRun = c.worst.run + 1;
+    const land = (j) => j.landingG != null ? `, landed ${j.landingG.toFixed(1)} g` : '';
+    const hits = c.hits.map(h =>
+      `<span style="white-space:nowrap;">run ${h.run + 1}: <strong style="color:var(--text);">${U.small(h.dist)}</strong></span>`
+    ).join(' &middot; ');
+    /* Name BOTH ends and the direction. The split runs shortest -> furthest, which is not the same
+       as first -> last (the furthest hit is on run 1 as often as not), so "of that 3.0 ft" left the
+       reader to guess which way round the signs were and a negative speed contribution -- the
+       interesting case -- is exactly the one that guess gets backwards.
+
+       No split at all when a factor is missing on either end: better a bare spread than an invented
+       attribution. */
+    const split = c.split
+      ? `<div style="margin-top:6px;">Going from the ${U.small(c.worst.dist)} hit to the ${U.small(c.best.dist)} one: ${jumpSplitPhrase(c.split)}.</div>`
+      : '';
+    return `
+      <div style="padding:12px 0; border-top:1px solid var(--border);">
+        <div style="font-size:13px;">
+          <strong>${c.hits.length} hits</strong> &middot; ${hits}
+        </div>
+        <div class="dim" style="font-size:12px; margin-top:6px; line-height:1.6;">
+          Furthest on run ${bestRun} (${U.small(c.best.dist)}${land(c.best)}),
+          shortest on run ${worstRun} (${U.small(c.worst.dist)}${land(c.worst)}).
+          ${split}
+        </div>
+      </div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="panel" style="margin-top:14px;">
+      <div style="font-family:'JetBrains Mono',monospace; font-size:11px; text-transform:uppercase;
+                  letter-spacing:.18em; color:var(--text-muted);">Same jump, run to run</div>
+      <div class="dim" style="font-size:12px; margin-top:6px;">
+        ${clusters.length} jump${clusters.length > 1 ? 's' : ''} you hit on more than one pass.
+        Because distance is takeoff speed × hang time, the change between two hits splits exactly
+        into those two parts — nothing else is left over.
+      </div>
+      ${rows}
+      <div class="dim" style="font-size:11px; margin-top:12px; border-top:1px solid var(--border); padding-top:10px;">
+        Descriptive, not advice. Two hits of one jump is a tiny sample, the sensors never saw the
+        lip, the landing or the transition, and a longer jump is not automatically a better one.
+        Loam will not tell you to carry more speed into a gap.
+      </div>
+    </div>`;
+}
+
 function renderJumpsTable(jumps) {
   const tbody = document.querySelector('#jumpsTable tbody');
   tbody.innerHTML = '';
@@ -21902,6 +22413,7 @@ function renderJumpsTable(jumps) {
       <td>${J.hang != null ? `<strong>${(J.hang*1000).toFixed(0)}</strong> ms` : '—'}</td>
       <td>${J.dist != null ? `${U.small(J.dist)} <span class="dim">(${U.metric() ? (J.dist*3.28084).toFixed(1) + ' ft' : J.dist.toFixed(2) + ' m'})</span>` : '—'}</td>
       <td>${J.speed_mps != null ? U.speed(J.speed_mps) : '—'} <span class="dim">${J.speed_mps != null ? '('+J.speed_mps.toFixed(2)+' m/s)' : ''}</span></td>
+      <td>${J.landingG != null ? `${J.landingG.toFixed(1)} g${J.landingFromWatch ? ' <span class="dim" title="measured at the wrist">⌚</span>' : ''}` : '<span class="dim">—</span>'}</td>
       <td class="dim">${J.lat != null ? J.lat.toFixed(5) : '—'}, ${J.lon != null ? J.lon.toFixed(5) : '—'}</td>
     `;
     const jn = i + 1;
@@ -23236,7 +23748,14 @@ function renderRoadClimbsAndBalance(D) {
    a per-sample grade, and the headline efficiency numbers, or null when the FIT lacks both channels.
    Used by the analyzer panel and folded into the coach digest so the AI can speak to spin vs lug. */
 function cadPowerStats(fitInRide) {
-  const rows = (fitInRide || []).filter(r => r.cad != null && r.power != null);
+  /* motorPower (FIT field 82), NOT power (field 7). Every "assist" number below was computed from
+     the rider's own watts until 2026-08-14 and reported as the motor's, which understated the
+     assist roughly 4x on this bike (148 W rider vs 572 W motor, turbo median) and inverted what
+     the lugging read meant. See extractFitData for how the two channels were told apart. A FIT
+     with no motor channel now returns null and the panel hides, which is correct: an analog bike
+     has no assist to plot, where before it would have plotted the rider's watts under a "motor
+     power" axis label. */
+  const rows = (fitInRide || []).filter(r => r.cad != null && r.motorPower != null);
   if (rows.length < 20) return null;
   /* Per-sample grade from FIT altitude over distance, looking back ~4s / ~25m so a single noisy
      altitude reading does not swing it. Clamped and zeroed when altitude/distance are missing. */
@@ -23252,15 +23771,15 @@ function cadPowerStats(fitInRide) {
   const pedaling = rows.filter(r => r.cad >= PEDAL);
   const avg = (arr, f) => arr.length ? arr.reduce((s, r) => s + f(r), 0) / arr.length : 0;
   const avgCad = avg(pedaling, r => r.cad);
-  const movingAssist = rows.filter(r => r.power > 5 && r.cad >= PEDAL);
-  const avgAssist = avg(movingAssist, r => r.power);
+  const movingAssist = rows.filter(r => r.motorPower > 5 && r.cad >= PEDAL);
+  const avgAssist = avg(movingAssist, r => r.motorPower);
   let energyWh = 0;
-  for (let i = 1; i < rows.length; i++) { const dt = Math.min(5, Math.max(0, rows[i].t_phone - rows[i - 1].t_phone)); energyWh += (rows[i].power || 0) * dt; }
+  for (let i = 1; i < rows.length; i++) { const dt = Math.min(5, Math.max(0, rows[i].t_phone - rows[i - 1].t_phone)); energyWh += (rows[i].motorPower || 0) * dt; }
   energyWh /= 3600;
   const climbIdx = []; for (let i = 0; i < rows.length; i++) if (grade[i] > 3) climbIdx.push(i);
   const climbCad = climbIdx.filter(i => rows[i].cad >= PEDAL);
   const avgClimbCad = climbCad.length ? climbCad.reduce((s, i) => s + rows[i].cad, 0) / climbCad.length : 0;
-  const climbLoaded = climbIdx.filter(i => rows[i].power > 120);
+  const climbLoaded = climbIdx.filter(i => rows[i].motorPower > 120);
   const lugging = climbLoaded.filter(i => rows[i].cad < 60);
   const lugPct = climbLoaded.length >= 5 ? Math.round(lugging.length / climbLoaded.length * 100) : null;
 
@@ -23286,20 +23805,181 @@ function cadPowerStats(fitInRide) {
     if (dur >= MIN_DUR && (gain == null || gain >= MIN_GAIN)) {
       const seg = rows.slice(a, e + 1);
       const segPed = seg.filter(r => r.cad >= PEDAL);
-      const segAssist = segPed.filter(r => r.power > 5);
-      const segLoad = seg.filter(r => r.power > 120);
+      const segAssist = segPed.filter(r => r.motorPower > 5);
+      const segLoad = seg.filter(r => r.motorPower > 120);
       const segLug = segLoad.filter(r => r.cad < 60);
       climbs.push({
         tStart: rows[a].t_phone, tEnd: rows[e].t_phone, duration: dur,
         dist, gain, avgGrade: (gain != null && dist) ? gain / dist * 100 : null,
         avgCad: segPed.length ? segPed.reduce((s, r) => s + r.cad, 0) / segPed.length : null,
-        avgAssist: segAssist.length ? segAssist.reduce((s, r) => s + r.power, 0) / segAssist.length : null,
+        avgAssist: segAssist.length ? segAssist.reduce((s, r) => s + r.motorPower, 0) / segAssist.length : null,
         lugPct: segLoad.length >= 4 ? Math.round(segLug.length / segLoad.length * 100) : null,
       });
     }
     i = e + 1;
   }
   return { rows, grade, avgCad, avgClimbCad, avgAssist, energyWh, lugPct, climbs, pedalSamples: pedaling.length };
+}
+
+/* ========== Motor-off ("analog") stretches ==========
+   See analyzer/sports/mtb/analog.js for the full reasoning; the short version is that ZERO MOTOR
+   POWER IS NOT EVIDENCE OF A MOTOR THAT IS OFF. A mid-drive reads 0 W whenever the rider is not
+   pedaling, whenever they are above the ~20 mph assist cutoff, and whenever they soft-pedal, so
+   only samples where an ON motor would have HAD to respond carry any information. Thresholds are
+   set from measured negatives on fully-assisted reference rides (longest false stretch 44 s, hence
+   a 90 s floor); the detector finds nothing across all three of them. It has never fired on a true
+   positive, because no recording in data/ has the motor off. */
+const ANALOG_PEDAL_RPM = 30;
+const ANALOG_CUTOFF_MPS = 8.5;
+const ANALOG_SILENT_W = 5;
+const ANALOG_MIN_S = 90;
+const ANALOG_MIN_EVIDENCE_S = 45;
+const ANALOG_BREAK_W = ANALOG_SILENT_W;
+const ANALOG_BATTERY_WITNESS_S = 240;
+
+function analogSegments(fitInRide) {
+  const rows = (fitInRide || []).filter(r => r.motorPower != null && r.t_phone != null)
+    .sort((a, b) => a.t_phone - b.t_phone);
+  if (rows.length < 20) return [];
+
+  /* Classify every sample once. `eligible` means an ON motor would have had to respond here, so
+     it is the only class that carries evidence either way; `assisted` means it demonstrably did. */
+  const cls = rows.map((r) => {
+    const pedaling = r.cad != null && r.cad >= ANALOG_PEDAL_RPM;
+    const belowCutoff = r.speed == null || r.speed < ANALOG_CUTOFF_MPS;
+    const eligible = pedaling && belowCutoff;
+    return { eligible, assisted: eligible && r.motorPower > ANALOG_BREAK_W };
+  });
+
+  /* Sample interval, for turning sample counts into seconds without assuming 1 Hz. Median so a
+     recording gap or a dropped record does not stretch it. */
+  const gaps = [];
+  for (let i = 1; i < rows.length; i++) {
+    const dt = rows[i].t_phone - rows[i - 1].t_phone;
+    if (dt > 0 && dt < 10) gaps.push(dt);
+  }
+  const dtNominal = gaps.length ? gaps.slice().sort((a, b) => a - b)[gaps.length >> 1] : 1;
+
+  const out = [];
+  let i = 0;
+  while (i < rows.length) {
+    if (cls[i].assisted) { i++; continue; }
+    /* Walk forward to the next assisted sample. Everything before it is a candidate: eligible
+       silence (evidence) plus coasting and over-cutoff samples (carried, not counted). */
+    let j = i;
+    while (j < rows.length && !cls[j].assisted) j++;
+    const a = i, e = j - 1;
+    const duration = rows[e].t_phone - rows[a].t_phone;
+    let evidenceSamples = 0;
+    for (let k = a; k <= e; k++) if (cls[k].eligible) evidenceSamples++;
+    const evidenceS = evidenceSamples * dtNominal;
+    if (duration >= ANALOG_MIN_S && evidenceS >= ANALOG_MIN_EVIDENCE_S) {
+      const seg = rows.slice(a, e + 1);
+      const bat = seg.map(r => r.batteryPct).filter(v => v != null);
+      /* Reported, never trusted: the OFF value of FIT field 119 is unknown because no recording
+         in data/ has the motor off. The first true analog lap will show it here. */
+      const assistModes = [...new Set(seg.map(r => r.assistMode).filter(v => v != null))].sort((x, y) => x - y);
+      const pedalSamples = seg.filter(r => r.cad != null && r.cad >= ANALOG_PEDAL_RPM);
+      out.push({
+        tStart: rows[a].t_phone, tEnd: rows[e].t_phone, duration,
+        /* How much of the stretch was the rider actually asking for torque. A stretch that is
+           mostly coasting is a weaker claim than one pedaled throughout, and the card says so
+           rather than presenting the two alike. */
+        pedalingS: evidenceS,
+        pedalingPct: duration > 0 ? Math.round(evidenceS / duration * 100) : null,
+        dist: (rows[e].dist != null && rows[a].dist != null) ? rows[e].dist - rows[a].dist : null,
+        gain: (() => {
+          let g = 0;
+          for (let k = a + 1; k <= e; k++) {
+            if (rows[k].altitude == null || rows[k - 1].altitude == null) continue;
+            const d = rows[k].altitude - rows[k - 1].altitude;
+            if (d > 0) g += d;
+          }
+          return g || null;
+        })(),
+        avgCad: pedalSamples.length
+          ? pedalSamples.reduce((s, r) => s + r.cad, 0) / pedalSamples.length : null,
+        avgHr: (() => {
+          const hr = seg.map(r => r.hr).filter(v => v != null);
+          return hr.length ? hr.reduce((s, v) => s + v, 0) / hr.length : null;
+        })(),
+        /* Rider watts, which is the whole point of going analog and is the one channel that
+           does NOT go quiet when the motor does. Field 7, see extractFitData. */
+        avgRiderW: (() => {
+          const p = pedalSamples.map(r => r.power).filter(v => v != null);
+          return p.length ? p.reduce((s, v) => s + v, 0) / p.length : null;
+        })(),
+        batteryDropPp: (bat.length >= 2 && duration >= ANALOG_BATTERY_WITNESS_S)
+          ? bat[0] - bat[bat.length - 1] : null,
+        assistModes,
+      });
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+/* Ride-level roll-up for the card and the coach digest: how much of the ride was ridden analog.
+   The denominator is the FIT's own covered time rather than the phone ride window, so the share
+   describes the part of the ride the motor channel actually saw. */
+function analogSummary(fitInRide) {
+  const segments = analogSegments(fitInRide);
+  const rows = (fitInRide || []).filter(r => r.motorPower != null && r.t_phone != null);
+  if (!rows.length) return null;
+  const covered = rows[rows.length - 1].t_phone - rows[0].t_phone;
+  const analogS = segments.reduce((s, g) => s + g.duration, 0);
+  return {
+    segments,
+    count: segments.length,
+    analogS,
+    coveredS: covered,
+    analogPct: covered > 0 ? Math.round(analogS / covered * 100) : null,
+    dist: segments.reduce((s, g) => s + (g.dist || 0), 0) || null,
+    gain: segments.reduce((s, g) => s + (g.gain || 0), 0) || null,
+  };
+}
+
+/* The Motor off card. Hidden entirely when the ride has no motor-off stretch, which is the common
+   case: an e-MTB ridden normally should show nothing here, and a section reading "0 analog
+   stretches" on every ride would be noise. */
+function renderAnalog(fitInRide, ride) {
+  const sec = document.getElementById('analogSection');
+  if (!sec) return;
+  const st = analogSummary(fitInRide);
+  if (!st || !st.count) { sec.classList.add('hidden'); return; }
+  sec.classList.remove('hidden');
+  const mins = (s) => `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+  const totalCad = st.segments.map(s => s.avgCad).filter(v => v != null);
+  const totalW = st.segments.map(s => s.avgRiderW).filter(v => v != null);
+
+  document.getElementById('analogSummary').innerHTML = `
+    <div class="stat accent"><div class="label">Ridden analog</div><div class="value">${mins(st.analogS)}</div><div class="sub">${st.count} stretch${st.count === 1 ? '' : 'es'} · ${st.analogPct}% of the ride</div></div>
+    ${st.dist != null ? `<div class="stat accent2"><div class="label">Distance</div><div class="value">${U.dist(st.dist)}</div><div class="sub">under your own power</div></div>` : ''}
+    ${st.gain != null ? `<div class="stat"><div class="label">Climbing</div><div class="value">${U.elev(st.gain)}</div><div class="sub">motor off</div></div>` : ''}
+    ${totalW.length ? `<div class="stat accent4"><div class="label">Your watts</div><div class="value">${(totalW.reduce((a, b) => a + b, 0) / totalW.length).toFixed(0)}<span class="unit">W</span></div><div class="sub">while pedaling, motor off</div></div>` : ''}
+    ${totalCad.length ? `<div class="stat"><div class="label">Cadence</div><div class="value">${(totalCad.reduce((a, b) => a + b, 0) / totalCad.length).toFixed(0)}<span class="unit">rpm</span></div><div class="sub">motor off</div></div>` : ''}
+  `;
+
+  document.querySelector('#analogTable tbody').innerHTML = st.segments.map((s, i) => `<tr>
+    <td>${i + 1}</td>
+    <td class="dim">ride+${(s.tStart - ride.start).toFixed(0)}s</td>
+    <td>${mins(s.duration)}</td>
+    <td>${s.pedalingPct != null ? s.pedalingPct + '%' : '—'}</td>
+    <td>${s.dist != null ? U.dist(s.dist) : '—'}</td>
+    <td>${s.gain != null ? U.elev(s.gain) : '—'}</td>
+    <td>${s.avgCad != null ? s.avgCad.toFixed(0) + ' rpm' : '—'}</td>
+    <td>${s.avgRiderW != null ? s.avgRiderW.toFixed(0) + ' W' : '—'}</td>
+    <td>${s.avgHr != null ? s.avgHr.toFixed(0) + ' bpm' : '—'}</td>
+  </tr>`).join('');
+
+  /* Three limits, all load-bearing, so they lead rather than hiding behind a disclosure:
+     the durations are lower bounds, the detector has never been graded on a real analog ride,
+     and the whole read is silent above the assist cutoff. */
+  document.getElementById('analogCaveat').innerHTML = betaCaveat(
+    `Found by looking for stretches where you were pedaling below the ~20 mph assist cutoff and the motor gave you nothing. Durations are <strong>at least</strong> this long, not exact.`,
+    `A stretch ends where the recording can first PROVE the motor was back on, which is the next moment you asked it for torque. Switch it back on and then coast, and that coast is still counted here, because nothing in the recording distinguishes it from still being off.
+     <br><br>Above roughly 20 mph the motor stops assisting anyway, so those samples say nothing about whether it was on, and they are excluded rather than counted as analog. The same goes for coasting and soft-pedaling: only the seconds where an ON motor would have had to respond are treated as evidence, which is what the Pedaling column reports.
+     <br><br><strong>This detector has never been graded on a real motor-off ride</strong>, because there isn't one in the reference data yet. Its thresholds are set from the opposite direction: across 118 minutes of fully-assisted riding the longest stretch that could be mistaken for analog was 44 seconds, and the floor here is 90, so it finds nothing on any assisted ride. That bounds false positives and says nothing yet about whether it catches every real analog stretch.`);
 }
 
 function renderCadPower(fitInRide, ride) {
@@ -23314,13 +23994,13 @@ function renderCadPower(fitInRide, ride) {
     <div class="stat accent"><div class="label">Avg cadence</div><div class="value">${avgCad.toFixed(0)}<span class="unit">rpm</span></div><div class="sub">while pedaling</div></div>
     <div class="stat accent2"><div class="label">Climb cadence</div><div class="value">${avgClimbCad ? avgClimbCad.toFixed(0) : '—'}<span class="unit">rpm</span></div><div class="sub">grade &gt; 3%</div></div>
     <div class="stat"><div class="label">Avg motor assist</div><div class="value">${avgAssist.toFixed(0)}<span class="unit">W</span></div><div class="sub">while pedaling</div></div>
-    <div class="stat accent4"><div class="label">Motor energy</div><div class="value">${energyWh.toFixed(0)}<span class="unit">Wh</span></div><div class="sub">battery used (approx)</div></div>
+    <div class="stat accent4"><div class="label">Motor energy</div><div class="value">${energyWh.toFixed(0)}<span class="unit">Wh</span></div><div class="sub">motor output; battery drain is more</div></div>
     ${lugPct != null ? `<div class="stat"><div class="label">Lugging on climbs</div><div class="value">${lugPct}<span class="unit">%</span></div><div class="sub">&lt;60 rpm under load</div></div>` : ''}
   `;
 
   const maxCad = Math.max(110, ...rows.map(r => r.cad));
   const trace = {
-    x: rows.map(r => r.cad), y: rows.map(r => r.power),
+    x: rows.map(r => r.cad), y: rows.map(r => r.motorPower),
     mode: 'markers', type: 'scatter',
     marker: {
       size: 5, opacity: 0.55,
@@ -23992,26 +24672,46 @@ function loamCsvName(raw) {
   return /\.(csv|zip)$/i.test(n) ? n : n + '.csv';
 }
 
-window.loamAnalyzeCSV = function (text, filename) {
+/* Hand `analyze` a File backed by the fetched BLOB, and never by a string.
+   `loadCombinedCSV` streams the parse precisely so a long ride's CSV is never wholly resident -- and
+   `await resp.text()` + `new File([text])` defeated that before the parse even began. It made the
+   whole recording resident TWICE: once as the JS string, once as the copy the File constructor takes
+   of it, and BOTH stayed alive for the entire analysis, because the string is still referenced by the
+   awaiting scope. On a merged multi-hour ride that is hundreds of MB of peak sitting under the
+   per-channel arrays as they grow, which is what got the web content process jetsammed -- the failure
+   AnalyzerWebView reports as "This recording was too large to analyze in the app". It reads as
+   intermittent because jetsam depends on what else the phone is holding at that moment, not on the
+   file crossing a threshold.
+   Building the File from the Blob references the same bytes rather than copying them, and PapaParse
+   reads a File in slices, so the recording is never wholly in the content process at all. This is
+   also why the desktop analyzer coped: a dropped file is disk-backed from the start and takes this
+   same path. */
+function loamAnalyzeBlobFile(blob, filename) {
   const name = loamCsvName(filename);
-  const p = analyze([new File([text], name, { type: 'text/csv' })]);
+  const p = analyze([new File([blob], name, { type: 'text/csv' })]);
   if (p && p.then) p.then(() => {
     const r = document.getElementById('results');
     if (r && LOAM_EMBEDDED) r.scrollIntoView();
   }).catch(() => {});
   return p;
+}
+
+/* Text entry point, kept for hosts that already hold the CSV as a string. Wrapping it in a Blob does
+   not undo the copy that string already is, so prefer loamAnalyzeURL for anything ride-sized. */
+window.loamAnalyzeCSV = function (text, filename) {
+  return loamAnalyzeBlobFile(new Blob([text], { type: 'text/csv' }), filename);
 };
 
 window.loamAnalyzeURL = async function (url) {
   try {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
-    const text = await resp.text();
+    const blob = await resp.blob();
     /* The recording is always served at the virtual path /recording.csv, so the URL
        cannot tell two sessions apart. Prefer the real session name the host injects
        (window.LOAM_SESSION_NAME) so each ride is labelled and de-duplicated distinctly. */
     const name = loamCsvName(window.LOAM_SESSION_NAME || url.split('/').pop());
-    return await window.loamAnalyzeCSV(text, name);
+    return await loamAnalyzeBlobFile(blob, name);
   } catch (e) {
     // Surface instead of failing silently. In embedded mode the dropzone/header are hidden,
     // so an unhandled rejection here (e.g. the recording could not be fetched) would leave
@@ -24029,9 +24729,11 @@ window.loamAnalyzeURLWithFit = async function (csvUrl, fitUrl) {
   try {
     const csvResp = await fetch(csvUrl);
     if (!csvResp.ok) throw new Error('csv fetch failed: ' + csvResp.status);
-    const text = await csvResp.text();
+    /* Blob, not text -- see loamAnalyzeBlobFile. A ride with a companion FIT is if anything the
+       bigger recording, so this path needs it more than the plain one, not less. */
+    const csvBlob = await csvResp.blob();
     const csvName = loamCsvName(window.LOAM_SESSION_NAME || csvUrl.split('/').pop());
-    const files = [new File([text], csvName, { type: 'text/csv' })];
+    const files = [new File([csvBlob], csvName, { type: 'text/csv' })];
     try {
       const fitResp = await fetch(fitUrl);
       if (fitResp.ok) files.push(new File([await fitResp.arrayBuffer()], 'recording.fit', { type: 'application/octet-stream' }));
@@ -24296,7 +24998,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '6054909db · 2026-08-14';
+const LOAM_BUILD = 'e95e0f359 · 2026-08-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -24348,6 +25050,8 @@ const LOAM_WHATS_NEW = [
     ['Your lifts compared with each other', 'Loam now keeps each lift session on this device and, once one lift has come up in three sessions with the weights filled in, shows what actually changed between them: heavier bar, more reps, both, or neither. Work done is weight times reps, so those two factors account for the whole of a change and the verdict names which one moved. No estimated one-rep max (that is a formula fitted to other people), and no comparison across different lifts, because a squat and a curl share no scale.'],
   ] },
   { h: 'Fixed', items: [
+    ['Long and merged sessions open in the app', 'a big recording — a merged session most of all — could come back as "this recording was too large to analyze in the app", and not reliably: the same session sometimes opened fine on the next try. Opening a session in the app read the whole recording into memory as text and then made a second copy of it, and both stayed there for the entire analysis, on top of the sensor data itself. Nothing about that was needed; the analyzer already reads a recording in slices, and now does so on the phone too, which is why the same file was always fine on the desktop. If it still runs out of memory, the message now tells you what actually happened and to try again rather than pointing you at a computer.'],
+    ['A dropped signal no longer ends the coaching turn', 'asking the coach where the bars are thin came back as "Stream error: Load failed" — the one message a phone browser gives for any network failure — and took the question with it, leaving no way back to the opening analysis except typing it out again. Loam now retries a dropped connection itself, and only while nothing has reached the screen, so it can never restart an answer you were already reading. When it does give up it says so in words you can act on and offers Try again. If the link died mid-answer, whatever had arrived is kept rather than replaced by a red line.'],
     ['Tap a run to see where it was', 'on a run, a walk or a GPS-only ride, tapping a row in the Runs panel said "showing Descent 3" and left the map exactly where it was, so there was no way to tell which stretch of trail it meant — and recognising it is the whole point of tagging it. The tapped stretch is now highlighted on the map, named where it starts, and scrolled into view.'],
     ['The coach knows which sport it is reading', 'a swim was described as a ride, and the coach could suggest recording your swim in Loam — advice to do something impossible. It also no longer offers an open-water swim questions about "sets", which open water does not have.'],
     ['Sharing a card sends the picture', 'on some targets a card arrived as a link rather than as the image, and every card was exported under the same filename regardless of sport or session.'],
