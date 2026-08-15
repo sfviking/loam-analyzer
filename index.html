@@ -11175,7 +11175,7 @@ function swimCaveats(poolM, s, source = 'apple-health', session = null) {
   const captured = source === 'captured';
   const parts = captured ? [
     'BETA, estimate-only. This session was RECORDED by Loam: an Apple Watch on the wrist streaming rotation rate, with the phone on the pool deck. It did NOT come from Apple Health, so there are no Apple lengths, no Apple stroke counts, and no stroke-style labels anywhere in this data.',
-    'Every stroke here is a PEAK IN WRIST ROTATION of the watch arm only. Apple counts both arms; these counts are roughly half of an Apple figure for the same swim and must never be compared to one, to a published stroke count, or to an imported Loam swim.',
+    'Every stroke here is a PEAK IN WRIST ROTATION of the watch arm only: one pull of one arm. How that relates to an Apple Watch stroke count is NOT a fixed factor and depends on the stroke. Apple sees the same single wrist and infers the arm it cannot see from its stroke-style classifier: for freestyle and backstroke the arms alternate, so it reports both and its figure is about double this one; for breaststroke and butterfly the arms move together and the two counts are on the same scale. Loam has no stroke classifier and cannot tell which case a length was, so never convert between the two, and never compare these counts to a watch reading, a published stroke count, or an imported Loam swim.',
     'There is no stroke classifier: every length is style "unknown". Never name a stroke, and never compare two lengths as though you knew they were the same stroke.',
     'SWOLF here is time plus ONE-ARM strokes, so it is not the SWOLF anyone else means by the word. Use it only to compare this swimmer\'s lengths within this one session, never against a published figure, a watch reading, or another pool.',
     session && session.lengthsInferred
@@ -11664,6 +11664,31 @@ const REST_GAP_S = 3.0;
 /** Below this a block is a detector artifact rather than a length: the validated swim produced two
  * such fragments (1.8 s and 5.1 s) from false strokes during rests. */
 const MIN_BLOCK_S = 10;
+/** Absolute floor, in rad/s, that a smoothed peak must clear to be a stroke at all.
+ *
+ * This exists because of a reported failure and it is the one gate here that is not about rhythm:
+ * a swimmer sat on a sofa with the watch on and Loam reported 12 strokes at 43/min. The threshold
+ * below it was the session MEDIAN and nothing else, which is scale-free by design -- and half of any
+ * signal is above its own median by construction, so a wrist that did nothing still produced peaks.
+ * Worse, the reported RATE was an artifact rather than a coincidence: `SMOOTH_S` turns broadband
+ * noise into a wobble, and `MIN_STROKE_SEP_S` caps how often it can be counted, so noise comes out at
+ * 38-45 strokes/min whatever the wrist did -- squarely inside a swimming rhythm, which is why every
+ * downstream rate/rhythm test waved it through (`detectSwim` called a still wrist a swim at 0.78
+ * confidence, and with a pool length picked, 10 noise blocks would have reported a 500 m swim).
+ * The same failure and the same fix as golf's `gPhoneIsWorn`: a still device's noise floor integrated
+ * into a real-looking number, gated by an absolute floor.
+ *
+ * 0.8 rad/s is deliberately a wide-margin floor rather than a tuned threshold, because the swim it
+ * would be tuned against is gitignored user data. Measured on the synthetic bracket in
+ * captured.test.js: a still-to-fidgety wrist smooths to a peak of 0.07-0.73 rad/s, while even a
+ * deliberately feeble stroke (1.5 rad/s at 25 strokes/min) peaks at 1.40 and a normal one at 3.5.
+ * A wrist genuinely swinging (raw p99 ~1.9 rad/s) does cross it, which is why this is a floor and
+ * not the whole gate: `MIN_STROKE_SEP_S` and `MIN_BLOCK_S` still require the crossings to be
+ * RHYTHMIC and SUSTAINED before any of them counts as swimming.
+ *
+ * `analyzeCapturedSwim` reports the session's measured peak next to this number, so the first thing
+ * to do with a real captured swim is read the two against each other rather than re-deriving them. */
+const MIN_STROKE_PEAK_RADS = 0.8;
 
 /**
  * Wrist rotation magnitude on a uniform grid.
@@ -11713,17 +11738,21 @@ function strokeSignal(wrist, opts = {}) {
 }
 
 /**
- * Stroke times, as local maxima of the smoothed magnitude above the session median.
+ * Stroke times, as local maxima of the smoothed magnitude above the session median AND above an
+ * absolute floor.
  *
- * The median as the threshold (rather than a fixed rad/s) is what makes this work across swimmers
- * and strokes: it scales with however hard this particular person moves their arm, and half the
- * samples sit below it by construction, so it separates the pull from the recovery rather than
- * encoding an absolute effort.
+ * The two thresholds answer different questions and both are needed. The median asks "is this one of
+ * the stronger moments of THIS session", which is what makes the detector work across swimmers and
+ * strokes: it scales with however hard this particular person moves their arm, so it separates the
+ * pull from the recovery rather than encoding an absolute effort. The floor asks "did the arm move
+ * like a swimming arm at all", which is the question a wrist on a sofa has to fail -- and it cannot
+ * be asked relatively, because the median passes half of any signal including nothing at all. See
+ * `MIN_STROKE_PEAK_RADS`.
  */
 function detectStrokes(wrist, opts = {}) {
   const { t0, fs, values } = strokeSignal(wrist, opts);
   if (values.length < 3) return [];
-  const thresh = median(values);
+  const thresh = Math.max(median(values), opts.minPeakRads ?? MIN_STROKE_PEAK_RADS);
   const minSep = Math.round((opts.minSepS || MIN_STROKE_SEP_S) * fs);
   const peaks = [];
   for (let i = 1; i < values.length - 1; i++) {
@@ -11779,6 +11808,15 @@ function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
   const strokeTimes = detectStrokes(wrist, opts);
   const blocks = segmentBlocks(strokeTimes, opts);
 
+  /* How hard the wrist actually turned, reported whether or not anything was detected. A zero-stroke
+     result is otherwise indistinguishable between "the watch was on a sofa" and "the analysis is
+     broken", and this is the number that tells them apart -- read against MIN_STROKE_PEAK_RADS, which
+     is carried alongside so a surface never has to hardcode it. Reduced rather than spread into
+     Math.max: an hour of wrist at 25 Hz is ~90k values, past the argument limit in some engines. */
+  const { values } = strokeSignal(wrist, opts);
+  let peakRotationRads = 0;
+  for (const v of values) if (v > peakRotationRads) peakRotationRads = v;
+
   const swimmingS = blocks.reduce((a, b) => a + b.durationS, 0);
   const inBlockStrokes = blocks.reduce((a, b) => a + b.strokes, 0);
 
@@ -11818,6 +11856,8 @@ function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
       blocks: blocks.length,
       strokes: inBlockStrokes,
       swimmingS,
+      peakRotationRads,
+      minPeakRads: opts.minPeakRads ?? MIN_STROKE_PEAK_RADS,
       distanceM,
       distancePerStrokeM: distanceM && inBlockStrokes > 0 ? distanceM / inBlockStrokes : null,
       strokeRateSpm: swimmingS > 0 ? (inBlockStrokes / swimmingS) * 60 : null,
@@ -12488,6 +12528,21 @@ async function analyze(files) {
          wholesale or grow a validator for numbers it just computed locally. The two provenance
          booleans do go through it: those are contract, and an import must be able to state that it
          is NOT inferred. */
+      /* No qualifying stroking, so there is no swim to show. This is the DECLARED path, which is the
+         only way a non-swim can get this far: auto-detection asks detectSwim, which requires 30
+         organized strokes, but picking Swim on the Record screen (rightly) suppresses detection
+         entirely, so nothing else stood between a wrist that never swam and a Swim view.
+         Reported by a swimmer who recorded a swim and then sat on the sofa: it read 12 strokes at
+         43/min, and with a pool length picked and two noise blocks it would have reported a distance.
+         The peak is quoted because it is the number that separates "the watch never swam" from "the
+         detector is broken", and a swimmer can sanity-check it against what they did. */
+      if (!payload.capturedTotals.strokes) {
+        const pk = payload.capturedTotals.peakRotationRads;
+        throw new Error('No swimming found in this recording. The watch arm never turned like a swimming arm: '
+          + `wrist rotation peaked at ${pk.toFixed(2)} rad/s, below the ${payload.capturedTotals.minPeakRads} rad/s a stroke has to clear, `
+          + 'so nothing here was counted as a stroke. If you did swim this one, the watch was most likely not streaming to the phone '
+          + '(check the Sessions list for watch motion); if the recording was left running afterwards, this is the right answer.');
+      }
       const session = { ...LoamSwim.normalizeSwimImport(payload), capturedTotals: payload.capturedTotals };
       const swim = LoamSwim.analyzeSwim(session);
       const summary = LoamSwim.computeSwimSummary(session, swim);
@@ -16033,7 +16088,7 @@ function renderSwim(D) {
   el.innerHTML = `
     <div class="section-title">Swim <span class="beta-badge">BETA</span></div>
     ${captured ? `<div class="strength-scope"><strong>Recorded by Loam, not imported from Apple Health.</strong>
-      Everything here comes from the Apple Watch on your wrist, with your phone on the pool deck: each stroke is a peak in wrist rotation of <em>that arm only</em>, so these counts are roughly half what your watch would report for both arms and are not comparable to one. There is no stroke type, because nothing here can tell freestyle from breaststroke.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA).</div>`
+      Everything here comes from the Apple Watch on your wrist, with your phone on the pool deck: each stroke is a peak in wrist rotation of <em>that arm only</em> &mdash; one pull of one arm, which is not the number your watch shows. How far apart the two run depends on the stroke: your watch reports both arms for freestyle and backstroke, where they alternate, but not for breaststroke or butterfly, where they move together. There is no stroke type here, because nothing in this data can tell freestyle from breaststroke, so read these counts on their own rather than converting them.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA).</div>`
     : `<div class="strength-scope"><strong>Imported from Apple Health, not recorded by Loam.</strong>
       Your watch already counts ${R.hasLengths ? 'lengths, strokes and stroke type' : 'distance, strokes and your GPS track'} better than a phone in a locker ever could, so Loam takes those as given and adds the part Apple does not show.${R.hasLengths ? ' Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.' : ''} Everything below is an estimate (BETA) pending swim ground truth.</div>`}
     <div class="swim-tiles">${tiles}</div>
@@ -16048,8 +16103,8 @@ function renderSwim(D) {
     ${body}
     ${captured
       ? betaCaveat(
-        `this swim was recorded by Loam and graded against exactly one real session, so every number here is an estimate. Strokes are peaks in <em>one wrist's</em> rotation &mdash; about half an Apple Watch stroke count for the same swim &mdash; so the SWOLF built on them is not the SWOLF anyone else means. Lengths come from <em>rests at the wall</em>, never from detected turns: swim continuously and this finds one long block and reports no distance at all.${swimShortPoolNote(s)}`,
-        `That one graded session was 4 x 50 m, and all four lengths were found. Reporting nothing for a continuous swim is the honest answer rather than a guess: a flip turn is over in a second or two and nothing in this data can see one. What Loam does not yet read from a captured swim: push-off and glide quality, stroke-to-stroke consistency, and body roll. The wrist motion for all three is here &mdash; the analysis is not built, which is a different thing from an import, where the data itself is missing.`)
+        `this swim was recorded by Loam and graded against exactly one real session, so every number here is an estimate. Strokes are peaks in <em>one wrist's</em> rotation, so the SWOLF built on them is not the SWOLF anyone else means. Lengths come from <em>rests at the wall</em>, never from detected turns: swim continuously and this finds one long block and reports no distance at all.${swimShortPoolNote(s)}`,
+        `That one graded session was 4 x 50 m, and all four lengths were found. Reporting nothing for a continuous swim is the honest answer rather than a guess: a flip turn is over in a second or two and nothing in this data can see one. <strong>Why an Apple stroke count is not a fixed multiple of this one:</strong> your watch sees the same single wrist and cannot measure your other arm either &mdash; it infers that arm from the stroke it has classified, doubling for freestyle and backstroke, where the arms alternate, and not for breaststroke or butterfly, where they move together. Loam has no stroke classifier, so it can neither apply that rule nor tell you which case a length was. What Loam does not yet read from a captured swim: push-off and glide quality, stroke-to-stroke consistency, and body roll. The wrist motion for all three is here &mdash; the analysis is not built, which is a different thing from an import, where the data itself is missing.`)
       : betaCaveat(
         `swim analysis has no ground-truth session behind it yet, so the per-set trends and verdicts are estimates. Lengths, stroke counts and stroke types come from your Apple Watch and are shown as recorded. ${R.hasLengths ? 'SWOLF is only comparable within one pool length.' : 'Out here your GPS track is sparse (the watch only fixes when your wrist surfaces), so the navigation read is windowed over a full minute and single wobbles mean nothing.'}${swimShortPoolNote(s)}`,
         `What Loam cannot measure from an import: push-off and glide quality, stroke-to-stroke consistency, and body roll. All three need the raw wrist motion stream, which HealthKit does not store, so they are left out rather than guessed at. Heart rate during a swim is marked <code>~</code> because optical HR reads poorly through water.`)}
@@ -24998,7 +25053,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'e95e0f359 · 2026-08-15';
+const LOAM_BUILD = '660ef17e1 · 2026-08-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -25010,7 +25065,7 @@ const LOAM_WHATS_NEW = [
        swimmer must know BEFORE the swim is here: where to leave the phone, that the pool length is
        asked for, and the two limits (rest at the walls, one arm) that decide whether the recording
        is readable at all. Learning those afterwards is learning them too late. */
-    ['Record a pool swim yourself (beta)', 'pick Swim on the Record screen, name your pool, and leave the phone at the end of the lane. Your watch counts the lengths and Loam records your stroke motion alongside, then opens the session in the Swim view. Two things to know before you push off: rest a moment at each wall, because Loam finds lengths from those pauses and never from turns, so a continuous swim reports no distance at all; and the strokes are peaks in your watch arm only, about half what Apple counts for the same swim. Importing is still the better source for a pool, and both live side by side.'],
+    ['Record a pool swim yourself (beta)', 'pick Swim on the Record screen, name your pool, and leave the phone at the end of the lane. Your watch counts the lengths and Loam records your stroke motion alongside, then opens the session in the Swim view. Two things to know before you push off: rest a moment at each wall, because Loam finds lengths from those pauses and never from turns, so a continuous swim reports no distance at all; and the strokes are peaks in your watch arm only, which is not the number your watch shows (it reports both arms for freestyle and backstroke, but not for breaststroke or butterfly, where they move together). Importing is still the better source for a pool, and both live side by side.'],
     ['A swim card worth sending', 'a 4:5 poster of the session: what you swam up top, the two factors of your pace pulling apart underneath, and the read named. Open water gets your track instead, with the stretches where the line wandered picked out.'],
     ['Weightlifting (beta)', 'phone in a pocket plus Apple Watch: sets, reps, tempo, depth, bar speed, a Spotter Cam replay, and the AI coach. Counts squat and deadlift reliably; label each set with its lift chip.'],
     /* Third element = the sport this item announces, so a build that hides that sport hides the item
