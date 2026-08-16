@@ -3345,6 +3345,21 @@ function detectGradeSegments(baroRows, locRows, ride) {
    with "end" markers using a loose keyword match — anything that looks like
    "top of/start of/starting downhill" opens a descent; the next "bottom/end/no
    downhill" closes it. */
+/* The capture app writes a `Pause` and a `Resume` mark at the two edges of a paused stretch, so a
+   reader can tell a deliberate hole in the recording from a sensor failure or a crash. They describe
+   the RECORDING, not the ride, and must never be read as something the athlete said about the trail --
+   the same rule the Crash mark lives under, and for the same reason: a mark that is merely the nearest
+   annotation to a descent start would otherwise title that run "Pause" in the runs table, in the saved
+   library, and as the suggested name the next time the segment is tagged.
+
+   EXACT match (trimmed, case-insensitive), unlike isCrashMark's substring test. These two strings are
+   written by the app, never spoken, so there is no voice-to-text variation to absorb; and "pause" is an
+   ordinary enough word that a substring rule would silently swallow a rider's own note. */
+function isSessionControlMark(text) {
+  const s = String(text == null ? '' : text).trim().toLowerCase();
+  return s === 'pause' || s === 'resume';
+}
+
 function pairDescentAnnotations(annotations) {
   const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g,' ');
   const isStart = (t) => {
@@ -3608,8 +3623,13 @@ function extractRideDescents(sensors, ride, fileLabel, minDropM) {
      a run had that run titled "Crash" -- in the runs table, in the saved library, and as the
      suggested name the next time they tagged the segment. The crash is reported by its own card,
      map marker and timeline mark; it has no business naming the trail. Matched through the shared
-     isCrashMark so this and parseCrashMarks can never disagree about what counts as one. */
-  const annotations = (sensors.annotations || []).filter(a => !isCrashMark(a && a.text));
+     isCrashMark so this and parseCrashMarks can never disagree about what counts as one.
+     The Pause / Resume marks are dropped for exactly the same reason: they record that capture was
+     suspended, which is a fact about the RECORDING and not a name for the trail. A rider who pauses at
+     the top of a run -- which is precisely where a pause gets tapped -- would otherwise have that run
+     titled "Resume". */
+  const annotations = (sensors.annotations || [])
+    .filter(a => !isCrashMark(a && a.text) && !isSessionControlMark(a && a.text));
   const out = [];
   for (const seg of descents) {
     const loc = sensors.location.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.latitude != null);
@@ -24794,10 +24814,15 @@ window.loamAnalyzeURLWithFit = async function (csvUrl, fitUrl) {
       if (fitResp.ok) files.push(new File([await fitResp.arrayBuffer()], 'recording.fit', { type: 'application/octet-stream' }));
     } catch (e) { /* CSV-only fallback */ }
     const p = analyze(files);
+    /* The scroll chain gets its own .catch: `return await p` already routes a rejection to the
+       handler below, but `p.then(...)` is a SECOND branch off the same promise and an unrejected one
+       is an unhandled rejection -- which in the app is a console error the E2E's uncaught-error
+       assertion would report against a failure the analyzer has in fact handled. Same reason
+       loamAnalyzeBlobFile carries one. */
     if (p && p.then) p.then(() => {
       const r = document.getElementById('results');
       if (r && LOAM_EMBEDDED) r.scrollIntoView();
-    });
+    }).catch(() => {});
     return await p;
   } catch (e) {
     // See loamAnalyzeURL: surface fetch failures so embedded mode never shows a blank screen.
@@ -24816,7 +24841,9 @@ window.loamAnalyzeFitURL = async function (fitUrl) {
     const name = /\.fit$/i.test(raw) ? raw : raw + '.fit';
     const files = [new File([await resp.arrayBuffer()], name, { type: 'application/octet-stream' })];
     const p = analyze(files);
-    if (p && p.then) p.then(() => { const r = document.getElementById('results'); if (r && LOAM_EMBEDDED) r.scrollIntoView(); });
+    // .catch for the same reason as loamAnalyzeURLWithFit: this branch off `p` is separate from the
+    // `await` below, so without it a handled failure still surfaces as an unhandled rejection.
+    if (p && p.then) p.then(() => { const r = document.getElementById('results'); if (r && LOAM_EMBEDDED) r.scrollIntoView(); }).catch(() => {});
     return await p;
   } catch (e) {
     hide('loading'); showError('Could not load this FIT.', (e && e.stack) || String(e));
@@ -25053,7 +25080,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '660ef17e1 · 2026-08-15';
+const LOAM_BUILD = '3327bdcce · 2026-08-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -25113,6 +25140,7 @@ const LOAM_WHATS_NEW = [
     ['Controls next to what they control', 'the smooth toggle now sits above the graph it changes rather than above the table (and is no longer set in heading type), the swim card\'s share button sits on the card, and the calibration-pose notice can be hidden per ride.'],
     ['Readable numbers and axes', 'heart-rate maxima are rounded (one read "111.9925390743", below its own average), and a long swim\'s x-axis no longer collapses into a picket fence of vertical digits.'],
     ['Units everywhere', 'the Imperial/Metric toggle now reaches highlights, timelines, comparisons, tooltips, and pace readouts (several were stuck in one system).'],
+    ['Pause actually pauses', 'the pause button watchOS puts on your watch face while Loam is recording did nothing at all — it is drawn by the system, and Loam was never listening for it, so a recording carried on regardless (and quietly stopped logging heart rate). Pause now stops the whole recording, on both devices, from wherever you tap it: that button, Siri, the Action button on an Ultra, or the new Pause button on the watch and on the Record screen. The clock stops, the coach goes quiet, nothing is written until you resume, and the time you spent stopped is left out of your session.'],
     ['Watch reliability', 'a wrist-motion stall is caught mid-session, a rapid stop/start no longer leaks a live workout, and a recording survives a mid-ride break.'],
     ['Saner numbers', 'no more impossible lean readings, the fitness chart buckets rides by your local day, and a forgotten End-set tap cannot crash lift analysis.'],
   ] },
