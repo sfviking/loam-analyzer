@@ -6976,34 +6976,56 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
+  const duration = ride.end - ride.start;
   /* Distance from the GPS path: the sum of point-to-point great-circle hops, which is exactly how
      Strava measures the uploaded GPX. Integrating Doppler speed under-reads at walking pace (slow GPS
      speed floors toward 0), so the path length is the honest figure and agrees with Strava's number.
-     Haversine is inlined so the drift-guard test can run this function in isolation. */
-  let distance = 0;
+     Haversine is inlined so the drift-guard test can run this function in isolation.
+
+     DISTANCE AND MOVING TIME ARE ONE PASS OVER ONE CLASSIFICATION OF EACH HOP, because they are two
+     views of the same seconds and deriving them from different sets of samples is what made a walk
+     read as a run. Three kinds of hop, exactly as `computeSplits` classifies them (the rules are
+     duplicated rather than shared for the reason stated in that module):
+       moving   - inside the gap limit, at or above the walking floor: real ground, real seconds;
+       standing - inside the gap limit, below the floor: the athlete is parked and the only thing
+                  moving is the GPS fix. No ground, no seconds;
+       dropout  - past the gap limit: the signal went away but the athlete did not. Real ground (the
+                  bridging this function has always done), and real seconds whenever the ground it
+                  bridged implies they were still moving.
+
+     THE STANDING CASE IS THE FIX, and it is the only behaviour that changed. Distance used to sum
+     EVERY hop while moving time counted only the moving ones, so the metres a parked phone's fixes
+     wander were divided by the seconds the athlete actually walked. That hid on a run, where drift is
+     a few percent of a long path, and it is ruinous on a short walk with a long pause: a real 12m34s
+     session with 44 s of walking came back as 481 ft at 8:03/mi, and +/-0.1 m of stationary jitter
+     across the 11m50s stop accounts for the entire overage (truth nearer 200 ft at about 19:00/mi).
+     It inflated the derived stride length too, that being distance over steps.
+
+     This function was the last one still counting it. `computeSplits` has skipped standing hops since
+     it was written (its label even names the excluded metres), and `runBestEfforts`' cumulative
+     checkpoints do not advance on them either -- so the headline distance disagreed with both of the
+     surfaces derived from it. The excluded metres come back as `driftDistance` rather than vanishing,
+     so the tile can name what it left out, which is the same choice the splits label already makes.
+
+     Path length cannot tell a 0.1 m walking step from a 0.1 m drift hop; the Doppler speed on the fix
+     can, and that is what the floor reads. A hop with no reported speed (or an invalid -1) therefore
+     counts as standing, which is right for the case that produces them -- a phone sitting still. */
+  const MOVING_MIN_MPS = 0.5, MOVING_MAX_GAP_S = 5;
+  let distance = 0, driftDistance = 0, movingTime = 0;
   const toRad = d => d * Math.PI / 180, R_EARTH = 6371000;
   for (let i = 1; i < inRide.length; i++) {
     const a = inRide[i-1], b = inRide[i];
-    if (a.latitude == null || a.longitude == null || b.latitude == null || b.longitude == null) continue;
-    const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
-    const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
-             + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
-    distance += 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
-  }
-  const duration = ride.end - ride.start;
-  /* Moving vs stopped. `duration` is the span of the active window, which still contains every
-     traffic light and water stop inside it, so labelling that "moving time" overstated it. Moving
-     time integrates the samples above a walking floor, plus any dropout whose bridged distance shows
-     the runner kept going (see below). computeGpsSummary still uses the older two-way rule and drops
-     dropout time on the floor; it integrates Doppler speed rather than walking a path, so it has no
-     bridged distance to judge a gap by. The two therefore no longer agree exactly on a recording
-     with heavy signal loss, which is a deliberate divergence and not drift. */
-  let movingTime = 0;
-  for (let i = 1; i < inRide.length; i++) {
-    const a = inRide[i - 1], b = inRide[i];
     const dt = b.t - a.t;
     if (!(dt > 0)) continue;
-    if (dt > 5) {
+    const havePos = a.latitude != null && a.longitude != null && b.latitude != null && b.longitude != null;
+    let d = 0;
+    if (havePos) {
+      const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
+      const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
+               + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+      d = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
+    }
+    if (dt > MOVING_MAX_GAP_S) {
       /* GPS dropout. The samples are missing, so the fix cannot report its own speed and the gap has
          to be judged by the ground it bridged: metres over seconds, against the same walking floor.
          Skipping the gap outright looked conservative but was not, because stoppedTime is the
@@ -7011,16 +7033,20 @@ function computeRunSummary(loc, baro, ride, R, hr) {
          "6m 00s stopped" when the runner actually stood still for about 79 s, and the other five
          minutes were a phone hunting for a fix at the trailhead while its owner ran. That also drove
          the first mile's pace to 4:51/mi once the splits started dividing by moving time. */
-      if (a.latitude == null || b.latitude == null) continue;   // no position: nothing to judge it by
-      const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
-      const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
-               + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
-      const bridged = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
-      if (bridged / dt >= 0.5) movingTime += dt;
+      if (!havePos) continue;   // no position: nothing to judge it by, and no ground to credit
+      distance += d;            // the ground was crossed even though the fixes went missing
+      if (d / dt >= MOVING_MIN_MPS) movingTime += dt;
       continue;
     }
-    if (b.speed >= 0.5) movingTime += dt;
+    if (b.speed >= MOVING_MIN_MPS) { distance += d; movingTime += dt; }
+    else driftDistance += d;    // standing: the fix wandered, the athlete did not
   }
+  /* `duration` is the span of the active window, which still contains every traffic light and water
+     stop inside it, so labelling that "moving time" overstated it. computeGpsSummary still uses the
+     older two-way rule and drops dropout time on the floor; it integrates Doppler speed rather than
+     walking a path, so it has no bridged distance to judge a gap by, and is structurally immune to
+     the drift problem above for the same reason. The two therefore no longer agree exactly on a
+     recording with heavy signal loss, which is a deliberate divergence and not drift. */
   const stoppedTime = Math.max(0, duration - movingTime);
   /* Session heart rate. Already computed for strength and golf and already fed to the coach digest,
      but the run headline never carried it, so the number the coach reasoned about was one the runner
@@ -7030,7 +7056,7 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   const hrAvg = hrIn.length ? Math.round(hrIn.reduce((a, r) => a + r.bpm, 0) / hrIn.length) : null;
   const hrMax = hrIn.length ? Math.round(Math.max(...hrIn.map(r => r.bpm))) : null;
   /* Two speeds, because there are two honest answers and the headline needs the one it labels.
-     `avgSpeed` is the path distance over the whole window (elapsed), the way Strava derives an
+     `avgSpeed` is the ground covered over the whole window (elapsed), the way Strava derives an
      elapsed pace; `movingSpeed` is the same distance over the moving time, which is what a runner
      means by "my pace" and what Strava leads with. The tile that reads "50m 42s moving" has to
      divide by 50m 42s: showing moving duration beside an elapsed pace put 7:46/mi and 8:41/mi next
@@ -7049,7 +7075,10 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   return {
     duration, movingTime, stoppedTime,
     hrAvg, hrMax,
-    distance, maxSpeed, avgSpeed, movingSpeed,
+    /* `driftDistance` is the path that accumulated while standing still, excluded from `distance`
+       above. Reported rather than dropped so the Distance tile can say what it left out; a caller
+       that ignores it still gets the honest distance. */
+    distance, driftDistance, maxSpeed, avgSpeed, movingSpeed,
     paceMinPerKm: avgSpeed > 0 ? (1000 / avgSpeed) / 60 : null,
     movingPaceMinPerKm: movingSpeed > 0 ? (1000 / movingSpeed) / 60 : null,
     altGain, altLoss,
@@ -11253,7 +11282,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next session:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
 }
 
 /* The CAPTURED swim's prompt, kept whole rather than assembled from the import prompt by
@@ -11294,7 +11323,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next session:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
 }
 
 
@@ -17201,7 +17230,10 @@ function renderAllRunning(D) {
     const rows = (D.sensors && D.sensors.location) || [];
     const hrRows = (D.sensors && D.sensors.heartRate) || [];
     const splits = computeSplits(rows, D.ride, unitM, hrRows);
-    renderRunSplits(splits, unitLabel, (D.summary || {}).distance);
+    /* The drift figure comes from the summary, which measured it, rather than from the gap between
+       two distances. Both now exclude standing hops under the same rule, so that gap is ~0 and the
+       note it used to drive would have quietly stopped appearing. */
+    renderRunSplits(splits, unitLabel, (D.summary || {}).driftDistance);
     /* Best efforts sit under the splits table on purpose: they answer the question the table above
        raises but cannot settle ("so how fast can I run a mile"), and reading them side by side is
        what makes the difference between the two obvious. */
@@ -18496,6 +18528,13 @@ function renderRunStats(s, detection, mount, ped) {
      that kept counting through six minutes of standing still. Moving is the right basis for both:
      "pace" means moving pace to every runner and to Strava, and nobody takes strides at a red light. */
   const paceSpeed = s.movingSpeed != null ? s.movingSpeed : s.avgSpeed;
+  /* Distance is ground covered while moving; the metres a parked phone's fixes wandered are excluded
+     (see computeRunSummary). Name them on the tile once they are worth a word, on the same 100 m bar
+     the splits label uses, because a session that stood still for most of its length should say so
+     where its distance is read rather than only further down the page. */
+  const driftSub = (s.driftDistance >= 100)
+    ? `ground covered · ${U.dist(s.driftDistance)} of drift while stopped, excluded`
+    : 'GPS path length';
   /* Steps: COUNTED from the pedometer channel when the recording carries one, and only estimated
      from cadence x moving time when it does not. The old comment here said "this pipeline has no raw
      pedometer channel", which stopped being true the moment the capture app defined its schema; the
@@ -18561,7 +18600,7 @@ function renderRunStats(s, detection, mount, ped) {
     <div class="stat">
       <div class="label">Distance</div>
       <div class="value">${U.dist(s.distance)}</div>
-      <div class="sub">GPS path length</div>
+      <div class="sub">${driftSub}</div>
     </div>
     ${hrTile}
     <div class="stat">
@@ -19491,7 +19530,7 @@ function renderRunBestEfforts(efforts, splits) {
   el.classList.remove('hidden');
 }
 
-function renderRunSplits(splits, unitLabel, totalPathM) {
+function renderRunSplits(splits, unitLabel, driftM) {
   if (!splits || !splits.length) { hide('runSplitsSection'); return; }
   show('runSplitsSection');
   const tbody = document.querySelector('#runSplitsTable tbody');
@@ -19512,12 +19551,10 @@ function renderRunSplits(splits, unitLabel, totalPathM) {
   const label = document.getElementById('runSplitsLabel');
   if (label) {
     const n = full.length;
-    /* Splits advance on ground covered, so on a run with a long stop they cover less than the
-       headline GPS-path distance, the difference being fixes that wandered while the runner stood
-       still. Say so once the gap is worth a word (100 m), rather than leaving two distances on one
-       screen with nothing to reconcile them. */
-    const covered = splits.reduce((a, sp) => a + sp.meters, 0);
-    const driftM = (totalPathM != null && totalPathM > covered) ? totalPathM - covered : 0;
+    /* Splits advance on ground covered, and so does the headline distance now, so the two agree and
+       there is nothing left to reconcile between them. The drift is still named because it is worth
+       knowing that a chunk of the recording was a phone sitting still -- it is just measured by the
+       summary rather than inferred from a difference. Named once it is worth a word (100 m). */
     label.textContent = `${n} full ${unitLabel}${n === 1 ? '' : 's'}`
       + (splits.length > n ? ' + a partial' : '')
       + (fastest ? ` \u00b7 fastest #${fastest}, slowest #${slowest}` : '')
@@ -19628,6 +19665,14 @@ const COACH_LS = { key: 'loam_anthropic_key', model: 'loam_coach_model', level: 
 const COACH_MODELS = [['claude-opus-5', 'Opus 5 — best'], ['claude-sonnet-5', 'Sonnet 5 — faster/cheaper']];
 const COACH_MODEL_DEFAULT = COACH_MODELS[0][0];
 const COACH_LEVELS = ['beginner', 'intermediate', 'advanced'];
+/* The thread is re-sent WHOLE on every turn (`coachState.messages.slice()`), so the cost of turn N
+   carries turns 1..N-1 with it while the coaching value of a 40th follow-up does not grow to match.
+   The cap is on QUESTIONS ASKED, not messages, so it reads as the number the athlete can count.
+   Capped rather than trimmed deliberately: dropping the oldest turns to make room would silently
+   take the session digest's own analysis out of context, and a coach that forgets the ride it just
+   described reads as a bug rather than as a limit. A fresh conversation is one reopen away and the
+   first turn comes back from cache, so the reset is close to free. */
+const COACH_MAX_TURNS = 30;
 let coachState = null;          /* { sport, digest, messages, streaming } */
 let coachAbort = null;
 
@@ -20534,7 +20579,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next session:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
   if (sport === 'lift' || isLiftSport(sport)) {
     return `You are Loam, an expert strength coach for the barbell back squat. This session was captured with an Apple Watch (wrist tracks the bar), AirPods (torso/head pitch), and a pocketed phone: you have per-set reps, tempo, bar range of motion, and mean concentric bar speed, plus the lifter's own Set-tap labels for bar position (high/low) and depth target (full/parallel), and optional entered load.
@@ -20548,7 +20593,9 @@ Method — for every point, follow "metric -> mechanism -> action":
 
 ${units} Loads and total volume are in the weight unit the lifter picked in the Lift view, given as the digest's "units" field; use that unit and do not convert it either.
 
-Coach the ${level} lifter: ${level === 'beginner' ? 'keep it simple and encouraging, prioritize consistent depth and control over load.' : level === 'advanced' ? 'assume they know the lifts; talk autoregulation, velocity loss thresholds, and programming nuance.' : 'balance fundamentals with the useful details.'} Be concise, specific, and warm. Do not pad. Prefer 2-4 tight points over a wall of text.`;
+Coach the ${level} lifter: ${level === 'beginner' ? 'keep it simple and encouraging, prioritize consistent depth and control over load.' : level === 'advanced' ? 'assume they know the lifts; talk autoregulation, velocity loss thresholds, and programming nuance.' : 'balance fundamentals with the useful details.'} Be concise, specific, and warm. Do not pad. Prefer 2-4 tight points over a wall of text.
+
+Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
   if (sport === 'run' || sport === 'walk') {
     /* GPS-only foot activity (a run or hike imported from a watch/phone FIT): pace + elevation +
@@ -20576,7 +20623,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next time:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
   if (sport === 'road') {
     /* Road cycling: rider watts from a real power meter, so this coach can be quantitative in a
@@ -20609,7 +20656,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next session:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
   if (sport === 'ride') {
     /* GPS-only FIT import: the digest has pace/elevation/lift structure but zero body-motion
@@ -20638,7 +20685,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next session:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
   const domain = sport === 'walking' ? `Walking/hiking reference points (the digest's gait block confirms this is a walk):
 - Cadence here is walking STEP rate: ~100-120 spm is typical; treat it descriptively, not as a target.
@@ -20677,7 +20724,7 @@ Format your FIRST analysis as compact markdown:
 - One bold headline takeaway (a single line).
 - 2-4 bullets, each a single metric -> mechanism -> action.
 - A final line "**Next session:** ..." naming one focus.
-For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble.`;
+For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
 }
 
 /* Backoff between coach attempts, and the HTTP statuses worth a second attempt: overload and the
@@ -20991,8 +21038,15 @@ function renderCoachPanel(D, sport) {
     chips.innerHTML = chipText.map(t => `<button class="coach-chip">${escapeHtml(t)}</button>`).join('');
     chips.querySelectorAll('.coach-chip').forEach((b, i) => { b.onclick = () => sendCoach(chipText[i]); });
   }
+  /* Re-enabling matters: #coachInput and #coachSend are persistent markup, not rebuilt by this
+     render, so a lockCoachInput() from a previous conversation's turn cap would otherwise survive
+     the reopen -- leaving the coach permanently dead and this panel's own "open it again" notice
+     telling the athlete to do something that does not work. The chips above are rebuilt from
+     innerHTML each render, so they come back enabled on their own. */
   const inputEl = document.getElementById('coachInput');
-  if (inputEl) inputEl.placeholder = coachInputPlaceholder(sport, coachOpts);
+  if (inputEl) { inputEl.disabled = false; inputEl.placeholder = coachInputPlaceholder(sport, coachOpts); }
+  const sendEl = document.getElementById('coachSend');
+  if (sendEl) sendEl.disabled = false;
 
   document.getElementById('coachStart').onclick = () => {
     if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
@@ -21035,6 +21089,25 @@ function setCoachSending(on) {
   const b = document.getElementById('coachSend'); if (b) b.disabled = on;
   const i = document.getElementById('coachInput'); if (i) i.disabled = on;
   const s = document.getElementById('coachStop'); if (s) s.classList.toggle('hidden', !on);
+}
+
+/* Questions the athlete has asked in this thread. Counts USER turns rather than messages because a
+   failed send pops its own user turn back off (see sendCoach's onError), so a question that never
+   reached the API must not spend from the budget. */
+function coachTurnsUsed(state) {
+  return state && state.messages ? state.messages.filter(m => m.role === 'user').length : 0;
+}
+
+/* Deliberately not setCoachSending(true): that also reveals the Stop button, which would offer to
+   abort a request that was never made. The placeholder carries the reason, since the disabled input
+   is the only part of this the athlete sees after the notice scrolls up. */
+function lockCoachInput(reason) {
+  const b = document.getElementById('coachSend'); if (b) b.disabled = true;
+  const i = document.getElementById('coachInput');
+  if (i) { i.disabled = true; i.placeholder = reason; }
+  /* The one-tap chips call sendCoach directly, bypassing the input entirely, so leaving them live
+     would let the athlete keep tapping and stack a duplicate notice per tap. No API call either way. */
+  document.querySelectorAll('.coach-chip').forEach(c => { c.disabled = true; });
 }
 
 /* The deterministic first "analyze this session" turn. Same wording on every open so its cached reply
@@ -21160,6 +21233,14 @@ async function restoreCachedCoach(state, sport) {
 
 async function sendCoach(text) {
   if (!coachState || coachState.streaming) return;
+  /* Checked BEFORE the stream slot is claimed, so this path has no slot to release. */
+  if (coachTurnsUsed(coachState) >= COACH_MAX_TURNS) {
+    appendCoachBubble('assistant',
+      `That is ${COACH_MAX_TURNS} questions in this conversation, which is where it stops. ` +
+      `Open this session again to start a fresh one — the analysis above is unchanged.`);
+    lockCoachInput('Conversation limit reached');
+    return;
+  }
   /* Claim the stream slot before the first await, so a rapid double-click cannot pass the
      guard twice and fire two parallel paid API calls. Every early return releases it. */
   coachState.streaming = true;
@@ -25080,7 +25161,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '3327bdcce · 2026-08-16';
+const LOAM_BUILD = '76f7937c8 · 2026-08-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
