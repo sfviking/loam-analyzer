@@ -20293,7 +20293,7 @@ function renderCoachHighlights(D, sport) {
   card.innerHTML = `<h3>${word} highlights</h3>`
     + `<div class="do-slot"><span class="do-badge">FOCUS</span><span class="do-text">${lead}</span></div>`
     + (rest.length ? `<ul>${rest.map(b => `<li>${b}</li>`).join('')}</ul>` : '')
-    + `<button class="ch-cta" type="button" onclick="scrollToCoach()">Ask the AI coach for the why and the drill &rarr;</button>`;
+    + `<button class="ch-cta" type="button" onclick="coachFromHighlights()">Ask the AI coach for the why and the drill &rarr;</button>`;
   sec.classList.remove('hidden');
 }
 
@@ -21390,20 +21390,46 @@ function renderCoachPanel(D, sport) {
   const sendEl = document.getElementById('coachSend');
   if (sendEl) sendEl.disabled = false;
 
-  document.getElementById('coachStart').onclick = () => {
-    if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
-    cta.classList.add('hidden');
-    compose.classList.remove('hidden');
-    if (chips) chips.classList.remove('hidden');
-    document.getElementById('coachInput').focus();
-    sendCoach(coachAnalyzePrompt(sport));
-  };
+  document.getElementById('coachStart').onclick = () => startCoachConversation({ focusInput: true });
   document.getElementById('coachSend').onclick = coachSendFromInput;
   document.getElementById('coachStop').onclick = () => { if (coachAbort) coachAbort.abort(); };
   document.getElementById('coachInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); coachSendFromInput(); } };
 
   /* If this ride's first insight is already cached, show it now (no click, no API call). */
   restoreCachedCoach(coachState, sport);
+}
+
+/* Reveal the conversation UI and ask for this session's analysis. Extracted from the Start button so
+   the highlights card's CTA can reach the SAME path: that button used to only scroll, leaving a
+   second tap ("Start") between a rider reading the highlights and any coaching, which is the most
+   likely reason people report never finding the coach at all. Elements are looked up by id rather
+   than closed over, because the highlights card calls this from outside renderCoachPanel's scope.
+   The reveal mirrors restoreCachedCoach's, which does the same three class flips when it replays a
+   cached first turn. */
+function startCoachConversation({ focusInput }) {
+  if (!coachState) return;
+  if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
+  const cta = document.getElementById('coachCta');
+  const compose = document.getElementById('coachCompose');
+  const chips = document.getElementById('coachChips');
+  if (cta) cta.classList.add('hidden');
+  if (compose) compose.classList.remove('hidden');
+  if (chips) chips.classList.remove('hidden');
+  /* Not focused on the highlights path: that tap asked to READ the analysis, and focusing the input
+     opens the mobile keyboard over the reply it just requested. */
+  if (focusInput) { const i = document.getElementById('coachInput'); if (i) i.focus(); }
+  sendCoach(coachAnalyzePrompt(coachState.sport));
+}
+
+/* The highlights card's CTA. Scrolls in every case, and starts the conversation only when it has not
+   started already -- the CTA block is hidden both by a live conversation and by restoreCachedCoach
+   replaying a cached first turn, so testing it keeps this from re-asking a question already answered
+   on screen (sendCoach would refuse a second first-turn anyway, but scrolling to an analysis the
+   rider already has should not depend on that). */
+function coachFromHighlights() {
+  scrollToCoach();
+  const cta = document.getElementById('coachCta');
+  if (cta && !cta.classList.contains('hidden')) startCoachConversation({ focusInput: false });
 }
 
 function coachSendFromInput() {
@@ -25807,7 +25833,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '4869917b8 · 2026-08-16';
+const LOAM_BUILD = 'd916bc267 · 2026-08-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
