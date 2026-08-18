@@ -2014,6 +2014,9 @@
         </div>
       </div>
       <div id="formMetrics" class="form-metrics"></div>
+      <!-- Shown by formSelectTurn only for a single corner that is a line worth coaching (see
+           formCoachSync). Hidden in whole-segment mode and on transit / "not a trail" corners. -->
+      <button id="formAskCoach" class="ghost-btn hidden" type="button" style="margin-top:10px;">Ask the coach about this corner &rarr;</button>
       <div id="formNote" class="dim" style="font-size:12px; margin:8px 2px 4px;"></div>
       <div class="dim" style="font-size:12px; margin-top:6px;">Left: you from behind, leaning as you leaned. Right: the same turn from above on the real map, rotated so you are always heading up. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.
         <details class="caveat-more"><summary>Every part of the picture</summary>On the left, the ghost needle marks this turn's peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where the bike is going (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the rider, while the trail stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.</details>
@@ -6417,6 +6420,7 @@ function setupFormReplay(D) {
     formSelectTurn(D, T);
   };
   sel.onchange = pick;
+  { const ask = document.getElementById('formAskCoach'); if (ask) ask.onclick = formAskCoachAboutTurn; }
   document.getElementById('formPlay').onclick = formPlayClicked;
   document.getElementById('formSpeedSel').onchange = (e) => { if (_form) _form.mult = +e.target.value; };
   { const av = document.getElementById('formAvatarSel'); if (av) { av.value = avatarPref(); av.onchange = (e) => setAvatar(e.target.value); } }
@@ -6453,6 +6457,79 @@ function formArmAutoplay() {
   _formObserver.observe(sec);
 }
 
+/* The corner facts the coach question carries, in the athlete's own units.
+   Converted HERE rather than in the module so the module stays unit-agnostic and testable, and so
+   these are the SAME numbers the tiles above are showing -- a question quoting different figures
+   from the panel it points at would be worse than no question. */
+function formCoachFacts(D, turn, S) {
+  const scrubMph = (typeof turnScrubMph === 'function') ? turnScrubMph(turn) : null;
+  const apex = (turn.apexSpeed != null) ? turn.apexSpeed : null;
+  const fin = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
+  return {
+    n: turn.n,
+    direction: turn.direction,
+    radius: turn.radius != null ? fin(U.smallNum(turn.radius)) : null,
+    apexSpeed: apex != null ? fin(U.speedNum(apex)) : null,
+    /* turnScrubMph works in mph internally, like the dropdown's scrub labels. */
+    scrub: (scrubMph != null && scrubMph > 0) ? fin(U.speedNum(scrubMph / 2.23694)) : null,
+    peakLean: fin(S.peakLean != null ? Math.abs(S.peakLean) : null),
+    medLeanL: fin(S.medLeanL), medLeanR: fin(S.medLeanR),
+    /* Gaze only when the channel was actually clean: a 'noisy' turn hides the needle on screen, so
+       quoting its peak to the coach would coach a number the rider was deliberately not shown. */
+    peakLook: (S.headRel && S.headStatus !== 'noisy') ? fin(S.peakLook) : null,
+    leadTime: (S.headRel && S.headStatus !== 'noisy') ? fin(S.leadTime) : null,
+    wristRange: S.wristRoll ? fin(S.wristRange) : null,
+    /* Bike-vs-body is a per-sample series, so "at the apex" has to name a frame. It uses the SAME
+       frame the replay parks on (formPeakIdx), which is the one the rider is looking at when the
+       button is there to be pressed -- a separation quoted from any other frame would describe a
+       picture they never saw. */
+    barInto: formBarIntoAtPeak(S),
+    speedUnit: U.speedUnit(), smallUnit: U.smallUnit(),
+  };
+}
+
+/* Bike-vs-body separation at the peak-lean frame: bars (wrist) minus torso (phone), the same
+   subtraction and sign convention the "Bike vs body" tile uses. Null unless the Watch recorded. */
+function formBarIntoAtPeak(S) {
+  if (!S || !S.barInto || !S.lean) return null;
+  const k = formPeakIdx(S);
+  if (k == null) return null;
+  const sep = S.barInto[k] - S.lean[k];
+  return (typeof sep === 'number' && isFinite(sep)) ? sep : null;
+}
+
+/* Offer the corner question only where a corner is a line worth coaching. formInRunTurns is the same
+   set the "Most scrubbed" chips and the hero card use: transit corners between runs are out, and so
+   is anything inside a run the rider marked "not a trail". Coaching a freeway offramp is exactly the
+   bug that scoping exists to prevent, and a question is a claim-making surface like any other. */
+/* Deliberately does NOT test coachState, though the press handler does. renderAll calls
+   setupFormReplay BEFORE renderCoachPanel, so at sync time coachState is still null on a first load
+   (and stale from the previous ride on a second one) -- gating on it here hid the button until the
+   rider happened to change the turn selection, and showed it for the wrong reason after that. The
+   replay's only call site is the MTB render path, which renders a coach panel a few lines later, so
+   "is there a coach" is answered by construction rather than by whichever render ran first. */
+function formCoachSync(D, turn) {
+  const btn = document.getElementById('formAskCoach');
+  if (!btn) return;
+  let ok = false;
+  try {
+    ok = !!turn && formInRunTurns(D).some(T => T.n === turn.n);
+  } catch (e) { ok = false; }
+  btn.classList.toggle('hidden', !ok);
+}
+
+/* One paid call, when the rider asks. Deliberately NOT wired to turn selection or the scrubber:
+   auto-explaining each corner would turn stepping through a ride into a per-corner billing event on
+   a key that ships inside the build. */
+function formAskCoachAboutTurn() {
+  if (!_form || !_form.turn || !_form.S) return;
+  if (!coachState) return;
+  if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
+  revealCoachConversation();
+  scrollToCoach();
+  sendCoach(LoamFormCoach.formTurnQuestion(formCoachFacts(_form.D, _form.turn, _form.S)));
+}
+
 function formSelectTurn(D, turn) {
   formStopAnim();
   _formZoomMult = 1;   /* each new turn starts framed to fit */
@@ -6463,9 +6540,11 @@ function formSelectTurn(D, turn) {
     document.getElementById('formReplaySvg').innerHTML = '';
     document.getElementById('formMetrics').innerHTML = '';
     if (note) note.textContent = 'Not enough motion data for this turn.';
+    formCoachSync(D, null);
     formInitMap(null);
     return;
   }
+  formCoachSync(D, turn);
   _form = { D, turn, S, tau: 0, dur: S.dur, mult: +(document.getElementById('formSpeedSel').value || 0.5), playing: false, raf: null, lastTs: null };
   formParkAtPeak();
   const bits = [];
@@ -6585,6 +6664,9 @@ function formGhostContext(D, run) {
 function formSelectSegment(D, run) {
   formStopAnim();
   _formZoomMult = 1;   /* each new segment starts framed to fit */
+  /* Whole-segment mode has no single corner to ask about: the question is built from ONE corner's
+     apex numbers, and a run spanning dozens of them has no apex. */
+  formCoachSync(D, null);
   const S = formSegmentSeries(D, run);
   const note = document.getElementById('formNote');
   if (!S) {
@@ -6621,20 +6703,30 @@ function formSelectSegment(D, run) {
    (one second before entry), where the paused frame headlined an upright rider, "0°" lean, and an
    amber "trailing" gaze. Play still shows the whole approach-to-exit arc: formSetPlaying rewinds
    to 0 when starting from this untouched resting frame. */
-function formParkAtPeak() {
-  const F = _form; if (!F) return;
-  const S = F.S;
-  /* Turn mode lean is corner-ward signed (positive = into the turn), so the peak frame is the max;
-     abs() would latch onto an opposite-direction wobble. Constrain the search to the corner itself
-     (tStart..tEnd): the padded clip's exit tail can out-lean the apex on packed trails, and parking
-     on the exit defeats the point of a mid-corner frame. Segment mode is signed left/right with no
-     single corner, so the biggest lean either side over the whole clip is the peak. */
+/* The peak-lean frame of a replay clip.
+   Turn mode lean is corner-ward signed (positive = into the turn), so the peak frame is the max;
+   abs() would latch onto an opposite-direction wobble. Constrain the search to the corner itself
+   (tStart..tEnd): the padded clip's exit tail can out-lean the apex on packed trails, and parking
+   on the exit defeats the point of a mid-corner frame. Segment mode is signed left/right with no
+   single corner, so the biggest lean either side over the whole clip is the peak.
+
+   Extracted so the coach question's "at the apex" separation names the SAME frame the replay parks
+   on. Two copies of this rule would let the number drift from the picture it describes. */
+function formPeakIdx(S) {
+  if (!S || !S.lean || !S.n) return null;
   let kPeak = 0, best = -Infinity;
   for (let i = 0; i < S.n; i++) {
     if (!S.segment && S.tStart != null && (S.g[i] < S.tStart || S.g[i] > S.tEnd)) continue;
     const v = S.segment ? Math.abs(S.lean[i]) : S.lean[i];
     if (v > best) { best = v; kPeak = i; }
   }
+  return kPeak;
+}
+
+function formParkAtPeak() {
+  const F = _form; if (!F) return;
+  const S = F.S;
+  const kPeak = formPeakIdx(S) || 0;
   F.tau = Math.max(0, Math.min(S.dur, S.g[kPeak] - S.w0));
   F.restingAtPeak = true;
   const scrub = document.getElementById('formScrub');
@@ -9652,6 +9744,78 @@ function liftHistoryReference(trend) {
    stationary driving-range sport that routes like the weightlifting Lift path: swings auto-segment from
    the wrist angular-speed burst, so the annotation chips (Driver / Iron / Wedge / Good / Mishit) LABEL
    rather than bracket. BETA / estimate-only until there is golf ground truth (CLAUDE.md). */
+/* Ported from analyzer/sports/mtb/form-coaching.js, pinned by its drift guard (compared by SOURCE:
+   the wording IS the behaviour, so a reworded copy that still produced a plausible question would
+   pass an output comparison while the two halves said different things to the coach). */
+const LoamFormCoach = (function () {
+
+/** Present if the value is a finite number. Absent channels (no AirPods, no Watch) stay absent. */
+function has(v) {
+  return typeof v === 'number' && isFinite(v);
+}
+
+/** `12.3 mph` — one place, unit appended. */
+function num(v, unit, places) {
+  const p = typeof places === 'number' ? places : 1;
+  return `${v.toFixed(p)}${unit ? ' ' + unit : ''}`;
+}
+
+/**
+ * The measured lines for one corner, in the order the tiles read on screen.
+ * Returns an array of strings; a channel that did not record contributes nothing rather than a dash,
+ * so the coach is never handed a placeholder it could mistake for a measurement.
+ */
+function formTurnLines(facts) {
+  const f = facts || {};
+  const side = f.direction === 'L' ? 'left' : 'right';
+  const lines = [];
+  lines.push(`Direction: ${side}-hander`);
+  if (has(f.radius)) lines.push(`Apex radius: ${num(f.radius, f.smallUnit)}`);
+  if (has(f.apexSpeed)) lines.push(`Apex speed: ${num(f.apexSpeed, f.speedUnit)}`);
+  if (has(f.scrub)) lines.push(`Speed scrubbed mid-corner: ${num(f.scrub, f.speedUnit)}`);
+  if (has(f.peakLean)) lines.push(`Peak lean into the corner: ${num(f.peakLean, 'degrees', 0)}`);
+  if (has(f.medLeanL) && has(f.medLeanR)) {
+    lines.push(`My median peak lean across the whole ride: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
+  }
+  if (has(f.peakLook)) lines.push(`Peak look-ahead (head vs bike direction, AirPods): ${num(f.peakLook, 'degrees', 0)}`);
+  if (has(f.leadTime)) {
+    lines.push(f.leadTime >= 0
+      ? `Head turn-in lead: my head committed ${num(f.leadTime, 'seconds', 2)} BEFORE the bike`
+      : `Head turn-in lead: my head committed ${num(Math.abs(f.leadTime), 'seconds', 2)} AFTER the bike`);
+  }
+  if (has(f.wristRange)) lines.push(`Wrist roll range through the corner (Watch, a rough proxy for the bars): ${num(f.wristRange, 'degrees', 0)}`);
+  if (has(f.barInto)) {
+    /* Bike-vs-body separation, signed the way the tile reads it. */
+    const who = f.barInto > 3 ? 'bike leaned over more than my body'
+      : f.barInto < -3 ? 'my body leaned more than the bike'
+        : 'bike and body about even';
+    lines.push(`Bike vs body at the apex: ${num(Math.abs(f.barInto), 'degrees', 0)}, ${who}`);
+  }
+  return lines;
+}
+
+/**
+ * The question sent into the coach thread. Written in the rider's voice because it lands in the
+ * conversation as their turn, and a first-person question is what the following reply answers.
+ */
+function formTurnQuestion(facts) {
+  const f = facts || {};
+  const label = f.n != null ? `T${f.n}` : 'this turn';
+  const lines = formTurnLines(f);
+  const missing = [];
+  if (!has(f.peakLook) && !has(f.leadTime)) missing.push('no AirPods gaze data on this corner');
+  if (!has(f.wristRange)) missing.push('no Apple Watch wrist data on this corner');
+  const gap = missing.length ? `\n\nNot measured here: ${missing.join('; ')}. Do not guess at them.` : '';
+  return `I am watching the Form Replay for corner ${label} -- the animated rider and the tiles under it. `
+    + `Explain what it is showing me.\n\n${lines.join('\n')}${gap}\n\n`
+    + `Tell me what these numbers say about how I rode this one corner, and one thing worth trying next time. `
+    + `Read only these numbers: nothing here saw the trail, the surface, my line, or what the bike was doing, `
+    + `so describe what was measured rather than asserting why it happened.`;
+}
+
+return { formTurnLines, formTurnQuestion };
+})();
+
 const LoamGolf = (function () {
   /* ---- ported from analyzer/sports/golf/annotations.js ---- */
   /*
@@ -21406,15 +21570,22 @@ function renderCoachPanel(D, sport) {
    than closed over, because the highlights card calls this from outside renderCoachPanel's scope.
    The reveal mirrors restoreCachedCoach's, which does the same three class flips when it replays a
    cached first turn. */
-function startCoachConversation({ focusInput }) {
-  if (!coachState) return;
-  if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
+/* Swap the "Start" block for the conversation UI. Split out from startCoachConversation because the
+   Form Replay's corner question also needs the thread visible, but must NOT send the analyze prompt
+   on its way there -- the rider asked about one corner, not for the ride summary. */
+function revealCoachConversation() {
   const cta = document.getElementById('coachCta');
   const compose = document.getElementById('coachCompose');
   const chips = document.getElementById('coachChips');
   if (cta) cta.classList.add('hidden');
   if (compose) compose.classList.remove('hidden');
   if (chips) chips.classList.remove('hidden');
+}
+
+function startCoachConversation({ focusInput }) {
+  if (!coachState) return;
+  if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
+  revealCoachConversation();
   /* Not focused on the highlights path: that tap asked to READ the analysis, and focusing the input
      opens the mobile keyboard over the reply it just requested. */
   if (focusInput) { const i = document.getElementById('coachInput'); if (i) i.focus(); }
@@ -25833,7 +26004,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'd916bc267 · 2026-08-16';
+const LOAM_BUILD = '3d39a76f4 · 2026-08-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -25860,6 +26031,9 @@ const LOAM_WHATS_NEW = [
     ['Lap comparison reads as an assignment', 'the three corners that cost you the most, worst first, with the full turn-by-turn list one tap away; tapping a corner opens it on its segment page, framed on the corner.'],
     ['Mark a run "not a trail"', 'a road transit or the ride home can look like a descent to grade detection; label it once and its corners drop out of the lap comparison and the most-scrubbed picks.'],
     ['Strava from the app', 'upload rides (with visibility and default bike/shoes), compare starred-segment PRs, and share a FIT straight into Loam.'],
+    /* No sport tag: a head-unit file can be a ride, an e-bike ride, a run or a hike, and the
+       whole point of the item is that it reaches someone who has not recorded anything yet. */
+    ['Open a file from your bike computer', 'a .fit exported from a Garmin, Wahoo, Specialized or Amflow head unit now opens straight in the app, with no phone recording behind it: Sessions tab, \'Analyze a .fit file\'. Road rides had no in-app path before this, since Loam does not record road cycling from the phone, so the only way to read one was a laptop. You get the map, the climbs and the descents, and on a Specialized file the jumps its head unit recorded plus the motor\'s own power on an e-bike, which is not the number other apps show you there. What a file like this cannot give you is anything that needs motion sensors: no turns, no lean, no cadence, no form. The analysis names those rather than quietly leaving them out, and tells you what recording the same ride with Loam would add.'],
     /* No sport tag: a recording left running is not a property of any one sport, and the entry has to
        reach whoever it happened to. */
     ['Trim a recording you forgot to stop', 'if the recording kept running through the drive home, the car was inside your ride -- its distance, its average speed, the map, and often an extra "descent" down the road home whose corners Loam then offered to coach you on. A recording that stops moving for five minutes and then covers ground again now opens with a notice saying so, and one tap trims to the first activity; or open the window picker, which draws the whole recording so you can see what you are leaving out. Nothing is deleted and you can widen it again at any time. It asks rather than deciding for you, because a five-minute stop is a drive home, a coffee stop, a mechanical or a lift queue and a GPS track cannot tell those apart. It never suggests trimming the START, because the quiet moment before you set off is where the phone works out which way up it was riding.'],
