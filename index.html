@@ -2953,18 +2953,45 @@ function detectRidingWindowAtThreshold(sorted, thr) {
   return { start, end };
 }
 
+/* Below this share of the walking window's span, the 2.0 m/s window is not describing the activity
+   -- it is describing a burst inside a slower one. See detectRidingWindow. */
+const WALK_SPAN_MIN_FRACTION = 0.5;
+
+function windowSpan(win) {
+  return (win == null || win.start == null || win.end == null) ? null : win.end - win.start;
+}
+
 function detectRidingWindow(locRows) {
   const sorted = [...locRows].sort((a,b) => a.t - b.t);
   // Primary threshold (2.0 m/s) is tuned for running/MTB and rejects stationary GPS jitter.
   // Fall back to a walking threshold (1.0 m/s) so a slow walk still analyzes rather than
   // erroring out with "no moving window". The sustained-3s test still rejects lone jitter spikes.
-  let win = detectRidingWindowAtThreshold(sorted, 2.0);
-  if (win.start == null || win.end == null) {
-    const walk = detectRidingWindowAtThreshold(sorted, 1.0);
-    if (walk.start != null && walk.end != null) {
-      dbg('[active window] no run/ride-speed window; using walking threshold (1.0 m/s)');
-      return walk;
-    }
+  const win = detectRidingWindowAtThreshold(sorted, 2.0);
+  const walk = detectRidingWindowAtThreshold(sorted, 1.0);
+  const winSpan = windowSpan(win), walkSpan = windowSpan(walk);
+  if (winSpan == null) {
+    if (walkSpan == null) return win;
+    dbg('[active window] no run/ride-speed window; using walking threshold (1.0 m/s)');
+    return walk;
+  }
+  /* A 2.0 m/s window that spans only a sliver of the walking one is a BURST, not the activity:
+     a 25-minute stroll where the walker briefly picked up the pace once reported as "1 MIN /
+     435 ft" against Strava's 25:10 / 1.39 mi off the same recording (owner report, 2026-08-19),
+     because the window ran from the first sustained crossing of 2.0 m/s to the last and both
+     sat inside one brisk minute. Widening rather than lowering the threshold is deliberate:
+     the walking window ALWAYS contains the 2.0 one (a fix sustained above 2.0 is sustained
+     above 1.0), so this can only ever grow the window, never move it somewhere else.
+     Safe for the sports that must not move -- the window is a SPAN, first crossing to last, so
+     any ride or run that opens and closes at speed sits at ~1.0 whatever happens in between.
+     Measured on the shapes this has to separate: MTB fixture 1.000, a ride with a 10-minute
+     hike-a-bike start 0.833, a run with a 2-minute walk either side 0.556, and the reported
+     walk 0.049. The bar sits in the order-of-magnitude gap below the nearest legitimate case,
+     NOT tuned against it. That margin is the whole reason this is safe to change at all: per
+     CLAUDE.md, moving `ride.start` moves the still-window calibration, which moves every turn
+     in the ride and renumbers turns that saved library descents already store. */
+  if (walkSpan != null && walkSpan > 0 && winSpan / walkSpan < WALK_SPAN_MIN_FRACTION) {
+    dbg(`[active window] 2.0 m/s window spans ${winSpan.toFixed(1)}s of the walking window's ${walkSpan.toFixed(1)}s; using walking threshold (1.0 m/s)`);
+    return walk;
   }
   return win;
 }
@@ -26004,7 +26031,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '3d39a76f4 · 2026-08-17';
+const LOAM_BUILD = 'd1ff9d8b3 · 2026-08-19';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
