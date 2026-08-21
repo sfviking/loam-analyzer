@@ -1771,7 +1771,7 @@
           <span class="subtitle">replay a run against your fastest lap of the same trail</span>
           <select id="ghostRun" style="margin-left:auto;"></select>
         </div>
-        <div class="ghost-controls">
+        <div class="ghost-controls" id="ghostControls">
           <button id="ghostPlay" class="ghost-btn">▶ Race the ghost</button>
           <input id="ghostScrub" type="range" min="0" max="1000" value="0">
           <select id="ghostSpeedSel">
@@ -1781,8 +1781,11 @@
             <option value="8">8x</option>
           </select>
         </div>
-        <div class="dim" style="font-size:12px; margin-top:6px;">Your run races a ghost of the fastest run on the map above. The live gap is seconds ahead of or behind the ghost at the same point along the track.</div>
-        <div id="ghostNote" class="dim hidden" style="font-size:12px; margin-top:6px; color:var(--accent);"></div>
+        <div id="ghostHow" class="dim" style="font-size:12px; margin-top:6px;">Your run races a ghost of the fastest run on the map above. The live gap is seconds ahead of or behind the ghost at the same point along the track.</div>
+        <!-- Deliberately NOT the accent colour: this note is the EXPECTED state of a ride that only
+             went down each trail once, and --accent is what the calibration and GPS-gap notices use
+             for something actually wrong. An amber block reads as an error report. -->
+        <div id="ghostNote" class="dim hidden" style="font-size:12px; margin-top:6px;"></div>
       </div>
     </div>
   </section>
@@ -2027,8 +2030,9 @@
         </div>
       </div>
       <div id="formMetrics" class="form-metrics"></div>
-      <!-- Shown by formSelectTurn only for a single corner that is a line worth coaching (see
-           formCoachSync). Hidden in whole-segment mode and on transit / "not a trail" corners. -->
+      <!-- Asks about whatever the replay is showing: one corner, or the whole segment. The label is
+           set by formCoachSync, which also hides it on transit / "not a trail" corners and on a run
+           marked "not a trail" -- a question is a claim-making surface like any other. -->
       <button id="formAskCoach" class="ghost-btn hidden" type="button" style="margin-top:10px;">Ask the coach about this corner &rarr;</button>
       <div id="formNote" class="dim" style="font-size:12px; margin:8px 2px 4px;"></div>
       <div class="dim" style="font-size:12px; margin-top:6px;">Left: you from behind, leaning as you leaned. Right: the same turn from above on the real map, rotated so you are always heading up. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.
@@ -4645,7 +4649,7 @@ function drawRuns() {
   drawRunsOverlay(runs, D);
   drawRunsDtw(runs, D);
   setupPlayByPlay(runs, D);
-  setupGhostRace(runs, D);
+  setupGhostRace(runs, D, nounSingular);
   /* Run mode (Auto/Descents/Laps) can change whether a comparable lap exists, so refresh the nav's
      Compare chip. Cheap and idempotent; also covers the initial render. */
   if (typeof buildSectionNav === 'function') buildSectionNav();
@@ -4748,6 +4752,7 @@ function toggleRunSkipped(r, D) {
    turn markers, in the exact visual language of the main map. */
 let _segMap = null, _segOverlay = null, _segMarkers = null, _segLoc = null, _segReturnScroll = 0, _segCoachWasVisible = false;
 let _segFormHome = null;   /* original DOM slot of #formReplaySection, so the segment page can borrow it and Back can return it */
+let _segCoachHome = null;  /* same, for #coachSection: the replay's corner question is asked from this page */
 let _segTurns = null;      /* this segment's turns, so a focused corner can be framed by its own window */
 let _segPinnedN = null;    /* a corner arrived at from elsewhere: keep it listed and marked even outside the top scrubbers */
 let segTurnMarkers = {};
@@ -4804,11 +4809,8 @@ function openSegmentPage(r, D, focusN) {
 
   _segReturnScroll = window.scrollY;
   hide('results'); show('segmentPage');
-  /* The coach panel is a top-level sibling of #results (it survives view switches),
-     so park it while the segment page is up and restore it on the way back. */
   const coach = document.getElementById('coachSection');
   _segCoachWasVisible = !!coach && !coach.classList.contains('hidden');
-  if (coach) coach.classList.add('hidden');
   window.scrollTo(0, 0);
   setStatus(`Segment: ${label}`, true);
 
@@ -4871,21 +4873,30 @@ function openSegmentPage(r, D, focusN) {
     document.getElementById('segmentPage').appendChild(formSec);
     setTimeout(() => {
       try {
-        /* Sync the dropdown to this run's whole-segment entry when one matches;
-           the dropdown is built from auto mode, so match by time window. */
-        const sel = document.getElementById('formTurn');
-        const autoRuns = _runsMode === 'auto' ? (segRunsList || []) : (segmentRuns(D, 'auto').runs || []);
-        const m = autoRuns.find(o => o.tStart === r.tStart && o.tEnd === r.tEnd);
+        /* The dropdown narrows to THIS segment while its page is up, and its one "Whole segment"
+           entry is this run. A rider who tapped a corner to look at it should not have to scroll past
+           every corner of the day to reach the one next to it (owner report, 2026-08-20) -- on a long
+           ride that list runs to a hundred entries, of which four are on the trail in front of them.
+           Corners with an implausible lean signal are dropped the same way the ride-wide list drops
+           them (formCriticalTurns' roll-range test), EXCEPT one arrived at by tap: the replay is about
+           to open on it either way, and a dropdown that cannot name what is on screen is worse than
+           one carrying a corner whose lean is shaky.
+           Offering this run rather than the matching auto-mode one also fixes a latent mismatch: the
+           viewed run may come from a segmentation mode whose windows are not in the auto list at all,
+           where the old lookup found nothing and left the dropdown reading some other descent. */
         const pinned = _segPinnedN != null ? turns.find(T => T.n === _segPinnedN) : null;
+        const replayable = turns
+          .filter(T => formTurnRollRange(D, T) <= 65 || (pinned && T.n === pinned.n))
+          .sort((a, b) => a.tStart - b.tStart);
+        _formScopeRun = r;
+        formFillTurnSelect(D, replayable, [r], pinned ? pinned.n : 'seg:' + r.n);
         if (pinned) {
           /* Arrived on a specific corner, so open the replay ON it rather than on the whole segment:
              the map answers "where is it", this answers "what did I do". Same three steps the
              most-scrubbed chips run. */
-          if (sel) sel.value = String(pinned.n);
           formMarkActiveChip(pinned.n);
           formSelectTurn(D, pinned);
         } else {
-          if (m && sel) { const v = 'seg:' + m.n; if (Array.from(sel.options).some(o => o.value === v)) sel.value = v; }
           formSelectSegment(D, r);
         }
         /* Chips scope to this descent while its page is up: only its corners. */
@@ -4893,6 +4904,18 @@ function openSegmentPage(r, D, focusN) {
         formArmAutoplay();
       } catch (e) {}
     }, 80);
+  }
+  /* The coach panel rides along too, after the replay, for the same reason the replay does: the
+     replay's "Ask the coach about this corner" button is ON this page, and the corner it is asked
+     about is the corner the rider tapped to get here. #coachSection is a top-level sibling of
+     #results, so parking it (which is what this used to do) left the button pressable and its whole
+     effect off screen -- revealCoachConversation flipped classes nobody could see, scrollToCoach was
+     a no-op on a display:none section, and sendCoach still made the paid call and streamed the reply
+     into a hidden thread. Nothing visibly happened, and on the bundled key it also spent one of the
+     day's questions. Back and any fresh render send it home, exactly as with the replay. */
+  if (coach && _segCoachWasVisible) {
+    if (!_segCoachHome) _segCoachHome = { parent: coach.parentNode, next: coach.nextElementSibling };
+    document.getElementById('segmentPage').appendChild(coach);
   }
   /* Leaflet cannot size itself inside a container that was display:none at init. */
   setTimeout(() => {
@@ -4980,15 +5003,32 @@ function renderSegFade(r, D) {
 
 function closeSegmentPage() {
   hide('segmentPage'); show('results');
-  if (_segCoachWasVisible) { const c = document.getElementById('coachSection'); if (c) c.classList.remove('hidden'); }
+  /* Send the borrowed coach panel home BEFORE #segmentPage is any use to it: leaving the node inside
+     a display:none page is how an answer the rider is mid-way through reading would vanish. The
+     conversation itself is untouched by the move -- the same DOM node, so the thread, the messages
+     and any stream in flight all come back with it. */
+  const coach = document.getElementById('coachSection');
+  if (coach) {
+    if (_segCoachHome && coach.parentNode !== _segCoachHome.parent) {
+      try { _segCoachHome.parent.insertBefore(coach, _segCoachHome.next); } catch (e) {}
+    }
+    if (_segCoachWasVisible) coach.classList.remove('hidden');
+  }
   /* Send the borrowed form replay home and pause it; keep its segment selection.
-     The scrub chips widen back to the whole ride. */
+     The scrub chips and the turn dropdown widen back to the whole ride. */
   if (_segFormHome) {
     const formSec = document.getElementById('formReplaySection');
     if (formSec && formSec.parentNode !== _segFormHome.parent) {
       formStopAnim();
       try { _segFormHome.parent.insertBefore(formSec, _segFormHome.next); } catch (e) {}
       try { if (_runsD) formRenderScrubChips(_runsD); } catch (e) {}
+      /* Scope first, then rebuild: formRestoreRideSelect asks formCurrentSelectValue where the replay
+         is, and that answer has to be resolved against the ride-wide run list it is about to install.
+         Clearing _formScopeRun here rather than in setupFormReplay matters because the lean baseline
+         reads it -- the NEXT corner picked from the ride-wide dropdown must be compared to its own
+         segment or the ride, not to the segment whose page the rider just left. */
+      _formScopeRun = null;
+      try { if (_runsD) formRestoreRideSelect(_runsD); } catch (e) {}
     }
   }
   segTurnMarkers = {};
@@ -5453,7 +5493,9 @@ function ghostTimeAtDist(track, d) {
   return t[a] + (t[i] - t[a]) * f;
 }
 
-function setupGhostRace(runs, D) {
+/* rowNoun is the runs panel's row noun (descent / lap / run), i.e. the SEGMENTATION MODE, not the
+   sport -- passed in so the empty state below counts the same rows the table above it shows. */
+function setupGhostRace(runs, D, rowNoun) {
   ghostRaceStop();
   _ghostSetup = null;
   const panel = document.getElementById('ghostRace');
@@ -5465,18 +5507,42 @@ function setupGhostRace(runs, D) {
   const note = document.getElementById('ghostNote');
   const play = document.getElementById('ghostPlay');
   const scrub = document.getElementById('ghostScrub');
+  const controls = document.getElementById('ghostControls');
+  const how = document.getElementById('ghostHow');
   // Only runs that have a same-segment peer can race (against the fastest lap of that trail).
   const comparable = runs.filter(r => fastestSameSegmentPeer(r, runs, D));
   if (!comparable.length) {
+    /* The empty state has to remove the whole racing apparatus, not just the parts that do something
+       (owner report, 2026-08-20: "This is confusing. Do I get a ghost or what?"). It used to hide the
+       lap picker, the Race button and the scrubber and leave TWO things behind: the playback-speed
+       select, orphaned in an otherwise empty control row, and the present-tense "Your run races a
+       ghost of the fastest run on the map above", sitting directly above a note saying there is no
+       ghost. A live-looking 2x dropdown under a sentence describing a race in progress reads as a
+       feature that is running, so the note underneath reads as a contradiction rather than as an
+       answer. Hide the row and the how-it-works line; the note is then the only body copy and can
+       answer the question outright. */
     sel.classList.add('hidden');
-    if (play) { play.classList.add('hidden'); play.onclick = null; }
-    if (scrub) { scrub.classList.add('hidden'); scrub.oninput = null; }
-    if (note) { note.classList.remove('hidden'); note.textContent = `No repeated segments in this ${sportNoun(displaySport(D))}. The ghost race replays a run against your fastest lap of the same trail; once you have two runs down one segment you can race them.`; }
+    if (controls) controls.classList.add('hidden');
+    if (how) how.classList.add('hidden');
+    if (play) play.onclick = null;
+    if (scrub) scrub.oninput = null;
+    if (note) {
+      note.classList.remove('hidden');
+      /* Says NO, why, and what would make it yes. "In one recording" is load-bearing: the ghost is
+         built from this recording's GPS (ghostTrack reads D.sensors.location), so unlike the
+         play-by-play there is no cross-ride fallback and the old "once you have two runs down one
+         segment" left that open. The row noun follows the segmentation mode so the count matches
+         the table above; the verb follows the sport, so a runner is not told to ride. */
+      const lex = sportLex(displaySport(D));
+      const rows = `${runs.length} ${rowNoun || 'run'}${runs.length === 1 ? '' : 's'}`;
+      note.innerHTML = `<span style="color:var(--text);">No ghost on this ${lexNoun(lex)}: its ${rows} are each on a different stretch of trail, so there is no second lap to race.</span>`
+        + `<br>${capitalize(lex.ctaVerb)} one stretch twice in one recording and the faster lap becomes the ghost.`;
+    }
     return;
   }
   sel.classList.remove('hidden');
-  if (play) play.classList.remove('hidden');
-  if (scrub) scrub.classList.remove('hidden');
+  if (controls) controls.classList.remove('hidden');
+  if (how) how.classList.remove('hidden');
   if (note) note.classList.add('hidden');
   sel.innerHTML = comparable.map(r => `<option value="${r.n}">${escapeHtml(runLabel(r.tStart) || r.label)}</option>`).join('');
   sel.onchange = () => ghostRaceStop();
@@ -5854,14 +5920,21 @@ function formTurnSeries(D, turn) {
     S.spdT = spdRows.map(r => r.t); S.spdV = spdRows.map(r => r.speed);
     S.spdMax = S.spdV.length ? Math.max(...S.spdV) : 0;
 
-    /* Ride-wide left/right peak-lean medians (from each turn's leanDelta) for the symmetry compare:
-       the opposite side's typical lean is drawn as a faint mirrored ghost so the rider can see this
-       turn against their other-side body position (the L/R asymmetry insight in CLAUDE.md). */
-    const sideMed = (dir) => {
-      const v = (D.turns || []).filter(t => t.direction === dir && t.leanDelta != null).map(t => Math.abs(t.leanDelta));
-      return v.length ? median(v) : null;
-    };
-    S.medLeanR = sideMed('R'); S.medLeanL = sideMed('L');
+    /* Left/right peak-lean medians (from each turn's leanDelta) for the symmetry compare, and the
+       corners they are taken over are a decision rather than a detail. The whole ride is the wrong
+       pool for a corner on a technical segment: it averages that trail together with the mellow flow
+       trail and the fireroad, so a well-ridden tight corner reads as "less committed than usual" when
+       it was measured against terrain the rider was not on (owner report, 2026-08-20). So when the
+       replay is narrowed to a segment, this corner is compared to the OTHER CORNERS ON THAT SEGMENT --
+       and only when there are enough of them per side to have a median at all. pickLeanBaseline owns
+       that choice and returns the scope with the numbers, so the tile and the coach question can name
+       the same baseline. */
+    const rideLean = formRideLeanMedians(D);
+    const leanRef = LoamFormCoach.pickLeanBaseline(
+      _formScopeRun ? formSegmentLeanMedians(D, _formScopeRun) : null, rideLean);
+    S.medLeanL = leanRef.L; S.medLeanR = leanRef.R; S.leanScope = leanRef.scope;
+    S.leanScopeLabel = leanRef.scope === 'segment' ? (runLabel(_formScopeRun.tStart) || _formScopeRun.label) : null;
+    S.rideMedLeanL = rideLean.L; S.rideMedLeanR = rideLean.R;
 
     return S;
   } catch (e) { console.warn('formTurnSeries failed', e); return null; }
@@ -6105,6 +6178,35 @@ function formCriticalTurns(D) {
   return (D.turns || []).slice()
     .sort((a, b) => a.tStart - b.tStart)
     .filter(T => formTurnRollRange(D, T) <= 65);
+}
+
+/* The corners of one segment, in time order. By tPeak (falling back to tStart) so a corner is counted
+   on the run its APEX is on, the same test every other run-scoped surface in this file uses. */
+function formSegmentTurns(D, run) {
+  if (!run) return [];
+  return (D.turns || [])
+    .filter(T => { const t = T.tPeak != null ? T.tPeak : T.tStart; return t >= run.tStart && t <= run.tEnd; })
+    .sort((a, b) => a.tStart - b.tStart);
+}
+
+/* Left/right peak-lean medians over the whole ride: the pooled baseline, kept as the fallback and as
+   the contrast figure. Every turn in the ride, deliberately, because that is what "your usual" has
+   always meant on this tile and narrowing it here would change a number nobody asked to change. */
+function formRideLeanMedians(D) {
+  const side = (dir) => {
+    const v = (D.turns || []).filter(t => t.direction === dir && t.leanDelta != null).map(t => Math.abs(t.leanDelta));
+    return v.length ? median(v) : null;
+  };
+  return { L: side('L'), R: side('R') };
+}
+
+/* The same medians over ONE segment, carrying the corner COUNTS behind them so pickLeanBaseline can
+   refuse a median two corners wide. */
+function formSegmentLeanMedians(D, run) {
+  const side = (dir) => formSegmentTurns(D, run)
+    .filter(t => t.direction === dir && t.leanDelta != null).map(t => Math.abs(t.leanDelta));
+  const l = side('L'), r = side('R');
+  return { L: l.length ? median(l) : null, R: r.length ? median(r) : null, nL: l.length, nR: r.length };
 }
 
 function formMarkActiveChip(v) {
@@ -6422,6 +6524,66 @@ function turnScrubMph(T) {
   return Math.max(0, vIn - vLow) * 2.237;
 }
 const FORM_SCRUB_MIN_MPH = 2.0;   /* below this we do not flag a turn as a scrubber */
+let _formSegs = [];        /* the runs the dropdown's "Whole segment" options resolve against */
+let _formScopeRun = null;  /* the segment the replay is narrowed to (segment page), or null for the whole ride */
+
+/* The turn dropdown, built for a SCOPE.
+
+   One builder for the ride-wide list and for the segment page's, so the two cannot drift in what they
+   mark or how they label a turn. The segment page passes only that segment's corners: a rider who
+   tapped one corner to look at it should not have to scroll past a hundred corners from the rest of
+   the day to reach its neighbour (owner report, 2026-08-20).
+
+   `segs` is stashed in `_formSegs` as well as rendered, because that is the list a "seg:" option
+   resolves against when picked. Keeping the two together is what stops an option resolving to a
+   different run than the one it names -- the segment page's viewed run may come from a segmentation
+   mode (`_runsMode`) whose windows do not appear in the auto-mode list at all, and the old code fell
+   back to `segs[0]` there, i.e. to the ride's first descent. */
+function formFillTurnSelect(D, turns, segs, want) {
+  const sel = document.getElementById('formTurn');
+  if (!sel) return;
+  _formSegs = segs || [];
+  /* Scrub markers stay scoped to corners inside runs (formInRunTurns): transit-turn scrub is not
+     coached, so it is not flagged either. The 〰 threshold is absolute, so narrowing the LIST never
+     changes which corners carry the marker -- only which are on offer. */
+  const inRunSet = new Set(formInRunTurns(D).map(T => T.n));
+  /* Scrub amounts follow the Units toggle (turnScrubMph computes in mph internally). */
+  const scrubFmt = (mph) => `${U.speedNum(mph / 2.23694).toFixed(1)} ${U.speedUnit()}`;
+  const turnOpts = (turns || []).map(T => {
+    const r = (T.radius != null && !isNaN(T.radius)) ? ` · r ${U.small(T.radius)}` : '';
+    const mph = turnScrubMph(T);
+    const sc = (inRunSet.has(T.n) && mph >= FORM_SCRUB_MIN_MPH) ? ` · 〰 scrub ${scrubFmt(mph)}` : '';
+    return `<option value="${T.n}">T${T.n} ${T.direction}${r}${sc}</option>`;
+  }).join('');
+  const segOpts = _formSegs.map(r => `<option value="seg:${r.n}">▶ ${escapeHtml(runLabel(r.tStart) || r.label)} · ${fmtDuration(r.tEnd - r.tStart)}</option>`).join('');
+  sel.innerHTML = `<optgroup label="Single turn">${turnOpts}</optgroup>`
+    + (segOpts ? `<optgroup label="Whole segment">${segOpts}</optgroup>` : '');
+  if (want != null && Array.from(sel.options).some(o => o.value === String(want))) sel.value = String(want);
+}
+
+/* The dropdown value describing what the replay is ACTUALLY showing, resolved against the option list
+   about to be installed. Used when the scope changes under a live replay (Back off the segment page),
+   so the label and the picture cannot disagree. The overlap fallback is the same test formGhostContext
+   uses: the viewed run may be a laps-mode window while the ride-wide list is auto-mode, and any
+   overlap in time means the same riding. */
+function formCurrentSelectValue(segs) {
+  if (!_form) return null;
+  if (_form.turn) return String(_form.turn.n);
+  const r = _form.run;
+  if (!r) return null;
+  const list = segs || [];
+  const m = list.find(o => o.tStart === r.tStart && o.tEnd === r.tEnd)
+    || list.find(o => (Math.min(o.tEnd, r.tEnd) - Math.max(o.tStart, r.tStart)) > 0);
+  return m ? 'seg:' + m.n : null;
+}
+
+/* Put the dropdown back on the whole ride, after the segment page narrowed it. */
+function formRestoreRideSelect(D) {
+  if (!D || !D.turns) return;
+  let segs = [];
+  try { segs = (typeof segmentRuns === 'function') ? (segmentRuns(D, 'auto').runs || []) : []; } catch (e) { segs = []; }
+  formFillTurnSelect(D, formCriticalTurns(D), segs, formCurrentSelectValue(segs));
+}
 
 function setupFormReplay(D) {
   formStop();
@@ -6432,6 +6594,7 @@ function setupFormReplay(D) {
   if (!ordered.length) { sec.classList.add('hidden'); return; }   /* no turn has a clean enough lean signal */
   sec.classList.remove('hidden');
   const sel = document.getElementById('formTurn');
+  _formScopeRun = null;   /* a fresh render is always the whole ride, never a leftover segment scope */
   /* Two ways to replay: a single critical turn (default, with gaze + hand), or a whole segment/run
      end to end (continuous signed lean). Segments come from the same auto run-segmentation the Runs
      panel uses, so the labels line up. */
@@ -6445,33 +6608,22 @@ function setupFormReplay(D) {
     .map(T => ({ T, mph: turnScrubMph(T) }))
     .filter(o => o.mph >= FORM_SCRUB_MIN_MPH)
     .sort((a, b) => b.mph - a.mph);
-  const scrubSet = new Set(scrubRanked.map(o => o.T.n));
-  /* Scrub amounts follow the Units toggle (turnScrubMph computes in mph internally). */
-  const scrubFmt = (mph) => `${U.speedNum(mph / 2.23694).toFixed(1)} ${U.speedUnit()}`;
-  const turnOpts = ordered.map(T => {
-    const r = (T.radius != null && !isNaN(T.radius)) ? ` · r ${U.small(T.radius)}` : '';
-    const sc = scrubSet.has(T.n) ? ` · 〰 scrub ${scrubFmt(turnScrubMph(T))}` : '';
-    return `<option value="${T.n}">T${T.n} ${T.direction}${r}${sc}</option>`;
-  }).join('');
-  const segOpts = segs.map(r => `<option value="seg:${r.n}">▶ ${escapeHtml(runLabel(r.tStart) || r.label)} · ${fmtDuration(r.tEnd - r.tStart)}</option>`).join('');
-  sel.innerHTML = `<optgroup label="Single turn">${turnOpts}</optgroup>`
-    + (segOpts ? `<optgroup label="Whole segment">${segOpts}</optgroup>` : '');
   /* Default to the most-scrubbed turn, the ride's most instructive corner, instead of the first
      chronological one (typically a trivial early bend). The dropdown stays chronological. */
-  if (scrubRanked.length) sel.value = String(scrubRanked[0].T.n);
+  formFillTurnSelect(D, ordered, segs, scrubRanked.length ? scrubRanked[0].T.n : null);
   formRenderScrubChips(D);
   const pick = () => {
     const v = sel.value;
     formMarkActiveChip(v);
     if (v && v.indexOf('seg:') === 0) {
-      const run = segs.find(r => r.n === +v.slice(4)) || segs[0];
+      const run = _formSegs.find(r => r.n === +v.slice(4)) || _formSegs[0];
       if (run) { formSelectSegment(D, run); return; }
     }
     const T = D.turns.find(x => x.n === +v) || ordered[0];
     formSelectTurn(D, T);
   };
   sel.onchange = pick;
-  { const ask = document.getElementById('formAskCoach'); if (ask) ask.onclick = formAskCoachAboutTurn; }
+  { const ask = document.getElementById('formAskCoach'); if (ask) ask.onclick = formAskCoach; }
   document.getElementById('formPlay').onclick = formPlayClicked;
   document.getElementById('formSpeedSel').onchange = (e) => { if (_form) _form.mult = +e.target.value; };
   { const av = document.getElementById('formAvatarSel'); if (av) { av.value = avatarPref(); av.onchange = (e) => setAvatar(e.target.value); } }
@@ -6540,6 +6692,78 @@ function formCoachFacts(D, turn, S) {
        button is there to be pressed -- a separation quoted from any other frame would describe a
        picture they never saw. */
     barInto: formBarIntoAtPeak(S),
+    /* Which corners the medians above describe, and the segment this one is on. The question names
+       both, so a coach reading a tight technical segment is not handed a ride-wide median as though
+       it described this trail -- and when the segment was too thin for its own median, the question
+       says THAT instead of quietly falling back. Same two values the Sides tile is showing. */
+    leanScope: S.leanScope || 'ride',
+    segLabel: formTurnSegmentLabel(D, turn),
+    speedUnit: U.speedUnit(), smallUnit: U.smallUnit(),
+  };
+}
+
+/* The segment a corner sits on, named. The replay's own scope wins when it has one (that is the trail
+   the rider is looking at, in whatever segmentation mode they opened it); otherwise the auto-mode run
+   containing the corner. Null for a corner on no run at all -- a transit corner has no segment to be
+   read relative to, and inventing one would be worse than the ride-wide comparison. */
+function formTurnSegmentRun(D, turn) {
+  const t = turn.tPeak != null ? turn.tPeak : turn.tStart;
+  if (_formScopeRun && t >= _formScopeRun.tStart && t <= _formScopeRun.tEnd) return _formScopeRun;
+  try {
+    const { runs } = segmentRuns(D, 'auto');
+    return (runs || []).find(r => t >= r.tStart && t <= r.tEnd) || null;
+  } catch (e) { return null; }
+}
+function formTurnSegmentLabel(D, turn) {
+  const run = formTurnSegmentRun(D, turn);
+  return run ? (runLabel(run.tStart) || run.label) : null;
+}
+
+/* The facts behind the WHOLE-SEGMENT question, in the athlete's units, converted here for the same
+   reason the corner facts are: these must be the numbers already on screen.
+   The ride-wide medians ride along beside the segment's on purpose. They are what let the coach see
+   that this trail is tighter (or more open) than the rest of the day, which is precisely the contrast
+   a pooled median destroys -- and the question labels them as contrast, never as this segment. */
+function formSegmentCoachFacts(D, run, S) {
+  const fin = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
+  const m = (run && run.metrics) || {};
+  const turns = formSegmentTurns(D, run);
+  const radii = turns.map(T => T.radius).filter(v => typeof v === 'number' && isFinite(v));
+  const apexes = turns.map(T => (T.vPeak != null ? T.vPeak : T.apexSpeed)).filter(v => typeof v === 'number' && isFinite(v));
+  const rideRadii = (D.turns || []).map(T => T.radius).filter(v => typeof v === 'number' && isFinite(v));
+  const scrub = turns.map(T => ({ n: T.n, direction: T.direction, mph: turnScrubMph(T) }))
+    .filter(o => o.mph >= FORM_SCRUB_MIN_MPH).sort((a, b) => b.mph - a.mph);
+  const G = _form && _form.ghost;
+  const myDur = (m.duration != null) ? m.duration : (run.tEnd - run.tStart);
+  return {
+    label: (runLabel(run.tStart) || run.label) || null,
+    durationS: fin(myDur),
+    /* The segment page's own stat chips, character for character (U.dist / U.elev pick their unit by
+       magnitude, so there is no fixed label to hand the module instead). */
+    distanceText: m.distance != null ? U.dist(m.distance) : null,
+    dropText: m.drop != null ? U.elev(m.drop) : null,
+    topSpeed: m.maxSpeed != null ? fin(U.speedNum(m.maxSpeed)) : null,
+    turnCount: turns.length,
+    leftTurns: turns.filter(T => T.direction === 'L').length,
+    rightTurns: turns.filter(T => T.direction === 'R').length,
+    medRadius: radii.length ? fin(U.smallNum(median(radii))) : null,
+    rideMedRadius: rideRadii.length ? fin(U.smallNum(median(rideRadii))) : null,
+    tightestRadius: radii.length ? fin(U.smallNum(Math.min(...radii))) : null,
+    medApexSpeed: apexes.length ? fin(U.speedNum(median(apexes))) : null,
+    /* Already gated by pickLeanBaseline: null here means the segment could not support a per-side
+       median, and formSegmentLines says so rather than printing the ride's in its place. */
+    medLeanL: S.leanScope === 'segment' ? fin(S.medLeanL) : null,
+    medLeanR: S.leanScope === 'segment' ? fin(S.medLeanR) : null,
+    rideMedLeanL: fin(S.rideMedLeanL), rideMedLeanR: fin(S.rideMedLeanR),
+    scrubbedCount: scrub.length,
+    worstScrub: scrub.slice(0, 3).map(o => ({ n: o.n, direction: o.direction, amount: fin(U.speedNum(o.mph / 2.23694)) })),
+    peerLabel: G ? G.peerLabel : null,
+    peerDurationS: G ? fin(G.peer.metrics.duration) : null,
+    gapS: G ? fin(myDur - G.peer.metrics.duration) : null,
+    /* Gaze is per-corner only: the whole-segment series never builds a head channel, so this says
+       "not on this replay" rather than "not recorded", and the question tells the coach not to guess. */
+    hasGaze: false,
+    hasWrist: !!S.wristRoll,
     speedUnit: U.speedUnit(), smallUnit: U.smallUnit(),
   };
 }
@@ -6554,36 +6778,53 @@ function formBarIntoAtPeak(S) {
   return (typeof sep === 'number' && isFinite(sep)) ? sep : null;
 }
 
-/* Offer the corner question only where a corner is a line worth coaching. formInRunTurns is the same
-   set the "Most scrubbed" chips and the hero card use: transit corners between runs are out, and so
-   is anything inside a run the rider marked "not a trail". Coaching a freeway offramp is exactly the
-   bug that scoping exists to prevent, and a question is a claim-making surface like any other. */
+/* The button asks about whatever the replay is showing: one CORNER, or the WHOLE SEGMENT.
+
+   Both are offered only where the subject is a line worth coaching. A corner has to be in
+   formInRunTurns -- the same set the "Most scrubbed" chips and the hero card use, so transit corners
+   between runs are out and so is anything inside a run the rider marked "not a trail". A segment has
+   to not BE such a run. Coaching a freeway offramp is exactly the bug that scoping exists to prevent,
+   and a question is a claim-making surface like any other.
+
+   Whole-segment mode used to offer nothing at all, on the grounds that the question was built from one
+   corner's apex numbers and a run has no apex. That was a fact about the question, not about the mode:
+   a segment has plenty to say for itself (its own corner count, radii, lean medians, scrubbers and lap
+   times), and it is the scope a rider lapping one trail actually wants read -- see formSegmentQuestion
+   for why a ride-wide median is the wrong yardstick for it. */
 /* Deliberately does NOT test coachState, though the press handler does. renderAll calls
    setupFormReplay BEFORE renderCoachPanel, so at sync time coachState is still null on a first load
    (and stale from the previous ride on a second one) -- gating on it here hid the button until the
    rider happened to change the turn selection, and showed it for the wrong reason after that. The
    replay's only call site is the MTB render path, which renders a coach panel a few lines later, so
    "is there a coach" is answered by construction rather than by whichever render ran first. */
-function formCoachSync(D, turn) {
+function formCoachSync(D, turn, run) {
   const btn = document.getElementById('formAskCoach');
   if (!btn) return;
-  let ok = false;
+  let label = null;
   try {
-    ok = !!turn && formInRunTurns(D).some(T => T.n === turn.n);
-  } catch (e) { ok = false; }
-  btn.classList.toggle('hidden', !ok);
+    if (turn) {
+      if (formInRunTurns(D).some(T => T.n === turn.n)) label = 'Ask the coach about this corner →';
+    } else if (run && !runIsSkipped(run, skippedRunWindows(D))) {
+      label = 'Ask the coach about this segment →';
+    }
+  } catch (e) { label = null; }
+  if (label) btn.textContent = label;
+  btn.classList.toggle('hidden', !label);
 }
 
 /* One paid call, when the rider asks. Deliberately NOT wired to turn selection or the scrubber:
    auto-explaining each corner would turn stepping through a ride into a per-corner billing event on
    a key that ships inside the build. */
-function formAskCoachAboutTurn() {
-  if (!_form || !_form.turn || !_form.S) return;
+function formAskCoach() {
+  if (!_form || !_form.S) return;
+  if (!_form.turn && !_form.run) return;
   if (!coachState) return;
   if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
   revealCoachConversation();
   scrollToCoach();
-  sendCoach(LoamFormCoach.formTurnQuestion(formCoachFacts(_form.D, _form.turn, _form.S)));
+  sendCoach(_form.turn
+    ? LoamFormCoach.formTurnQuestion(formCoachFacts(_form.D, _form.turn, _form.S))
+    : LoamFormCoach.formSegmentQuestion(formSegmentCoachFacts(_form.D, _form.run, _form.S)));
 }
 
 function formSelectTurn(D, turn) {
@@ -6596,11 +6837,11 @@ function formSelectTurn(D, turn) {
     document.getElementById('formReplaySvg').innerHTML = '';
     document.getElementById('formMetrics').innerHTML = '';
     if (note) note.textContent = 'Not enough motion data for this turn.';
-    formCoachSync(D, null);
+    formCoachSync(D, null, null);
     formInitMap(null);
     return;
   }
-  formCoachSync(D, turn);
+  formCoachSync(D, turn, null);
   _form = { D, turn, S, tau: 0, dur: S.dur, mult: +(document.getElementById('formSpeedSel').value || 0.5), playing: false, raf: null, lastTs: null };
   formParkAtPeak();
   const bits = [];
@@ -6668,9 +6909,14 @@ function formSegmentSeries(D, run) {
     S.tPeak = (run.tStart + run.tEnd) / 2;
     const spdRows = locWin.filter(r => r.speed != null);
     S.spdT = spdRows.map(r => r.t); S.spdV = spdRows.map(r => r.speed); S.spdMax = S.spdV.length ? Math.max(...S.spdV) : 0;
-    const sideMed = (dir) => { const v = (D.turns || []).filter(t => t.direction === dir && t.leanDelta != null).map(t => Math.abs(t.leanDelta)); return v.length ? median(v) : null; };
-    S.medLeanR = sideMed('R'); S.medLeanL = sideMed('L');
-    S.turnCount = (D.turns || []).filter(t => (t.tPeak != null ? t.tPeak : t.tStart) >= run.tStart && (t.tPeak != null ? t.tPeak : t.tStart) <= run.tEnd).length;
+    /* Whole-segment mode is a segment by definition, so its own corners are the baseline whenever it
+       has enough of them per side; see formTurnSeries for why the ride is the wrong pool. */
+    const rideLean = formRideLeanMedians(D);
+    const leanRef = LoamFormCoach.pickLeanBaseline(formSegmentLeanMedians(D, run), rideLean);
+    S.medLeanL = leanRef.L; S.medLeanR = leanRef.R; S.leanScope = leanRef.scope;
+    S.leanScopeLabel = leanRef.scope === 'segment' ? (runLabel(run.tStart) || run.label) : null;
+    S.rideMedLeanL = rideLean.L; S.rideMedLeanR = rideLean.R;
+    S.turnCount = formSegmentTurns(D, run).length;
     return S;
   } catch (e) { console.warn('formSegmentSeries failed', e); return null; }
 }
@@ -6720,9 +6966,11 @@ function formGhostContext(D, run) {
 function formSelectSegment(D, run) {
   formStopAnim();
   _formZoomMult = 1;   /* each new segment starts framed to fit */
-  /* Whole-segment mode has no single corner to ask about: the question is built from ONE corner's
-     apex numbers, and a run spanning dozens of them has no apex. */
-  formCoachSync(D, null);
+  /* The button switches to the SEGMENT question here rather than going away: a run has no apex, but
+     it has its own corners, radii, lean medians and lap times, and those are what a rider lapping one
+     trail wants read. Synced before formSegmentSeries so a series that fails to build leaves the
+     button hidden below rather than offering a question about nothing. */
+  formCoachSync(D, null, run);
   const S = formSegmentSeries(D, run);
   const note = document.getElementById('formNote');
   if (!S) {
@@ -6730,6 +6978,7 @@ function formSelectSegment(D, run) {
     document.getElementById('formReplaySvg').innerHTML = '';
     document.getElementById('formMetrics').innerHTML = '';
     if (note) note.textContent = 'Not enough motion data for this segment.';
+    formCoachSync(D, null, null);
     formInitMap(null);
     return;
   }
@@ -7149,13 +7398,19 @@ function formFrame() {
       + `<div class="fm-value ${sep > 3 ? 'into' : ''}">${mag}<span class="fm-unit">° ${who}</span></div>`
       + `<div class="fm-sub">bars vs torso lean, right now</div></div>`;
   }
-  /* Sides: your median peak lean left vs right across the whole ride, flagging the weaker side. The
-     current turn's side is highlighted so you can read this turn against your other-side norm. */
+  /* Sides: your median peak lean left vs right, flagging the weaker side. The current turn's side is
+     highlighted so you can read this turn against your other-side norm.
+     The SCOPE is named on the tile rather than assumed: when the replay is narrowed to a segment this
+     is that segment's own corners, and when the segment was too thin to have a median per side it
+     falls back to the whole ride. Those are different claims, the fallback is invisible otherwise, and
+     the coach question quotes these same two numbers -- so whichever one is in play has to be legible
+     here or the question would cite a comparison the rider never saw. */
   if (S.medLeanL != null && S.medLeanR != null) {
     const here = seg ? (lean >= 0 ? 'R' : 'L') : F.turn.direction;
     const weaker = Math.abs(S.medLeanL - S.medLeanR) < 3 ? 'balanced' : (S.medLeanL < S.medLeanR ? 'left leans less' : 'right leans less');
     const hl = (on) => on ? 'color:#e0a458;' : '';
-    cards += `<div class="form-metric"><div class="fm-label">Sides · median lean</div><div class="fm-value" style="font-size:18px;"><span style="${hl(here==='L')}">${S.medLeanL.toFixed(0)}°L</span> · <span style="${hl(here==='R')}">${S.medLeanR.toFixed(0)}°R</span></div><div class="fm-sub">${weaker}</div></div>`;
+    const scope = S.leanScope === 'segment' ? 'this segment' : 'whole ride';
+    cards += `<div class="form-metric"><div class="fm-label">Sides · median lean</div><div class="fm-value" style="font-size:18px;"><span style="${hl(here==='L')}">${S.medLeanL.toFixed(0)}°L</span> · <span style="${hl(here==='R')}">${S.medLeanR.toFixed(0)}°R</span></div><div class="fm-sub">${weaker} · ${scope}</div></div>`;
   }
   cards += ghostCornerTile;
   const mEl = document.getElementById('formMetrics');
@@ -9816,6 +10071,42 @@ function num(v, unit, places) {
   return `${v.toFixed(p)}${unit ? ' ' + unit : ''}`;
 }
 
+/** `1:07` — a duration the coach can read back as a lap time. */
+function mmss(s) {
+  const t = Math.max(0, Math.round(s));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+/**
+ * A per-side lean median over fewer corners than this is noise wearing a measurement's clothes: with
+ * two right-handers the "median" is their mean, and one committed corner moves it several degrees.
+ * Same bar, for the same reason, as golf's three-a-side gate on the Good/Mishit split.
+ */
+const LEAN_BASE_MIN_PER_SIDE = 3;
+
+/**
+ * Which left/right lean medians a corner should be read against: the SEGMENT's own corners when it
+ * has enough of them per side, otherwise the ride's.
+ *
+ * The segment is preferred wherever it is available because that is the comparison a rider means. A
+ * ride-wide median pools a technical segment with everything else ridden that day, so a corner on the
+ * tight one is measured against a number that partly describes a different trail. Falling back is not
+ * a silent downgrade: `scope` rides along so the caller can label the tile and the question with
+ * which baseline is actually in play, and the two can never say different things.
+ *
+ * `segment` is `{ L, R, nL, nR }` (medians and the corner counts behind them); `ride` is `{ L, R }`.
+ */
+function pickLeanBaseline(segment, ride, minPerSide) {
+  const min = typeof minPerSide === 'number' ? minPerSide : LEAN_BASE_MIN_PER_SIDE;
+  const s = segment || {};
+  if (has(s.L) && has(s.R) && has(s.nL) && has(s.nR) && s.nL >= min && s.nR >= min) {
+    return { L: s.L, R: s.R, scope: 'segment' };
+  }
+  const r = ride || {};
+  if (has(r.L) && has(r.R)) return { L: r.L, R: r.R, scope: 'ride' };
+  return { L: null, R: null, scope: 'none' };
+}
+
 /**
  * The measured lines for one corner, in the order the tiles read on screen.
  * Returns an array of strings; a channel that did not record contributes nothing rather than a dash,
@@ -9831,7 +10122,13 @@ function formTurnLines(facts) {
   if (has(f.scrub)) lines.push(`Speed scrubbed mid-corner: ${num(f.scrub, f.speedUnit)}`);
   if (has(f.peakLean)) lines.push(`Peak lean into the corner: ${num(f.peakLean, 'degrees', 0)}`);
   if (has(f.medLeanL) && has(f.medLeanR)) {
-    lines.push(`My median peak lean across the whole ride: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
+    /* Names the baseline it actually used. The tile above the button shows these same two numbers and
+       carries the same label, so the question can never quote a comparison the rider is not looking
+       at -- which is the whole reason `pickLeanBaseline` returns its scope rather than just numbers. */
+    const where = (f.leanScope === 'segment' && f.segLabel)
+      ? `on ${f.segLabel}, the segment this corner is on`
+      : 'across the whole ride';
+    lines.push(`My median peak lean ${where}: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
   }
   if (has(f.peakLook)) lines.push(`Peak look-ahead (head vs bike direction, AirPods): ${num(f.peakLook, 'degrees', 0)}`);
   if (has(f.leadTime)) {
@@ -9862,14 +10159,102 @@ function formTurnQuestion(facts) {
   if (!has(f.peakLook) && !has(f.leadTime)) missing.push('no AirPods gaze data on this corner');
   if (!has(f.wristRange)) missing.push('no Apple Watch wrist data on this corner');
   const gap = missing.length ? `\n\nNot measured here: ${missing.join('; ')}. Do not guess at them.` : '';
+  /* Which corners this one should be read against. The session data on `system` describes the whole
+     ride, so left to itself the coach compares a corner on a tight technical segment to a median that
+     also contains the mellow trail and the fireroad -- and reports the difference as though it were
+     about how the corner was ridden. */
+  const scope = !f.segLabel ? ''
+    : f.leanScope === 'segment'
+      ? `\n\nRead this corner against the other corners on ${f.segLabel} -- the medians above are that `
+        + `segment's, not the ride's. The session data you were given pools every trail I rode today, `
+        + `so a ride-wide median describes a mix of terrain rather than this one; if you use a figure `
+        + `from it, say that is what you are doing.`
+      : `\n\nThis corner is on ${f.segLabel}, but that segment has too few corners per side to give it `
+        + `its own lean median, so the medians above are ride-wide and pool every trail I rode today. `
+        + `Do not read a left/right asymmetry out of this single corner against them.`;
   return `I am watching the Form Replay for corner ${label} -- the animated rider and the tiles under it. `
-    + `Explain what it is showing me.\n\n${lines.join('\n')}${gap}\n\n`
+    + `Explain what it is showing me.\n\n${lines.join('\n')}${gap}${scope}\n\n`
     + `Tell me what these numbers say about how I rode this one corner, and one thing worth trying next time. `
     + `Read only these numbers: nothing here saw the trail, the surface, my line, or what the bike was doing, `
     + `so describe what was measured rather than asserting why it happened.`;
 }
 
-return { formTurnLines, formTurnQuestion };
+/**
+ * The measured lines for one whole SEGMENT, in the order the segment page reads top to bottom.
+ * Same rule as the corner lines: a channel that did not record contributes nothing rather than a
+ * dash, and a median the sample cannot support is refused out loud rather than quoted.
+ */
+function formSegmentLines(facts) {
+  const f = facts || {};
+  const lines = [];
+  if (has(f.durationS)) lines.push(`Time: ${mmss(f.durationS)}`);
+  /* Distance and drop arrive PRE-FORMATTED, unlike every other figure here, because their unit is
+     chosen by magnitude (km vs m, mi vs ft) rather than fixed -- and because these exact strings are
+     the ones on the segment page's own stat chips, which is the rule this whole file follows. */
+  if (f.distanceText) lines.push(`Distance: ${f.distanceText}`);
+  if (f.dropText) lines.push(`Drop: ${f.dropText}`);
+  if (has(f.topSpeed)) lines.push(`Top speed: ${num(f.topSpeed, f.speedUnit)}`);
+  if (has(f.turnCount)) {
+    const sides = (has(f.leftTurns) && has(f.rightTurns))
+      ? ` (${f.leftTurns} left, ${f.rightTurns} right)` : '';
+    lines.push(`Corners on this segment: ${f.turnCount}${sides}`);
+  }
+  if (has(f.medRadius)) {
+    /* The ride-wide radius beside it is the single most load-bearing contrast here: it is what tells
+       the coach whether this segment is tighter or more open than the rest of the day, which is the
+       difference a ride-wide median hides. */
+    const vs = has(f.rideMedRadius)
+      ? ` (median across the whole ride: ${num(f.rideMedRadius, f.smallUnit)})` : '';
+    lines.push(`Median apex radius on this segment: ${num(f.medRadius, f.smallUnit)}${vs}`);
+  }
+  if (has(f.tightestRadius)) lines.push(`Tightest corner on this segment: ${num(f.tightestRadius, f.smallUnit)}`);
+  if (has(f.medApexSpeed)) lines.push(`Median apex speed on this segment: ${num(f.medApexSpeed, f.speedUnit)}`);
+  if (has(f.medLeanL) && has(f.medLeanR)) {
+    lines.push(`My median peak lean on this segment: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
+  } else if (has(f.turnCount)) {
+    lines.push(`Too few corners per side on this segment for a per-side lean median, so there is no left/right asymmetry to read here.`);
+  }
+  if (has(f.rideMedLeanL) && has(f.rideMedLeanR)) {
+    lines.push(`For contrast only, my median peak lean across the whole ride: ${num(f.rideMedLeanL, 'degrees', 0)} left, ${num(f.rideMedLeanR, 'degrees', 0)} right`);
+  }
+  if (has(f.scrubbedCount)) {
+    const worst = (f.worstScrub || []).map(o => `T${o.n} ${o.direction === 'L' ? 'left' : 'right'} (-${num(o.amount, f.speedUnit)})`);
+    lines.push(`Corners where I bled speed between entry and apex/exit: ${f.scrubbedCount}`
+      + (worst.length ? `, worst first: ${worst.join(', ')}` : ''));
+  }
+  if (f.peerLabel && has(f.peerDurationS) && has(f.gapS)) {
+    lines.push(`My fastest lap of this same segment today was ${f.peerLabel} at ${mmss(f.peerDurationS)}, `
+      + `${num(f.gapS, 'seconds', 1)} quicker than the lap I am watching`);
+  }
+  return lines;
+}
+
+/**
+ * The question sent into the coach thread for a whole segment. First person, like the corner
+ * question, because it lands in the conversation as the rider's turn.
+ */
+function formSegmentQuestion(facts) {
+  const f = facts || {};
+  const label = f.label ? `"${f.label}"` : 'this segment';
+  const lines = formSegmentLines(f);
+  const missing = [];
+  if (!f.hasGaze) missing.push('no AirPods gaze data on this segment');
+  if (!f.hasWrist) missing.push('no Apple Watch wrist data on this segment');
+  const gap = missing.length ? `\n\nNot measured here: ${missing.join('; ')}. Do not guess at them.` : '';
+  return `I am watching the whole-segment Form Replay for ${label} -- my lean, left and right, through `
+    + `the segment end to end. Read this SEGMENT for me.\n\n${lines.join('\n')}${gap}\n\n`
+    + `Judge it on its own terms. The session data you were given covers my whole ride, and a ride-wide `
+    + `median pools this trail together with everything else I rode today, so a tight technical segment `
+    + `looks slow and cramped against it while a mellow one looks flat -- neither of which is about how `
+    + `I rode. Compare the corners on this segment to EACH OTHER and to the numbers above, and if the `
+    + `only figure you have is a ride-wide one, say so rather than reading it as though it described `
+    + `this trail. Tell me what these numbers say about how I rode this segment, and one thing worth `
+    + `trying on my next lap of it. Read only these numbers: nothing here saw the trail, the surface, `
+    + `my line, or what the bike was doing, so describe what was measured rather than asserting why it `
+    + `happened.`;
+}
+
+return { formTurnLines, formTurnQuestion, formSegmentLines, formSegmentQuestion, pickLeanBaseline, LEAN_BASE_MIN_PER_SIDE };
 })();
 
 const LoamGolf = (function () {
@@ -14489,6 +14874,16 @@ function hideAllSections() {
     if (_segFormHome) {
       const fs = document.getElementById('formReplaySection');
       if (fs && fs.parentNode !== _segFormHome.parent) _segFormHome.parent.insertBefore(fs, _segFormHome.next);
+    }
+  } catch (e) {}
+  /* Same for the coach panel, and it matters more than it does for the replay: renderCoachPanel ends
+     with show('coachSection'), which clears .hidden on a section still sitting inside the hidden
+     #segmentPage. The panel would then be "shown" and invisible for the whole session, with no
+     .hidden on it to explain why. */
+  try {
+    if (_segCoachHome) {
+      const cs = document.getElementById('coachSection');
+      if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
   ['strengthResults','golfResults','swimResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
@@ -26142,7 +26537,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '889ba8c37 · 2026-08-20';
+const LOAM_BUILD = '3d1f115b7 · 2026-08-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
