@@ -2882,10 +2882,17 @@ function cropMedian(xs) {
 
 /* The stretches of a recording where the athlete was moving, split by stops of at least gapMinS.
    Each block is bounded by its own first and last MOVING sample, so the stop either side of it is
-   outside the block and its duration is time spent moving, not time spent recording. */
+   outside the block and its duration is time spent moving, not time spent recording.
+
+   `opts.pausedSpans` are the stretches the athlete explicitly paused (see pauseSpans). Those seconds
+   do not count towards a gap, so a paused break does not split the recording in two: a pause is a
+   hole in the file, not a stop in the activity, and it is the one kind of gap the recording itself
+   explains. Without this a rider who paused at a lift queue for six minutes came back to a notice
+   offering to throw away everything after it. */
 function activityBlocks(locRows, opts = {}) {
   const moveMps = opts.moveMps != null ? opts.moveMps : CROP_MOVE_MPS;
   const gapMinS = opts.gapMinS != null ? opts.gapMinS : CROP_GAP_MIN_S;
+  const paused = opts.pausedSpans || [];
   const rows = (locRows || [])
     .filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.speed) && r.speed >= 0)
     .sort((a, b) => a.t - b.t);
@@ -2894,7 +2901,7 @@ function activityBlocks(locRows, opts = {}) {
   let cur = null;
   for (const r of rows) {
     if (r.speed <= moveMps) continue;
-    if (cur && r.t - cur.end >= gapMinS) { blocks.push(cur); cur = null; }
+    if (cur && (r.t - cur.end) - pausedOverlapS(paused, cur.end, r.t) >= gapMinS) { blocks.push(cur); cur = null; }
     if (!cur) cur = { start: r.t, end: r.t, speeds: [] };
     cur.end = r.t;
     cur.speeds.push(r.speed);
@@ -3627,6 +3634,51 @@ function detectGradeSegments(baroRows, locRows, ride) {
 function isSessionControlMark(text) {
   const s = String(text == null ? '' : text).trim().toLowerCase();
   return s === 'pause' || s === 'resume';
+}
+
+/* The paused stretches of a recording, paired out of those same marks.
+ *
+ * A pause is a HOLE in the recording, not a quiet stretch of it: StreamingCSVWriter.skipGap makes
+ * the paused seconds genuinely absent, so nothing distinguishes a rider who stood at a lift queue
+ * for ten minutes from a phone that lost every sensor for ten minutes -- except these two marks,
+ * which the app writes precisely so a reader can tell the two apart. Every surface that reasons
+ * about a gap in the track therefore wants this list, and until now nothing read it: the analyzer
+ * knew what a Pause mark was only well enough to stop it naming a descent.
+ *
+ * Pairing rules, all of them "believe the marks and never invent one":
+ *   - a second Pause while one is already open is ignored (the pause path is idempotent by design:
+ *     a pause from the phone bounces back off the watch as a second arrival), as is a Resume with
+ *     no Pause open.
+ *   - a Pause never closed is closed at `spanEnd` when one is given, which is the recording that
+ *     was stopped while still paused; with no spanEnd it is dropped rather than run to infinity.
+ *
+ * Returns [{ start, end }] in time order. Empty for every recording made before the app grew a
+ * Pause button, which is what makes it safe for callers to subtract unconditionally.
+ */
+function pauseSpans(annotations, spanEnd) {
+  const marks = (annotations || [])
+    .filter(a => a && Number.isFinite(a.t) && isSessionControlMark(a.text))
+    .sort((a, b) => a.t - b.t);
+  const spans = [];
+  let open = null;
+  for (const m of marks) {
+    const isPause = String(m.text).trim().toLowerCase() === 'pause';
+    if (isPause) { if (open == null) open = m.t; }
+    else if (open != null) { if (m.t > open) spans.push({ start: open, end: m.t }); open = null; }
+  }
+  if (open != null && Number.isFinite(spanEnd) && spanEnd > open) spans.push({ start: open, end: spanEnd });
+  return spans;
+}
+
+/* Seconds of [t0, t1] that fall inside a paused span. The overlap rather than a whole-or-nothing
+   test, so a gap that merely TOUCHES a pause still reports its unexplained part -- the same rule
+   SensorRecorder.gpsGapWarning already applies on the phone, and for the same reason: a pause
+   explains the seconds it covers and no others. */
+function pausedOverlapS(spans, t0, t1) {
+  if (!spans || !spans.length || !(t1 > t0)) return 0;
+  let s = 0;
+  for (const p of spans) s += Math.max(0, Math.min(t1, p.end) - Math.max(t0, p.start));
+  return s;
 }
 
 function pairDescentAnnotations(annotations) {
@@ -7601,7 +7653,13 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
-  const duration = ride.end - ride.start;
+  /* Paused minutes are not session minutes anywhere else the athlete looks -- not the Record screen,
+     not the wrist, not the workout written to Health -- because the whole recording is suspended, so
+     counting them here left the analyzer disagreeing with all of them about the same session. Zero
+     on every recording with no Pause marks, which is every recording made before the button existed. */
+  const duration = (ride.end - ride.start) - (ride.pausedS || 0);
+  /* The stretches that were paused, so the loop below can tell them from a signal dropout. */
+  const pausedSpans = ride.pausedSpans || [];
   /* Distance from the GPS path: the sum of point-to-point great-circle hops, which is exactly how
      Strava measures the uploaded GPX. Integrating Doppler speed under-reads at walking pace (slow GPS
      speed floors toward 0), so the path length is the honest figure and agrees with Strava's number.
@@ -7650,6 +7708,13 @@ function computeRunSummary(loc, baro, ride, R, hr) {
                + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
       d = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
     }
+    /* A paused stretch is not a dropout, and this is the one place the difference costs distance
+       rather than bookkeeping. The branch below credits the ground a gap bridged, on the reasoning
+       that a phone hunting for a fix does not stop its owner running -- true of a dropout and false
+       of a pause, where the recording is suspended and the athlete may have gone somewhere else
+       entirely. Read as a dropout, a paused drive to the next trailhead joins the run twice over:
+       as distance, and (d/dt clears the walking floor comfortably) as moving time. */
+    if (pausedOverlapS(pausedSpans, a.t, b.t) > 0) continue;
     if (dt > MOVING_MAX_GAP_S) {
       /* GPS dropout. The samples are missing, so the fix cannot report its own speed and the gap has
          to be judged by the ground it bridged: metres over seconds, against the same walking floor.
@@ -7699,6 +7764,8 @@ function computeRunSummary(loc, baro, ride, R, hr) {
   }
   return {
     duration, movingTime, stoppedTime,
+    /* Carried on the summary so the Duration tile can say WHY it is shorter than the recording. */
+    pausedS: ride.pausedS || 0,
     hrAvg, hrMax,
     /* `driftDistance` is the path that accumulated while standing still, excluded from `distance`
        above. Reported rather than dropped so the Distance tile can say what it left out; a caller
@@ -8598,7 +8665,9 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
       return ride.start != null ? new Date().toISOString() : null;
     })(),
     rideStart: ride.start, rideEnd: ride.end,
-    duration: ride.end - ride.start,
+    /* Excludes paused time, matching the Duration tile: a library row and the analysis it was saved
+       from must not disagree about how long the session was. */
+    duration: (ride.end - ride.start) - (ride.pausedS || 0),
     summary: {
       distance: summary && summary.distance != null ? summary.distance : null,
       avgSpeed: summary && summary.avgSpeed != null ? summary.avgSpeed : null,
@@ -9706,7 +9775,12 @@ function computeStrengthSummary(sensors, ride, R) {
   }
 
   return {
-    duration: ride.end - ride.start,
+    /* Paused minutes are not session minutes anywhere else the athlete looks -- not the Record
+       screen, not the wrist, not the workout written to Health -- because the whole recording is
+       suspended, so counting them here left the analyzer disagreeing with all of them about the
+       same session. Zero on every recording with no Pause marks, which is every recording made
+       before the app grew the button. */
+    duration: (ride.end - ride.start) - (ride.pausedS || 0),
     nSets: R.nSets,
     nReps: R.nReps,
     avgRepsPerSet: sets.length ? +(R.nReps / sets.length).toFixed(1) : 0,
@@ -10554,7 +10628,12 @@ const LoamGolf = (function () {
 
     const con = R.consistency || {};
     return {
-      duration: ride.end - ride.start,
+      /* Paused minutes are not session minutes anywhere else the athlete looks -- not the Record
+         screen, not the wrist, not the workout written to Health -- because the whole recording is
+         suspended, so counting them here left the analyzer disagreeing with all of them about the
+         same session. Zero on every recording with no Pause marks, which is every recording made
+         before the app grew the button. */
+      duration: (ride.end - ride.start) - (ride.pausedS || 0),
       nSwings: R.nSwings,
       /* Both tap counts, not just the bad one: a golfer who taps Good on the swings they liked was
          reporting something, and until this existed the only place that tap surfaced was one lowercase
@@ -13274,6 +13353,15 @@ async function analyze(files) {
       }
     }
 
+    /* The stretches the athlete PAUSED, attached to the ride window every summary is computed over.
+       A pause is a hole in the recording rather than a quiet stretch of it, so without this the
+       analyzer counts paused minutes as session minutes and holds the last speed across the hole --
+       and comes back with a duration the phone, the watch, Strava and Health all disagree with, on a
+       recording where the athlete explicitly said what the silence was. Empty for every recording
+       made before the app grew a Pause button, so every number below is unchanged on all of them. */
+    ride.pausedSpans = pauseSpans(sensors.annotations, ride.end);
+    ride.pausedS = pausedOverlapS(ride.pausedSpans, ride.start, ride.end);
+
     /* The stationary sports are decided by now (declared, tap-inferred, or detected above), which is
        exactly what the crop SUGGESTION needs to know before it offers anything. A lift, a range
        session or a pool swim records the phone sitting still, so the only GPS movement in the file is
@@ -13928,7 +14016,14 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
   const longestJump = ridingJumps && ridingJumps.length ? (topJumps(ridingJumps, 1)[0] || null) : null;
   const maxJumpDist = longestJump && longestJump.dist != null ? longestJump.dist : null;
   return {
-    duration: ride.end - ride.start, distance, maxSpeed, altDrop,
+    /* Paused minutes are not session minutes anywhere else the athlete looks -- not the Record
+       screen, not the wrist, not the workout written to Health -- because the whole recording is
+       suspended, so counting them here left the analyzer disagreeing with all of them about the
+       same session. Zero on every recording with no Pause marks, which is every recording made
+       before the app grew the button. */
+    duration: (ride.end - ride.start) - (ride.pausedS || 0), distance, maxSpeed, altDrop,
+    /* Carried on the summary so the Duration tile can say WHY it is shorter than the recording. */
+    pausedS: ride.pausedS || 0,
     nTurns: descentTurns.length, nTurnsAll: turns.length,
     turnsScopedToDescents,
     rightTurns, leftTurns, medianRadius, calibWin,
@@ -14613,6 +14708,17 @@ function showLandscapeTip() {
    Separate from fmtDuration rather than replacing it: that one is pinned to
    analyzer/core/format/format.js by a drift guard and returns plain text for places that cannot
    take markup (chart labels, the coach digest, aria text). */
+/* A word for the Duration tile when the athlete PAUSED. Paused minutes are not in the duration (see
+   computeSummary / computeRunSummary), and without saying so the page carries two numbers that
+   disagree with no explanation: the trim bar states the recording's whole length while the tile
+   states a shorter session. This is the sentence that reconciles them. Empty for every recording
+   with no Pause marks. */
+function pausedSubNote(summary) {
+  const p = summary && summary.pausedS;
+  if (!(p >= 1)) return '';
+  return ` · ${fmtDuration(p)} paused`;
+}
+
 function durTileHTML(sec) {
   const total = Math.max(0, Math.round(Number(sec) || 0));
   const h = Math.floor(total / 3600);
@@ -19478,9 +19584,9 @@ function renderRunStats(s, detection, mount, ped) {
   const movingSec = s.movingTime != null ? s.movingTime : s.duration;
   const stoppedSec = s.stoppedTime != null ? s.stoppedTime : 0;
   const stopWorthNaming = stoppedSec >= 30;
-  const durSub = stopWorthNaming
+  const durSub = (stopWorthNaming
     ? `moving · ${fmtDuration(stoppedSec)} stopped`
-    : 'moving time';
+    : 'moving time') + pausedSubNote(s);
   /* EVERY number derived from a duration divides by the duration the tile beside it displays.
      When the Duration tile moved to moving time, Pace and Steps stayed on the elapsed window, so
      one screen carried 50m42s next to 8:41/mi when 50m42s over 6.53 mi is 7:46/mi, and a step count
@@ -22660,7 +22766,7 @@ function renderStats(s, hasFit) {
     <div class="stat">
       <div class="label">Duration</div>
       <div class="value">${durTileHTML(dur)}</div>
-      <div class="sub">moving time</div>
+      <div class="sub">moving time${pausedSubNote(s)}</div>
     </div>
     <div class="stat">
       <div class="label">Distance</div>
@@ -25979,11 +26085,17 @@ function buildCropStrip(sensors, span) {
 function cropContext(sensors, span) {
   if (!span) return null;
   const loc = sensors.location || [];
+  /* The stretches the athlete paused. A pause makes the recording genuinely ABSENT for its duration
+     (StreamingCSVWriter.skipGap), so without this the gap it leaves is indistinguishable from the
+     drive home this whole surface exists to catch -- and the notice offered to drop everything after
+     a lift-queue break. These are the two facts the recording carries about its own holes; every
+     other gap stays exactly as suspicious as it was. */
+  const opts = { pausedSpans: pauseSpans(sensors.annotations, span.end) };
   return {
     span,
     strip: buildCropStrip(sensors, span),
-    blocks: activityBlocks(loc).filter(b => b.durationS >= CROP_BLOCK_MIN_S || b.distanceM >= CROP_BLOCK_MIN_M),
-    suggestion: suggestCrop(loc, span),
+    blocks: activityBlocks(loc, opts).filter(b => b.durationS >= CROP_BLOCK_MIN_S || b.distanceM >= CROP_BLOCK_MIN_M),
+    suggestion: suggestCrop(loc, span, opts),
   };
 }
 
@@ -26537,7 +26649,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = '3d1f115b7 · 2026-08-21';
+const LOAM_BUILD = 'dfcc8e815 · 2026-08-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
