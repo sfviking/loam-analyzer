@@ -3726,20 +3726,54 @@ function detectGradeSegments(baroRows, locRows, ride) {
    with "end" markers using a loose keyword match — anything that looks like
    "top of/start of/starting downhill" opens a descent; the next "bottom/end/no
    downhill" closes it. */
+/* The mark `SessionMerge` stamps at the head of every fragment after the first when it stitches
+   several recordings into one, so a reader can see WHERE one recording ended and the next began.
+
+   A merged session is not one recording that happens to be long: it is several recordings laid end
+   to end, and everything the capture app carries per RECORDING resets at that boundary -- the sticky
+   lift chip (SensorRecorder sets `currentLift = nil` at every start), the sticky club, the bar
+   position, the depth. Without the mark nothing downstream can see the seam, so a sticky label from
+   one recording silently annexes the next one's sets: a squat session merged with a curl session came
+   back reporting six squat sets, because the curl fragment (whose own chip grid started blank, and
+   whose lifter had no reason to re-tap what they tapped ten minutes earlier -- nor any way to, from
+   the watch, whose grid carries only Squat / Deadlift / Press) inherited the "Squat" tap across the
+   seam. Deriving the seam from the gap in `seconds_elapsed` instead was rejected for the reason the
+   Pause marks exist at all: a deliberate hole and a sensor dropout leave the same shape, and only a
+   mark the writer stamps says which it was.
+
+   Written by the merge rather than by capture, so it is absent from every recording that was never
+   merged -- which is what makes every reader of it a no-op on an ordinary session. */
+const RECORDING_SEAM_MARK = 'new recording';
+
+/* True for that mark. EXACT match (trimmed, case-insensitive) for the same reason the pause marks
+   are matched exactly: it is written by us, never spoken, so there is no voice-to-text variation to
+   absorb, and the words are ordinary enough that a substring rule would swallow a rider's own note. */
+function isSeamMark(text) {
+  return String(text == null ? '' : text).trim().toLowerCase() === RECORDING_SEAM_MARK;
+}
+
 /* The capture app writes a `Pause` and a `Resume` mark at the two edges of a paused stretch, so a
    reader can tell a deliberate hole in the recording from a sensor failure or a crash. They describe
    the RECORDING, not the ride, and must never be read as something the athlete said about the trail --
    the same rule the Crash mark lives under, and for the same reason: a mark that is merely the nearest
    annotation to a descent start would otherwise title that run "Pause" in the runs table, in the saved
-   library, and as the suggested name the next time the segment is tagged.
+   library, and as the suggested name the next time the segment is tagged. The seam mark above is one
+   of these too, and lands in exactly the same trap: a merge seam sits between two recordings, which
+   on a shuttle day is precisely where the next descent starts.
 
-   EXACT match (trimmed, case-insensitive), unlike isCrashMark's substring test. These two strings are
+   EXACT match (trimmed, case-insensitive), unlike isCrashMark's substring test. These strings are
    written by the app, never spoken, so there is no voice-to-text variation to absorb; and "pause" is an
    ordinary enough word that a substring rule would silently swallow a rider's own note. */
 function isSessionControlMark(text) {
   const s = String(text == null ? '' : text).trim().toLowerCase();
-  return s === 'pause' || s === 'resume';
+  return s === 'pause' || s === 'resume' || s === RECORDING_SEAM_MARK;
 }
+
+/* The two marks a PAUSE is made of. pauseSpans filters on these rather than on
+   isSessionControlMark, which is a wider set (it also covers the merge seam above): every mark that
+   is not a Pause closes an open pause in the loop below, so a seam landing inside a paused stretch
+   would end the pause where nothing resumed. */
+const PAUSE_MARKS = ['pause', 'resume'];
 
 /* The paused stretches of a recording, paired out of those same marks.
  *
@@ -3762,7 +3796,7 @@ function isSessionControlMark(text) {
  */
 function pauseSpans(annotations, spanEnd) {
   const marks = (annotations || [])
-    .filter(a => a && Number.isFinite(a.t) && isSessionControlMark(a.text))
+    .filter(a => a && Number.isFinite(a.t) && PAUSE_MARKS.includes(String(a.text).trim().toLowerCase()))
     .sort((a, b) => a.t - b.t);
   const spans = [];
   let open = null;
@@ -9217,9 +9251,15 @@ const LoamStrength = (function () {
  *
  *   Bar position and depth are STICKY: a "High bar" / "Low bar" tap sets the bar
  *   position for that set and every later set until changed, same for "Full
- *   depth" / "Parallel". A set's labels are resolved over its whole window (the
- *   lifter taps the type a few seconds after Start), so late taps still count.
- *   "Miss" marks a failed rep and is attached to the set it falls in.
+ *   depth" / "Parallel", and same for the lift itself. A set's labels are
+ *   resolved over its whole window (the lifter taps the type a few seconds after
+ *   Start), so late taps still count. "Miss" marks a failed rep and is attached
+ *   to the set it falls in.
+ *
+ *   Stickiness stops at a RECORDING SEAM: a merged session is several recordings
+ *   laid end to end and every sticky label resets when a recording starts, so
+ *   each fragment is read on its own terms. See the module for the report this
+ *   came from -- a curl fragment that inherited another recording's "Squat".
  *
  *   Returns [{ tStart, tEnd, barPosition, depthTarget, misses }] in time order,
  *   or [] when there are no set marks (fall back to auto-segmentation).
@@ -9247,7 +9287,22 @@ function parseSetMarks(annotations, ride) {
     .slice()
     .sort((a, b) => a.t - b.t);
   if (!anns.length) return [];
+  /* One fragment per source recording, split at the seams the merge stamped, each ending where the
+     next begins (the last at ride end). A recording that was never merged carries no seam mark, so
+     it is one fragment and every number below is exactly what it was before this split existed. */
+  const fragments = [];
+  let cur = [];
+  for (const a of anns) {
+    if (isSeamMark(a.text)) { fragments.push({ anns: cur, end: a.t }); cur = []; continue; }
+    cur.push(a);
+  }
+  fragments.push({ anns: cur, end: ride.end });
+  return fragments.flatMap(f => (f.anns.length ? parseFragmentSetMarks(f.anns, f.end) : []));
+}
 
+/* One source recording's worth of marks: `anns` already filtered to the ride window, sorted, and cut
+   at the seams; `tRecordingEnd` is where this fragment stops (the next seam, or the ride's end). */
+function parseFragmentSetMarks(anns, tRecordingEnd) {
   /* Most recent bar / depth tap at or before t (sticky). */
   const barOf = t => {
     let v = null;
@@ -9300,7 +9355,7 @@ function parseSetMarks(annotations, ride) {
     const sets = [];
     for (let i = 0; i < opens.length; i++) {
       const tStart = opens[i].t;
-      const nextOpen = i + 1 < opens.length ? opens[i + 1].t : ride.end;
+      const nextOpen = i + 1 < opens.length ? opens[i + 1].t : tRecordingEnd;
       const close = anns.find(a => norm(a.text) === 'end set' && a.t > tStart);
       const tEnd = close && close.t < nextOpen ? close.t : nextOpen;
       sets.push(mkSet(tStart, tEnd));
@@ -9317,7 +9372,7 @@ function parseSetMarks(annotations, ride) {
   const sets = [];
   for (let i = 0; i < setMarks.length; i++) {
     const tStart = setMarks[i].t;
-    const tEnd = i + 1 < setMarks.length ? setMarks[i + 1].t : ride.end;
+    const tEnd = i + 1 < setMarks.length ? setMarks[i + 1].t : tRecordingEnd;
     const hasLabel = anns.some(a => qual.includes(norm(a.text)) && a.t > tStart && a.t < tEnd);
     if (anyLabel && !hasLabel) continue;
     sets.push(mkSet(tStart, tEnd));
@@ -10495,7 +10550,12 @@ const LoamGolf = (function () {
       for (const a of anns) {
         if (a.t > t + 1e-6) break;
         const n = gGolfNorm(a.text);
-        if (G_CLUBS.includes(n)) v = n;
+        /* A recording seam clears the sticky club, for the same reason the capture app clears it at
+           every start (SensorRecorder: `currentClub = nil`): the swings after the seam came out of a
+           different recording, and a merged range session must not label them with a club tapped in
+           the previous one. Absent from any session that was never merged. */
+        if (isSeamMark(n)) v = null;
+        else if (G_CLUBS.includes(n)) v = n;
       }
       return v;
     };
@@ -26790,7 +26850,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'b13ec1a39 · 2026-08-21';
+const LOAM_BUILD = '112fcd8ef · 2026-08-22';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
@@ -26848,6 +26908,7 @@ const LOAM_WHATS_NEW = [
     ['Your lifts compared with each other', 'Loam now keeps each lift session on this device and, once one lift has come up in three sessions with the weights filled in, shows what actually changed between them: heavier bar, more reps, both, or neither. Work done is weight times reps, so those two factors account for the whole of a change and the verdict names which one moved. No estimated one-rep max (that is a formula fitted to other people), and no comparison across different lifts, because a squat and a curl share no scale.'],
   ] },
   { h: 'Fixed', items: [
+    ['A merged session keeps each recording\'s own labels', 'merging a squat session with a curl session came back as a session of nothing but squats. Your lift, bar position and depth stay set once you tap them, and the merge let the first recording\'s taps run straight on into the second one \u2014 which starts with a blank chip grid on the app, and offers no Curl chip at all on the watch. Loam now marks where each recording began, so a set is labeled with what you tapped in the recording it belongs to, and an unlabeled set is left unlabeled instead of being called a squat. The same fix covers a club tapped at the range, a set you forgot to close with End set (it now stops at the end of its own recording rather than swallowing the break), and an older session recorded with the single Set chip, whose sets used to vanish when merged with a newer one. Sessions merged before this update need merging again to pick it up; your original recordings are kept unless you asked for them to be deleted.'],
     ['Long and merged sessions open in the app', 'a big recording — a merged session most of all — could come back as "this recording was too large to analyze in the app", and not reliably: the same session sometimes opened fine on the next try. Opening a session in the app read the whole recording into memory as text and then made a second copy of it, and both stayed there for the entire analysis, on top of the sensor data itself. Nothing about that was needed; the analyzer already reads a recording in slices, and now does so on the phone too, which is why the same file was always fine on the desktop. If it still runs out of memory, the message now tells you what actually happened and to try again rather than pointing you at a computer.'],
     ['A dropped signal no longer ends the coaching turn', 'asking the coach where the bars are thin came back as "Stream error: Load failed" — the one message a phone browser gives for any network failure — and took the question with it, leaving no way back to the opening analysis except typing it out again. Loam now retries a dropped connection itself, and only while nothing has reached the screen, so it can never restart an answer you were already reading. When it does give up it says so in words you can act on and offers Try again. If the link died mid-answer, whatever had arrived is kept rather than replaced by a red line.'],
     ['Tap a run to see where it was', 'on a run, a walk or a GPS-only ride, tapping a row in the Runs panel said "showing Descent 3" and left the map exactly where it was, so there was no way to tell which stretch of trail it meant — and recognising it is the whole point of tagging it. The tapped stretch is now highlighted on the map, named where it starts, and scrolled into view.'],
