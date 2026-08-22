@@ -946,18 +946,23 @@
     border-radius: var(--radius); letter-spacing: 0.02em;
   }
 
+  /* flow-root so the dismiss button can FLOAT rather than sit absolutely in the corner over a
+     reserved strip of padding. The reserve was `padding-right: 74px`, a width measured once against
+     the calibration notice's "Hide" and never revisited when the trim notice arrived saying "Keep
+     it all" -- which is 107px wide, so on a phone its heading ran straight under the button (owner
+     report, 2026-08-20; at desktop widths the heading's first line stops short of the corner, which
+     is why it read fine everywhere it was looked at). A float reserves its OWN width, so the next
+     notice can say whatever it needs to and the text wraps around it. */
   .mount-notice {
-    position: relative;
+    display: flow-root; position: relative;
     background: rgba(212,165,116,0.08); border: 1px solid rgba(212,165,116,0.35);
     border-left: 3px solid var(--accent-4);
     padding: 16px 20px; border-radius: 4px;
     font-family: 'IBM Plex Sans', sans-serif; font-size: 13px;
     color: var(--text-dim); line-height: 1.5;
   }
-  /* Padded away from the text so a long first line cannot run under it. */
-  .mount-notice { padding-right: 74px; }
   .notice-hide {
-    position: absolute; top: 10px; right: 10px;
+    float: right; margin: 0 0 8px 14px;
     background: transparent; color: var(--text-dim);
     border: 1px solid rgba(212,165,116,0.45); border-radius: 999px;
     padding: 3px 11px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
@@ -1315,7 +1320,9 @@
     <button type="button" class="notice-hide" id="cropNoticeHide" aria-label="Keep the whole recording">Keep it all</button>
     <strong>This recording kept going after the activity stopped.</strong>
     <span id="cropNoticeBody"></span>
-    <div class="crop-actions"><button type="button" id="cropNoticeApply" class="crop-primary">Trim to the first activity</button>
+    <!-- Not "the first activity": the window keeps everything up to the LAST stretch that still
+         moved like the session, so a recording with a break in the middle of it keeps both halves. -->
+    <div class="crop-actions"><button type="button" id="cropNoticeApply" class="crop-primary">Trim to the activity</button>
       <button type="button" id="cropNoticeOpen">Choose the window&hellip;</button></div>
   </div>
   <div class="crop-bar">
@@ -1354,7 +1361,11 @@
     border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6);
     color: var(--text-dim, #475569); cursor: pointer; }
   .crop-bar button:hover, .crop-actions button:hover { color: var(--text, #1a202c); }
-  .crop-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  /* `clear` because a flex container establishes its own formatting context and so would be SQUEEZED
+     alongside the floated dismiss button rather than flowing under it. Today's notices carry enough
+     prose that the float has ended long before, which is precisely the kind of accident that stops
+     being true without anyone noticing. */
+  .crop-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; clear: both; }
   .crop-actions .crop-primary { background: var(--accent, #e87b3d); border-color: var(--accent, #e87b3d); color: #fff; }
   .crop-panel { border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 16px 18px;
     background: var(--surface, #f7fafc); margin-bottom: 8px; }
@@ -2814,18 +2825,39 @@ function applyRotation(R, rows) {
    FIT sync, the watch's epoch-stamped samples and the pause gaps are all anchored to the recording's
    own start, not the crop's) and nothing is edited on disk, so widening a crop later costs nothing.
 
+   A STOP IS NOT EVIDENCE. The first version asked only whether there was a long stop with a journey
+   either side of it, which is the shape of a drive home and equally the shape of a lap session with
+   a break, a shuttle day, a lunch stop and a lift queue (owner report, 2026-08-20). The suggestion
+   now needs the stretch after the stop to move like a VEHICLE, to go somewhere the session did not,
+   and to have nothing session-shaped after it.
+
    Ported verbatim from analyzer/core/crop/crop.js; see that file's header for the full reasoning and
    crop.test.js for the drift guard that keeps the two copies identical. */
 const CROP_MOVE_MPS = 1.0;
 const CROP_GAP_MIN_S = 300;
 const CROP_BLOCK_MIN_S = 60;
 const CROP_BLOCK_MIN_M = 200;
-/* Ground (m) both the kept and the dropped stretch must cover before a crop is worth SUGGESTING.
+/* Ground (m) both the kept and the dropped stretches must cover before a crop is worth SUGGESTING.
    Distance rather than duration: standing about at walking pace lasts minutes while going nowhere.
    Measured against a real 23m 40s recording with 44 s of moving time and 481 ft of path (walk in,
    phone down for nine minutes, walk out), whose two "blocks" of 48 m and 32 m cleared the duration
    half of the bar above and had the notice offering to drop 20 of its 23 minutes. */
 const CROP_JOURNEY_MIN_M = 300;
+/* Median speed (m/s) at or above which a stretch moves faster than the session could have, and the
+   multiple of the session's own pace it must also clear. Wide-margin bars, not tuned ones: an
+   e-bike's assist cuts out at 8.9 m/s (the fastest pace anything here sustains under power), the
+   reported false positive's fastest "end of the ride" stretch medianed 7.7 m/s, and the drive this
+   feature was built for medians 20 m/s. Deliberately not set to catch every drive -- a slow drive
+   through town simply is not suggested, which costs one tap on the trim bar, where a lower bar would
+   put road-cycling medians on the wrong side of it. */
+const CROP_VEHICLE_MPS = 12;
+const CROP_VEHICLE_RATIO = 2;
+/* Grid cell (m) for the "did it go anywhere new" test, matched against its eight neighbours, and the
+   fraction of the dropped stretch that may sit on ground the session already covered. Laps and
+   out-and-backs retrace essentially all of themselves; a drive home shares the access road and
+   leaves. */
+const CROP_RETRACE_CELL_M = 60;
+const CROP_RETRACE_MAX = 0.5;
 const CROP_PAD_S = 30;
 const CROP_MIN_SPAN_S = 30;
 
@@ -2917,13 +2949,66 @@ function activityBlocks(locRows, opts = {}) {
   }));
 }
 
-/* Propose keeping the FIRST stretch of activity, when there is a later one to drop. First, not
-   longest and not fastest: a recording is started when the activity starts, and picking by size
-   would hand back the car (a 40-minute drive home outlasts a 30-minute lap session, and outruns any
-   ride). The window always starts at the START OF THE RECORDING, because the body-frame calibration
-   comes from a still window before the riding starts and a suggestion that trimmed the quiet head
-   would take the calibration with it and move every turn in the ride. Returns null when there is
-   nothing to propose, which is the common case. */
+/* Flag each stretch that moves like a vehicle rather than like the session around it, plus the
+   session's own pace the judgement was made against: the fastest median among the stretches under
+   the absolute bar on their own, taken over the WHOLE recording so the answer does not depend on
+   where in the list the question is asked. A recording in which every stretch clears the bar has no
+   session pace at all and is all vehicle, which is the right answer -- there is no activity in it to
+   keep -- and suggestCrop then proposes nothing. */
+function cropVehicleBlocks(blocks, opts = {}) {
+  const floor = opts.vehicleMps != null ? opts.vehicleMps : CROP_VEHICLE_MPS;
+  const ratio = opts.vehicleRatio != null ? opts.vehicleRatio : CROP_VEHICLE_RATIO;
+  let paceMps = 0;
+  for (const b of blocks) {
+    const v = b.medianSpeedMps;
+    if (Number.isFinite(v) && v < floor && v > paceMps) paceMps = v;
+  }
+  const isVehicle = blocks.map(b => Number.isFinite(b.medianSpeedMps)
+    && b.medianSpeedMps >= floor
+    && b.medianSpeedMps >= ratio * paceMps);
+  return { isVehicle, paceMps };
+}
+
+/* The fraction of the dropped stretches' fixes sitting on ground the kept stretches already covered.
+   Null when there is no position to measure with (a FIT with speed but no track, GPS that never got
+   a fix), in which case the caller proceeds on speed alone rather than refusing to answer. A coarse
+   occupancy grid rather than a distance computation: the question is "is this the same road", the
+   tolerance is deliberately loose, and a per-pair search over two multi-thousand-fix tracks would be
+   quadratic for no extra truth. */
+function cropRetraceFraction(locRows, keepBlocks, dropBlocks, opts = {}) {
+  const cellM = opts.retraceCellM != null ? opts.retraceCellM : CROP_RETRACE_CELL_M;
+  const inAny = (t, wins) => wins.some(w => t >= w.start && t <= w.end);
+  const pts = (locRows || []).filter(r => r && Number.isFinite(r.t)
+    && Number.isFinite(r.latitude) && Number.isFinite(r.longitude));
+  const kept = pts.filter(r => inAny(r.t, keepBlocks));
+  const dropped = pts.filter(r => inAny(r.t, dropBlocks));
+  if (kept.length < 2 || dropped.length < 2) return null;
+  const dLat = cellM / 111320;
+  const cosLat = Math.abs(Math.cos(kept[0].latitude * Math.PI / 180));
+  const dLon = cellM / (111320 * Math.max(0.05, cosLat));
+  const cell = (r) => `${Math.round(r.latitude / dLat)},${Math.round(r.longitude / dLon)}`;
+  const seen = new Set();
+  for (const r of kept) seen.add(cell(r));
+  let hits = 0;
+  for (const r of dropped) {
+    const a = Math.round(r.latitude / dLat), b = Math.round(r.longitude / dLon);
+    let near = false;
+    for (let i = -1; i <= 1 && !near; i++) {
+      for (let j = -1; j <= 1; j++) { if (seen.has(`${a + i},${b + j}`)) { near = true; break; } }
+    }
+    if (near) hits++;
+  }
+  return hits / dropped.length;
+}
+
+/* Propose keeping everything up to the last stretch that still moved like the session, when what
+   follows moves like a vehicle and goes somewhere new. The cut goes after the LAST such stretch
+   rather than after the first stretch of any kind: a stop splits a recording, it does not end one,
+   and cutting at the first split read a lap session's lunch break as the end of the day. The window
+   always starts at the START OF THE RECORDING, because the body-frame calibration comes from a still
+   window before the riding starts and a suggestion that trimmed the quiet head would take the
+   calibration with it and move every turn in the ride. Returns null when there is nothing to
+   propose, which is the common case. */
 function suggestCrop(locRows, span, opts = {}) {
   if (!span || !Number.isFinite(span.start) || !Number.isFinite(span.end)) return null;
   const minS = opts.blockMinS != null ? opts.blockMinS : CROP_BLOCK_MIN_S;
@@ -2931,14 +3016,32 @@ function suggestCrop(locRows, span, opts = {}) {
   const all = activityBlocks(locRows, opts);
   const blocks = all.filter(b => b.durationS >= minS || b.distanceM >= minM);
   if (blocks.length < 2) return null;
-  const keep = blocks[0];
-  const next = blocks[1];
-  /* Both sides have to be a journey before this is worth raising. Summed over ALL the dropped
-     stretches rather than just the next one, so a scrap of movement sitting between the activity and
-     the drive home cannot hide the drive behind it. */
+  const { isVehicle, paceMps } = cropVehicleBlocks(blocks, opts);
+  /* Where the session ends: the last stretch that still moved like it. */
+  let keepIdx = -1;
+  for (let i = blocks.length - 1; i >= 0; i--) { if (!isVehicle[i]) { keepIdx = i; break; } }
+  /* Nothing that moves like the session (a recording of nothing but driving), or nothing vehicular
+     after it (breaks between laps, a lunch stop, a second session) -- either way, no suggestion. */
+  if (keepIdx < 0 || keepIdx >= blocks.length - 1) return null;
+  const kept = blocks.slice(0, keepIdx + 1);
+  const removed = blocks.slice(keepIdx + 1);
+  const keep = blocks[keepIdx];
+  const next = removed[0];
+  /* Both sides have to be a journey before this is worth raising. Summed over ALL the stretches on
+     each side rather than just the two either side of the cut, so neither a scrap of movement
+     sitting between the activity and the drive home nor a scrap of driving can carry the decision on
+     its own -- but the kept side counts only what moved like the SESSION, or a recording that opens
+     with the drive to the trailhead would meet the bar on that drive and propose keeping a lap of
+     the car park. */
   const minM2 = opts.journeyMinM != null ? opts.journeyMinM : CROP_JOURNEY_MIN_M;
-  const removedM = blocks.slice(1).reduce((a, b) => a + b.distanceM, 0);
-  if (keep.distanceM < minM2 || removedM < minM2) return null;
+  const keptM = kept.reduce((a, b, i) => a + (isVehicle[i] ? 0 : b.distanceM), 0);
+  const removedM = removed.reduce((a, b) => a + b.distanceM, 0);
+  if (keptM < minM2 || removedM < minM2) return null;
+  /* And it has to go somewhere new. Laps, an out-and-back and a descent of the road just climbed all
+     retrace themselves, and any of them can outrun the session's own median. */
+  const maxRetrace = opts.retraceMax != null ? opts.retraceMax : CROP_RETRACE_MAX;
+  const retracedFraction = cropRetraceFraction(locRows, kept, removed, opts);
+  if (retracedFraction != null && retracedFraction >= maxRetrace) return null;
   const pad = opts.padS != null ? opts.padS : CROP_PAD_S;
   const end = Math.min(keep.end + pad, next.start - 1, span.end);
   const crop = normalizeCrop({ start: span.start, end }, span);
@@ -2947,9 +3050,11 @@ function suggestCrop(locRows, span, opts = {}) {
     start: crop.start,
     end: crop.end,
     keep,
-    removed: blocks.slice(1),
+    removed,
     gapS: next.start - keep.end,
     removedS: span.end - crop.end,
+    paceMps,
+    retracedFraction,
     blocks,
   };
 }
@@ -26159,12 +26264,24 @@ function renderCropNotice() {
   if (!s || !_cropSuggestOK || _cropActive || cropNoticeDismissed(_cropKey)) { sec.classList.add('hidden'); return; }
   const later = s.removed.map(b =>
     `${fmtDuration(b.durationS)} covering ${U.dist(b.distanceM)} at a median ${U.speed(b.medianSpeedMps)}`);
+  /* The notice quotes the two facts the DECISION was made on, not just the stop. The stop is what
+     the athlete remembers, so it still leads; the pace comparison and the new ground are what
+     separate a drive home from the lunch break in the middle of a lap session, and quoting them is
+     what lets a wrong suggestion be seen to be wrong rather than merely felt to be. The fresh-ground
+     clause is withheld unless the tail is CLEANLY new, since the gate itself only asks for a
+     majority. */
+  const pace = Number.isFinite(s.paceMps) && s.paceMps > 0 ? U.speed(s.paceMps) : null;
+  const fresh = s.retracedFraction != null && s.retracedFraction < 0.2;
   document.getElementById('cropNoticeBody').innerHTML =
     ` Movement stops at <span class="crop-notice-num">${cropRel(s.keep.end)}</span>, and after a`
     + ` ${fmtDuration(s.gapS)} stop the recording picks up again: ${later.join('; then ')}.`
+    + (pace ? ` That is well past the ${pace} the session itself was moving at`
+      : ` That is faster than the session itself was moving`)
+    + (fresh ? `, and over ground the session never covered` : ``)
+    + `, which is what a drive home looks like.`
     + ` Trimming there keeps ${fmtDuration(s.end - s.start)} and leaves out the last ${fmtDuration(s.removedS)}.`
-    + ` A stop that long is usually the end of a session, but it could be a long break &mdash; open the`
-    + ` window picker to see the whole recording before you decide. Nothing is deleted either way.`;
+    + ` A fast road descent or a lift out can read the same way, so open the window picker to see the`
+    + ` whole recording before you decide. Nothing is deleted either way.`;
   sec.classList.remove('hidden');
 }
 
@@ -26649,7 +26766,7 @@ document.getElementById('libraryModal').addEventListener('click', (e) => {
    stamps the GitHub Pages mirror, and both reproduce with `git hash-object loam-mtb-analyzer.html`.
    CHANGELOG.md is canonical. */
 const LOAM_VERSION = '1.3.0';
-const LOAM_BUILD = 'dfcc8e815 · 2026-08-21';
+const LOAM_BUILD = '5d80a6cd6 · 2026-08-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
