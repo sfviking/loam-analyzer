@@ -1695,6 +1695,17 @@
     <button type="button" id="landscapeTipDismiss">Got it</button>
   </div>
 
+  <!-- A track this page repaired is a track this page is making a claim about, so it says so on its
+       face: how much was missing, where it came from, and that the rest is the phone's own. No
+       dismiss button, deliberately -- it is a statement about the data on screen rather than advice
+       to act on, and it goes away by itself the moment the phone records a whole ride. -->
+  <section id="fitRepairNotice" class="hidden">
+    <div class="mount-notice">
+      <strong>Filled a gap in your phone's GPS from the head unit.</strong>
+      <span id="fitRepairNoticeBody"></span>
+    </div>
+  </section>
+
   <section id="mtbCalibNotice" class="hidden">
     <div class="mount-notice">
       <button type="button" class="notice-hide" onclick="hideCalibNotice()" aria-label="Hide this notice for this ride">Hide</button>
@@ -2464,6 +2475,121 @@ function extractFitData(messages) {
     });
   }
   return { records, jumps };
+}
+
+/* ========== Companion-FIT track repair ==========
+
+   A 5-mile ride read 0.27 MILES because location was granted "While Using" and the phone went into
+   a pocket (owner, mid-ride, 2026-08-23) -- while the Specialized head unit on the bars recorded
+   the whole thing at 1 Hz. This page read that file for jumps and the e-bike block and took every
+   GPS-derived number from the phone's holed track: "i actually have the full ride in the specialized
+   fit file but we're not using it."
+
+   It FILLS, it never REPLACES: a phone fix wins wherever the phone has one, and the FIT is consulted
+   only for stretches the phone recorded nothing at all. So a ride with an intact phone track has no
+   holes, nothing is inserted, and the render is exactly what it was -- the validated reference rides
+   included.
+
+   Ported verbatim from analyzer/core/fit/track-repair.js; see that file's header for the full
+   reasoning and track-repair.test.js for the drift guard that keeps the two copies identical. */
+const FIT_GAP_MIN_S = 20;
+const FIT_REPAIR_MIN_S = 60;
+const FIT_REPAIR_MIN_FIXES = 30;
+const FIT_EDGE_PAD_S = 1.0;
+const FIT_DERIVED_SPEED_FLOOR = 0.5;
+
+function haversineM(lat1, lon1, lat2, lon2) {
+  const r = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * r * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function fitTrackSamples(fitRecords, phoneStartFitSec) {
+  const pts = (fitRecords || [])
+    .filter((r) => r && r.lat != null && r.lon != null && r.ts != null)
+    .sort((a, b) => a.ts - b.ts);
+  if (!pts.length) return [];
+  const withSpeed = pts.filter((p) => p.speed != null).length;
+  const useFitSpeed = withSpeed >= pts.length / 2;
+  let derived = null;
+  if (!useFitSpeed) {
+    const step = new Array(pts.length).fill(0);
+    for (let i = 1; i < pts.length; i++) {
+      const dt = pts[i].ts - pts[i - 1].ts;
+      step[i] = dt > 0 ? haversineM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon) / dt : step[i - 1];
+    }
+    if (pts.length > 1) step[0] = step[1];
+    derived = step.map((_, i) => {
+      const w = step.slice(Math.max(0, i - 2), Math.min(step.length, i + 3)).sort((a, b) => a - b);
+      const v = w[Math.floor(w.length / 2)];
+      return v < FIT_DERIVED_SPEED_FLOOR ? 0 : v;
+    });
+  }
+  let lastSpeed = 0;
+  return pts.map((p, i) => {
+    if (useFitSpeed) { if (p.speed != null) lastSpeed = p.speed; }
+    else lastSpeed = derived[i];
+    return {
+      t: p.ts - phoneStartFitSec,
+      speed: lastSpeed,
+      latitude: p.lat,
+      longitude: p.lon,
+      altitude: p.altitude != null ? p.altitude : null,
+      source: 'fit',
+    };
+  });
+}
+
+function trackHoles(locs, span, gapMinS = FIT_GAP_MIN_S) {
+  if (!span || span.start == null || span.end == null || !(span.end > span.start)) return [];
+  const ts = (locs || []).map((r) => r.t).filter((t) => t != null && t >= span.start && t <= span.end)
+    .sort((a, b) => a - b);
+  const holes = [];
+  let prev = span.start;
+  for (const t of ts) {
+    if (t - prev >= gapMinS) holes.push({ start: prev, end: t });
+    prev = Math.max(prev, t);
+  }
+  if (span.end - prev >= gapMinS) holes.push({ start: prev, end: span.end });
+  return holes;
+}
+
+function repairTrackFromFit(phoneLocs, fitLocs, span, opts = {}) {
+  const gapMinS = opts.gapMinS != null ? opts.gapMinS : FIT_GAP_MIN_S;
+  const minS = opts.minS != null ? opts.minS : FIT_REPAIR_MIN_S;
+  const pad = opts.pad != null ? opts.pad : FIT_EDGE_PAD_S;
+  const locs = phoneLocs || [];
+  const none = { location: locs, used: false, filledS: 0, filledM: 0, holes: [] };
+  if (!fitLocs || fitLocs.length < FIT_REPAIR_MIN_FIXES) return none;
+
+  const holes = trackHoles(locs, span, gapMinS);
+  if (!holes.length) return none;
+
+  const filled = [];
+  const added = [];
+  let filledS = 0;
+  let filledM = 0;
+  for (const hole of holes) {
+    const inside = fitLocs.filter((r) => r.t >= hole.start + pad && r.t <= hole.end - pad);
+    if (inside.length < 2) continue;
+    let meters = 0;
+    for (let i = 1; i < inside.length; i++) {
+      meters += haversineM(inside[i - 1].latitude, inside[i - 1].longitude, inside[i].latitude, inside[i].longitude);
+    }
+    const seconds = inside[inside.length - 1].t - inside[0].t;
+    filledS += seconds;
+    filledM += meters;
+    filled.push({ start: hole.start, end: hole.end, seconds, meters, fixes: inside.length });
+    added.push(...inside);
+  }
+  if (filledS < minS || !added.length) return none;
+
+  const location = locs.concat(added).sort((a, b) => a.t - b.t);
+  return { location, used: true, filledS, filledM, holes: filled };
 }
 
 /* ========== Sensor file ingestion ========== */
@@ -13488,6 +13614,32 @@ async function analyze(files) {
     onProgress('extracting sensors');
     const sensorsFull = loaded.sensors ? loaded.sensors : (loaded.format === 'combined' ? extractFromCombined(loaded.data) : extractFromZip(loaded.data));
 
+    /* FIT TRACK REPAIR: fill the phone track's holes from the head unit's, at the INPUT, for exactly
+       the reason the crop below is applied here -- everything after this line (the riding window,
+       the still-window calibration, sport detection, every sport module, the map, the library
+       record) then reads one track and none of them has to remember to re-scope itself. Re-scoping
+       at the output is the alternative, and the "not a trail" label is a long account of what that
+       costs: every claim-making surface has to be found, and the ones that are missed contradict the
+       ones that are not.
+
+       Ahead of the crop deliberately, so the crop panel and its suggestion see the real track. A
+       recording whose phone GPS went quiet at the trailhead has a hole shaped exactly like a stop,
+       and suggestCrop would otherwise be reasoning about the phone's failure rather than the ride.
+
+       phoneStartUTC is parsed here rather than at its old home 300 lines down, because the sync is
+       what makes the FIT's clock comparable at all: `phone_t = t_fit - offset`, both sides UTC. */
+    const phoneStartUTC = parseUTCFromFilename(sensorFile.name);
+    let fitRepair = null;
+    if (fitRecords.length && phoneStartUTC) {
+      const fitLocs = fitTrackSamples(fitRecords, phoneStartUTC.getTime() / 1000 - FIT_EPOCH_UNIX);
+      const rep = repairTrackFromFit(sensorsFull.location, fitLocs, sensorSpan(sensorsFull));
+      if (rep.used) {
+        sensorsFull.location = rep.location;
+        fitRepair = rep;
+        onProgress(`filling ${Math.round(rep.filledS / 60)} min of missing GPS from the FIT`);
+      }
+    }
+
     /* CROP: a window on the input, applied here and nowhere later. Everything below this line --
        the riding window, the still window calibration picks, sport detection, every sport module --
        sees a shorter recording rather than having to remember to re-scope itself. The context is
@@ -13555,7 +13707,8 @@ async function analyze(files) {
        is declared-only and the auto path goes through detectSwim further down. */
     let isSwim = /^(swim|swimming)$/.test(userSport);
 
-    const phoneStartUTC = parseUTCFromFilename(sensorFile.name);
+    /* phoneStartUTC is parsed up at the FIT track repair now (the repair needs the same sync this
+       used to be the only consumer of), so it is already in scope here. */
 
     let ride;
     if (isLift || isGolf || isSwim) {
@@ -13702,7 +13855,7 @@ async function analyze(files) {
       onProgress('rendering');
       hide('loading'); show('results');
       const runRender = {
-        sensors, ride, running, gait, summary: runSummary, detection, sport, imuRateHz,
+        sensors, ride, running, gait, summary: runSummary, detection, sport, imuRateHz, fitRepair,
         descents, comparison, libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
         title: sensorFile && sensorFile.name,
       };
@@ -13726,7 +13879,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
-      const liftRender = { sensors, ride, strength, summary, sport, imuRateHz, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const liftRender = { sensors, ride, strength, summary, sport, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link the lift like every other sport so it reopens instantly and is bookmarkable at
          #/ride/<key> (this was the only branch that recomputed on every open and had no URL). The render
          object is structured-cloneable (plain sensor/summary/strength data, no functions), so it round-
@@ -13750,7 +13903,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('golfResults');
-      const golfRender = { sensors, ride, golf, summary, sport, imuRateHz, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const golfRender = { sensors, ride, golf, summary, sport, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link like every other sport so it reopens instantly at #/ride/<key>. The render
          object is structured-cloneable (plain data, no functions), so it round-trips through the
          IndexedDB analysis cache; renderCachedAnalysis + cachedSportNoun carry a golf branch.
@@ -13985,7 +14138,7 @@ async function analyze(files) {
     hide('loading'); show('results');
     const mtbRender = {
       sensors, t, yawSeg, rollSmooth, R,
-      ride, turns, summary, calibWin, sport, imuRateHz,
+      ride, turns, summary, calibWin, sport, imuRateHz, fitRepair,
       fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
@@ -15237,7 +15390,7 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','fitRepairNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -16878,6 +17031,7 @@ function renderGolf(D) {
   _lastRender = { fn: renderGolf, D };
   _golfD = D;   // the swing-count control writes against this session's key
   renderSampleRateNotice(D);
+  renderFitRepairNotice(D);
   const g = D.golf || {}, s = D.summary || {}, con = g.consistency || {};
   const el = document.getElementById('golfResults');
   if (!g.nSwings) {
@@ -16992,6 +17146,7 @@ function renderGolf(D) {
 function renderStrength(D) {
   _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
   renderSampleRateNotice(D);
+  renderFitRepairNotice(D);
   /* Register for the header Units toggle (rerenderUnits), same as every other renderer. Without this,
      changing units on a Lift session re-runs the PREVIOUS ride's renderer, which hides the Lift view
      and paints a stale ride into a hidden container (blank page below the header). */
@@ -18510,6 +18665,7 @@ function renderAllRunning(D) {
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
   renderSampleRateNotice(D);
+  renderFitRepairNotice(D);
   renderRideSignature(D, sport);
   /* Pedometer channel, when the recording carries one. Computed here rather than inside
      renderRunStats because it needs the raw sensors and the ride window, not just the summary. */
@@ -22782,6 +22938,31 @@ async function sendCoach(text) {
   });
 }
 
+/* Companion-FIT track repair notice. Carried on the render payload (so a cached replay keeps it,
+   the same reason the sample-rate warning is), and shown only when the repair actually fired --
+   `repairTrackFromFit` returns used:false and the original array whenever it did not, so an intact
+   ride never reaches this at all.
+   It quotes MINUTES and MILES rather than a fix count because those are the two numbers the rider
+   can check against their own memory of the ride, and it names the phone's own contribution too: a
+   track that is nine tenths recorded and one tenth recovered should not read as though the whole
+   thing came off the head unit. */
+function renderFitRepairNotice(D) {
+  const sec = document.getElementById('fitRepairNotice');
+  if (!sec) return;
+  const rep = D && D.fitRepair;
+  if (!rep || !rep.used) { sec.classList.add('hidden'); return; }
+  const body = document.getElementById('fitRepairNoticeBody');
+  if (body) {
+    const mins = Math.max(1, Math.round(rep.filledS / 60));
+    const miles = rep.filledM / 1609.34;
+    const where = rep.holes.length === 1 ? 'one stretch' : `${rep.holes.length} stretches`;
+    body.textContent = ` Your phone recorded no GPS for about ${mins} min of this ride (${where}),`
+      + ` so ${miles.toFixed(2)} mi of the track came from the FIT instead. Everywhere the phone did`
+      + ` record a fix, its own track is what you are looking at.`;
+  }
+  sec.classList.remove('hidden');
+}
+
 /* Sample-rate warning banner. Fed by detectImuRateHz / imuRateWarning (computed once in analyze
    and carried on the render payload, so cached replays keep the warning). All three sport renders
    call this, since every sport consumes the 100 Hz phone-motion assumption somewhere. */
@@ -22936,6 +23117,7 @@ function renderAll(D) {
      the coach panel and the geek-stats dump are handed. */
   D.crashes = crashesForD(D);
   renderSampleRateNotice(D);
+  renderFitRepairNotice(D);
   renderCalibNotice(D);
   renderRideSignature(D, 'mtb');
   renderStats(D.summary, D.hasFit);
@@ -26957,7 +27139,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'd921be6b4 · 2026-08-23';
+const LOAM_BUILD = '5fffe774f · 2026-08-23';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
