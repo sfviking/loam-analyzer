@@ -3657,6 +3657,10 @@ function lowerBound(arr, target) {
 }
 
 function detectGradeSegments(baroRows, locRows, ride) {
+  /* The longest hop the distance series will integrate across. Same 5 s the other five integrations
+     in the dashboard use, and declared inside the function so the drift guard can run the HTML's
+     copy in a bare scope. */
+  const GRADE_MAX_GAP_S = 5;
   /* Use baro relativeAltitude if available; otherwise GPS altitude.
      Compute grade % over 20s windows, segment when sign of grade is sustained. */
   const haveBaro = baroRows && baroRows.length > 10;
@@ -3671,7 +3675,14 @@ function detectGradeSegments(baroRows, locRows, ride) {
   for (let i = 1; i < loc.length; i++) {
     const dt = loc[i].t - loc[i-1].t;
     const v = ((loc[i].speed || 0) + (loc[i-1].speed || 0)) / 2;
-    cumDist.push(cumDist[i-1] + v * dt);
+    /* Skip a hop that spans a long GPS gap (dt > 5 s at ~1 Hz brackets a dropout, and a pause is
+       always longer still): holding a speed across the hole invents avgSpeed*gap metres of ground
+       nobody covered. Every other distance integration in this file already refuses that hop --
+       computeSummary, runMetrics, the split and best-effort loops -- and this one is the series the
+       grade windows divide BY, so a phantom denominator also flattens the grade either side of the
+       hole. Measured no-op on every validated dataset: none of the reference FITs or phone
+       recordings contains a location gap over 5 s. */
+    cumDist.push(cumDist[i-1] + (dt > GRADE_MAX_GAP_S ? 0 : v * dt));
   }
   function distAt(t) {
     let li = 0;
@@ -3713,8 +3724,15 @@ function detectGradeSegments(baroRows, locRows, ride) {
   }
   if (cur && cur.tEnd - cur.tStart >= MIN_DUR) segs.push(cur);
 
+  const paused = (ride && ride.pausedSpans) || [];
   for (const s of segs) {
-    s.duration = s.tEnd - s.tStart;
+    /* Minus whatever the athlete PAUSED inside the segment. A pause is a hole in the recording, so
+       the samples either side of it are consecutive and the segment closes over it without noticing
+       -- which made a descent taken with a five-minute stop in the middle five minutes slower than
+       the same descent ridden straight through. That number is not only displayed: it is stored on
+       the saved descent, so it ranks against unpaused efforts on the cross-ride segment leaderboard
+       for good. Zero on every recording with no Pause marks. */
+    s.duration = (s.tEnd - s.tStart) - pausedOverlapS(paused, s.tStart, s.tEnd);
     s.gradeAvg = s.grades.reduce((a,b)=>a+b,0) / s.grades.length;
     s.distance = distAt(s.tEnd) - distAt(s.tStart);
   }
@@ -4001,7 +4019,10 @@ function compareDescents(descents, sensors, cadSeries) {
     for (let i = 1; i < locInWin.length; i++) {
       const dt = locInWin[i].t - locInWin[i-1].t;
       const v = (locInWin[i].speed + locInWin[i-1].speed) / 2;
-      dist.push(dist[i-1] + v * dt);
+      /* Refuse a hop across a long gap, the same 5 s runMetrics and computeSummary already refuse:
+         holding a speed across a dropout -- or across a stretch the athlete paused, which is always
+         longer -- credits avgSpeed*gap metres of ground nobody covered. */
+      dist.push(dist[i-1] + (dt > 5 ? 0 : v * dt));
     }
     const totalDist = dist[dist.length - 1] || 0;
     /* Summary stats for the window. */
@@ -4114,7 +4135,10 @@ function extractRideDescents(sensors, ride, fileLabel, minDropM) {
     for (let i = 1; i < locInWin.length; i++) {
       const dt = locInWin[i].t - locInWin[i-1].t;
       const v = (locInWin[i].speed + locInWin[i-1].speed) / 2;
-      dist.push(dist[i-1] + v * dt);
+      /* Same 5 s refusal runMetrics makes on the identical loop. This is the copy that gets SAVED --
+         `distance`, and `distSeries`, which is what the ghost race reads to place a rival at a
+         distance -- so metres invented across a hole would outlive the session that made them. */
+      dist.push(dist[i-1] + (dt > 5 ? 0 : v * dt));
     }
     const totalDist = dist[dist.length - 1] || seg.distance || 0;
     /* Best annotation label: pick the one whose timestamp is closest to seg.tStart,
@@ -4503,8 +4527,14 @@ function runMetrics(run, D) {
   let drop = null;
   const baro = (D.sensors.baro || []).filter(r => r.t >= tStart && r.t <= tEnd && r.relativeAltitude != null);
   if (baro.length > 1) { const a = baro.map(r => r.relativeAltitude); drop = Math.max(...a) - Math.min(...a); }
+  /* Minus whatever the athlete PAUSED inside the run. A pause is a hole in the recording, so the run
+     window closes straight over it and a lap ridden with a two-minute stop in it read two minutes
+     slower than the same lap ridden through -- against its own siblings in the runs table, against
+     the reference lap in the play-by-play, and against the ghost. Zero on every recording with no
+     Pause marks. */
+  const pausedS = pausedOverlapS((D.ride && D.ride.pausedSpans) || [], tStart, tEnd);
   return {
-    duration: tEnd - tStart, distance: dist,
+    duration: (tEnd - tStart) - pausedS, distance: dist,
     maxSpeed: speeds.length ? Math.max(...speeds) : 0,
     avgSpeed: speeds.length ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0,
     nTurns: turns.length, medianRadius: radii.length ? median(radii) : null,
@@ -13222,11 +13252,27 @@ function renderMinimalSummary(sensors, span, positioned) {
   show('miniSummary');
   setStatus('Ready');
 
-  const dur = Math.max(0, span.end - span.start);
+  /* This is the fallback render, so it is the one place least likely to be looking at a tidy
+     recording -- and it was the one place with no gap discipline at all. Two rules, both of them
+     already applied by every other summary in the file:
+
+     A pause is not session time. The span still runs from the first sample to the last, so counting
+     it left this tile disagreeing with the Record screen, the wrist, Health and Strava on a
+     recording where the athlete explicitly said what the silence was.
+
+     And a hop across a hole is not ground covered. Straight-line haversine over EVERY pair credits
+     whatever the athlete did while the recording was stopped or the phone had no fix -- a drive to
+     the next trailhead lands here whole, and then divides into the average speed as well. */
+  const paused = pauseSpans(sensors && sensors.annotations, span.end);
+  const dur = Math.max(0, (span.end - span.start) - pausedOverlapS(paused, span.start, span.end));
+  const MINI_MAX_GAP_S = 5;
   let dist = 0;
-  for (let i = 1; i < positioned.length; i++)
+  for (let i = 1; i < positioned.length; i++) {
+    const dt = positioned[i].t - positioned[i-1].t;
+    if (!(dt > 0) || dt > MINI_MAX_GAP_S) continue;
     dist += haversineMeters(positioned[i-1].latitude, positioned[i-1].longitude,
                             positioned[i].latitude, positioned[i].longitude);
+  }
   const speed = dur > 0 ? dist / dur : 0;   // m/s, straight path-length average
   const metric = loamUnits() === 'metric';
 
@@ -13307,9 +13353,24 @@ async function analyze(files) {
     if (!sensorFile && fitFile) {
       const probeBuf = await fitFile.arrayBuffer();
       if (superseded()) return;
-      const probe = extractFitData(parseFIT(probeBuf));
+      const probeMsgs = parseFIT(probeBuf);
+      const probe = extractFitData(probeMsgs);
+      /* An E-BIKE is asked about FIRST, and the reason is the same one that moved sport detection off
+         field 7 on 2026-08-14 (CLAUDE.md, "Specialized FIT e-bike block"): field 7 is the RIDER's
+         watts and is present on every Levo, so the power probe below routed a standalone e-MTB file
+         straight into the ROAD analysis. That is not a cosmetic mislabel -- it estimated an FTP from
+         watts an assisted rider produced, it saved the ride as `sport: 'road'`, and the road view's
+         best-power envelope is built from saved road rides, so an e-MTB day quietly became the bar
+         the athlete's next real road ride was measured against. It also meant the e-MTB label, the
+         motor-off read and lift detection (all of which live in analyzeFitOnly) never ran on the one
+         file shape they were written for.
+         Field 82 is the motor's own power and is the channel that actually distinguishes the two;
+         fitIsEbike reads the file's declared sport/sub-sport instead, which covers an e-bike whose
+         head unit logs no motor channel at all. */
+      const hasMotor = probe.records.filter(r => r.motorPower != null && r.motorPower > 0).length >= 20;
+      const isEbike = hasMotor || fitIsEbike(probeMsgs);
       const hasPower = probe.records.filter(r => r.power != null && r.power > 0).length >= 20;
-      if (hasPower) await analyzeRoadFit(fitFile, onProgress, superseded);
+      if (hasPower && !isEbike) await analyzeRoadFit(fitFile, onProgress, superseded);
       else await analyzeFitOnly(fitFile, onProgress, superseded);
       return;
     }
@@ -13368,9 +13429,28 @@ async function analyze(files) {
     const cropKey = contentHash || (sensorFile && sensorFile.name) || null;
     const storedCrop = cropStored(cropKey);
     const cropSuffix = storedCrop ? `:crop=${Math.round(storedCrop.start)}-${Math.round(storedCrop.end)}` : '';
+    /* The recording's IDENTITY, hoisted out of the cache decision, because those are two different
+       questions and answering them together made one recording's edits land on another's.
+
+       `_currentRunKey` namespaces everything the athlete types or taps about THIS ride: the run
+       labels, the "not a trail" marks, the dismissed calibration notice, the coach's carry-over. It
+       used to be set only inside `if (cacheable)`, and `cacheable` is false for a ride with a
+       companion Specialized FIT (which is the app's normal MTB path), for a Sensor Logger zip, and
+       for a `.csv.gz` -- so all three shared the literal `'x'` namespace with each other. Since
+       `runIsSkipped` matches a mark to a run by MIDPOINT of elapsed seconds, marking "Descent 2" as
+       not-a-trail on Tuesday's ride silently disowned any run of Thursday's ride whose midpoint fell
+       in the same stretch of the clock -- from the hero card, the scrub chips, the lap comparison and
+       the coach digest -- and badged a run the rider never marked. A run renamed on one ride showed
+       up named on another.
+
+       `cropKey` is the same identity the crop, the lift, golf and swim render keys already use
+       (content hash where there is one, filename otherwise), and the filename is a real per-session
+       identity in the app: Swift injects `window.LOAM_SESSION_NAME` and `loamCsvName` keeps it.
+       Caching is untouched -- `cacheKey` still requires a content hash. Entries already written under
+       `'x'` are left where they are rather than migrated: they cannot be attributed to a ride. */
+    _currentRunKey = cropKey;
     if (cacheable) {
       cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix + poolSuffix + cropSuffix);
-      _currentRunKey = contentHash;
       if (cacheKey) {
         try {
           const cached = await getCachedAnalysis(cacheKey);
@@ -19565,6 +19645,32 @@ function loamCardFilename(slug, when) {
   return `loam-${slug}-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.png`;
 }
 
+/* Where a card's caption sends someone who was handed the picture. The TestFlight VIP public link is
+   an interim target, chosen by the owner (issue #385) because there is still no public download page:
+   it is the STABLE channel, so a stranger who joins from a shared card gets a promoted build rather
+   than the fast one. Swap this one constant when a real download page exists.
+
+   How far it actually travels differs by path, and only one of the three carries it to the recipient:
+   - Web Share API: `text` is the message body, so the link lands in Messages / Mail / X beside the
+     picture. This is the path that does the job.
+   - iOS bridge: the caption becomes the share sheet's SUBJECT and its link-preview title (see
+     ShareCardItem in AnalyzerWebView.swift, which deliberately shares ONE image item -- passing the
+     text as a second item made several targets attach the card as a link instead of a picture). So a
+     Mail share carries it in the subject and the sender sees it in the sheet header, but a Messages
+     share sends the picture alone. Putting the URL on the card ART is the only thing that would
+     survive that, and it is a design change to three posters, not a caption change.
+   - Plain download: no caption at all; the file is the whole artifact.
+   Kept to one line with a single space: a newline would land in a Mail subject line. */
+const LOAM_INSTALL_URL = 'https://testflight.apple.com/join/61Jeddcf';
+
+/* The caption a share sheet is handed. Idempotent, so a builder that ever spells the link out itself
+   does not get it twice. */
+function loamShareText(caption) {
+  const c = (caption || '').trim();
+  if (c.includes(LOAM_INSTALL_URL)) return c;
+  return c ? c + ' ' + LOAM_INSTALL_URL : LOAM_INSTALL_URL;
+}
+
 /* Share a rendered card (Ride Signature, Lift Signature) as a PNG, nudging the user toward sending it
    to friends rather than just filing it away. Three delivery paths:
    - iOS app (WKWebView): hand the PNG (+ a caption) to the native `loam` bridge, which presents the
@@ -19572,10 +19678,11 @@ function loamCardFilename(slug, when) {
    - Web with the Web Share API: open the OS share sheet with the image file so it reaches the same
      messaging/social targets. A user cancel (AbortError) is respected, not silently downloaded.
    - Web without share support (most desktops): fall back to a plain download.
-   The caption carries no install link yet, deferred per product until a public download page exists
-   to point at. Tracked in issue #385. */
+   The install link is appended HERE rather than by each card builder, so all three cards (ride, lift,
+   swim) and all three delivery paths carry the same one and none can be forgotten; the builders'
+   captions stay the plain sport-naming sentence the E2E pins. */
 async function loamShareImage(dataURL, filename, caption) {
-  const text = caption || '';
+  const text = loamShareText(caption);
   const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
     && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam;
   if (embedded) {
@@ -26850,7 +26957,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '2b71e08b3 · 2026-08-22';
+const LOAM_BUILD = 'cda051872 · 2026-08-23';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
