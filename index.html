@@ -5664,7 +5664,25 @@ function runTurnsFromD(run, D) {
 function pbpSpeedUsable(T) {
   return !!T && isFinite(T.vPeak) && T.vPeak > 1.8 && isFinite(T.vExit) && T.vExit > 1.8;
 }
-function pbpDeltasFromTurns(A, F) {
+/* Corners the recording can prove were taken at a standstill are not corners, and here they are
+   worse than merely uninformative: this pairing is POSITIONAL (turn i of one lap against turn i of
+   the other), so one junk entry on one side shifts every corner after it onto the wrong partner and
+   the deltas below stop describing the same piece of trail.
+
+   detectTurns' speed floor keeps them out of a freshly analysed ride, so on the live side this is a
+   no-op. The side it exists for is a library descent SAVED BEFORE that floor landed: those carry
+   whatever the old detector admitted, including a rider standing next to the bike, and they are
+   compared against clean laps for as long as they sit in the library.
+
+   Provably non-rolling only. vPeak is stored, so a positive speed under the floor is evidence; an
+   exact 0 is what the sampler returns when it knows nothing (no GPS, or outside coverage) and is
+   left alone, so a GPS-less lap keeps every corner it has and is judged not-comparable by
+   pbpSpeedUsable further down, exactly as before. */
+function pbpRolling(turns) {
+  return (turns || []).filter(T => !(T && isFinite(T.vPeak) && T.vPeak > 0 && T.vPeak < TURN_MIN_SPEED_MPS));
+}
+function pbpDeltasFromTurns(rawA, rawF) {
+  const A = pbpRolling(rawA), F = pbpRolling(rawF);
   const MPS = 2.23694, n = Math.min(A.length, F.length), out = [];
   for (let i = 0; i < n; i++) {
     const a = A[i], f = F[i];
@@ -9168,7 +9186,12 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
 }
 
 /* ========== Turn detection ========== */
-const TURN_PARAMS = { entryRate: 25.0, exitRate: 8.0, minHeadingChg: 25.0, minDuration: 0.5 };
+/* A turn needs the bike to have been rolling. See the long note at the gate in detectTurns for what
+   these two separate and why the bar sits where it does; both are pinned by
+   analyzer/sports/mtb/turns.test.js against this file. */
+const TURN_MIN_SPEED_MPS = 1.0;   /* ~2.2 mph: above stopped-and-handled, well under the slowest real corner */
+const TURN_SPEED_COVER_S = 5.0;   /* a real GPS fix this close vouches for the speed; further away, no gate */
+const TURN_PARAMS = { entryRate: 25.0, exitRate: 8.0, minHeadingChg: 25.0, minDuration: 0.5, minSpeed: TURN_MIN_SPEED_MPS };
 
 /* A "descent" must actually go down. Grade segmentation alone admits nuisance segments (lift-exit
    dips, altitude-drift blobs, long rolling traverses); requiring 30 m of NET drop keeps every real
@@ -9188,11 +9211,10 @@ const MIN_DESCENT_DROP_M = 30;
    of horizontal accel is tiny, |w| ~ 0.02 to 0.09) and did not beat interpolation
    on real rides. Phone-only speed from the IMU is ML territory, like phone-only
    jump detection. */
-function makeGpsInterpSpeedAt(locRows) {
+function makeGpsInterpSpeedAt(locRows, coverS) {
   const g = (locRows || []).filter(r => r && r.speed != null && r.speed >= 0).slice().sort((a, b) => a.t - b.t);
-  if (!g.length) return () => 0;
   const L = g.length - 1;
-  return (tq) => {
+  const at = !g.length ? () => 0 : (tq) => {
     if (tq <= g[0].t) return g[0].speed;
     if (tq >= g[L].t) return g[L].speed;
     let lo = 0, hi = L;
@@ -9200,6 +9222,23 @@ function makeGpsInterpSpeedAt(locRows) {
     const f = (tq - g[lo].t) / ((g[hi].t - g[lo].t) || 1);
     return g[lo].speed + f * (g[hi].speed - g[lo].speed);
   };
+  /* `covers(t)` answers "did a real fix vouch for the speed here", and it is what lets detectTurns'
+     speed floor reject a turn at all. A zero out of this sampler means "not moving" only where a
+     nearby fix says so: with no GPS the branch above returns 0 everywhere, and inside a dropout the
+     endpoint clamp repeats a possibly-stationary edge fix across the whole gap. Reading either as
+     proof of a standstill would delete every turn on a GPS-less recording, so coverage is a
+     nearest-real-fix test and absence of evidence disables the floor instead of failing it.
+     coverS undefined (any caller that does not ask for this) makes every comparison false, i.e. no
+     coverage anywhere, i.e. the floor never fires -- the safe direction. */
+  at.covers = (tq) => {
+    if (!g.length) return false;
+    if (tq <= g[0].t) return g[0].t - tq <= coverS;
+    if (tq >= g[L].t) return tq - g[L].t <= coverS;
+    let lo = 0, hi = L;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (g[m].t <= tq) lo = m; else hi = m; }
+    return Math.min(tq - g[lo].t, g[hi].t - tq) <= coverS;
+  };
+  return at;
 }
 
 function detectTurns(t, yawSeg, yawMetric, rollSmooth, rideStart, rideEnd, params, speedAt, speedSource) {
@@ -9223,7 +9262,28 @@ function detectTurns(t, yawSeg, yawMetric, rollSmooth, rideStart, rideEnd, param
           if (Math.abs(yawMetric[k]) > peakAbs) { peakAbs = Math.abs(yawMetric[k]); peakIdx = k; }
         const peakRate = yawMetric[peakIdx];
 
-        if (duration >= params.minDuration && Math.abs(headingChg) >= params.minHeadingChg) {
+        /* A bike that is not rolling is not cornering. Segmentation keys on yaw rate alone, which a
+           phone produces just as happily in a hand as on the bars: a rider who stops, lays the bike
+           down and hikes back up hands the detector 300-460 deg "turns" at 0.0-0.5 mph, and because
+           r = v / omega those land with centimetre-scale apex radii that then dominate the ride's
+           median. Measured on the 2026-08-23 Tanga drone session: 24 turns at a 0.7 ft median radius
+           with the stops in, 8 turns at 13.7 ft over the riding alone.
+
+           params.minSpeed is a wide-margin bar, not a tuned one. The junk on that recording topped
+           out at 0.22 m/s and the slowest real corner ran 1.79 m/s, so 1.0 m/s sits in the
+           order-of-magnitude gap between them: 4.5x above the junk, 1.8x below the slowest real
+           turn, and under any speed at which a bicycle is still balancing rather than being walked.
+           Erring toward admitting junk rather than deleting a real corner is deliberate.
+
+           It REJECTS only where the recording can prove a standstill (speedAt.covers), so a
+           GPS-less recording, or a corner inside a GPS dropout, keeps every turn it has rather than
+           losing all of them to a sampler that returns 0 when it knows nothing. Same posture as the
+           crop suggestion: absence of evidence is not evidence. This is an admission gate and it
+           does not touch the hysteresis, the heading-change bar or the radius formula. */
+        const speedKnown = typeof speedAt.covers === 'function' && speedAt.covers(t[peakIdx]);
+        const rolling = !(params.minSpeed > 0) || !speedKnown || speedAt(t[peakIdx]) >= params.minSpeed;
+
+        if (duration >= params.minDuration && Math.abs(headingChg) >= params.minHeadingChg && rolling) {
           /* A real bike is on the ground past ~60 deg of body lean, so a delta beyond 70 deg is
              sensor artifact (usually a calibration pose that does not match the riding pose), not
              riding. Null it so the lean symmetry metrics and coach skip it instead of reporting
@@ -14214,6 +14274,22 @@ async function analyze(files) {
           const frac = denom > 0 ? (tq - fitT[lo]) / denom : 0;
           return fitS[lo] + frac * (fitS[hi] - fitS[lo]);
         };
+        /* Same contract as the GPS sampler's `covers`, so detectTurns' speed floor works on a
+           FIT-equipped ride too -- and works better there, because wheel speed reads a true zero at
+           a standstill where GPS Doppler wanders. Coverage is still required: the clamps above
+           repeat an edge record across any dropout, and a bridged gap is interpolation rather than
+           evidence. */
+        fitSpeedAt.covers = (tq) => {
+          const last = fitT.length - 1;
+          if (tq <= fitT[0]) return fitT[0] - tq <= TURN_SPEED_COVER_S;
+          if (tq >= fitT[last]) return tq - fitT[last] <= TURN_SPEED_COVER_S;
+          let lo = 0, hi = last;
+          while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1;
+            if (fitT[mid] <= tq) lo = mid; else hi = mid;
+          }
+          return Math.min(tq - fitT[lo], fitT[hi] - tq) <= TURN_SPEED_COVER_S;
+        };
       }
     }
 
@@ -14237,7 +14313,7 @@ async function analyze(files) {
     if (fitSpeedAt) {
       speedAt = fitSpeedAt; speedSource = 'fit';
     } else {
-      speedAt = makeGpsInterpSpeedAt(sensors.location); speedSource = 'gps';
+      speedAt = makeGpsInterpSpeedAt(sensors.location, TURN_SPEED_COVER_S); speedSource = 'gps';
     }
     const turns = detectTurns(t, yawSeg, yawMetric, rollSmooth,
                               ride.start, ride.end, TURN_PARAMS, speedAt, speedSource);
@@ -27829,7 +27905,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '6839c8987 · 2026-08-23';
+const LOAM_BUILD = 'cc1528aff · 2026-08-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
