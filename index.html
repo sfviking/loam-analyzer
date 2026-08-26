@@ -9985,6 +9985,22 @@ const WRIST_FS = 50;             // resample rate for the wrist stream
 const WRIST_VEL_THR = 0.30;      // m/s; a real rep swings the bar's vertical velocity past this
 const WRIST_MIN_ROM_M = 0.15;    // and moves it at least this far vertically
 const WRIST_MIN_REP_SEP_S = 2.0; // two bottoms closer than one squat rep are one rep (a bounce out of the hole)
+/*
+ * A descent that has not driven back up this long after its bottom was not a rep. Without it the
+ * "down" state has no exit but a drive, so a walk-out -- which lowers the bar onto the back and then
+ * simply holds it there, never clearing +WRIST_VEL_THR -- stays open across the get-set pause and
+ * ANNEXES the first working rep: the pair comes back as one cycle stamped at the walk-out's deeper
+ * bottom, which the leading-un-rack trim below then drops, taking the real rep with it. Measured on
+ * the 2026-08-25 ground-truth session (a 120 kg triple came back as 2).
+ *
+ * WIDE-MARGIN, not tuned: on that session every genuinely counted rep drove back up within 4.0 s of
+ * its bottom (and all but one within 1 s), while the walk-out hold that had to be rejected ran
+ * 12.2 s. Anything in 4.5-12 s counts all four sets correctly; 8 s sits between the two measured
+ * edges. Erring LONG is deliberate -- a longer hold leaves more of the work to the un-rack / re-rack
+ * trims, which are validated against the earlier ground-truth sessions, so this rule only fires on
+ * the hold those trims cannot see.
+ */
+const WRIST_MAX_HOLD_S = 8.0;
 
 /*
  * Count reps in one bounded window from wrist (bar) motion. The watch is on the
@@ -9993,18 +10009,22 @@ const WRIST_MIN_REP_SEP_S = 2.0; // two bottoms closer than one squat rep are on
  * recordings the position integral is swamped by arm swing / wrist rotation and
  * grows spurious troughs (a 5-rep set read as 8), whereas the single-integral
  * velocity keeps a clean once-per-rep down-up swing. A rep is a descent (velocity
- * below -WRIST_VEL_THR) followed by the drive back up (above +WRIST_VEL_THR); the
- * amplitude gate rejects the small fidgets of walking the bar out and re-racking.
- * Per-rep ROM is the integrated descent distance and concentric velocity is the
- * mean upward velocity out of the bottom (the VBT metric). Returns null when there
- * is too little wrist data in the window (caller falls back to the phone counter).
+ * below -WRIST_VEL_THR) followed by the drive back up (above +WRIST_VEL_THR) within
+ * WRIST_MAX_HOLD_S of the bottom; the amplitude gate rejects the small fidgets of
+ * walking the bar out and re-racking. Per-rep ROM is the integrated descent distance
+ * (from where the bar starts down, not from where it crosses the velocity gate) and
+ * concentric velocity is the mean upward velocity out of the bottom (the VBT metric).
+ * Returns null when there is too little wrist data in the window (caller falls back to
+ * the phone counter).
  *
  * NOTE: validated on two real labeled sessions (a 4x5 squat: recovers the 5-rep
  * train per set, down from the old 8/8/7/7; and the 2026-07-15 6-set squat session,
  * where the trailing-re-rack trim below fixed set 1's 13->10). The remaining known
  * misses are the shallow-parallel and light-fast-rep gate tradeoffs (they under-count,
  * see the gate-boundary tests), so treat the wrist rep count as experimental until it
- * is validated across more sessions.
+ * is validated across more sessions. A third session (2026-08-25: 60x10, 100x5, 120x3,
+ * 140x3) added the two rules called out on WRIST_MAX_HOLD_S and dipAcc below, each of
+ * which cost one rep on one of the two heavy sets; it now reproduces all four.
  */
 function countRepsWrist(wrist, tStart, tEnd) {
   const seg = (wrist || []).filter(r => r.t >= tStart && r.t <= tEnd);
@@ -10034,17 +10054,26 @@ function countRepsWrist(wrist, tStart, tEnd) {
   /* Amplitude-gated velocity cycle: descent -> drive up = one rep. */
   const reps = [];
   let state = 'idle', vMin = 0, tBottom = 0, tDown = 0, romAcc = 0, upSum = 0, upN = 0;
+  /* The descent in progress, tracked from the ZERO crossing rather than from the -WRIST_VEL_THR
+     crossing, because the lowering starts where the bar starts moving down and not where it gets
+     fast enough to notice. Integrating from the threshold instead threw away the slow head of every
+     descent, which is most of a heavy one: on the 2026-08-25 session the middle rep of a 140 kg
+     triple measured 0.08 m of ROM against a real ~0.3 m and was dropped by the WRIST_MIN_ROM_M gate,
+     so the set came back as 2. It also under-reported eccentric time on every rep. */
+  let dipAcc = 0, dipStart = 0;
   /* Eccentric (lowering) time = descent start -> bottom; concentric (drive) time = bottom -> end of the
      up phase. Both come free from the same state machine, so a set's tempo splits into down / up. */
   const mkRep = (tEnd) => ({ t: tBottom, rom: romAcc, cv: upN ? upSum / upN : 0, amp: -vMin,
     eccS: +Math.max(0, tBottom - tDown).toFixed(2), conS: +Math.max(0, tEnd - tBottom).toFixed(2) });
   for (let i = 0; i < n; i++) {
+    if (vs[i] < 0) { if (dipAcc === 0) dipStart = tu[i]; dipAcc += -vs[i] * dt; } else dipAcc = 0;
     if (state === 'idle') {
-      if (vs[i] < -WRIST_VEL_THR) { state = 'down'; vMin = vs[i]; tBottom = tu[i]; tDown = tu[i]; romAcc = 0; upSum = 0; upN = 0; }
+      if (vs[i] < -WRIST_VEL_THR) { state = 'down'; vMin = vs[i]; tBottom = tu[i]; tDown = dipStart; romAcc = dipAcc; upSum = 0; upN = 0; }
     } else if (state === 'down') {
       if (vs[i] < 0) romAcc += -vs[i] * dt;        // integrate the descent distance
       if (vs[i] < vMin) { vMin = vs[i]; tBottom = tu[i]; }
       if (vs[i] > WRIST_VEL_THR) { state = 'up'; upSum = vs[i]; upN = 1; }
+      else if (tu[i] - tBottom > WRIST_MAX_HOLD_S) state = 'idle';   // held down, never drove: not a rep
     } else {
       if (vs[i] > 0) { upSum += vs[i]; upN++; }
       if (vs[i] < WRIST_VEL_THR) {
@@ -27905,7 +27934,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'cc1528aff · 2026-08-24';
+const LOAM_BUILD = '24d1538ff · 2026-08-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
