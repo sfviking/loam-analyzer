@@ -1877,6 +1877,21 @@
     </div>
   </section>
 
+  <!-- The e-MTB offer. Placed with the other notices, and shown only when detection has concluded
+       MTB with nothing able to say otherwise -- which for a rider with no Specialized FIT is every
+       ride they will ever record, since motor power is the only route to the e-MTB label. Reported
+       2026-08-27: "Loan seems to always auto detect me on a mountain bike ride and we both know I
+       will always be EMTB." The offer lives HERE rather than beside the dropzone's Sport picker
+       because the app hides the dropzone entirely, so a control there is invisible to exactly the
+       people who need it. -->
+  <section id="emtbNotice" class="hidden">
+    <div class="mount-notice">
+      <button type="button" class="notice-hide" onclick="hideEmtbNotice()" aria-label="Hide this notice for this ride">Hide</button>
+      <strong>Analyzed as MTB.</strong>
+      <span id="emtbNoticeBody"></span>
+    </div>
+  </section>
+
   <section id="rideSignatureSection" class="hidden">
     <div class="ride-sig-wrap">
       <div id="rideSignature"></div>
@@ -3415,6 +3430,77 @@ function detectRidingWindow(locRows) {
 }
 
 /* ========== Sport detection ========== */
+
+/* At least this many records carrying motor power above zero before a companion FIT is taken as
+   proof of a motor. Unchanged from the value the FIT override has always used; it is here so the
+   two halves of the same decision read one constant. */
+const EMTB_FIT_MOTOR_RECORDS = 20;
+
+/*
+ * Whether an auto-detected `mtb` ride should be relabelled `emtb`.
+ *
+ * ## Why a preference exists at all
+ *
+ * Nothing in a phone recording distinguishes an e-MTB from an analog one. `detectSport` reads GPS
+ * speed percentiles and a cadence probe; a motor shows up in neither. The ONLY route to `emtb` has
+ * ever been a companion Specialized FIT carrying motor power (field 82), so a rider who does not
+ * attach one gets "MTB" on every ride they will ever record -- not because detection guesses wrong,
+ * but because it cannot express the answer. Reported 2026-08-27: "Loam seems to always auto detect
+ * me on a mountain bike ride and we both know I will always be EMTB." That "always" is literally
+ * correct and would have stayed correct forever.
+ *
+ * The label is not cosmetic: it decides the Strava upload's activity type, what the library stores,
+ * and which sport the coach digest describes.
+ *
+ * ## Why it renames rather than declares
+ *
+ * The obvious alternative is a default SPORT, and it is worse. A declared sport suppresses
+ * auto-detection entirely, so a standing default of e-MTB analyzes the morning's run as a ride --
+ * which is the failure `CaptureSettings.resetPerLaunchState` exists to prevent, made permanent.
+ * This preference cannot do that: it is consulted only when detection has already concluded `mtb`,
+ * so a run still detects as a run and a road ride still detects as road. It moves exactly the one
+ * distinction the sensors structurally cannot make, and nothing else.
+ *
+ * ## MEASURED EVIDENCE WINS, and the asymmetry is the whole rule
+ *
+ * The preference fills a GAP; it does not overrule a file. Same posture as `covers()` on the speed
+ * samplers and as the crop suggestion's "a stop is not evidence": absence of evidence is not
+ * evidence, so what matters is whether the FIT can speak about motors at all.
+ *
+ *   - A FIT with motor-power records above zero says e-MTB. It already did, and still does, whatever
+ *     the preference says -- so a rider who borrows an e-bike for a day is labelled correctly even
+ *     with the preference off.
+ *   - A FIT that CARRIES the motor-power channel and shows nothing on it is positive evidence of an
+ *     analog bike, and the preference is refused. This is the case that would otherwise silently
+ *     upload an analog ride to Strava as an e-bike ride.
+ *   - A FIT with no motor-power channel at all vouches for nothing. An Amflow/Avinox export is
+ *     GPS-only, and a Garmin never had the field, so treating a missing channel as "no motor" would
+ *     refuse the preference for precisely the riders who need it most. No evidence, so the
+ *     preference decides.
+ *   - No FIT: no evidence, so the preference decides. This is the reported case.
+ *
+ * One consequence, accepted and stated on the toggle: a rider with the preference on who rides an
+ * ANALOG bike with no FIT gets an e-MTB label. There is nothing in the recording to catch that, the
+ * per-ride Sport selector fixes it in one click, and it is the trade the rider opted into.
+ *
+ * Deliberately NOT consulted when the rider picked a sport by hand (`userSport !== 'auto'`): an
+ * explicit "MTB" outranks a standing preference, exactly as it outranks the FIT override today.
+ */
+function emtbLabel({ userSport, detectedSport, fitRecords, prefersEmtb }) {
+  if (userSport !== 'auto' || detectedSport !== 'mtb') return { sport: detectedSport, reason: 'not-applicable' };
+  const fit = fitRecords || [];
+  const withMotorField = fit.filter(r => r && r.motorPower != null);
+  if (withMotorField.filter(r => r.motorPower > 0).length >= EMTB_FIT_MOTOR_RECORDS) {
+    return { sport: 'emtb', reason: 'fit-motor-power' };
+  }
+  // The file carries the channel and it is silent: that is a measurement, not a gap.
+  if (withMotorField.length) return { sport: 'mtb', reason: 'fit-says-analog' };
+  if (prefersEmtb) return { sport: 'emtb', reason: 'preference' };
+  /* Auto-detected MTB, the preference off, and nothing in the recording able to speak either way.
+     The one case worth OFFERING the preference in, which is what the notice keys on. */
+  return { sport: 'mtb', reason: 'no-evidence' };
+}
+
 /* e-MTB and MTB share one analysis pipeline (body-frame turns, jumps, FIT); only the label differs,
    so MTB-specific branches (mechanics, coach history, highlights) treat both alike. Running is the
    other pipeline. */
@@ -8837,6 +8923,11 @@ function rideLocalKeys(key, allKeys) {
     'loam.golfSwings.' + key,
     /* The dismissed calibration-mismatch banner. One flag per recording, no run suffix. */
     'loam_calibnotice:' + key,
+    /* The dismissed e-MTB offer. Per-recording for the same reason: a rider who was not ready to
+       answer on one ride should be asked again on the next. The PREFERENCE itself is deliberately
+       not here -- it is a standing answer about the rider's bike, not a fact about this recording,
+       and deleting a ride must not silently relabel every future one. */
+    'loam_emtbnotice:' + key,
     /* The trim window, the answer to the "this kept running" notice, and the panel's picture of the
        whole recording (span + strip + activity blocks). Three keys rather than one because they are
        written at different moments and the context outlives any particular crop. */
@@ -13821,6 +13912,14 @@ async function analyze(files) {
     const cropKey = contentHash || (sensorFile && sensorFile.name) || null;
     const storedCrop = cropStored(cropKey);
     const cropSuffix = storedCrop ? `:crop=${Math.round(storedCrop.start)}-${Math.round(storedCrop.end)}` : '';
+    /* The e-MTB preference is an INPUT to the analysis for exactly the reason the pool length and
+       the crop are: it changes the sport the render is computed under, and the sport reaches the
+       library record, the Strava activity type and the coach digest. Without it in the key, answering
+       the e-MTB question replays the stale render and the answer appears to do nothing -- which is
+       the identical failure the two comments above were written for, on a third input. Caught by the
+       `mtb-emtb` browser scenario rather than by reasoning, which is what that scenario is for.
+       Only meaningful on an auto-detected ride, since a declared sport ignores the preference. */
+    const emtbSuffix = (prefersEmtbRides() && (!declaredSportKey || declaredSportKey === 'auto')) ? ':emtb=1' : '';
     /* The recording's IDENTITY, hoisted out of the cache decision, because those are two different
        questions and answering them together made one recording's edits land on another's.
 
@@ -13842,7 +13941,7 @@ async function analyze(files) {
        `'x'` are left where they are rather than migrated: they cannot be attributed to a ride. */
     _currentRunKey = cropKey;
     if (cacheable) {
-      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix + poolSuffix + cropSuffix);
+      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix + poolSuffix + cropSuffix + emtbSuffix);
       if (cacheKey) {
         try {
           const cached = await getCachedAnalysis(cacheKey);
@@ -14336,17 +14435,28 @@ async function analyze(files) {
       }
     }
 
-    /* e-MTB when the FIT carries the motor-power channel (FIT field 82, which only an assisted bike
-       populates). Same analysis as MTB; only the stored/displayed/Strava sport label changes, so the
-       ride matches Ride segments and uploads as an e-bike ride. Manual "e-MTB"/"MTB" picks are left
-       as chosen. This used to test `power` (field 7), which is the RIDER's watts on every bike, so an
-       analog MTB ridden with a power meter would have labelled itself an e-MTB and been uploaded to
-       Strava as one. Motor power is the channel that actually means "there is a motor here". */
-    if (userSport === 'auto' && sport === 'mtb' && fitInRide && fitInRide.filter(r => r.motorPower != null && r.motorPower > 0).length >= 20) {
-      sport = 'emtb';
-      dbg('[sport detect] FIT has motor power -> emtb');
-      if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
-        try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
+    let emtbReason = 'not-applicable';
+    /* e-MTB, from the FIT's motor-power channel (field 82, which only an assisted bike populates) or,
+       when nothing in the recording can speak to it, from the rider's standing preference. Same
+       analysis as MTB either way; only the stored/displayed/Strava sport label changes, so the ride
+       matches Ride segments and uploads as an e-bike ride. Manual "e-MTB"/"MTB" picks are left as
+       chosen. The FIT test used to read `power` (field 7), which is the RIDER's watts on every bike,
+       so an analog MTB with a power meter labelled itself an e-MTB; field 82 is the channel that
+       actually means "there is a motor here". See emtbLabel for why a silent motor channel refuses
+       the preference and a missing one does not. */
+    {
+      const relabel = emtbLabel({ userSport, detectedSport: sport, fitRecords: fitInRide,
+                                  prefersEmtb: prefersEmtbRides() });
+      /* Kept for the notice, which offers the preference exactly when nothing could decide
+         ('no-evidence'). Reading the reason rather than re-deriving it means the offer and the
+         decision cannot disagree about whether the FIT had a view. */
+      emtbReason = relabel.reason;
+      if (relabel.sport !== sport) {
+        sport = relabel.sport;
+        dbg(`[sport detect] ${relabel.reason} -> ${sport}`);
+        if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
+          try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
+        }
       }
     }
 
@@ -14420,7 +14530,7 @@ async function analyze(files) {
     hide('loading'); show('results');
     const mtbRender = {
       sensors, t, yawSeg, rollSmooth, R,
-      ride, turns, summary, calibWin, sport, imuRateHz, fitRepair,
+      ride, turns, summary, calibWin, sport, imuRateHz, fitRepair, emtbReason,
       fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
@@ -15672,7 +15782,7 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','fitRepairNotice','mtbCalibNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -23785,6 +23895,135 @@ function renderSampleRateNotice(D) {
   sec.classList.remove('hidden');
 }
 
+/* The rider's standing answer to "which bike", consulted only when the recording itself cannot say
+   (see emtbLabel). localStorage like every other preference here; a throwing store (private mode,
+   full quota) reads as "no preference", which is the safe direction -- it can only leave a ride
+   labelled the way it is labelled today. */
+const EMTB_PREF_KEY = 'loam_prefers_emtb';
+/* THREE states, not two, and the third one is the whole reason an analog rider is not pestered.
+   Unset means "never asked"; '1' and '0' are both ANSWERS. A two-state boolean would have made
+   "I don't ride an e-bike" indistinguishable from "not yet", so the offer below would have come
+   back on every single ride for exactly the riders it does not apply to -- which is most of them. */
+function emtbPreference() {
+  /* The HOST's answer wins, for the reason its pool length does: in the app this is a Settings row
+     the rider can see and change, and a page-local copy that disagreed with it would be two answers
+     to one question on one device. Only ever injected when actually answered -- an unanswered rider
+     gets no global at all rather than a `false`, which would read as "I ride analog" and silence a
+     question nobody had been asked. */
+  if (typeof window !== 'undefined' && typeof window.LOAM_PREFERS_EMTB === 'boolean') {
+    return window.LOAM_PREFERS_EMTB ? 'yes' : 'no';
+  }
+  try {
+    const v = localStorage.getItem(EMTB_PREF_KEY);
+    return v === '1' ? 'yes' : v === '0' ? 'no' : 'unset';
+  } catch (e) { return 'unset'; }
+}
+function prefersEmtbRides() { return emtbPreference() === 'yes'; }
+function setPrefersEmtbRides(on) {
+  try { localStorage.setItem(EMTB_PREF_KEY, on ? '1' : '0'); } catch (e) {}
+  /* Answering INSIDE the app has to reach the app's own store, or the Settings row would keep
+     showing "Ask me" for a rider who has just answered, and the injected global would overrule the
+     localStorage copy on the next open -- the answer would appear to un-stick itself. Same bridge
+     the detected sport already posts back through. */
+  if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
+    try { window.webkit.messageHandlers.loam.postMessage({ prefersEmtb: !!on }); } catch (e) {}
+  }
+}
+
+/* "No" is an ANSWER, not a postponement -- the same posture the crop notice's "Keep it all" takes,
+   and for a stronger reason. Which bike you ride is a standing fact, so an analog rider who declines
+   once has told us everything there is to know, and asking again next ride would be nagging them
+   about a question they have already settled. Stored globally, so it is one dismissal, forever.
+
+   The per-ride key below is kept for the PROVENANCE line (the other direction), where dismissing
+   really is about this ride rather than about the rider. */
+function emtbNoticeKey() { return `loam_emtbnotice:${_currentRunKey || 'x'}`; }
+function declineEmtbPreference() {
+  setPrefersEmtbRides(false);
+  const sec = document.getElementById('emtbNotice');
+  if (sec) sec.classList.add('hidden');
+}
+function hideEmtbNotice() {
+  try { localStorage.setItem(emtbNoticeKey(), '1'); } catch (e) {}
+  const sec = document.getElementById('emtbNotice');
+  if (sec) sec.classList.add('hidden');
+}
+
+/* Turn the preference on and re-analyze, the same way the pool picker and the Calibration selector
+   do. Re-analyzing rather than patching the label in place is the point: `sport` reaches the
+   library record, the Strava upload type and the coach digest during analysis, so a cosmetic swap
+   would leave four surfaces disagreeing with the one on screen. Needs the backing File; a library
+   replay has none, so the offer is not made there. */
+function declineEmtbPreferenceAndReanalyze() {
+  setPrefersEmtbRides(false);
+  const sec = document.getElementById('emtbNotice');
+  if (sec) sec.classList.add('hidden');
+  /* Unlike declining the OFFER -- where the label is already 'mtb' and nothing needs recomputing --
+     turning the preference off changes this ride's sport, and therefore its library record, its
+     Strava activity type and its coach digest. Re-analyze for the same reason accepting does. */
+  if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+}
+
+function acceptEmtbPreference() {
+  setPrefersEmtbRides(true);
+  const sec = document.getElementById('emtbNotice');
+  if (sec) sec.classList.add('hidden');
+  if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+}
+
+function renderEmtbNotice(D) {
+  const sec = document.getElementById('emtbNotice');
+  if (!sec) return;
+  const body = document.getElementById('emtbNoticeBody');
+  const lead = sec.querySelector('strong');
+  const reason = D && D.emtbReason;
+  /* A library replay has no backing File, so neither branch can re-analyze and neither is offered. */
+  if (!_lastSensorFile || !body || !lead) { sec.classList.add('hidden'); return; }
+
+  const mkBtn = (text, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'notice-action'; b.textContent = text; b.onclick = fn;
+    return b;
+  };
+
+  /* THE OFFER. Only on 'no-evidence' (auto-detected MTB, no FIT able to speak, no answer on file),
+     and only while the preference is genuinely UNSET -- an analog rider who said no is never asked
+     again, which is the difference between a question and a nag. */
+  if (reason === 'no-evidence' && emtbPreference() === 'unset') {
+    lead.textContent = 'Analyzed as MTB.';
+    body.textContent = ' Nothing in this recording can tell an e-bike from an analog one \u2014 a motor'
+      + ' shows up only in a Specialized head unit\'s FIT file, and there is none here. Which do you ride?'
+      + ' The answer is remembered and you will not be asked again.';
+    body.appendChild(document.createTextNode(' '));
+    body.appendChild(mkBtn('I ride an e-MTB', acceptEmtbPreference));
+    body.appendChild(document.createTextNode(' '));
+    body.appendChild(mkBtn('Analog \u2014 keep calling it MTB', declineEmtbPreference));
+    sec.classList.remove('hidden');
+    return;
+  }
+
+  /* THE PROVENANCE LINE, which is the way back. A preference-labelled ride says where its label came
+     from and offers to change the answer, because otherwise the setting is one-way for anybody who
+     turned it on by mistake: the per-ride Sport picker lives on the dropzone, and the app hides the
+     dropzone entirely. Dismissable per RIDE (unlike the offer, which is answered once and for all) --
+     this one really is about this ride, and a rider who wants it gone on every ride has the Hide
+     button and a key that the ride's own deletion cleans up. */
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(emtbNoticeKey()) === '1'; } catch (e) {}
+  if (reason === 'preference' && !dismissed) {
+    lead.textContent = 'Labelled e-MTB because you said you ride one.';
+    body.textContent = ' Nothing in this recording confirms it \u2014 there is no FIT carrying motor'
+      + ' power \u2014 so this label, and the Strava activity type that follows from it, come from your'
+      + ' answer rather than from the ride.';
+    body.appendChild(document.createTextNode(' '));
+    body.appendChild(mkBtn('I don\'t ride an e-MTB', declineEmtbPreferenceAndReanalyze));
+    sec.classList.remove('hidden');
+    return;
+  }
+
+  sec.classList.add('hidden');
+}
+
 /* Calibration pose-mismatch warning. The body frame comes from the quietest still window in the
    recording, which is usually before you roll out. If the phone moved between that window and the
    ride (pocket then backpack is the common one), lean and turn metrics are computed in the wrong
@@ -23928,6 +24167,7 @@ function renderAll(D) {
   renderSampleRateNotice(D);
   renderFitRepairNotice(D);
   renderCalibNotice(D);
+  renderEmtbNotice(D);
   renderRideSignature(D, 'mtb');
   renderStats(D.summary, D.hasFit);
   renderCoachHighlights(D, 'mtb');
@@ -27948,7 +28188,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '1a72d3075 · 2026-08-26';
+const LOAM_BUILD = '4d0879a96 · 2026-08-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
