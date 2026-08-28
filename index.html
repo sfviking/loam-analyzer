@@ -23921,6 +23921,25 @@ function emtbPreference() {
 function prefersEmtbRides() { return emtbPreference() === 'yes'; }
 function setPrefersEmtbRides(on) {
   try { localStorage.setItem(EMTB_PREF_KEY, on ? '1' : '0'); } catch (e) {}
+  /* AND the injected global, which `emtbPreference` reads FIRST. Without this the app's copy of the
+     answer goes stale the moment the rider changes it, and the one control that depends on changing
+     it is the one that breaks: a rider whose preference is already on opens a ride, gets the
+     provenance line, taps "I don't ride an e-MTB" -- and the re-analysis reads the still-true global,
+     labels the ride e-MTB again, and the cache key never moves either (`emtbSuffix` reads the same
+     function), so the stale render replays and the button does nothing at all. On the hosted page
+     there is no global and the button always worked, which is exactly where it matters least: the
+     app hides the dropzone, so this line IS the way back from a mis-tap, and without it a wrong
+     answer uploads every future ride to Strava as an e-bike ride with no undo reachable in the app.
+     Setting it here keeps "the host's answer wins" true rather than weakening it -- the host is
+     being told, on the next line, the very answer being written here. Only touched when a global
+     actually exists, so the hosted page's localStorage-only path is unchanged.
+
+     The pool length avoids this whole class of problem the other way, by HIDING its on-page picker
+     when the host declared one. That is not available here: the button is the way back, so it has to
+     work rather than disappear. */
+  if (typeof window !== 'undefined' && typeof window.LOAM_PREFERS_EMTB === 'boolean') {
+    window.LOAM_PREFERS_EMTB = !!on;
+  }
   /* Answering INSIDE the app has to reach the app's own store, or the Settings row would keep
      showing "Ask me" for a rider who has just answered, and the injected global would overrule the
      localStorage copy on the next open -- the answer would appear to un-stick itself. Same bridge
@@ -28188,7 +28207,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '4d0879a96 · 2026-08-27';
+const LOAM_BUILD = '1669bc319 · 2026-08-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
