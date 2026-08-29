@@ -3102,6 +3102,42 @@ function gravityPoseMismatch(gravityRows, calibStart, calibEnd, rideStart, rideE
   const dot = Math.max(-1, Math.min(1, gc[0]*gr[0] + gc[1]*gr[1] + gc[2]*gr[2]));
   return Math.acos(dot) * 180 / Math.PI;
 }
+/*
+ * Split the calibration-vs-riding pose mismatch into the two components that have DIFFERENT
+ * consequences. The total angle above conflates a harmless error mode with a damaging one, so a
+ * notice thresholded on it fires on correctly mounted phones -- see
+ * analyzer/core/calibration/calibration.js for the measurements behind these two bars and for why
+ * the asymmetry is mechanical rather than a curve fit. In short: body-frame yaw rate is the -y
+ * component of R @ gyro, so a frame tilted about the FORWARD axis mixes the bike's roll rate --
+ * large in a corner, and signed by turn direction -- into the yaw channel and manufactures a
+ * left/right asymmetry, while a tilt about the LATERAL axis mixes in pitch rate, which is small on a
+ * bike and carries no direction sign. A body-worn phone (waist belt, pocket) shows a real fore-aft
+ * offset all by itself, because standing still and riding are different postures.
+ */
+const CALIB_POSE_LATERAL_DEG = 12;
+const CALIB_POSE_TOTAL_DEG = 40;
+function poseMismatchAxes(gravityRows, R, rideStart, rideEnd) {
+  let sx = 0, sy = 0, sz = 0, n = 0;
+  for (const r of gravityRows) {
+    if (r.t < rideStart || r.t > rideEnd) continue;
+    sx += r.x; sy += r.y; sz += r.z; n++;
+  }
+  if (!n) return null;
+  const m = Math.hypot(sx, sy, sz);
+  if (!(m > 1e-9)) return null;
+  const g = [sx / m, sy / m, sz / m];
+  const b = [
+    R[0][0]*g[0] + R[0][1]*g[1] + R[0][2]*g[2],
+    R[1][0]*g[0] + R[1][1]*g[1] + R[1][2]*g[2],
+    R[2][0]*g[0] + R[2][1]*g[1] + R[2][2]*g[2],
+  ];
+  const DEG = 180 / Math.PI;
+  return {
+    totalDeg: Math.acos(Math.max(-1, Math.min(1, -b[1]))) * DEG,
+    foreAftDeg: Math.atan2(b[2], -b[1]) * DEG,
+    lateralDeg: Math.atan2(b[0], -b[1]) * DEG,
+  };
+}
 function matmul(A, B) {
   const C = [[0,0,0],[0,0,0],[0,0,0]];
   for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) C[i][j] += A[i][k]*B[k][j];
@@ -4609,8 +4645,12 @@ const CRASH_TURN_GAP_S = 5;
 const CRASH_DEDUPE_S = 20;
 /* Fewest same-side corners needed before "your typical lean" is a number worth printing. */
 const CRASH_MIN_BASELINE = 3;
-/* Mount-shift threshold, mirroring CALIB_POSE_MISMATCH_DEG (the calibration-vs-riding pose notice).
-   Same quantity -- an angle between two mean gravity directions -- so the same 12 deg applies. */
+/* Mount-shift threshold: an angle between two mean gravity directions, 12 deg.
+   The calibration-vs-riding pose notice used to threshold the same total angle and no longer does,
+   because a BODY-WORN phone shows a large fore-aft offset with a perfect mount (standing and riding
+   are different postures) -- see poseMismatchAxes. That correction does NOT reach here, and the
+   reason is the entry below: both sides of THIS comparison are riding samples, so the rider's
+   posture is held roughly constant across it and what is left really is the phone moving. */
 const CRASH_MOUNT_SHIFT_DEG = 12;
 /* Only riding samples feed the mount-shift comparison, at the ride-window gate rather than the
    stop gate: standing over the bike puts the phone at a different angle to gravity than riding does,
@@ -14422,6 +14462,11 @@ async function analyze(files) {
     /* Flag a calibration captured in a different pose than the ride (classic: calibrate with the
        phone in a pocket, then move it to a backpack before riding). Surfaced as a notice in renderAll. */
     calibWin.poseMismatchDeg = gravityPoseMismatch(sensors.gravity, calibWin.start, calibWin.end, ride.start, ride.end);
+    /* The fore-aft / lateral split of that same angle. Only the lateral half predicts damage to the
+       turn-side reads (see poseMismatchAxes), so it is what renderCalibNotice gates on and what the
+       geek-stats dump prints; the total is kept because other surfaces already store it. */
+    { const _axes = poseMismatchAxes(sensors.gravity, R, ride.start, ride.end);
+      if (_axes) { calibWin.poseForeAftDeg = _axes.foreAftDeg; calibWin.poseLateralDeg = _axes.lateralDeg; } }
 
     onProgress('rotating sensors to body frame');
     const gyroBody = applyRotation(R, sensors.gyro);
@@ -14975,7 +15020,14 @@ function renderCrossTurnRead(hostId, subject, reference, onCorner) {
   if (!cmp.length) {
     html += `<div class="dim">Neither lap stored usable corner speeds, so only the times above are comparable.</div>`;
   } else if (!noted.length) {
-    html += `<div class="dim">No notable corner-by-corner differences (within ~${pbpSpeedFmt(1.0)} everywhere).</div>`;
+    /* "everywhere" used to mean min(countA, countF): the pairing runs over the shorter lap, so on a
+       2-vs-6 pair four of the reference's corners -- including, in the reported case, both of its
+       fastest -- were silently never examined, under a heading that read as a verdict on the lap
+       (owner report, 2026-08-29). Name the scope instead of implying the whole descent. */
+    const skipped = Math.abs(countA - countF);
+    html += `<div class="dim">No notable differences across the ${cmp.length} corner${cmp.length === 1 ? '' : 's'} that could be compared (within ~${pbpSpeedFmt(1.0)}).`
+      + (skipped ? ` The other ${skipped} had no counterpart on the shorter lap and were not compared.` : '')
+      + `</div>`;
   } else {
     const focused = giveUps.slice(0, PBP_FOCUS_LINES);
     if (focused.length) {
@@ -15340,10 +15392,20 @@ function renderCrossRide({ perRide, clusters }) {
           line: { color: m.color, width: 2 }, marker: { size: 6 },
           name: m.tag,
         }));
+        /* The x axis is the corner's POSITION down the descent, so laps that detected different
+           numbers of corners are lined up in order and corner 3 of one is not corner 3 of the other.
+           renderCrossTurnRead says so below, but the chart is where the eye goes first, and a lap
+           whose line simply stops reads as "rode two corners and quit" rather than "four corners
+           were not detected" (owner report, 2026-08-29: "are 8/29 corners missing or is the blue
+           line supposed to be flat"). */
+        const turnCounts = turnMembers.map(m => m.turns.length);
+        const turnNote = note + (new Set(turnCounts).size > 1
+          ? `<br><span style="font-size:11px">these laps detected ${turnCounts.join(' vs ')} corners &mdash; lined up in order, so corner N is not the same corner on every lap</span>`
+          : '');
         loamPlot(`crossTurnChart_${ci}`, turnTraces, {
           paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
           font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-          title: { text: 'Apex speed by corner' + note, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
+          title: { text: 'Apex speed by corner' + turnNote, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
           margin: { l: 48, r: 14, t: 32, b: 64 },
           xaxis: { title: { text: 'corner down the descent', font: { size: 11 } }, gridcolor: '#e2e8f0', dtick: 1 },
           yaxis: { title: { text: `apex speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
@@ -20513,7 +20575,49 @@ function buildTagMembers(targetTag, allRides) {
     if (seen.has(sig)) continue;
     seen.add(sig); unique.push(m);
   }
-  return unique;
+  /* ONE RIDE RECORDED BY TWO DEVICES IS NOT TWO LAPS (owner report, 2026-08-29: "why is it comparing
+     the same lap against itself"). The signature above collapses the case its own comment describes
+     -- one FILE in the library twice, where all six numbers are byte-identical -- and cannot touch
+     the same ride seen by two GPS receivers, because not one of those numbers will ever match. The
+     reported pair differed by 6 s of duration and 0.02 mi, which is exactly what a phone and a
+     Specialized head unit produce on one descent.
+     They are separate library rides for a structural reason: a ride is keyed by the content hash of
+     the file it came from, and analyzeFitOnly hashes the FIT while the CSV path hashes the CSV, so
+     dedupeRides (which groups on that key) can never link them. Left alone, the head unit takes the
+     segment PR, tagProgression counts one descent as two laps and reports "getting faster" from a
+     ride against itself, and the coach reads two efforts where there was one.
+     The test needs no tolerance and no tuning: two efforts that OVERLAP IN ABSOLUTE TIME cannot be
+     two laps, because nobody rides the same segment twice at once. Both clocks are UTC (the
+     FIT-to-phone sync is accurate to 1-2 s, far inside a descent), and a genuine repeat lap is
+     minutes away since the rider has to get back to the top.
+     Whichever copy carries corners wins, because a standalone FIT stores none (GPS-only rides get no
+     turn metrics) and dropping the phone's copy would silently empty the corner chart. */
+  const absWindow = (m) => {
+    const d = memberDate(m);
+    if (!d || isNaN(d) || m.tStart == null || m.tEnd == null) return null;
+    const base = d.getTime() / 1000;
+    return [base + m.tStart, base + m.tEnd];
+  };
+  const richer = (a, b) => {
+    const ta = (a.turns || []).length, tb = (b.turns || []).length;
+    if (ta !== tb) return ta > tb ? a : b;
+    const la = (a.locInWin || []).length, lb = (b.locInWin || []).length;
+    return lb > la ? b : a;
+  };
+  const kept = [];
+  for (const m of unique) {
+    const w = absWindow(m);
+    /* No usable date means no way to tell a duplicate from a repeat lap, so it is kept: an extra row
+       is a smaller error than deleting a real effort. */
+    if (!w) { kept.push(m); continue; }
+    const clashAt = kept.findIndex((k) => {
+      const kw = absWindow(k);
+      return kw && w[0] < kw[1] && kw[0] < w[1];
+    });
+    if (clashAt === -1) { kept.push(m); continue; }
+    kept[clashAt] = richer(kept[clashAt], m);
+  }
+  return kept;
 }
 
 /* Longitudinal read for one tagged segment: how many laps, your PR (best) time, and how much faster
@@ -24141,12 +24245,27 @@ function renderEmtbNotice(D) {
   sec.classList.add('hidden');
 }
 
-/* Calibration pose-mismatch warning. The body frame comes from the quietest still window in the
-   recording, which is usually before you roll out. If the phone moved between that window and the
-   ride (pocket then backpack is the common one), lean and turn metrics are computed in the wrong
-   frame. ~12deg cleanly separates a real pose change (tens of degrees) from the few degrees of
-   average trail pitch a correctly mounted phone shows. */
-const CALIB_POSE_MISMATCH_DEG = 12;
+/* Calibration pose-mismatch warning. The body frame comes from a still window in the recording,
+   usually before you roll out. If the phone moved between that window and the ride (pocket then
+   backpack is the common one), lean and turn metrics are computed in the wrong frame.
+
+   THE TOTAL ANGLE IS THE WRONG THING TO THRESHOLD, and this notice used to (owner report,
+   2026-08-29: a phone in a lower-back run belt warned at 14 deg after the rider deliberately held
+   still for 20 s, on a mount that provably never moved). The old bar's premise was that ~12 deg
+   separates a real pose change from "the few degrees of average trail pitch a correctly mounted
+   phone shows", which leaves out the case that produced the report: a BODY-WORN phone sits on a
+   body that changes shape. A waist belt rides on the pelvis, the pelvis rotates forward when you
+   get on a bike, and that is a real, permanent, unfixable fore-aft offset on a perfect mount. The
+   reported ride measured 14.0 deg fore-aft and 0.6 deg lateral, and its riding pose ranged over
+   ~30 deg through the ride (whole-ride gravity coherence 0.867) while a mid-ride standstill
+   reproduced the calibration pose to 7-8 deg: the mount held, the rider bent.
+
+   So the gate is the LATERAL component, which is the one that damages what this notice actually
+   claims -- see poseMismatchAxes for the sweep and the mechanism. Measured on the reported ride, a
+   frame 14 deg out fore-aft moved turn count 85 -> 86, median apex radius 17.7 -> 17.1 ft and the
+   left/right lean gap 0.4 -> 0.4 deg, i.e. nothing; the same 14 deg applied LATERALLY costs 6 turns
+   and starts inverting the left/right split. Warning about the first is a false alarm that also
+   teaches riders the wrong lesson, since no amount of standing still can remove it. */
 /* Dismissal is per-RIDE, keyed on the same ride hash the custom run labels use. Global would be
    wrong (the next ride's mismatch is new information), and session-only would re-nag every time the
    ride is reopened from the library, which is the annoyance being fixed. */
@@ -24163,18 +24282,43 @@ function hideCalibNotice() {
 function renderCalibNotice(D) {
   const sec = document.getElementById('mtbCalibNotice');
   if (!sec) return;
-  const deg = D.calibWin && D.calibWin.poseMismatchDeg;
-  if (deg == null || !isFinite(deg) || deg < CALIB_POSE_MISMATCH_DEG) { sec.classList.add('hidden'); return; }
+  /* Recomputed here from the render payload rather than read off calibWin, so a ride replayed from
+     the analysis cache (or analyzed before this shipped) is judged on the same decomposition as a
+     fresh one instead of falling back to the stored total angle. Everything needed is on D: the
+     body-frame rotation, the gravity channel and the ride window. */
+  const axes = (D.sensors && D.sensors.gravity && D.R && D.ride)
+    ? poseMismatchAxes(D.sensors.gravity, D.R, D.ride.start, D.ride.end) : null;
+  const deg = axes ? axes.totalDeg : (D.calibWin && D.calibWin.poseMismatchDeg);
+  const lateral = axes ? Math.abs(axes.lateralDeg) : null;
+  const foreAft = axes ? Math.abs(axes.foreAftDeg) : null;
+  /* Without the decomposition only a gross mismatch is worth mentioning: the total angle cannot say
+     whether it is the harmless mode or the damaging one, and the reported false alarm is what
+     erring toward silence is for. */
+  const bad = lateral != null
+    ? (lateral >= CALIB_POSE_LATERAL_DEG || deg >= CALIB_POSE_TOTAL_DEG)
+    : (deg != null && isFinite(deg) && deg >= CALIB_POSE_TOTAL_DEG);
+  if (deg == null || !isFinite(deg) || !bad) { sec.classList.add('hidden'); return; }
   /* Read the notice, act on it or not, then put it away for this ride. The warning still governs how
      much to trust the lean numbers, so it is dismissible rather than removable: the Calibration
      selector in the header is unaffected and re-running the analysis re-evaluates the mismatch. */
   if (calibNoticeHidden()) { sec.classList.add('hidden'); return; }
   const body = document.getElementById('mtbCalibNoticeBody');
   if (body) {
-    body.textContent =
-      ` Your phone seems to have sat about ${Math.round(deg)}° differently during calibration than while riding`
-      + ` (classic case: calibrated in a pocket, then moved to a backpack before rolling out).`
-      + ` Lean angles are likely inflated or skewed and turn sides can be off.`;
+    /* Name the component that actually fired, because the two mean different things to the rider
+       and only one of them is worth acting on. A sideways twist is a mount problem and damages the
+       turn-side reads; a pure fore-aft offset that is large enough to reach the backstop is a
+       mounting angle, not a posture, and costs turns rather than sides. */
+    const sideways = lateral != null && lateral >= CALIB_POSE_LATERAL_DEG;
+    body.textContent = sideways
+      ? ` Your phone sat about ${Math.round(lateral)}° twisted sideways relative to how it rode`
+        + (foreAft != null && foreAft >= 5
+            ? ` (plus ${Math.round(foreAft)}° fore-aft, which is normal for a body-worn phone and is not the problem)` : '')
+        + `. A sideways twist mixes the bike's roll into the turn signal, so turn sides and the`
+        + ` left/right lean split are the numbers to distrust. Classic case: calibrated in a pocket,`
+        + ` then moved to a backpack before rolling out.`
+      : ` Your phone seems to have sat about ${Math.round(deg)}° differently during calibration than`
+        + ` while riding (classic case: calibrated in a pocket, then moved to a backpack before`
+        + ` rolling out), which is far enough out to cost turns.`;
     /* Offer the in-app fix right here instead of only advising "next time": Final-mount calibration
        re-derives the body frame from the last still moment before the ride. Flipping the header
        select through a synthetic change event reuses its handler, so persistence and the re-run
@@ -27028,7 +27172,7 @@ function renderParams(s, hasFit) {
     <span>exit <strong>${TURN_PARAMS.exitRate}°/s</strong></span>
     <span>min heading <strong>${TURN_PARAMS.minHeadingChg}°</strong></span>
     <span>min duration <strong>${TURN_PARAMS.minDuration}s</strong></span>
-    <span style="margin-left:auto">calib <strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)}g${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : ''})</span>
+    <span style="margin-left:auto">calib <strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
   `;
 }
 
@@ -28305,7 +28449,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '0b30ea287 · 2026-08-29';
+const LOAM_BUILD = 'fc509354f · 2026-08-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
