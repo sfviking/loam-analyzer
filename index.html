@@ -13682,6 +13682,43 @@ function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayU
     strokeRateSeries, seriesTrendPct, navigationRead, routePoints };
 })();
 
+/*
+ * Why a declared swim found no strokes, said in the swimmer's terms.
+ *
+ * A pure function rather than an inline throw because it FORKS ON A MEASUREMENT and got the fork
+ * wrong for as long as it existed. `detectStrokes` thresholds at max(session median,
+ * MIN_STROKE_PEAK_RADS) and then additionally requires the crossings to be RHYTHMIC and SUSTAINED
+ * (MIN_STROKE_SEP_S / MIN_BLOCK_S), so a wrist that peaked at 3.5 rad/s and moved unrhythmically
+ * lands here with a peak far ABOVE the floor. The old copy asserted flatly that it was BELOW one --
+ * in the same sentence that quoted the number -- and then sent a swimmer whose watch plainly was
+ * streaming off to check whether it was. A message that contradicts the figure it just printed is
+ * worse than no message.
+ *
+ * The peak is quoted either way, because it is the number that separates "the watch never swam" from
+ * "the detector is broken" and a swimmer can check it against what they actually did.
+ *
+ * This is the DECLARED path only: auto-detection asks detectSwim, which requires 30 organized
+ * strokes, so picking Swim on the Record screen is the only way a non-swim reaches a Swim view.
+ */
+function capturedSwimNoStrokeMessage(totals) {
+  const pk = totals.peakRotationRads, floor = totals.minPeakRads;
+  /* Written as `!(pk >= floor)` so a missing or NaN peak takes the below-floor branch: that branch's
+     advice (check whether the watch was streaming) is the right answer when there is no number at
+     all, where the rhythm branch would be claiming a measurement nobody has. */
+  if (!(pk >= floor)) {
+    return 'No swimming found in this recording. The watch arm never turned like a swimming arm: '
+      + `wrist rotation peaked at ${Number(pk || 0).toFixed(2)} rad/s, below the ${floor} rad/s a stroke has to clear, `
+      + 'so nothing here was counted as a stroke. If you did swim this one, the watch was most likely not streaming to the phone '
+      + '(check the Sessions list for watch motion); if the recording was left running afterwards, this is the right answer.';
+  }
+  return 'No swimming found in this recording. The watch arm moved hard enough for a stroke '
+    + `(wrist rotation peaked at ${pk.toFixed(2)} rad/s, above the ${floor} rad/s a stroke has to clear) `
+    + 'but never settled into a swimming rhythm: strokes have to arrive steadily and keep going long enough to count as a length, '
+    + 'and nothing here did. That is what a wrist doing something other than swimming looks like. If you did swim this one, it was '
+    + 'most likely too short a stretch to count, or the watch dropped in and out (check the Sessions list for watch motion).';
+}
+
+
 /* Which stationary sport an UNTAPPED recording looks like, or null.
 
    Golf and lifting are normally routed by a tap: a club chip or a Set chip in the annotations. An
@@ -14104,7 +14141,28 @@ async function analyze(files) {
         else if (stationary === 'weightlifting') { isLift = true; ride = spanRide; }
         else if (stationary === 'swimming') { isSwim = true; ride = spanRide; }
         else if (!sensors.location.length) {
-          throw new Error('No GPS in this recording. If it was a lift or golf, pick Weightlifting or Golf in the sport selector so it analyzes as a stationary session.');
+          /* Two different situations reach this line and they want opposite advice, which the single
+             old message could not give: it told everybody to "pick Weightlifting or Golf", so a
+             runner who had ALREADY declared Running -- a treadmill session, the commonest way to
+             record with no GPS at all -- was told to relabel their run as a lift. It also predated
+             Swimming (beta) joining the selector and never mentioned it, so the one stationary sport
+             a swimmer would be looking for was the one not offered.
+
+             A DECLARED sport gets past the stationary detectors untouched (autoSport is false, so
+             `stationary` is null above), and the only sports that can be declared and still land
+             here are the moving ones -- lift, golf and swim all take the span window forty lines
+             earlier. So a declared sport here means "you told us this was read from a GPS track and
+             there is no GPS track", which is a limit to state rather than a setting to change. */
+          /* And it names the control the READER can actually see. The app hides the dropzone and its
+             Sport picker entirely, so "pick it in the Sport selector" is an instruction to use a
+             thing that is not on screen; the equivalent there is the Sessions row's Change activity
+             menu. Same `LOAM_EMBEDDED` fork the other host-aware copy on this page already takes. */
+          const picker = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
+            ? 'the session\u2019s Change activity menu on the Sessions tab'
+            : 'the Sport selector above';
+          throw new Error(autoSport
+            ? `No GPS in this recording. If it was a lift, golf or a pool swim, pick Weightlifting, Golf or Swimming in ${picker} so it analyzes as a stationary session.`
+            : `No GPS in this recording, and a ${sportNoun(userSport)} is read from the GPS track: distance, pace and the active window all come from it, so there is nothing here to analyze. A treadmill or indoor session records no fixes. Weightlifting, Golf and Swimming are the activities Loam can read without GPS \u2014 you can switch this session to one of those in ${picker}.`);
         } else {
           // Too short / too slow for a moving window, but we still have a GPS track. Show a minimal
           // summary (duration, distance, avg speed, map) instead of a hard error, so a quick walk
@@ -14324,13 +14382,7 @@ async function analyze(files) {
          43/min, and with a pool length picked and two noise blocks it would have reported a distance.
          The peak is quoted because it is the number that separates "the watch never swam" from "the
          detector is broken", and a swimmer can sanity-check it against what they did. */
-      if (!payload.capturedTotals.strokes) {
-        const pk = payload.capturedTotals.peakRotationRads;
-        throw new Error('No swimming found in this recording. The watch arm never turned like a swimming arm: '
-          + `wrist rotation peaked at ${pk.toFixed(2)} rad/s, below the ${payload.capturedTotals.minPeakRads} rad/s a stroke has to clear, `
-          + 'so nothing here was counted as a stroke. If you did swim this one, the watch was most likely not streaming to the phone '
-          + '(check the Sessions list for watch motion); if the recording was left running afterwards, this is the right answer.');
-      }
+      if (!payload.capturedTotals.strokes) throw new Error(capturedSwimNoStrokeMessage(payload.capturedTotals));
       const session = { ...LoamSwim.normalizeSwimImport(payload), capturedTotals: payload.capturedTotals };
       const swim = LoamSwim.analyzeSwim(session);
       const summary = LoamSwim.computeSwimSummary(session, swim);
@@ -16260,6 +16312,38 @@ function onLiftWeight(i, val) {
   const hist = liftHistoryRemember(_liftDc, (_liftDc.strength && _liftDc.strength.sets) || [], w);
   const panel = document.getElementById('liftHistoryPanel');
   if (panel) panel.innerHTML = liftHistorySection(hist);
+}
+
+/* Which instrument actually produced each set's reps, as a sentence.
+ *
+ * `analyzeStrength` prefers the WRIST (the watch tracks the bar) and falls back to phone POCKET TILT
+ * when no watch streamed; `liftApplyRepCorr` stamps MANUAL on any set the lifter corrected by hand.
+ * Three sources, and until 2026-08-29 both the Lift view's caveat and the coach digest's notes said
+ * flatly that "reps, tempo, ROM and bar speed come from the Apple Watch" on all of them.
+ *
+ * That is wrong in three different directions and the worst of them is the correction: a lifter who
+ * has just told the app the counter miscounted had that number described to the coach as the
+ * counter's own reading off a watch. On a phone-only session it is wrong about the instrument AND
+ * about the gaps -- `romMeters`, `eccS`, `conS` and bar speed are all wrist-only, so they come
+ * through null, and a coach told the watch was on the wrist can only read those nulls as a lift with
+ * no depth and no speed rather than as a channel that was never recorded.
+ *
+ * Same shape as the golf digest's `hasPelvis` branch, which has always named the instrument state
+ * rather than asserting one: the numbers are what they are, and what changes is the sentence about
+ * where they came from. Returns null when every set came from the wrist, so the common case adds
+ * nothing.
+ *
+ * Set numbers are 1-based to match `setRows` and the per-set table the lifter is looking at. */
+function liftRepSourceNote(sets) {
+  const list = sets || [];
+  const nums = (src) => list.map((s, i) => (s.repSource || 'wrist') === src ? i + 1 : null).filter(n => n != null);
+  const phone = nums('phone'), manual = nums('manual');
+  if (!phone.length && !manual.length) return null;
+  const say = (ns) => (ns.length === 1 ? `Set ${ns[0]}` : `Sets ${ns.join(', ')}`);
+  const parts = [];
+  if (phone.length) parts.push(`${say(phone)} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on ${phone.length === 1 ? 'that set' : 'those sets'} it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.`);
+  if (manual.length) parts.push(`${say(manual)} carr${manual.length === 1 ? 'ies' : 'y'} a rep count the LIFTER typed in to correct the counter. Treat ${manual.length === 1 ? 'it' : 'those'} as authoritative and never describe ${manual.length === 1 ? 'it' : 'them'} as something the watch measured.`);
+  return parts.join(' ');
 }
 
 /* ---- Per-set rep correction. The wrist rep counter is BETA and can miscount (racking the bar can
@@ -18237,7 +18321,7 @@ function renderStrength(D) {
     <div id="liftHistoryPanel">${liftHistorySection(liftHistory)}</div>
     ${betaCaveat(
       `treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.`,
-      `Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus one ground-truth squat session, not yet against a stationary non-lift recording, which is what would measure its false-positive rate. A lift is stationary, so there is no GPS map, turns, or jumps.`)}
+      `${liftRepSourceNote(sets) ? liftRepSourceNote(sets) + ' Everywhere else, reps' : 'Reps'}, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus one ground-truth squat session, not yet against a stationary non-lift recording, which is what would measure its false-positive rate. A lift is stationary, so there is no GPS map, turns, or jumps.`)}
   `;
   renderLiftSignature(Dc);
   renderLiftForm(Dc);
@@ -22546,8 +22630,14 @@ function buildDigest(D, sport, metric) {
       bar_rom_cm: set.romMeters != null ? r1(set.romMeters * 100, 0) : null,
       mean_bar_speed_mps: (set.barSpeed && set.barSpeed.available) ? r1(set.barSpeed.meanMps, 2) : null,
       forward_lean_deg_vs_most_upright_set: r1(set.forwardLeanDeg),
+      /* 'wrist' | 'phone' | 'manual'. Carried per set rather than summarised, because the sets can
+         disagree: a watch that stalls mid-session leaves some sets on the wrist and the rest on
+         pocket tilt, and the nulls in bar_rom_cm / mean_bar_speed_mps only make sense read against
+         this. See liftRepSourceNote for the sentence that explains it. */
+      rep_source: set.repSource || 'wrist',
       misses: (set.misses && set.misses.length) || 0,
     }));
+    const repSourceNote = liftRepSourceNote(D.strength.sets || []);
     return {
       sport: 'weightlifting (barbell; wrist + AirPods + phone, no map)',
       units: liftUnit(),
@@ -22559,7 +22649,7 @@ function buildDigest(D, sport, metric) {
       volume: liftVolumeKg(D) > 0 ? fmtVol(liftVolumeKg(D)) : null,
       heart_rate_bpm: s.hrAvg != null ? { avg: s.hrAvg, max: s.hrMax } : null,
       sets: setRows,
-      notes: 'Bar position and depth are the lifter\'s Set-tap labels (authoritative). Reps, tempo, ROM and bar speed come from the Apple Watch wrist motion; the wrist rep count and bar speed are experimental (the rep count can over-count a trailing re-rack). Rep counting is reliable for squat and deadlift only: press is unproven, curls are noisy, bench undercounts by about half, and chin-ups/pull-ups do not count, so distrust rep totals on those lifts. Each set\'s lift is the lifter\'s tapped label, never auto-detected; a set without a label is assumed to be a squat, so treat its lift identity as uncertain. High-vs-low bar is a RELATIVE torso-lean read within this session, not an absolute measurement. Coach on what the numbers support: velocity-based autoregulation (fade), depth consistency, and the high/low bar tradeoff.',
+      notes: 'Bar position and depth are the lifter\'s Set-tap labels (authoritative). ' + (repSourceNote ? repSourceNote + ' Everywhere else, reps' : 'Reps') + ', tempo, ROM and bar speed come from the Apple Watch wrist motion; the wrist rep count and bar speed are experimental (the rep count can over-count a trailing re-rack). Rep counting is reliable for squat and deadlift only: press is unproven, curls are noisy, bench undercounts by about half, and chin-ups/pull-ups do not count, so distrust rep totals on those lifts. Each set\'s lift is the lifter\'s tapped label, never auto-detected; a set without a label is assumed to be a squat, so treat its lift identity as uncertain. High-vs-low bar is a RELATIVE torso-lean read within this session, not an absolute measurement. Coach on what the numbers support: velocity-based autoregulation (fade), depth consistency, and the high/low bar tradeoff.',
     };
   }
   /* Road cycling (head-unit FIT with a power meter): the coach's currency is rider watts. Every
@@ -24005,10 +24095,19 @@ function renderEmtbNotice(D) {
     return b;
   };
 
+  /* Read BEFORE either branch, because the Hide button in the corner writes this key from whichever
+     of them is showing and its label promises "for this ride" in both. It used to be read only by
+     the provenance branch, so hiding the OFFER held until the next thing that re-analyzed this
+     recording -- a trim, a calibration change, a pool pick -- and then the question a rider had just
+     put away came back on the same ride. Answering is still the thing that settles it for good; this
+     only keeps a dismissal honest for as long as it claims. */
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(emtbNoticeKey()) === '1'; } catch (e) {}
+
   /* THE OFFER. Only on 'no-evidence' (auto-detected MTB, no FIT able to speak, no answer on file),
      and only while the preference is genuinely UNSET -- an analog rider who said no is never asked
      again, which is the difference between a question and a nag. */
-  if (reason === 'no-evidence' && emtbPreference() === 'unset') {
+  if (reason === 'no-evidence' && emtbPreference() === 'unset' && !dismissed) {
     lead.textContent = 'Analyzed as MTB.';
     body.textContent = ' Nothing in this recording can tell an e-bike from an analog one \u2014 a motor'
       + ' shows up only in a Specialized head unit\'s FIT file, and there is none here. Which do you ride?'
@@ -24024,11 +24123,10 @@ function renderEmtbNotice(D) {
   /* THE PROVENANCE LINE, which is the way back. A preference-labelled ride says where its label came
      from and offers to change the answer, because otherwise the setting is one-way for anybody who
      turned it on by mistake: the per-ride Sport picker lives on the dropzone, and the app hides the
-     dropzone entirely. Dismissable per RIDE (unlike the offer, which is answered once and for all) --
-     this one really is about this ride, and a rider who wants it gone on every ride has the Hide
-     button and a key that the ride's own deletion cleans up. */
-  let dismissed = false;
-  try { dismissed = localStorage.getItem(emtbNoticeKey()) === '1'; } catch (e) {}
+     dropzone entirely. Dismissable per RIDE, like the offer above, and a rider who wants it gone on
+     every ride has the Hide button and a key that the ride's own deletion cleans up. The difference
+     between the two is not the dismissal, it is that only the offer can be ANSWERED: saying "analog"
+     settles the question for every future ride, where hiding either notice settles nothing. */
   if (reason === 'preference' && !dismissed) {
     lead.textContent = 'Labelled e-MTB because you said you ride one.';
     body.textContent = ' Nothing in this recording confirms it \u2014 there is no FIT carrying motor'
@@ -28207,7 +28305,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '1669bc319 · 2026-08-28';
+const LOAM_BUILD = '0b30ea287 · 2026-08-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
