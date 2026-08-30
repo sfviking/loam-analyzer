@@ -2908,6 +2908,7 @@ function addCombinedRow(out, r) {
   if (r.headphone_accelerationX != null)
     out.headphone.push({ t,
       accelerationX: r.headphone_accelerationX, accelerationY: r.headphone_accelerationY, accelerationZ: r.headphone_accelerationZ,
+      gravityX: r.headphone_gravityX, gravityY: r.headphone_gravityY, gravityZ: r.headphone_gravityZ,
       rx: r.headphone_rotationRateX, ry: r.headphone_rotationRateY, rz: r.headphone_rotationRateZ,
       pitch: r.headphone_pitch, roll: r.headphone_roll, yaw: r.headphone_yaw });
   /* Apple Watch wrist motion (only present in rides recorded with the watch companion). Attitude
@@ -4055,6 +4056,100 @@ function applyWristCadence(running, wristSeries) {
   if (!running || !wristSeries || !wristSeries.length) return running;
   applyWalkBandCadence(running, wristSeries);
   running.cadSource = 'wrist';
+  return running;
+}
+
+/*
+ * Cadence from the AIRPODS instead of the phone. See analyzer/sports/running/head-cadence.js for the
+ * full reasoning and the measurements; the short version:
+ *
+ * The head falls and is caught once per FOOTSTRIKE, so its vertical bob completes one cycle per step
+ * and its fundamental lands on the step rate directly -- the same place the wrist's rectified |w|
+ * arrives at, without needing rectification to get there.
+ *
+ * Measured 2026-08-30 across 14 running sessions (10.6 hours, 15,760 moving windows), running the
+ * shipped cadence recipe over head vertical accel and over phone |accel| so only the sensor differed:
+ * confident windows head 99% (92-100% by session) vs phone 81% (29-93%); median confidence head 0.62
+ * (0.53-0.66) vs phone 0.20 (0.09-0.45); agreement with the phone where the phone is confident, 0.0
+ * spm median on all 14. Against the already-validated WRIST on the 5 sessions carrying both: 0.0 spm
+ * median over 4,264 paired windows, 97-100% within 2 spm.
+ *
+ * CONFIDENCE IS NOT THE ONLY GATE, and this is where it departs from the wrist. Peak-over-RMS is
+ * scale-free, so a barely-moving head still produces a "confident" peak -- windows GPS called still
+ * cleared a 0.15 bar about half the time, which is the swim detector's sofa bug exactly. H_MIN_AMP_MS2
+ * is the absolute floor that rejects it: still windows median 0.21 m/s² RMS, running 7.88, and any
+ * floor in 1.5-3.0 rejects 95-99% of still windows while keeping 99.6%+ of running ones.
+ *
+ * It never overrides the WRIST (applied only when the wrist was not preferred), and it is running-only
+ * -- the library holds one walk with head motion and its watch stalled, so there is nothing to grade a
+ * walking head cadence against.
+ *
+ * Against CMPedometer's counted steps (a different algorithm, already read by pedometer.js): median
+ * 2.7 spm apart over 13 sessions, and every session tens of spm clear of half or double, which rules
+ * out a harmonic lock. It resolves nothing finer -- an integer step count over ~2.6 s updates is
+ * coarsely quantized, and its median lands on 163.4 or 164.1 in 12 of the 13 -- and on all four
+ * sessions where the two differ by over 5 spm the WRIST agrees with the HEAD to 0.0 spm.
+ */
+const H_WIN_S = 10, H_HOP_S = 2;
+const H_BAND_LO_HZ = 2.0, H_BAND_HI_HZ = 3.5, H_BAND_STEP_HZ = 0.02;
+const H_MIN_CONF = 0.30, H_MIN_AMP_MS2 = 2.0, H_MIN_SAMPLES = 100, H_MIN_SPAN_S = 6, H_MIN_WINDOWS = 10;
+/* headphone_acceleration* is exported in g while headphone_gravity* is scaled to m/s². Miss it and
+   every amplitude lands 9.8x small -- the mixed-unit trap that hid phone freefall detection in June. */
+const H_G = 9.80665;
+
+function headCadenceSeries(headRows, ride) {
+  const rows = (headRows || []).filter(
+    r => r && r.t >= ride.start && r.t <= ride.end
+      && Number.isFinite(r.accelerationX) && Number.isFinite(r.accelerationY) && Number.isFinite(r.accelerationZ)
+      && Number.isFinite(r.gravityX) && Number.isFinite(r.gravityY) && Number.isFinite(r.gravityZ));
+  if (rows.length < H_MIN_SAMPLES) return [];
+  const tArr = rows.map(r => r.t);
+  /* Along the head's OWN gravity direction, so it does not matter how the bud sits, or which bud is
+     reporting -- left and right are mirrored and CoreMotion hands over between them without saying so. */
+  const vert = rows.map(r => {
+    const gm = Math.hypot(r.gravityX, r.gravityY, r.gravityZ) || 1;
+    return H_G * (r.accelerationX * r.gravityX + r.accelerationY * r.gravityY + r.accelerationZ * r.gravityZ) / gm;
+  });
+
+  const lower = (arr, x) => {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; }
+    return lo;
+  };
+
+  const series = [];
+  for (let w0 = ride.start; w0 + H_WIN_S <= ride.end; w0 += H_HOP_S) {
+    const w1 = w0 + H_WIN_S;
+    const i0 = lower(tArr, w0), i1 = lower(tArr, w1);
+    if (i1 - i0 < H_MIN_SAMPLES) continue;
+    if (tArr[i1 - 1] - tArr[i0] < H_MIN_SPAN_S) continue;
+    const sig = vert.slice(i0, i1);
+    const m = sig.reduce((s, v) => s + v, 0) / sig.length;
+    const detr = sig.map(v => v - m);
+    const rms = Math.sqrt(detr.reduce((s, v) => s + v * v, 0) / detr.length);
+    if (rms < H_MIN_AMP_MS2) continue;
+    const ts = tArr.slice(i0, i1).map(t => t - w0);
+    const fPeak = dftPeakFreq(detr, ts, H_BAND_LO_HZ, H_BAND_HI_HZ, H_BAND_STEP_HZ);
+    const magPeak = dftMagAt(detr, ts, fPeak);
+    const conf = rms > 0 ? Math.min(magPeak / rms, 1) : 0;
+    if (conf < H_MIN_CONF) continue;
+    series.push({ t: (w0 + w1) / 2, freq: fPeak, spm: fPeak * 60, conf });
+  }
+  return series;
+}
+
+/* Coverage, not agreement -- same reasoning as preferWristCadence: a rule that only accepted the head
+   when it confirmed the phone would decline in exactly the case this exists for. */
+function preferHeadCadence(headSeries, phoneSeries) {
+  if (!headSeries || headSeries.length < H_MIN_WINDOWS) return false;
+  const phoneConfident = (phoneSeries || []).filter(c => c && c.conf > 0.15).length;
+  return headSeries.length >= phoneConfident * 0.5;
+}
+
+function applyHeadCadence(running, headSeries) {
+  if (!running || !headSeries || !headSeries.length) return running;
+  applyWalkBandCadence(running, headSeries);
+  running.cadSource = 'head';
   return running;
 }
 
@@ -14421,6 +14516,19 @@ async function analyze(files) {
       if (preferWristCadence(wristCad, running.cadSeries)) {
         applyWristCadence(running, wristCad);
         dbg('[cadence] wrist series preferred:', wristCad.length, 'windows, median', running.cadMedian.toFixed(0), 'spm');
+      } else if (sport === 'running') {
+        /* No watch, or one too still to speak for the run: the AirPods are the next-best cadence
+           sensor and beat the phone on the same measure the wrist does -- 99% of windows confident
+           against the phone's 81%, agreeing with the phone to 0.0 spm where the phone is confident
+           and with the WRIST to 0.0 spm where a watch was also worn. Deliberately BELOW the wrist in
+           precedence (the wrist has an independent signed cross-check and this does not; where both
+           exist they agree, so the ordering costs nothing), and running-only, since there is no walk
+           with head motion and a working watch to grade a walking head cadence against. */
+        const headCad = headCadenceSeries(sensors.headphone || [], ride);
+        if (preferHeadCadence(headCad, running.cadSeries)) {
+          applyHeadCadence(running, headCad);
+          dbg('[cadence] head series preferred:', headCad.length, 'windows, median', running.cadMedian.toFixed(0), 'spm');
+        }
       }
       /* Per-climb read from the up-segments (uses whatever cadSeries is current, so a walk gets its
          walk-band cadence, and any session gets the wrist's when it was preferred above). Geometric
@@ -14454,7 +14562,7 @@ async function analyze(files) {
       renderAllRunning(runRender);
       const cmpStr = comparison && comparison.dtw ? ` · DTW: ${descents.length} descents` : '';
       const breakStr = sport === 'running' && gait.breaks.length ? ` · ${gait.breaks.length} walk break${gait.breaks.length > 1 ? 's' : ''}` : '';
-      const cadFromStr = running.cadSource === 'wrist' ? ' from watch' : '';
+      const cadFromStr = running.cadSource === 'wrist' ? ' from watch' : running.cadSource === 'head' ? ' from AirPods' : '';
       setStatus(`${sport === 'walking' ? 'Walk' : 'Run'} loaded (${runSummary.cadMedian ? runSummary.cadMedian.toFixed(0) + ' SPM' + cadFromStr : 'no cadence'} · phone ${running.mount}${cmpStr}${breakStr})`, true);
       return;
     }
@@ -20178,6 +20286,8 @@ function renderAllRunning(D) {
     const note = document.getElementById('runMountCadenceNote');
     if (note) note.textContent = D.running.cadSource === 'wrist'
       ? 'Cadence came from your watch instead, so hand motion did not touch it, and pace is reliable'
+      : D.running.cadSource === 'head'
+      ? 'Cadence came from your AirPods instead, so hand motion did not touch it, and pace is reliable'
       : 'Cadence and pace are reliable';
   }
   if (D.comparison && D.comparison.dtw) renderDescentComparison(D);
@@ -21667,7 +21777,8 @@ function renderRunStats(s, detection, mount, ped) {
      31% of its updates while the wrist tracked throughout. A reader who cannot tell which instrument
      produced the headline cannot weigh the disagreement the rest of this caption reports. */
   const agr = ped && ped.agreement;
-  const cadFrom = s.cadSource === 'wrist' ? 'median · watch (wrist motion)' : 'median · FFT on |accel|';
+  const cadFrom = s.cadSource === 'wrist' ? 'median · watch (wrist motion)'
+    : s.cadSource === 'head' ? 'median · AirPods (head bob)' : 'median · FFT on |accel|';
   const cadSub = !agr ? cadFrom
     : agr.agrees
       ? `${cadFrom} · pedometer agrees (${agr.pedSpm.toFixed(0)} spm)`
@@ -21923,6 +22034,8 @@ function renderRunCadence(cadSeries, cadSource) {
   const method = document.getElementById('runCadenceMethod');
   if (method) method.textContent = cadSource === 'wrist'
     ? '10s windows · FFT peak on watch |rotation rate| · low-confidence windows omitted'
+    : cadSource === 'head'
+    ? '10s windows · FFT peak on AirPods vertical accel · low-confidence and low-amplitude windows omitted'
     : '10s windows · FFT peak on |accel| (rotation-invariant)';
   if (!cadSeries.length) {
     Plotly.purge('runCadenceChart');
@@ -23416,7 +23529,8 @@ function buildDigest(D, sport, metric) {
       ...u.speed('avg_speed', s.movingSpeed != null ? s.movingSpeed : s.avgSpeed),
       cadence_spm_median: r1(s.cadMedian, 0),
       cadence_spm_mean: r1(s.cadMean, 0),
-      cadence_source: run.cadSource === 'wrist' ? 'apple watch wrist motion' : 'phone accelerometer',
+      cadence_source: run.cadSource === 'wrist' ? 'apple watch wrist motion'
+        : run.cadSource === 'head' ? 'airpods head motion' : 'phone accelerometer',
       vertical_oscillation_cm_median: r1(s.oscMedian),
       ...u.elev('elevation_gain', s.altGain),
       ...u.elev('elevation_loss', s.altLoss),
@@ -23432,6 +23546,7 @@ function buildDigest(D, sport, metric) {
            phone makes oscillation an upper bound but leaves a wrist-sourced cadence untouched, and a
            coach told only "the phone was in a hand" would reasonably hedge both. */
         + (run.cadSource === 'wrist' ? ' Cadence (and per-segment cadence_spm) came from the APPLE WATCH on the wrist, not the phone, so it is unaffected by how the phone was carried; it is the step rate, not the arm-swing rate.' : '')
+        + (run.cadSource === 'head' ? ' Cadence (and per-segment cadence_spm) came from the AIRPODS, not the phone, so it is unaffected by how the phone was carried; head bob peaks once per footstrike, so it is the step rate. It is NOT a measurement of running form: nothing here read head posture or head angle.' : '')
         + (sport === 'walking' ? ' This is a WALK: cadence is walking step rate (typical 100-120 spm); do not coach running form, pace zones, or oscillation targets.' : '')
     };
   }
@@ -28939,7 +29054,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '8c8ca89fd · 2026-08-30';
+const LOAM_BUILD = '57fa02508 · 2026-08-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
