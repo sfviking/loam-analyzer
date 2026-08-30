@@ -1960,7 +1960,7 @@
       <div id="playByPlay" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
           Play-by-play
-          <span class="subtitle">vs your fastest lap of the same trail · biggest give-ups first · tap a corner to open it</span>
+          <span class="subtitle">vs your best comparable lap of the same trail · biggest give-ups first · tap a corner to open it</span>
           <select id="pbpRun" style="margin-left:auto;"></select>
         </div>
         <div id="pbpBody"></div>
@@ -5769,6 +5769,41 @@ function fastestSameSegmentPeer(run, runs, D) {
   return peers.reduce((a, b) => b.metrics.duration < a.metrics.duration ? b : a);
 }
 
+/* Which past lap of a tagged segment the play-by-play compares today's run against, and whether the
+   two are even measuring the same ground. Ported to analyzer/sports/mtb/run-comparison.js and
+   drift-pinned; see that module's header for the full argument. Two exclusions are ordinary and both
+   can drop the segment's actual best (a lap is not compared with itself; a lap with no stored corners
+   cannot be lined up turn for turn), so `fastest` and `excluded` come back and the copy can stop
+   claiming the reference is the rider's best when the leaderboard says otherwise. */
+function pickCrossRideRef(members, self, selfMember, distTolFrac) {
+  const all = (members || []).filter((m) => m && isFinite(m.duration));
+  const none = { ref: null, fastest: null, excluded: null, distFrac: null, comparable: false };
+  if (!all.length) return none;
+  const faster = (a, b) => (b.duration < a.duration ? b : a);
+  const fastest = all.reduce(faster);
+  /* Is this lap from the recording being looked at? By the library ROW ID where both sides have one,
+     because in the iOS app every recording reaches the analyzer as "recording.csv" and a filename
+     test there either matches every lap or none of them. Falls back to the name for a caller with no
+     id to give (and for library rows saved without one), which is what this always used to do. */
+  const isSelf = (m) => (self && self.rideId != null && m.rideId != null)
+    ? m.rideId === self.rideId
+    : !!(self && self.file && m.file === self.file);
+  /* A lap is not compared with itself, and a lap with no stored corners cannot be lined up turn for
+     turn. Both are correct exclusions and both can drop the segment's actual best. */
+  const usable = all.filter((m) => m.turns && m.turns.length && !isSelf(m));
+  if (!usable.length) return { ...none, fastest };
+  const ref = usable.reduce(faster);
+  /* Why the segment's best is not the reference, when it is not -- keyed on DURATION rather than
+     identity, so a lap that merely ties the best needs no explaining. */
+  const excluded = fastest.duration < ref.duration
+    ? (isSelf(fastest) ? 'self' : 'no-corners')
+    : null;
+  const dRef = ref.distance, dSelf = selfMember && selfMember.distance;
+  const distFrac = (isFinite(dRef) && dRef > 0 && isFinite(dSelf) && dSelf > 0)
+    ? Math.abs(dSelf - dRef) / dRef : null;
+  return { ref, fastest, excluded, distFrac, comparable: !!selfMember && (distFrac == null || distFrac < distTolFrac) };
+}
+
 /* Turn-by-turn play-by-play: compare a run to the fastest run, turns matched in order. Meaningful
    for repeated runs of the same segment (laps or marked runs); unrelated descents will not line up
    (gated by runsSameSegment). Each turn note covers apex speed (braking / line) and exit drive. */
@@ -5862,6 +5897,10 @@ const PBP_FOCUS_LINES = 3;   /* the focused read: the corners that cost the most
    thresholds are the lap-vs-lap difference floor - see renderPlayByPlay for why they are
    deliberately not FORM_SCRUB_MIN_MPH. */
 function pbpTurnCost(d) { return Math.max(-d.dApex, -d.dExitGain); }
+/* The mirror of pbpTurnCost, for ranking the corners that were BETTER rather than worse. Kept beside
+   it so the two read as one pair: a corner's cost is how much speed it gave up, its gain is how much
+   it carried. */
+function pbpTurnGain(d) { return Math.max(d.dApex, d.dExitGain); }
 /* The words for one paired corner, shared so the in-ride and cross-ride reads phrase the same delta
    identically. `spd` formats an mph magnitude in the active units. */
 function pbpNoteBits(d, spd) {
@@ -5878,11 +5917,19 @@ function pbpRankDeltas(deltas) {
   const cmp = (deltas || []).filter(d => d.usable);
   const speaks = (d) => d.dApex <= -1.0 || d.dApex >= 1.0 || d.dExitGain >= 1.0 || d.dExitGain <= -1.0;
   const noted = cmp.filter(speaks);
+  /* The corners that were purely better, biggest gain first. Exactly the set `gained` has always
+     counted -- same disjoint predicate, so a corner that braked harder AND drove out stronger stays
+     in giveUps and is not double-claimed -- returned as the LIST as well as the count, so the PR
+     card can NAME the best of them without re-deriving the predicate and drifting from the count
+     printed beside it. */
+  const gains = cmp.filter(d => (d.dApex >= 1.0 || d.dExitGain >= 1.0) && pbpTurnCost(d) < 1.0)
+    .sort((a, b) => pbpTurnGain(b) - pbpTurnGain(a));
   return {
     cmp,
     noted,
     giveUps: noted.filter(d => pbpTurnCost(d) >= 1.0).sort((a, b) => pbpTurnCost(b) - pbpTurnCost(a)),
-    gained: cmp.filter(d => (d.dApex >= 1.0 || d.dExitGain >= 1.0) && pbpTurnCost(d) < 1.0).length,
+    gains,
+    gained: gains.length,
   };
 }
 function renderPlayByPlay(run, ref, D) {
@@ -5892,23 +5939,59 @@ function renderPlayByPlay(run, ref, D) {
   const labF = escapeHtml(ref.label);
   if (!ref.sameSegmentOK) {
     _pbpCtx = null;   /* nothing actionable rendered, so leave no stale turn-link context behind */
-    body.innerHTML = `<div class="dim" style="font-size:13px;">`
-      + `<strong>${labA}</strong> and <strong>${labF}</strong> do not look like the same segment, `
-      + `so a turn-by-turn comparison would not be meaningful. Pick two runs of the same trail `
-      + `(laps, or marked runs of one descent).</div>`;
+    /* Two different refusals. In-ride, the runs are geographically different trails and the fix is
+       to pick two laps of one. Cross-ride, they are the same TAGGED trail measured over different
+       windows -- buildTagMember could not clip one of them to the tag's gates -- and telling the
+       rider to pick a different run would be advice about a control that cannot fix it. */
+    body.innerHTML = ref.crossRide
+      ? `<div class="dim" style="font-size:13px;"><strong>${labA}</strong> and <strong>${labF}</strong> `
+        + `are the same trail, but Loam could not line them up to the same start and finish gates, so `
+        + `their times measure different amounts of trail and comparing them would be misleading. `
+        + `Adjusting the segment's gates (Runs &rarr; the segment page) usually fixes this.</div>`
+      : `<div class="dim" style="font-size:13px;">`
+        + `<strong>${labA}</strong> and <strong>${labF}</strong> do not look like the same segment, `
+        + `so a turn-by-turn comparison would not be meaningful. Pick two runs of the same trail `
+        + `(laps, or marked runs of one descent).</div>`;
     return;
   }
-  _pbpCtx = { run, D };
-  const A = runTurnsFromD(run, D);
+  /* The window this comparison is ABOUT. For a cross-ride reference that is the run clipped to the
+     tagged segment's gates -- the same clip the reference itself carries -- because the reference is
+     a gate-to-gate lap and the run is a whole descent or a tap bracket, and comparing the two
+     reports the clip as riding (see setupPlayByPlay). In-ride, both sides are run windows from one
+     segmentation and the run is already the right thing. */
+  const win = ref.subject || { tStart: run.tStart, tEnd: run.tEnd, duration: run.metrics.duration };
+  /* The turn chips open the corner they name, and they look it up against this window. A tag whose
+     start gate sits ABOVE the drop-in clips with a lead-in (segPolyline / segLeadSec), so the
+     clipped window can begin BEFORE the run does -- and a corner up there is a real part of the
+     segment under discussion, but not of the run, so handing the run to openSegmentPage would name a
+     corner its page does not list. Carry a window covering both; it differs from the run only in
+     that lead-in case. */
+  _pbpCtx = { run, D, win: { tStart: Math.min(run.tStart, win.tStart), tEnd: Math.max(run.tEnd, win.tEnd) } };
+  const A = runTurnsFromD(win, D);
   const { deltas, countA, countF } = pbpDeltasFromTurns(A, ref.turns || []);
-  const dt = run.metrics.duration - ref.duration;
+  const dt = win.duration - ref.duration;
   const faster = dt < 0;
-  const refWhat = ref.crossRide ? 'your fastest lap on this trail' : 'fastest on this segment';
+  /* What the reference IS. "your fastest lap on this trail" is an over-claim whenever the segment's
+     actual best was excluded -- this recording holds it (a lap is not compared with itself), or the
+     faster lap stored no corners -- and the segment leaderboard goes on naming that lap as the
+     fastest, so the two surfaces contradicted each other with no way for the reader to tell which
+     was right. */
+  const refWhat = ref.crossRide
+    ? (ref.excluded ? 'your best lap here that this can line up' : 'your fastest lap on this trail')
+    : 'fastest on this segment';
   let html = `<div style="margin-bottom:8px;"><strong>${labA}</strong> vs `
     + `<strong>${labF}</strong> (${refWhat}): `
     + `<span style="color:${faster ? '#7fb069' : 'var(--accent)'};">${faster ? '' : '+'}${dt.toFixed(1)}s ${faster ? 'faster' : 'slower'}</span></div>`;
   if (ref.crossRide)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across ${sportNoun(displaySport(D), { plural: true })}, lined up turn-for-turn on the same trail.</div>`;
+    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across ${sportNoun(displaySport(D), { plural: true })}, `
+      + `both cut to this segment's start and finish gates so the two times measure the same trail.</div>`;
+  if (ref.crossRide && ref.excluded)
+    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Your fastest lap here is `
+      + `${fmtDuration(ref.fastestDuration)}${ref.fastestLabel ? ` (${escapeHtml(ref.fastestLabel)})` : ''}, and it is not the `
+      + (ref.excluded === 'self'
+          ? `reference because it is in this recording &mdash; a lap is not compared with itself.`
+          : `reference because it was saved without per-corner data, so there is nothing to line up turn for turn.`)
+      + `</div>`;
   if (countA !== countF)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These runs have different turn counts (${countA} vs ${countF}). The turns are lined up in order, so a missed or extra turn can shift the pairing; the per-turn notes below read best for repeated runs of the same segment.</div>`;
   /* Speed deltas follow the Units toggle like the turn table (they used to hardcode mph). The delta
@@ -5987,7 +6070,11 @@ function renderPlayByPlay(run, ref, D) {
    staying on the ride view. */
 function pbpShowTurnOnMap(n) {
   if (!_pbpCtx) return;
-  const { run, D } = _pbpCtx;
+  const { D } = _pbpCtx;
+  /* The compared window, which is the run except where a tag's lead-in reaches above the drop-in
+     (see renderPlayByPlay). Every corner the play-by-play names is inside it, which is what makes
+     the chip able to open all of them. */
+  const run = { ..._pbpCtx.run, ..._pbpCtx.win };
   /* The play-by-play is the one turn affordance with no map anywhere near it, and it used to answer
      "where is this corner" by scrolling to the whole-ride map and PANNING at whole-ride zoom, which
      drops the corner into a pile of overlapping markers spanning the whole recording. Send the rider
@@ -6013,7 +6100,11 @@ function pbpShowTurnOnMap(n) {
 }
 function pbpShowTurnRow(n) {
   if (!_pbpCtx) return;
-  const { run, D } = _pbpCtx;
+  const { D } = _pbpCtx;
+  /* The compared window, for the same reason pbpShowTurnOnMap uses it: the row this links to has to
+     survive the table being filtered, and a lead-in corner is outside the run but inside the
+     comparison. Identical to the run whenever the clip does not reach above the drop-in. */
+  const run = { ..._pbpCtx.run, ..._pbpCtx.win };
   /* The table may be filtered to a different run (its rows are a subset); re-filter to this one so
      the target row exists and the surrounding rows are this lap's context. */
   if (!document.querySelector(`#turnTable tbody tr[data-n="${n}"]`)) filterTurnTableToRun(run, D);
@@ -6054,25 +6145,62 @@ async function setupPlayByPlay(allRuns, D) {
   // fastest prior lap that carries stored per-turn data. Rides saved before per-descent turns existed
   // have none, so they are skipped (re-open such a ride once to backfill it). Best-effort + async.
   try {
-    const selfFile = D.title || null;
+    /* Who "this recording" is, so its own laps are not offered as the reference. The library row id
+       is the real answer; the filename is the fallback for a ride that never reached the library
+       (and it is only a fallback because every iOS recording is called "recording.csv"). */
+    const selfIdent = { rideId: (D && D.libraryRideId != null) ? D.libraryRideId : null, file: D.title || null };
     const needXR = runs.filter(r => !refOf.has(r.n) && r.src && r.src.autoTag && r.src.autoTag.taggedSegmentId != null);
     if (needXR.length) {
       const [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]);
+      /* This ride's own library row, so the SUBJECT can be clipped by the same function against the
+         same tag as the reference. Saved by analyze() before this runs; null only for a ride that
+         never reached the library, which pickCrossRideRef then reports as not comparable. */
+      const selfRow = allRides.find(x => x.id === D.libraryRideId) || null;
       for (const r of needXR) {
         const tag = allTags.find(t => t.id === r.src.autoTag.taggedSegmentId);
         if (!tag) continue;
-        const laps = buildTagMembers(tag, allRides)
-          .filter(m => m.turns && m.turns.length && (!selfFile || m.file !== selfFile));
-        if (!laps.length) continue;
-        const best = laps.reduce((a, b) => b.duration < a.duration ? b : a);
-        const md = memberDate(best);
+        /* THE TWO SIDES HAVE TO BE THE SAME STRETCH OF TRAIL, and until 2026-08-30 they were not.
+           A library lap is CLIPPED TO THE TAG'S GATES by buildTagMember, while the run on the left
+           of the comparison is this ride's own segmentation window -- a whole detected descent, or
+           a Segment Start/End bracket plus the 45 s of breathing room segmentRuns allows it. Those
+           are different lengths of trail by construction, so the headline reported the gate clip as
+           riding: on the reference fixture one descent measures 60 s as a run window and 38 s
+           clipped, and a rider who had just set a PR on this trail was told they were 20.7 s SLOWER
+           than their fastest lap (owner report: "it sounds like I'm slower than my fastest lap").
+           The corner notes were wrong for the same reason and said so out loud without knowing it --
+           "different turn counts (34 vs 21)" is one window holding 13 corners the other never
+           covered, paired by index, so corner n was not the same corner on the two sides.
+           Clipping the subject through buildTagMember against the same tag makes both sides the
+           segment the tag defines, which is the only window in which "you were N seconds slower"
+           means anything. */
+        const selfMember = (selfRow && r.src) ? buildTagMember(selfRow, r.src, tag) : null;
+        /* PR_DIST_NOTE_FRAC is deliberately the same number the PR card uses: this is the same
+           question ("are these two efforts the same stretch of trail?"), and a second threshold
+           would be a second answer to it. It is needed because the clip is best-effort on both
+           sides -- buildTagMember keeps the whole descent when the gates do not resolve past
+           SEG_CLIP_MAX_MISS_M -- so agreeing on the tag is not the same as having measured the same
+           ground. */
+        const pick = pickCrossRideRef(buildTagMembers(tag, allRides), selfIdent, selfMember, PR_DIST_NOTE_FRAC);
+        if (!pick.ref) continue;
+        const md = memberDate(pick.ref);
         const dateLabel = (md && !isNaN(md)) ? md.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'prior lap';
+        const fd = pick.excluded ? memberDate(pick.fastest) : null;
         refOf.set(r.n, {
           label: `${dateLabel} · fastest lap`,
-          turns: best.turns,
-          duration: best.duration,
+          turns: pick.ref.turns,
+          duration: pick.ref.duration,
           crossRide: true,
-          sameSegmentOK: true,
+          /* Was `true` unconditionally, which is how a comparison between two different windows got
+             rendered as a verdict for as long as it did. */
+          sameSegmentOK: pick.comparable,
+          /* The subject's window, clipped to the same gates. renderPlayByPlay reads its turns and
+             its duration from here rather than from the run. */
+          subject: selfMember ? { tStart: selfMember.tStart, tEnd: selfMember.tEnd, duration: selfMember.duration } : null,
+          /* Why the segment's actual best is not the reference, so the panel can say so instead of
+             contradicting the leaderboard. */
+          excluded: pick.excluded,
+          fastestDuration: pick.excluded ? pick.fastest.duration : null,
+          fastestLabel: (fd && !isNaN(fd)) ? fd.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : null,
         });
       }
     }
@@ -14983,6 +15111,106 @@ async function analyzeMulti(sensorFiles) {
   }
 }
 
+/* ---- Segment personal bests (ported to analyzer/sports/mtb/segment-pr.js, drift-pinned) ----------
+   "You just set a PR on this segment", plus the decomposition of the margin. The board already
+   ranked every effort and put a lightning bolt on the fastest, and that was the whole of it: a rider
+   who took two seconds off their best on a trail they had ridden eight times had to read it off a
+   table (owner request, 2026-08-30).
+   The hard part is not the congratulation, it is the four ways a leaderboard row can be the fastest
+   TIME without being a faster LAP -- too little history, a short gate window, a margin inside the
+   clock's own resolution, and a previous best that launched from a stop. See the module header for
+   the full argument behind each gate; the constants below carry the short version. */
+/* Efforts needed before the word "record" is used: with n efforts and no trend the newest is the
+   fastest with probability 1/n, so on the second-ever lap a "personal best" is a coin flip wearing a
+   trophy. Three is the first count where the newest effort beat something rather than one thing. */
+const PR_MIN_LAPS = 3;
+/* Distance disagreement between the two laps big enough to name. Both distances are the geodesic
+   path between the same gates when the clip lands, so they differ only by GPS wander on a ~50-point
+   decimated track -- metres on a segment of hundreds. 5% is far outside that and far inside the 40%
+   spread an unclipped board shows. Wide-margin, not tuned, and NOT validated against a real board. */
+const PR_DIST_NOTE_FRAC = 0.05;
+/* A third of the descent is named as where the time came from only if it holds more than half the
+   total gain -- otherwise the margin was spread and naming a third invents a story out of thirds
+   that differ by noise. */
+const PR_THIRD_MIN_SHARE = 0.5;
+/* ...and only if that third is worth at least one second, one sample of the 1 Hz delta series. */
+const PR_THIRD_MIN_S = 1.0;
+
+function segmentPRRead(pr, previous, lapCount, tieS) {
+  if (!pr || !previous || pr === previous) return null;
+  const marginS = previous.duration - pr.duration;
+  if (!(marginS > 0)) return null;
+  const tied = isFinite(tieS) && marginS <= tieS;
+
+  /* Pace over the ground each lap actually covered. Distances are the geodesic path between the
+     gates (buildTagMember), so this is the like-for-like question the raw clock cannot answer. */
+  const dPr = pr.distance, dPrev = previous.distance;
+  const haveDist = isFinite(dPr) && dPr > 0 && isFinite(dPrev) && dPrev > 0;
+  const distFrac = haveDist ? (dPr - dPrev) / dPrev : null;
+  const paceFaster = haveDist ? (dPr === 0 ? null : (pr.duration / dPr) < (previous.duration / dPrev)) : null;
+  /* Only the SHORT direction can manufacture a PR: covering more ground in less time is a better lap
+     whatever the pace says, so it is never refused here. */
+  const shortWindow = haveDist && distFrac < 0 && paceFaster === false;
+
+  const laps = lapCount != null ? lapCount : 2;
+  return {
+    laps,
+    marginS,
+    distFrac,
+    paceFaster,
+    verdict: tied ? 'tied' : (shortWindow ? 'short-window' : (laps >= PR_MIN_LAPS ? 'pr' : 'pr-thin')),
+    /* Which way the two laps' distances disagree, when the gap is worth naming at all. */
+    distNote: (distFrac != null && Math.abs(distFrac) >= PR_DIST_NOTE_FRAC)
+      ? (distFrac > 0 ? 'longer' : 'shorter') : null,
+    /* 'flattered': the beaten time launched from a stop, so part of the margin is its handicap.
+       'understated': this lap did, so the margin is smaller than the riding was. */
+    standing: (previous.standingStart && !pr.standingStart) ? 'flattered'
+      : (pr.standingStart && !previous.standingStart) ? 'understated' : null,
+  };
+}
+
+function prGainThirds(delta) {
+  const d = (delta || []).filter((v) => v != null && isFinite(v));
+  if (d.length < 6) return null;
+  const n = d.length;
+  const b1 = Math.round(n / 3), b2 = Math.round((2 * n) / 3);
+  const gain = (a, b) => d[a] - d[b];
+  const thirds = [
+    { name: 'top', gainS: gain(0, b1) },
+    { name: 'middle', gainS: gain(b1, b2) },
+    { name: 'bottom', gainS: gain(b2, n - 1) },
+  ];
+  const totalS = thirds.reduce((s, t) => s + t.gainS, 0);
+  const best = thirds.reduce((a, b) => (b.gainS > a.gainS ? b : a));
+  const leadShare = totalS > 0 ? best.gainS / totalS : 0;
+  return {
+    thirds,
+    totalS,
+    leadS: best.gainS,
+    leadShare,
+    lead: (best.gainS >= PR_THIRD_MIN_S && leadShare >= PR_THIRD_MIN_SHARE) ? best.name : null,
+  };
+}
+
+/* The fastest effort on a CALENDAR DAY BEFORE the latest one's -- the standing record a fresh PR
+   actually beat. members is fastest-first, so the first match is the best.
+   Distinct from members[1] (the second-fastest overall), which is the same thing only when the
+   latest day holds one of the top two: ride three laps today, go 1:37 and 1:38 against an old best
+   of 1:45, and members[1] is today's other lap, so "2s faster than your previous best" would report
+   a within-session gap and hide the eight seconds actually taken off the record. Returns null when
+   every effort is on the latest day, which is not a failure -- there IS no earlier record then, and
+   the caller falls back to the next-best lap and says so. */
+function bestBeforeMember(members, latest) {
+  const ld = memberDate(latest);
+  if (!ld || isNaN(ld)) return null;
+  const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const key = dayKey(ld);
+  return (members || []).find((m) => {
+    const d = memberDate(m);
+    return d && !isNaN(d) && dayKey(d) !== key && d < ld;
+  }) || null;
+}
+
 /* Render the cross-ride dashboard: a per-ride summary panel and one section
    per matched descent cluster, each with a summary table, speed-vs-distance
    overlay, and DTW lag chart vs the longest descent in the cluster. */
@@ -15107,6 +15335,117 @@ function crossCornerMarkers(reference, subject) {
   return out;
 }
 
+/* The congratulation, and the decomposition of the margin, above the leaderboard table for a segment
+   whose NEWEST effort is also its fastest (owner request, 2026-08-30). Renders nothing at all in
+   every other case: this is a PR card, not a running commentary on how today went.
+
+   Everything it says about the pair is the same pair the gain/loss map paints and the corner read
+   below describes -- renderCrossRide hands it the same `previous` it uses as `ref` -- so the three
+   cannot quote different laps at each other. The numbers likewise: the thirds come off the same DTW
+   delta the map is painted from, and the corner counts come from the shared pbpRankDeltas the read
+   below uses, rather than a second predicate that could drift from the count printed under it.
+
+   What it will not do is explain the margin. It says how much, where on the trail, and which corners
+   carried more speed; it never says why, never scores the lap, and sets no target for the next one --
+   the same rule the crash card and the jump reads follow, and for the same reason: nothing in the
+   pipeline saw the trail, the bike or the rider. It also does not restate the margin as an average
+   speed, because avgSpeed IS distance/duration here, so "faster time AND faster average" is one fact
+   counted twice (the same double-count the jump card documents for takeoff x hang). */
+function renderSegmentPRCard(hostId, pr, previous, members, labels) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  /* SEG_TIME_TIE_S is the leaderboard's OWN tie band (see its declaration): the table below badges a
+     lap `= tied` from this same number, so passing it here is what stops the card claiming a personal
+     best over a gap the table has already called unseparable. */
+  const read = segmentPRRead(pr, previous, (members || []).length, SEG_TIME_TIE_S);
+  if (!read) { host.innerHTML = ''; host.classList.add('hidden'); return; }
+  const prevLabel = escapeHtml((labels && labels.prev) || 'your previous best');
+  const lapWord = `${read.laps} lap${read.laps === 1 ? '' : 's'}`;
+  const margin = `${read.marginS.toFixed(read.marginS < 10 ? 1 : 0)}s`.replace('.0s', 's');
+  const pct = (f) => `${Math.round(Math.abs(f) * 100)}%`;
+
+  /* Headline. The three verdicts are three different CLAIMS, not three tones of one claim: a record,
+     a fastest-of-two, and a faster clock that is not a faster lap. */
+  let head, sub;
+  if (read.verdict === 'tied') {
+    /* The table below marks these two laps tied from the same constant. A card claiming a record over
+       a gap that table calls unseparable is the leaderboard-vs-panel contradiction this whole surface
+       exists to avoid, so the claim is withdrawn rather than hedged. */
+    head = `Your quickest time here &mdash; but too close to call`;
+    sub = `${fmtDuration(pr.duration)} against ${prevLabel}'s ${fmtDuration(previous.duration)}. `
+      + `A gate-to-gate time carries a second or two depending on where the saved track's points happen to fall, `
+      + `so a ${margin} gap is inside what the timing itself moves by. The table below marks them tied for the same reason.`;
+  } else if (read.verdict === 'short-window') {
+    head = `Fastest time here &mdash; but not a personal best`;
+    sub = `${fmtDuration(pr.duration)} is your quickest clock on this segment, and it covered ${pct(read.distFrac)} less ground than ${prevLabel} `
+      + `(${U.dist(pr.distance)} vs ${U.dist(previous.distance)}) at a slower pace over the trail it did cover. `
+      + `The shorter time is the shorter window, so it is not counted as a record.`;
+  } else if (read.verdict === 'pr-thin') {
+    head = `Your fastest time here`;
+    sub = `${fmtDuration(pr.duration)}, ${margin} up on ${prevLabel}. That is ${lapWord} on this segment, so it is a fastest-of-${read.laps} `
+      + `rather than a record &mdash; ride it ${PR_MIN_LAPS - read.laps === 1 ? 'once more' : `${PR_MIN_LAPS - read.laps} more times`} and it becomes one.`;
+  } else {
+    head = `Personal best on this segment`;
+    sub = `${fmtDuration(pr.duration)}, ${margin} faster than ${prevLabel}${labels && labels.priorDay ? ', your best before today' : ''}, over ${lapWord} here.`;
+  }
+
+  /* What changed. Only for a claim that stands: on a short window the decomposition would be
+     describing a margin the line above just refused. */
+  const better = [];
+  if (read.verdict !== 'short-window' && read.verdict !== 'tied') {
+    const dtw = pairwiseDescentDTW(previous, pr);
+    const thirds = dtw ? prGainThirds(dtw.delta) : null;
+    if (thirds && thirds.lead) {
+      better.push(`Most of it came in the <strong>${thirds.lead} third</strong> of the descent `
+        + `(${thirds.leadS.toFixed(1)}s of the ${thirds.totalS.toFixed(1)}s swing across it).`);
+    } else if (thirds && thirds.totalS > 0) {
+      better.push(`The time came off evenly down the descent rather than in one place.`);
+    }
+    /* Corners, from the same ranker the read below uses, so the two cannot disagree about how many
+       corners were compared or which were better. */
+    const { cmp, gains, giveUps } = pbpRankDeltas(pbpDeltasFromTurns(pr.turns || [], previous.turns || []).deltas);
+    if (cmp.length && gains.length) {
+      const best = gains[0];
+      const bits = pbpNoteBits(best, pbpSpeedFmt);
+      better.push(`You carried more speed through <strong>${gains.length} of the ${cmp.length}</strong> corner${cmp.length === 1 ? '' : 's'} that could be compared`
+        + (bits.length ? `, most at <strong>corner ${best.n}${best.dir}</strong> &mdash; ${bits.join(', ')}` : '')
+        + `.${giveUps.length ? ` ${giveUps.length} still cost speed; they are listed below the map.` : ''}`);
+    }
+  }
+
+  /* Caveats. Each is a reason the margin is not simply "how much better you rode", and each is
+     stated because it is measurable, not to hedge the mood.
+     None of them apply to a TIE: every one qualifies a margin, and a tie is the finding that there
+     is no margin to qualify -- "part of this gap is that lap's handicap" contradicts the sentence
+     above it. The ground difference between two tied laps is the table's own note to make, and the
+     headline points at it rather than saying it twice in different words. */
+  const caveats = [];
+  if (read.verdict === 'tied') { /* nothing to qualify */ }
+  else if (read.standing === 'flattered')
+    caveats.push(`${prevLabel} launched from a near stop at the start gate, so part of this margin is that lap's handicap rather than this lap's riding.`);
+  else if (read.standing === 'understated')
+    caveats.push(`This lap launched from a near stop at the start gate, so the margin under-states it.`);
+  /* The ground comparison, on a claim that still stands. Both arms carry the tie guard: chaining the
+     second off the first would let a tied-but-shorter lap through the gap. */
+  if (read.verdict !== 'tied' && read.distNote === 'longer')
+    caveats.push(`This lap covered ${pct(read.distFrac)} more ground than ${prevLabel} (${U.dist(pr.distance)} vs ${U.dist(previous.distance)}): either more trail between the same gates, or one of the two windows did not clip to them.`);
+  else if (read.verdict !== 'tied' && read.distNote === 'shorter' && read.verdict !== 'short-window')
+    caveats.push(`This lap covered ${pct(read.distFrac)} less ground than ${prevLabel} (${U.dist(pr.distance)} vs ${U.dist(previous.distance)}), though it was quicker per unit of trail as well as on the clock.`);
+
+  const trophy = read.verdict === 'pr' ? '🏆 ' : '';
+  /* Only a standing claim is drawn in the segment green. A withdrawn one (a tie, or a short window)
+     is a neutral note, or the colour would keep congratulating past the words. */
+  const claims = read.verdict === 'pr' || read.verdict === 'pr-thin';
+  host.innerHTML = `
+    <div class="panel" style="padding:16px 18px; margin-bottom:12px; border-left:3px solid ${claims ? 'var(--moss)' : 'var(--text-muted)'};">
+      <div style="font-size:14px; font-weight:600; color:${claims ? 'var(--moss)' : 'var(--text)'}; margin-bottom:4px;">${trophy}${head}</div>
+      <div style="font-size:13px; line-height:1.55;">${sub}</div>
+      ${better.length ? `<ul style="margin:10px 0 0; padding-left:18px; font-size:13px; line-height:1.55;">${better.map(b => `<li style="margin-bottom:4px;">${b}</li>`).join('')}</ul>` : ''}
+      ${caveats.length ? `<div class="dim" style="font-size:12px; line-height:1.5; margin-top:10px;">${caveats.map(c => `&bull; ${c}`).join('<br>')}</div>` : ''}
+    </div>`;
+  host.classList.remove('hidden');
+}
+
 function renderCrossRide({ perRide, clusters }) {
   /* Tear down any Leaflet gain/loss maps from a prior render before the container is rebuilt. */
   for (const mp of _crossDeltaMaps) { try { mp.remove(); } catch (e) {} }
@@ -15197,7 +15536,16 @@ function renderCrossRide({ perRide, clusters }) {
     const pr = members[0];
     const latest = latestBestMember(members);
     const cmp = (latest && latest !== pr) ? latest : pr;
-    const ref = (cmp === pr) ? members[1] : pr;
+    /* "The time it just beat" is the standing record from a PREVIOUS day, which members[1] only is
+       when the latest day does not also hold the second-fastest lap. Ride three laps today, go 1:37
+       and 1:38 against an old best of 1:45, and members[1] is today's other lap: the map would paint
+       today against itself and the PR card would report a one-second within-session gap while the
+       eight seconds actually taken off the record went unmentioned. bestBeforeMember returns null
+       when every effort is on the latest day -- there is no earlier record then -- and the old
+       next-best fallback is right for that case, so the card says "next-best lap" rather than
+       claiming a day it does not have. */
+    const priorBest = (cmp === pr && latest) ? bestBeforeMember(members, latest) : null;
+    const ref = (cmp === pr) ? (priorBest || members[1]) : pr;
     /* Distinct colour + human label per compared ride. In the app every recording is served as
        "recording.csv", so colouring/labelling by filename collapsed every line to ONE colour and ONE
        legend entry (the wall of "recording.csv" that buried the plot). Index-based colours + a date
@@ -15232,6 +15580,7 @@ function renderCrossRide({ perRide, clusters }) {
         ${escapeHtml(title)}
         <span class="subtitle">${members.length} ${xMany} · ${U.dist(ref.distance)} reference distance · ${U.small(haversineMeters(cluster.centroidLatStart, cluster.centroidLonStart, ref.latStart, ref.lonStart))} start spread</span>
       </div>
+      <div id="crossPrCard_${ci}" class="hidden"></div>
       <div class="panel" style="padding:20px; margin-bottom:12px;">
         <div style="display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-bottom:8px;">
           <label for="crossSort_${ci}" style="font-size:11px; color:var(--text-muted);">Sort</label>
@@ -15249,6 +15598,7 @@ function renderCrossRide({ perRide, clusters }) {
           </table>
         </div>
         <div style="color:var(--text-muted); font-size:10px; margin-top:6px;">Distance is the geodesic path between the segment gates, so it stays consistent lap to lap for ranking. The smaller "GPS" value in parentheses is the raw Doppler ground distance, closer to what Strava reports.</div>
+        <div id="crossTieNote_${ci}" style="color:var(--text-muted); font-size:10px; margin-top:4px;"></div>
       </div>
       <div class="chart" id="crossDeltaMap_${ci}" style="height:380px; margin-bottom:8px;"></div>
       <div class="chart detail-chart" id="crossSpeedChart_${ci}" style="height:280px; margin-bottom:8px;"></div>
@@ -15257,15 +15607,31 @@ function renderCrossRide({ perRide, clusters }) {
       <div class="panel" id="crossPbp_${ci}" style="padding:16px; margin-bottom:24px;"></div>`;
     container.appendChild(section);
 
+    /* Congratulate a fresh personal best, and decompose the margin. Only fires when the newest
+       effort is also the fastest (latest === pr), so `ref` is the record it beat and the card, the
+       painted map and the corner read below all describe the same pair. `latest` is null when no
+       member carries a usable date, and then nothing here can know which effort is the newest, so
+       no PR is claimed -- the old `cmp === pr` test alone would have called one anyway. */
+    if (latest && latest === pr && ref && ref !== pr)
+      renderSegmentPRCard(`crossPrCard_${ci}`, pr, ref, members,
+                          { prev: dateLabels[ref._mi], priorDay: ref === priorBest });
+
     /* Comparison table rows, re-sortable: best time (fastest first, the default) or date (newest
        first, undated last). The choice sticks across clusters and sessions via localStorage. */
     const standingBadge = m => m.standingStart
       ? ` <span title="Launched from a near stop at the start gate: the dead seconds are trimmed, but the slow acceleration still handicaps this time" style="font-weight:400; color:var(--text-muted); font-size:10px; white-space:nowrap;">🧍 standing start</span>`
       : '';
+    /* Laps close enough to the PR that the gap is inside the timing's own noise (SEG_TIME_TIE_S).
+       They keep their place in time order -- this only stops the board presenting the difference as a
+       result. The PR itself is excluded: it is the thing everything else is being tied WITH. */
+    const tiedWithPr = m => m !== pr && (m.duration - pr.duration) <= SEG_TIME_TIE_S;
+    const tieBadge = m => tiedWithPr(m)
+      ? ` <span title="Within ${SEG_TIME_TIE_S}s of the best time. Re-timing one lap through this same code moves it 1-2s depending on where the recording's descent window happens to start, so a gap this small is measurement, not riding." style="font-weight:400; color:var(--text-muted); font-size:10px; white-space:nowrap;">= tied</span>`
+      : '';
     const rowHtml = m => `
       <tr>
         <td style="text-align:center;"><input type="checkbox" class="cmp-check" data-mi="${m._mi}" ${selectedMembers.has(m) ? 'checked' : ''} style="cursor:pointer;"></td>
-        <td style="color:${m.color}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}${standingBadge(m)}</td>
+        <td style="color:${m.color}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}${tieBadge(m)}${standingBadge(m)}</td>
         <td>${fmtDuration(m.duration)}</td>
         <td>${U.dist(m.distance)}${(m.distanceGps != null && Math.abs(m.distanceGps - m.distance) >= 5) ? ` <span style="color:var(--text-muted); font-size:10px;">(GPS ${U.dist(m.distanceGps)})</span>` : ''}</td>
         <td>${U.speed(m.avgSpeed)}</td>
@@ -15283,6 +15649,27 @@ function renderCrossRide({ perRide, clusters }) {
           })
         : members;   /* already ranked fastest first */
       cmpBody.innerHTML = rows.map(rowHtml).join('');
+      /* Say WHY a lap is marked tied, once, under the table. The gates are placed on a 50-point
+         decimated track, so re-timing a single lap through this code moves it 1-2 s depending only on
+         where its recording's descent window opened -- measured across 8 laps of one real segment.
+         A lap that is slower on the clock yet covered MORE ground is the case that reads as a bug
+         (owner report), so when the numbers on screen say that, the note says it too. */
+      const tied = members.filter(tiedWithPr);
+      const noteEl = section.querySelector(`#crossTieNote_${ci}`);
+      if (noteEl) {
+        if (!tied.length) noteEl.textContent = '';
+        else {
+          const faster = tied.filter(m => m.avgSpeed > pr.avgSpeed);
+          noteEl.innerHTML = `Times within ${SEG_TIME_TIE_S}s are shown as tied: `
+            + `${tied.map(m => escapeHtml(m.tag.replace(/ ⚡| · ref/g, ''))).join(', ')} `
+            + `${tied.length === 1 ? 'is' : 'are'} inside what the timing itself varies by `
+            + `(re-timing one lap moves it 1-2s, depending only on where its recording's descent window began). `
+            + (faster.length
+                ? `${faster.map(m => escapeHtml(m.tag.replace(/ ⚡| · ref/g, ''))).join(', ')} `
+                  + `covered more ground than the best time did, so on pace ${faster.length === 1 ? 'it is' : 'they are'} ahead.`
+                : `Ranking still goes by time.`);
+        }
+      }
       /* Wire the freshly-rendered checkboxes (m._mi indexes the fastest-first members array). */
       cmpBody.querySelectorAll('.cmp-check').forEach(box => {
         box.onchange = () => {
@@ -20337,14 +20724,53 @@ function polyPointAtFrac(poly, frac) {
   const lo = Math.floor(x), hi = Math.min(poly.length - 1, lo + 1), f = x - lo;
   return [poly[lo][0] + f * (poly[hi][0] - poly[lo][0]), poly[lo][1] + f * (poly[hi][1] - poly[lo][1])];
 }
-/* Geodesic length of a polyline between two fractional positions along it. */
+/* Geodesic length of a polyline between two fractional positions along it, INTERPOLATING both ends
+   rather than rounding them to the nearest stored vertex.
+
+   This is most of why one segment measured a different length every lap (owner report, 2026-08-30:
+   "Same segment is calculated slightly different so even though my average speed was faster today
+   it's only second place"). A saved descent's track is decimated to 50 points, so on a 2 km segment
+   its vertices sit ~40 m apart; rounding each gate to the nearest one quantized the distance onto a
+   40 m grid, and because both ends round INWARD the errors bias rather than cancel.
+   Measured on the reported segment itself -- 8 real laps of Devil Slide -> Linda Mar, same two gates,
+   graded against the raw 1 Hz path between those gates: mean error 23.8 m -> 8.9 m, and the old
+   systematic under-measurement (7 of 8 laps short, worst -37 m) largely goes with it. The lap-to-lap
+   spread falls 74.5 m -> 35.7 m against a true spread of 28.4 m, i.e. what is left is mostly riding
+   rather than arithmetic. */
 function polylineSpanMeters(poly, f0, f1) {
   if (poly.length < 2) return 0;
   if (f1 < f0) { const t = f0; f0 = f1; f1 = t; }
-  const i0 = Math.round(f0 * (poly.length - 1)), i1 = Math.round(f1 * (poly.length - 1));
-  let m = 0;
-  for (let i = i0 + 1; i <= i1; i++) m += haversineMeters(poly[i-1][0], poly[i-1][1], poly[i][0], poly[i][1]);
-  return m;
+  const n = poly.length - 1;
+  const x0 = Math.max(0, Math.min(n, f0 * n)), x1 = Math.max(0, Math.min(n, f1 * n));
+  const i0 = Math.floor(x0), i1 = Math.floor(x1);
+  const A = polyPointAtFrac(poly, x0 / n), B = polyPointAtFrac(poly, x1 / n);
+  if (i0 === i1) return haversineMeters(A[0], A[1], B[0], B[1]);
+  let m = 0, prev = A;
+  for (let i = i0 + 1; i <= i1; i++) { m += haversineMeters(prev[0], prev[1], poly[i][0], poly[i][1]); prev = poly[i]; }
+  return m + haversineMeters(prev[0], prev[1], B[0], B[1]);
+}
+/* The sub-polyline between two fractional positions: the interior vertices with both ends
+   interpolated, so the returned track BEGINS and ENDS exactly where the gates are. Returned
+   alongside each point's fraction along the parent, because those fractions are the only honest way
+   to time the points afterwards -- the two end intervals are partial, so a consumer that assumed
+   even index spacing (index fraction = time fraction, true of an evenly decimated track) would skew
+   every point by up to one vertex interval. Coincident points are dropped so a gate landing on a
+   vertex does not emit a zero-length segment. */
+function polylineSliceFrac(poly, f0, f1) {
+  const n = poly.length - 1;
+  if (n < 1) return { points: poly.slice(), fracs: poly.map(() => 0) };
+  if (f1 < f0) { const t = f0; f0 = f1; f1 = t; }
+  const x0 = Math.max(0, Math.min(n, f0 * n)), x1 = Math.max(0, Math.min(n, f1 * n));
+  const points = [], fracs = [];
+  const push = (p, f) => {
+    const last = points[points.length - 1];
+    if (last && haversineMeters(last[0], last[1], p[0], p[1]) < 0.05) return;
+    points.push(p); fracs.push(f);
+  };
+  push(polyPointAtFrac(poly, x0 / n), x0 / n);
+  for (let i = Math.floor(x0) + 1; i <= Math.floor(x1); i++) push([poly[i][0], poly[i][1]], i / n);
+  push(polyPointAtFrac(poly, x1 / n), x1 / n);
+  return { points, fracs };
 }
 /* Every distinct pass of a polyline near a gate point (each contiguous run of vertices within maxMissM
    collapses to its closest vertex). On a self-overlapping trail, a switchback brings the track near a
@@ -20421,6 +20847,21 @@ const SEG_LEAD_SEC = 45;
    already at speed. The dead seconds are trimmed, but the slow launch still handicaps the time, so the
    lap is flagged on the leaderboard rather than ranked as a fair head-to-head. ~2.5 m/s = 5.6 mph. */
 const SEG_STANDING_START_MPS = 2.5;
+/* Two laps whose times differ by less than this are TIED: the gap is inside what the timing itself
+   moves by, so calling one of them faster is reading noise as a result (owner report, 2026-08-30:
+   "even though my average speed was faster today it's only second place" -- the two laps in question
+   were 1 s apart).
+
+   Measured, not chosen: take ONE real lap and re-time it through this same code while varying only
+   where the stored descent window happens to open and close, which is a property of the grade
+   detector rather than of the riding. Across 8 real laps of the reported segment the duration moves
+   1-2 s with the rider doing nothing different, because a gate lands somewhere slightly different on
+   a 50-point decimated track each time. 2 s is the worst same-lap spread observed, so it is the bar.
+
+   This does NOT reorder the board -- laps still rank by time, and the PR is still the fastest time.
+   It only stops a gap this small being PRESENTED as a win. Sub-second precision cannot help here:
+   the uncertainty is in where the gate sits on the track, not in the rounding of the clock. */
+const SEG_TIME_TIE_S = 2;
 function buildTagMember(r, d, targetTag) {
   const { start, end } = tagClipPoints(targetTag);
   /* Default to the core detected window (today's behavior). When the tag carries an explicit start
@@ -20431,6 +20872,10 @@ function buildTagMember(r, d, targetTag) {
      they cannot reach). Tags with no explicit start (clipStart null = whole run) always use the core
      arrays, so existing leaderboards are unchanged. */
   let poly = d.polyline, spd = d.speed;
+  /* Seconds into the timed window for each polyline point, set only when the gate clip below runs.
+     Null means the clip did not apply and the track is still evenly index-decimated, where index
+     fraction IS time fraction and tOf's even spacing is exact. */
+  let polyT = null;
   let tStart = d.tStart, tEnd = d.tEnd, duration = d.duration, distance = d.distance;
   /* GPS/Doppler ground distance (the pre-geodesic integral of location_speed) kept alongside the
      geodesic distance: the geodesic path is the consistent-across-laps ranking distance, this one is
@@ -20486,11 +20931,21 @@ function buildTagMember(r, d, targetTag) {
        as elapsed time, matching Strava-style segment timing). */
     while (s0 < s1 && (clipSpd[s0] == null || clipSpd[s0] < SEG_MOVING_MIN_MPS)) s0++;
     while (s1 > s0 && (clipSpd[s1] == null || clipSpd[s1] < SEG_MOVING_MIN_MPS)) s1--;
-    const p0 = Math.round((s0 / (clipSpd.length - 1)) * (clipPoly.length - 1));
-    const p1 = Math.round((s1 / (clipSpd.length - 1)) * (clipPoly.length - 1));
-    if ((s0 > 0 || s1 < clipSpd.length - 1) && s1 - s0 >= 5 && p1 - p0 >= 3) {
+    const nClipS = clipSpd.length - 1;
+    const p0 = Math.round((s0 / nClipS) * (clipPoly.length - 1));
+    const p1 = Math.round((s1 / nClipS) * (clipPoly.length - 1));
+    if ((s0 > 0 || s1 < nClipS) && s1 - s0 >= 5 && p1 - p0 >= 3) {
       spd = clipSpd.slice(s0, s1 + 1);
-      poly = clipPoly.slice(p0, p1 + 1);
+      /* Cut the track AT the gates, not at the nearest stored vertex. The timed window is [s0, s1] in
+         whole seconds either way -- this decides only where the polyline is severed -- but the stored
+         track is decimated to 50 points, so "nearest vertex" quantized both ends onto a ~40 m grid and
+         the same trail came out a different length every lap. See polylineSpanMeters for the cost,
+         measured on the reported segment. */
+      const cut = polylineSliceFrac(clipPoly, s0 / nClipS, s1 / nClipS);
+      poly = cut.points;
+      /* Seconds into the timed window for each of those points. The two end intervals are partial
+         after the cut, so index fraction is no longer time fraction and tOf must read these instead. */
+      polyT = cut.fracs.map(f => Math.max(0, Math.min(s1 - s0, f * nClipS - s0)));
       tStart = base + s0; tEnd = base + s1;
       duration = s1 - s0;
       /* (1) Distance = geodesic path length along the (decimated) track between gates, NOT the integral
@@ -20514,10 +20969,12 @@ function buildTagMember(r, d, targetTag) {
   /* poly is decimated to ~50 points spread over the window while spd is the 1 Hz series, so pairing
      them by index would attach the first ~50 seconds of speed to the whole track and integrate
      distance with dt=1 between decimated points. Map each decimated point to its time into the
-     window (index-decimated GPS, so index fraction is also a time fraction) and sample the 1 Hz
-     speed there instead. */
+     window and sample the 1 Hz speed there instead.
+     polyT carries those times when the gate clip cut the track (its two end intervals are partial, so
+     index fraction is NOT time fraction there); with no clip the track is evenly index-decimated and
+     the index fraction is exact. */
   const winDur = spd.length > 1 ? spd.length - 1 : Math.max(1, poly.length - 1);
-  const tOf = (i) => poly.length > 1 ? (i / (poly.length - 1)) * winDur : 0;
+  const tOf = (i) => polyT ? polyT[i] : (poly.length > 1 ? (i / (poly.length - 1)) * winDur : 0);
   const speedAtT = (ts) => {
     if (!spd || !spd.length) return 0;
     const x = Math.min(spd.length - 1, Math.max(0, ts));
@@ -20540,6 +20997,12 @@ function buildTagMember(r, d, targetTag) {
   const standingStart = entryVals.length ? Math.min(...entryVals) < SEG_STANDING_START_MPS : false;
   return {
     file: r.filename, recordedAt: r.recordedAt || r.savedAt || null,
+    /* The library row's id, so a consumer can tell WHICH RIDE a lap came from. `file` cannot do that
+       job: in the iOS app every recording reaches the analyzer as "recording.csv", so a name test
+       either matches everything or nothing -- the same reason the standalone-FIT import keys identity
+       on content rather than on a name. Used by pickCrossRideRef to keep a lap from being compared
+       with itself. */
+    rideId: r.id != null ? r.id : null,
     /* The recording clock WITHOUT the savedAt fallback above, for the one consumer that needs to know
        the difference (memberRideClock, used by the duplicate-lap overlap test). Null on a legacy row
        that never stored one, which is exactly the case that must not be guessed at. */
@@ -28476,7 +28939,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '7ffa7d162 · 2026-08-30';
+const LOAM_BUILD = '8c8ca89fd · 2026-08-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
