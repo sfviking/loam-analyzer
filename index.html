@@ -15017,6 +15017,13 @@ function renderCrossTurnRead(hostId, subject, reference, onCorner) {
     + `<strong>${escapeHtml(reference.tag)}</strong>, corner by corner</div>`;
   if (countA !== countF)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These laps detected different numbers of corners (${countA} vs ${countF}), so they are lined up in order and a missed or extra corner shifts every pairing after it. Read the notes with that in mind.</div>`;
+  /* How many of the reference's corners the pairing never reached. pbpDeltasFromTurns runs over
+     min(countA, countF), so on a 2-vs-6 pair four corners are silently absent from every claim below
+     -- and the count-mismatch line above covers MIS-PAIRING (the shift), not OMISSION (the drop),
+     which is why it did not catch this (owner report, 2026-08-29). BOTH arms of the read name it:
+     the quiet one because "no notable differences" reads as a verdict on the whole descent, and the
+     noted one because a list of corners reads as the complete list of corners that differed. */
+  const skipped = Math.abs(countA - countF);
   if (!cmp.length) {
     html += `<div class="dim">Neither lap stored usable corner speeds, so only the times above are comparable.</div>`;
   } else if (!noted.length) {
@@ -15024,7 +15031,6 @@ function renderCrossTurnRead(hostId, subject, reference, onCorner) {
        2-vs-6 pair four of the reference's corners -- including, in the reported case, both of its
        fastest -- were silently never examined, under a heading that read as a verdict on the lap
        (owner report, 2026-08-29). Name the scope instead of implying the whole descent. */
-    const skipped = Math.abs(countA - countF);
     html += `<div class="dim">No notable differences across the ${cmp.length} corner${cmp.length === 1 ? '' : 's'} that could be compared (within ~${pbpSpeedFmt(1.0)}).`
       + (skipped ? ` The other ${skipped} had no counterpart on the shorter lap and were not compared.` : '')
       + `</div>`;
@@ -15040,6 +15046,7 @@ function renderCrossTurnRead(hostId, subject, reference, onCorner) {
     if (!focused.length) tail.push('No corner cost you real speed on this lap');
     else if (rest > 0) tail.push(`${rest} more corner${rest === 1 ? '' : 's'} cost you time`);
     if (gained > 0) tail.push(`${gained} where you carried more speed`);
+    if (skipped) tail.push(`${skipped} had no counterpart on the shorter lap and ${skipped === 1 ? 'was' : 'were'} not compared`);
     if (tail.length) html += `<div class="dim" style="font-size:12px; margin-top:6px;">${tail.join(' · ')}.</div>`;
   }
   host.innerHTML = html;
@@ -20237,6 +20244,19 @@ function memberDate(m) {
   if (m && m.recordedAt) { const r = new Date(m.recordedAt); if (!isNaN(r)) return r; }
   return null;
 }
+/* The member's real RECORDING clock, or null -- deliberately narrower than memberDate, which is
+   allowed to fall back to the library row's savedAt because for LABELLING and ORDERING a save day
+   is "enough to identify the ride". It is not enough to place a lap on an absolute time axis: a
+   save time bears no relation to when the descent was ridden, so `savedAt + tStart` is a fabricated
+   instant, and two rides saved minutes apart in one backfill produce overlapping fabricated windows
+   from descents that never happened at the same time. Only used by the duplicate-lap overlap test in
+   buildTagMembers, whose whole premise is that the two clocks are real and comparable. */
+function memberRideClock(m) {
+  const dt = parseUTCFromFilename((m && m.file) || '');
+  if (dt && !isNaN(dt)) return dt;
+  if (m && m.ridingAt) { const r = new Date(m.ridingAt); if (!isNaN(r)) return r; }
+  return null;
+}
 /* The run the rider most recently rode: among the members on the newest ride date, the fastest.
    Grouping is by calendar day, so several runs from today collapse to today's best. Returns null
    when no member carries a usable date (filename UTC or library recordedAt). */
@@ -20520,6 +20540,10 @@ function buildTagMember(r, d, targetTag) {
   const standingStart = entryVals.length ? Math.min(...entryVals) < SEG_STANDING_START_MPS : false;
   return {
     file: r.filename, recordedAt: r.recordedAt || r.savedAt || null,
+    /* The recording clock WITHOUT the savedAt fallback above, for the one consumer that needs to know
+       the difference (memberRideClock, used by the duplicate-lap overlap test). Null on a legacy row
+       that never stored one, which is exactly the case that must not be guessed at. */
+    ridingAt: r.recordedAt || null,
     /* The library row's sport, so surfaces built from members (the cross-ride view, the leaderboard)
        can say "3 runs" instead of the hardcoded "3 rides". Absent on rows saved before sport
        detection, and 'unknown' on a multi-file compare drop; sportsLex treats both as unlabeled. */
@@ -20593,7 +20617,10 @@ function buildTagMembers(targetTag, allRides) {
      Whichever copy carries corners wins, because a standalone FIT stores none (GPS-only rides get no
      turn metrics) and dropping the phone's copy would silently empty the corner chart. */
   const absWindow = (m) => {
-    const d = memberDate(m);
+    /* memberRideClock, NOT memberDate: a member whose only date is the library row's savedAt has no
+       real recording clock, and pretending it does is how two genuinely different efforts saved in
+       one backfill overlap on a fabricated axis and one gets deleted. */
+    const d = memberRideClock(m);
     if (!d || isNaN(d) || m.tStart == null || m.tEnd == null) return null;
     const base = d.getTime() / 1000;
     return [base + m.tStart, base + m.tEnd];
@@ -28449,7 +28476,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'fc509354f · 2026-08-29';
+const LOAM_BUILD = '7ffa7d162 · 2026-08-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
