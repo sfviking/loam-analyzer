@@ -2955,8 +2955,23 @@ function addCombinedRow(out, r) {
     out.gyro.push({ t, x: r.gyroscope_x, y: r.gyroscope_y, z: r.gyroscope_z });
   if (r.accelerometer_x != null && r.accelerometer_y != null && r.accelerometer_z != null)
     out.accel.push({ t, x: r.accelerometer_x, y: r.accelerometer_y, z: r.accelerometer_z });
+  /* CoreLocation reports an UNKNOWN horizontal speed as -1, not as a missing value, and it does so
+     often: across the owner's 87 recordings carrying 200+ fixes, 75 contain at least one sentinel
+     and 30 are more than 5% sentinel. A -1 is not a speed, so it is nulled here at ingestion rather
+     than being left for ~30 downstream consumers to notice -- the same layering argument the crop
+     makes (`core/crop/crop.js`): fix it on the way in and no surface has to remember to re-scope
+     itself, because the ones that forget fail SILENTLY and in different directions. Measured on the
+     corpus, leaving it in moves the ride's median GPS speed by more than 0.1 m/s on 32 of those 87
+     and the mean on 42, and on 4 it drives the median NEGATIVE, so a moving athlete reads as
+     stationary. Worse, both distance integrals (`mtb/runs.js` runMetrics, `mtb/descents.js`, the
+     latter SAVED to the library and read by the segment leaderboard) sum `speed * dt`, so every
+     sentinel SUBTRACTS a metre per second from a lap's distance.
+     The ROW is kept, only its speed is dropped: it still carries latitude/longitude/altitude, and
+     the track must not lose a fix just because the Doppler estimate was unavailable. Every consumer
+     already filters `speed != null` (or `>= 0`), so this reaches them as the absence it always was.
+     Negative rather than exactly -1: a negative ground speed is meaningless whatever wrote it. */
   if (r.location_speed != null)
-    out.location.push({ t, speed: r.location_speed, latitude: r.location_latitude, longitude: r.location_longitude, altitude: r.location_altitude });
+    out.location.push({ t, speed: r.location_speed >= 0 ? r.location_speed : null, latitude: r.location_latitude, longitude: r.location_longitude, altitude: r.location_altitude });
   if (r.barometer_relativeAltitude != null)
     out.baro.push({ t, relativeAltitude: r.barometer_relativeAltitude });
   if (r.headphone_accelerationX != null)
@@ -3024,7 +3039,9 @@ function extractFromZip(zipData) {
   if (zipData.Gravity) out.gravity = normT(zipData.Gravity);
   if (zipData.Gyroscope) out.gyro = normT(zipData.Gyroscope);
   if (zipData.Accelerometer) out.accel = normT(zipData.Accelerometer);
-  if (zipData.Location) out.location = normT(zipData.Location);
+  /* Same -1 sentinel as the combined path above, and the same treatment: Sensor Logger's own
+     Location.csv writes CoreLocation's speed through unchanged, so a zip carries it too. */
+  if (zipData.Location) out.location = normT(zipData.Location).map(r => (r.speed != null && r.speed < 0 ? { ...r, speed: null } : r));
   if (zipData.Barometer) out.baro = normT(zipData.Barometer);
   if (zipData.Headphone) out.headphone = normT(zipData.Headphone);
   if (zipData.Annotation) {
@@ -10812,7 +10829,7 @@ function detectStrength(sensors, ride) {
   const reasons = [];
 
   /* Reject locomotion: sustained GPS speed means MTB / running / walking, not a lift. */
-  const loc = (sensors.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  const loc = (sensors.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null && r.speed >= 0);
   if (loc.length >= 10) {
     const sp = loc.map(r => r.speed).sort((a, b) => a - b);
     const med = sp[Math.floor(sp.length / 2)];
@@ -12361,7 +12378,7 @@ function detectGolf(sensors, ride) {
   const reasons = [];
 
   /* Reject locomotion: sustained GPS speed means a walk / ride, not a range session. */
-  const loc = (sensors.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  const loc = (sensors.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null && r.speed >= 0);
   if (loc.length >= 10) {
     const sp = loc.map(r => r.speed).sort((a, b) => a - b);
     const med = sp[Math.floor(sp.length / 2)];
@@ -29153,7 +29170,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '2b9307a3f · 2026-08-30';
+const LOAM_BUILD = '283c402d0 · 2026-08-31';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
