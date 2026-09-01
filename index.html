@@ -4248,18 +4248,58 @@ function detectGradeSegments(baroRows, locRows, ride) {
   /* Distance series along location track aligned to alt timestamps. */
   const loc = locRows.filter(r => r.t >= ride.start && r.t <= ride.end && r.latitude != null);
   if (loc.length < 5) return [];
+  /* A hop's ground. Doppler speed where the recording HAS one, and the great-circle ground under the
+     track where it does not.
+
+     `(speed || 0)` used to cover both, and a CoreLocation speed of -1 means UNKNOWN rather than
+     stationary -- the parser nulls it at ingestion (see sensor-logger-csv.js), whose comment says
+     every downstream reader already filters it out. This one does not: it coerces the absence to a
+     measured standstill, which is the one answer the recording itself contradicts, because the
+     fixes either side of it MOVED. Measured across the owner's 83 analyzable recordings: over the
+     482 stretches where the Doppler channel is silent, the athlete's own track covers 3.26 km and
+     this series claimed 0.27 km of it. 92% of the ground, gone, with a median per-stretch error of
+     -94%.
+
+     That matters here more than a distance readout would, because cumDist is the DENOMINATOR of
+     every grade sample below and grade is what opens and closes a segment -- and a grade segment is
+     a descent, which is a run, which is a leaderboard row. On `2026-08-14_22-58-54` (24% sentinel)
+     the lost ground cost 6 grade segments and 3 descents outright; on the validated
+     `boyscout-2026-06-20` it reported a descent at -31.1% that is really -25.6%, with the segment
+     boundaries unmoved.
+
+     This is NOT the Doppler-vs-displacement question CLAUDE.md leaves open for the ride headline:
+     the rest of this series still integrates Doppler, and only a hop with no Doppler reading at all
+     is measured from the track. `computeRunSummary` already answers the same question the same way
+     (a phone hunting for a fix does not stop its owner running).
+
+     Interpolating the unknown speed from its neighbours was measured and REJECTED, though it is the
+     mechanism `makeGpsInterpSpeedAt` uses for the neighbouring question: the neighbours collapse
+     toward zero for the same reason the sentinel appears in the first place, so it still lost 76% of
+     the ground on stretches under 5 s while over-claiming 146% on stretches over a minute. The track
+     has neither failure. */
+  const gradeHopMeters = (a, b, dt) => {
+    if (a.speed != null && b.speed != null) return ((a.speed + b.speed) / 2) * dt;
+    if (!Number.isFinite(a.latitude) || !Number.isFinite(b.latitude)
+        || !Number.isFinite(a.longitude) || !Number.isFinite(b.longitude)) return 0;
+    const R = 6371000, toRad = Math.PI / 180;
+    const dLat = (b.latitude - a.latitude) * toRad, dLon = (b.longitude - a.longitude) * toRad;
+    const la1 = a.latitude * toRad, la2 = b.latitude * toRad;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  };
   let cumDist = [0];
   for (let i = 1; i < loc.length; i++) {
     const dt = loc[i].t - loc[i-1].t;
-    const v = ((loc[i].speed || 0) + (loc[i-1].speed || 0)) / 2;
     /* Skip a hop that spans a long GPS gap (dt > 5 s at ~1 Hz brackets a dropout, and a pause is
        always longer still): holding a speed across the hole invents avgSpeed*gap metres of ground
        nobody covered. Every other distance integration in this file already refuses that hop --
        computeSummary, runMetrics, the split and best-effort loops -- and this one is the series the
        grade windows divide BY, so a phantom denominator also flattens the grade either side of the
        hole. Measured no-op on every validated dataset: none of the reference FITs or phone
-       recordings contains a location gap over 5 s. */
-    cumDist.push(cumDist[i-1] + (dt > GRADE_MAX_GAP_S ? 0 : v * dt));
+       recordings contains a location gap over 5 s. The unknown-speed fill above rides inside this
+       guard rather than around it: a hop long enough to be a dropout is refused whichever channel
+       would have measured it. */
+    cumDist.push(cumDist[i-1] + (dt > GRADE_MAX_GAP_S ? 0 : gradeHopMeters(loc[i-1], loc[i], dt)));
   }
   function distAt(t) {
     let li = 0;
@@ -16768,6 +16808,13 @@ function saveLiftSignature() {
   if (!_liftSigD) return;
   const svg = liftSignatureSVG(_liftSigD);
   const img = new Image();
+  /* The RIDE card has carried an `onerror` since it was written (it redraws without terrain and
+     still delivers); this one had only `onload`, so any rasterization failure left the Share button
+     doing nothing at all, forever, with nothing said. That is not hypothetical in this file: an SVG
+     the browser refuses to decode is exactly what #605 measured, and an <img> that fails to load
+     simply never fires `onload`. There is nothing to fall back to here -- the card IS the SVG -- so
+     the honest outcome is to say so. */
+  img.onerror = () => { console.warn('lift card rasterization failed'); loamCardShareFailed(); };
   img.onload = () => {
     const cv = document.createElement('canvas'); cv.width = 1600; cv.height = 920;
     const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, 1600, 920);
@@ -21672,12 +21719,27 @@ function loamShareText(caption) {
    The install link is appended HERE rather than by each card builder, so all three cards (ride, lift,
    swim) and all three delivery paths carry the same one and none can be forgotten; the builders'
    captions stay the plain sport-naming sentence the E2E pins. */
+/* The card equivalent of loamChartSaveFailed, and it exists for the same reason on the same day's
+   evidence: a Share button whose only failure mode is "nothing happens" is a mystery rather than a
+   bug, and the rider has no way to tell it apart from a share that quietly worked. Its wording names
+   the card rather than the chart, since these two paths fail independently -- a page whose charts
+   save fine can still have a card that will not rasterize. */
+function loamCardShareFailed() {
+  setStatus('Card could not be shared');
+  try { alert('This card could not be turned into a picture, so nothing was shared.'); } catch (e) {}
+}
 async function loamShareImage(dataURL, filename, caption) {
   const text = loamShareText(caption);
+  /* A builder that produced nothing must not reach the download arm, where an <a> with an empty href
+     is clicked and the browser does exactly nothing -- the same silence, one layer down. */
+  if (!dataURL) { loamCardShareFailed(); return; }
   const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
     && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam;
   if (embedded) {
-    try { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename, text }); } catch (e) {}
+    /* Reported, not swallowed: this is the same `saveImage` bridge loamSaveChart posts to, and the
+       empty catch it used to end in was half of what made the 2026-08-31 report unreadable. */
+    try { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename, text }); }
+    catch (e) { console.warn('card share bridge failed', e); loamCardShareFailed(); }
     return;
   }
   try {
@@ -29267,7 +29329,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '048ec906d · 2026-08-31';
+const LOAM_BUILD = '42511aefb · 2026-09-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
