@@ -1324,6 +1324,7 @@
       <option value="weightlifting">Weightlifting (beta)</option>
       <option value="golf">Golf (beta)</option>
       <option value="swimming">Swimming (beta)</option>
+      <option value="skiing">Ski (beta)</option>
     </select>
   </div>
   <!-- Pool length is asked, never inferred: nothing in a wrist stream reveals how long the pool is,
@@ -3613,6 +3614,15 @@ function emtbLabel({ userSport, detectedSport, fitRecords, prefersEmtb }) {
    so MTB-specific branches (mechanics, coach history, highlights) treat both alike. Running is the
    other pipeline. */
 function isMtbFamily(sport) { return sport === 'mtb' || sport === 'emtb'; }
+/* The sport `renderAll`'s shared surfaces should SPEAK as. That path is the descents-and-turns
+   pipeline rather than the MTB pipeline -- skiing is read by exactly the same measurements -- but
+   five of its calls carried the LITERAL 'mtb', so a declared ski day rendered a card saying RIDE,
+   a hero card about braking, and the mountain-bike coach prompt. The literal is preserved for
+   every sport that had it (MTB and e-MTB both rendered these with 'mtb' deliberately, so this is
+   byte-identical for them) and only skiing takes a different value. Parameterising the rest of
+   the path properly is the right eventual fix and is deliberately NOT attempted here: e-MTB's
+   surfaces branch on that literal in ways nothing currently pins. */
+function renderPathSport(sport) { return isSkiSport(sport) ? 'skiing' : 'mtb'; }
 
 /* One SPORT lexicon so every shared surface says the right noun for the activity instead of MTB
    literals (the "sport is a parameter, never a fork" principle; see unified-sport-ux.md). Keyed by
@@ -3628,6 +3638,11 @@ const SPORT_LEX = {
   lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', legend: 'sets', noun: 'lift', nounPlural: 'lifts' },
   golf: { activity: 'Range', signature: 'GOLF', ctaVerb: 'swing', legend: 'swings', noun: 'range session', nounPlural: 'range sessions' },
   swim: { activity: 'Swim', signature: 'SWIM', ctaVerb: 'swim', legend: 'lengths', noun: 'swim', nounPlural: 'swims' },
+  /* `legend: 'turns'` because a ski descent is read the same way an MTB descent is -- body-frame
+     yaw rate, hysteretic segmentation, lean off the gravity vector. The row noun stays the
+     segmentation mode (descent / lap / run) as for every other sport, so "ski day" is the whole
+     RECORDING: "drop another ski day covering this segment". */
+  ski:  { activity: 'Ski',  signature: 'SKI',  ctaVerb: 'ski',  legend: 'turns', noun: 'ski day', nounPlural: 'ski days' },
 };
 /* `noun`/`nounPlural` name a whole RECORDING, for the copy that talks about OTHER recordings: "drop
    another ride covering this segment", "N rides", "past rides keep their label". Every one of those
@@ -3647,12 +3662,18 @@ function isGolfSport(sport) { return sport === 'golf'; }
    predicate exists for the coach dispatch rather than for routing. Both spellings are accepted
    because the payload says 'swimming' and the picker vocabulary elsewhere says 'swim'. */
 function isSwimSport(sport) { return sport === 'swimming' || sport === 'swim'; }
+/* Skiing accepts both spellings for the same reason swimming does, and here it is load-bearing
+   rather than defensive: `SessionListView.activityChoices` has shipped a "Ski" re-tag writing
+   `"skiing"` since before any of this existed, while `ski` is the shorter form the lexicon keys on
+   and the one older tests use as an unrecognised-sport control. Both must resolve. */
+function isSkiSport(sport) { return sport === 'skiing' || sport === 'ski'; }
 function normalizeSport(sport) {
   if (sport === 'running') return 'run';
   if (sport === 'walking') return 'walk';
   if (isLiftSport(sport)) return 'lift';
   if (isGolfSport(sport)) return 'golf';
   if (isSwimSport(sport)) return 'swim';
+  if (isSkiSport(sport)) return 'ski';
   if (SPORT_LEX[sport]) return sport;
   /* CATCH-ALL, and the reason swimming shipped calling itself a ride: an unrecognized sport silently
      becomes MTB here, so every shared surface reads "ride" with nothing failing anywhere. A new sport
@@ -3701,6 +3722,16 @@ function detectSport(sensors, ride) {
   /* The p99 arm catches climb-heavy MTB rides whose fast descents are under 5% of the
      samples (so p95 stays low), e.g. a long fire-road grind with one ripping descent.
      8 m/s (17.9 mph) at the 99th percentile is unreachable on foot over a normal ride. */
+  /* IT IS "WHEELS OR SKIS", NOT "WHEELS", and this gate cannot tell the difference. An alpine
+     skier clears both bars trivially, so before skiing was wired every outdoor ski day was
+     returned here as `mtb` at confidence 1 -- and then analysed by the whole MTB pipeline,
+     which mostly WORKS on a skier (body-frame yaw is body-frame yaw, freefall is freefall),
+     so the output was confident, plausible and wrongly labelled. That is why nobody noticed.
+     No speed statistic separates the two: a skier and a rider occupy the same band on the
+     same terrain. Skiing is therefore DECLARED, never detected (analyze() resolves it before
+     reaching here), and this gate keeps returning mtb for an undeclared recording because a
+     wrong guess toward the sport that needs a body frame is the one this file has always
+     made and the one its other comments are written against. */
   if (p95Speed > 7.0 || p99Speed > 8.0) {
     reasons.push(`p95 ${p95Speed.toFixed(1)} / p99 ${p99Speed.toFixed(1)} m/s (${(p99Speed*2.237).toFixed(1)} mph) exceeds human sustained pace, forcing MTB`);
     const cadHz = quickCadenceFreq(sensors.accel, ride);
@@ -5467,10 +5498,11 @@ function drawRuns() {
          replaces the coach's facts without rebuilding the panel, so a conversation in progress
          survives -- see its header for why that distinction is the whole reason it exists. */
       try {
-        if (_runsD && isMtbFamily(_runsD.sport)) {
-          renderCoachHighlights(_runsD, 'mtb');
-          renderGeekStats(_runsD, 'mtb');
-          refreshCoachFacts(_runsD, 'mtb');
+        if (_runsD && (isMtbFamily(_runsD.sport) || isSkiSport(_runsD.sport))) {
+          const rSport = renderPathSport(_runsD.sport);
+          renderCoachHighlights(_runsD, rSport);
+          renderGeekStats(_runsD, rSport);
+          refreshCoachFacts(_runsD, rSport);
           /* The lap-to-lap jump card is a claim-making surface for the same reason: it names a
              specific feature and says which pass was further. A jump logged on the road home must
              leave it on the tap, not at the next open. Idempotent, and a no-op on rides with no
@@ -9545,9 +9577,15 @@ function descentPolyline(sensors, descent) {
 async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey }) {
   /* Build descent list with polylines + speed for every recording, not just
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
-     net-drop floor; running keeps every graded segment (hill repeats are short). */
+     net-drop floor; running keeps every graded segment (hill repeats are short).
+     SKIING TAKES THE FLOOR TOO, and it needs it at least as much as a bike does: a lift-served day
+     is a long alternation of runs and rides, so the lift-exit dips and altitude-drift blobs the
+     floor was introduced to reject occur once per lap rather than once per ride. Without this a
+     declared ski day would have fallen into the `: 0` arm with running, since `isMtbFamily` is
+     false for it -- the silent kind of wrong, because a ski day genuinely does have many real
+     descents and a few extra would not look obviously wrong. */
   const rawDescents = extractRideDescents(sensors, ride, filename,
-    (isMtbFamily(sport) || sport === 'ride' || sport === 'road') ? MIN_DESCENT_DROP_M : 0);
+    (isMtbFamily(sport) || isSkiSport(sport) || sport === 'ride' || sport === 'road') ? MIN_DESCENT_DROP_M : 0);
   const descents = [];
   for (const d of rawDescents) {
     const poly = descentPolyline(sensors, d);
@@ -14500,6 +14538,16 @@ async function analyze(files) {
        is no tap to infer from -- Water Lock makes the watch untappable mid-swim, which is why this
        is declared-only and the auto path goes through detectSwim further down. */
     let isSwim = /^(swim|swimming)$/.test(userSport);
+    /* Skiing is the first sport that is NEITHER GPS-moving nor stationary, and which of the two it
+       is depends on the VENUE rather than on the sport. Outdoors it has a perfectly ordinary GPS
+       ride window and takes the ordinary path; under a snow dome's roof it has none and would
+       otherwise fall through to the "No GPS in this recording" error. So it is not listed with the
+       stationary sports below -- the branch that catches it sits after GPS window detection has
+       been given its chance, which is the one place the venue split is decided.
+       DECLARED ONLY, deliberately: `detectSport` cannot help (see the comment on its speed gate --
+       a skier and a rider are indistinguishable by GPS speed), and there is no ski tap chip to
+       infer from the way a lift or a club infers. */
+    const isSki = isSkiSport(userSport);
 
     /* phoneStartUTC is parsed up at the FIT track repair now (the repair needs the same sync this
        used to be the only consumer of), so it is already in scope here. */
@@ -14532,6 +14580,21 @@ async function analyze(files) {
         if (stationary === 'golf') { isGolf = true; ride = spanRide; }
         else if (stationary === 'weightlifting') { isLift = true; ride = spanRide; }
         else if (stationary === 'swimming') { isSwim = true; ride = spanRide; }
+        /* INDOOR SKIING: a declared ski session that found no GPS window is under a roof. It gets a
+           refusal naming the actual limit rather than the generic "no GPS" advice below, which
+           would tell a skier to relabel their session as a lift.
+
+           It REFUSES rather than rendering, and that is deliberate. `analyzer/sports/ski/` can
+           already read this recording -- it segments laps from the barometer alone -- but every
+           constant in it is reasoned from published venue geometry and from sensor noise measured
+           OUTDOORS, and it is graded against synthetic fixtures the author wrote. Rendering that to
+           a skier would put an ungraded detector in front of a person, which is the one thing the
+           module's own header says not to do. Its own tests assert a known false positive (walking
+           down a dome's staircase reads as a run). See ski-tracker-spec.md section 13.6 for the two
+           recordings that would lift this, and 13.7 for the port that would then wire it. */
+        else if (isSki) {
+          throw new Error('No GPS in this recording, so this looks like an indoor ski session — under a dome’s roof GPS cannot get a fix. Loam can read the lap structure of an indoor session from the barometer, but that detector has never been graded against a real recording, so it is not shown yet. An OUTDOOR ski day analyzes normally.');
+        }
         else if (!sensors.location.length) {
           /* Two different situations reach this line and they want opposite advice, which the single
              old message could not give: it told everybody to "pick Weightlifting or Golf", so a
@@ -14592,6 +14655,11 @@ async function analyze(files) {
       ? { sport: 'weightlifting', confidence: 1, reasons: ['declared or Set-tap-labeled lift'] }
       : isSwim
       ? { sport: 'swimming', confidence: 1, reasons: ['declared swim, or detectSwim on a stationary phone'] }
+      /* Declared only. Short-circuited here so the geek-stats dump does not report "mtb, confidence
+         1" on a session the athlete has explicitly labelled as skiing -- which is what detectSport
+         returns for any real ski day, and the reason this sport had to be wired at all. */
+      : isSki
+      ? { sport: 'skiing', confidence: 1, reasons: ['declared ski'] }
       : detectSport(sensors, ride);
     /* Auto: prefer detected sport. If unknown, default to running, since MTB needs a stable
        body-frame, which would silently produce garbage on a non-MTB recording, while the
@@ -14816,7 +14884,11 @@ async function analyze(files) {
     }
 
     /* MTB path — needs gyro + still-window calibration. */
-    if (!sensors.gravity.length || !sensors.gyro.length) throw new Error('MTB analysis needs gravity + gyroscope channels');
+    /* Named for the ANALYSIS rather than for MTB: skiing reaches this same line, and a skier told
+       that "MTB analysis" needs a channel they do not have has been handed a message about someone
+       else's sport. Both sports are read from the body frame, which is what actually needs these. */
+    if (!sensors.gravity.length || !sensors.gyro.length)
+      throw new Error(`${sportLex(sport).activity} analysis reads turns and lean from the body frame, so it needs the gravity and gyroscope channels; this recording has neither.`);
 
     onProgress('finding calibration window');
     const calibWin = findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy);
@@ -24065,6 +24137,42 @@ function coachSystemPrompt(sport, level, metric, source) {
      is threaded from the digest at both call sites rather than defaulted here. */
   if (isSwimSport(sport)) return LoamSwim.swimCoachPrompt(level, source);
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
+  /* SKIING. It reuses the MTB READS -- descents, body-frame turns, lean off the gravity vector --
+     because a ski run and an MTB descent are the same measurement, but it must not reuse the MTB
+     LANGUAGE, which is about berms, brakes and a bike underneath the rider. Without this branch a
+     declared ski day fell through to `sportName = 'mountain biking'` and got coached on braking
+     into corners.
+     THE CAVEAT BLOCK IS THE POINT. A phone on the torso cannot see the one thing ski coaching is
+     actually about: what the SKIS are doing. Edge angle, ski-to-ski pressure distribution and
+     fore/aft balance are Carv's headline metrics and they are measured at the BOOT; nothing here
+     observes them, and a coach that names them would be inventing the sport's core reads. Same
+     rule as the jump entry and the crash card: describe what changed, name no cause, set no
+     target. */
+  if (isSkiSport(sport)) {
+    return `You are Loam, an expert ski coach reading sensor-derived metrics from a single alpine ski day recorded with a phone worn on the body (plus, when present, an Apple Watch and AirPods). Turn them into specific, honest, actionable coaching.
+
+Method - for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies about the skiing.
+3. Action: give one concrete cue or drill for the next run.
+
+What the numbers here are:
+- A RUN is a descent between lift rides. Lift rides are detected and excluded from the riding stats, so distance, speed and time describe skiing rather than sitting on a chair.
+- Turn count, turn rate and left/right balance come from the phone's body-frame yaw rate. They are the same measurement the mountain-bike pipeline makes, and they are trustworthy as COUNTS and RHYTHM.
+- Apex radius is speed divided by turn rate at the tightest point. It describes the ARC the skier travelled, not the arc the skis carved.
+- Lean is the roll of the PHONE against gravity, so it describes how far the torso tipped into the turn.
+
+${units}
+
+WHAT THIS DATA CANNOT SEE, and you must never claim:
+- EDGE ANGLE. Nothing here measures how far the skis are tipped. Torso lean is not edge angle -- a skier can angulate hard with a quiet upper body, or lean the whole body in with almost no edge. Never report or imply an edge angle.
+- SKI PRESSURE, weight distribution between the skis, or fore/aft balance. Those are measured at the boot and this recording has no boot sensor.
+- CARVING vs SKIDDING. That distinction needs to know whether the ski tracked its own arc, which needs the ski. A small radius is not evidence of a carve.
+- Which ski was the outside ski, terrain type, snow condition, or whether a turn was well or badly executed.
+Do not substitute a proxy for any of these and do not hedge your way into naming them anyway. If the skier asks about edge angle or pressure, say plainly that this setup cannot measure it and name what it can.
+
+Tone: direct, specific, encouraging. Cite numbers. One or two priorities, not a list. Never invent a metric that is not in the data.`;
+  }
   if (isGolfSport(sport)) {
     return `You are Loam, an expert golf coach reading sensor-derived metrics from a single driving-range session (Apple Watch on the lead wrist, AirPods in, phone in a pocket). Turn them into specific, honest, actionable coaching.
 
@@ -25265,6 +25373,7 @@ function buildSectionNav() {
 }
 
 function renderAll(D) {
+  const rSport = renderPathSport(D.sport);
   _lastRender = { fn: renderAll, D };
   hideAllSections();
   { const ct = document.getElementById('carryLabel'); if (ct) ct.classList.add('hidden'); }
@@ -25283,9 +25392,9 @@ function renderAll(D) {
   renderFitRepairNotice(D);
   renderCalibNotice(D);
   renderEmtbNotice(D);
-  renderRideSignature(D, 'mtb');
+  renderRideSignature(D, rSport);
   renderStats(D.summary, D.hasFit);
-  renderCoachHighlights(D, 'mtb');
+  renderCoachHighlights(D, rSport);
   renderCrashSection(D);
   renderMap(D.sensors.location, D.turns, D.ride, D.ridingJumps, D.crashes);
   renderTimeline(D.t, D.yawSeg, D.sensors.location, D.turns, D.ride, D.fitInRide, D.ridingJumps, D.crashes);
@@ -25298,9 +25407,9 @@ function renderAll(D) {
   if (D.fitInRide && D.fitInRide.length) { show('fitDataSection'); renderFitChart(D.fitInRide, D.ride); renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
   currentRide = D.ride;
   renderRunsPanel(D);
-  renderGeekStats(D, 'mtb');
-  renderCoachPanel(D, 'mtb');
-  updateAttachFitVisibility('mtb', D.hasFit);
+  renderGeekStats(D, rSport);
+  renderCoachPanel(D, rSport);
+  updateAttachFitVisibility(rSport, D.hasFit);
   buildSectionNav();
 }
 
@@ -29329,7 +29438,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '42511aefb · 2026-09-01';
+const LOAM_BUILD = 'a2ddd81ae · 2026-09-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
