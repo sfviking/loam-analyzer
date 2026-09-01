@@ -15991,7 +15991,7 @@ function renderCrossRide({ perRide, clusters }) {
            line supposed to be flat"). */
         const turnCounts = turnMembers.map(m => m.turns.length);
         const turnNote = note + (new Set(turnCounts).size > 1
-          ? `<br><span style="font-size:11px">these laps detected ${turnCounts.join(' vs ')} corners &mdash; lined up in order, so corner N is not the same corner on every lap</span>`
+          ? `<br><span style="font-size:11px">these laps detected ${turnCounts.join(' vs ')} corners — lined up in order, so corner N is not the same corner on every lap</span>`
           : '');
         loamPlot(`crossTurnChart_${ci}`, turnTraces, {
           paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
@@ -21573,18 +21573,56 @@ function rerenderUnits() { if (_lastRender) _lastRender.fn(_lastRender.D); }
 /* Save the chart as a PNG. On the desktop web page this is a normal browser download. Inside the iOS
    app (WKWebView) a normal download silently vanishes (the web view has no download handler), so when
    embedded we hand the PNG to the native side over the existing `loam` message bridge, which presents
-   a share sheet (Save to Photos / Files). The desktop path is unchanged. */
+   a share sheet (Save to Photos / Files). The desktop path is unchanged.
+
+   A failure here is REPORTED rather than swallowed, and that is the half of the 2026-08-31 report
+   that outlives its cause. `Plotly.toImage` rejects for reasons that have nothing to do with the
+   button -- an entity Plotly cannot decode is one (see loamPlotText), and it will not be the last
+   thing that makes an exported SVG unparseable -- and both arms of this function used to end in an
+   empty catch. So the rider tapped Save snapshot, the tooltip stayed up, and NOTHING happened, with
+   no way to tell a broken save from a save that had quietly worked. One line of "it failed" is not
+   a fix for anything, but it is the difference between a bug and a mystery. */
+function loamChartSaveFailed() {
+  setStatus('Chart snapshot failed');
+  /* alert() rather than the status line alone: the page header is not sticky, so a rider deep in
+     the results who taps a chart's camera would never see a message up there -- which is the exact
+     silence being fixed. The app bridges alert() to a native dialog (see AnalyzerWebView's
+     runJavaScriptAlertPanelWithMessage), so both hosts show it. */
+  try { alert('This chart could not be turned into a picture, so nothing was saved. Other charts on this page should still save.'); } catch (e) {}
+}
 function loamSaveChart(gd) {
-  const filename = 'loam-chart.png';
+  /* One file per chart per session, for the reason loamCardFilename states for the share cards: the
+     iOS share sheet writes the PNG to a temp path named by this, and every chart in the app used to
+     share out as `loam-chart.png`, so two snapshots collided on one path and neither said which
+     chart it was once it landed in Photos. The graph div's id is what distinguishes them. */
+  const slug = String((gd && gd.id) || 'chart').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+  /* The recording's own clock where this render has one, so a session's charts file together; the
+     library comparison views have no loaded recording and fall back to the export time, which
+     loamCardFilename already handles and which still gives every chart a distinct name. */
+  const when = (() => {
+    try { return parseUTCFromFilename((_lastRender && _lastRender.D && _lastRender.D.title) || ''); }
+    catch (e) { return null; }
+  })();
+  const filename = loamCardFilename('chart-' + (slug || 'chart'), when);
   const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
     && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam;
-  if (embedded && window.Plotly && Plotly.toImage) {
-    Plotly.toImage(gd, { format: 'png', scale: 2 })
-      .then(dataURL => { try { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename }); } catch (e) {} })
-      .catch(() => {});
-  } else if (window.Plotly && Plotly.downloadImage) {
-    Plotly.downloadImage(gd, { format: 'png', scale: 2, filename: 'loam-chart' });
-  }
+  /* try/catch AND .catch: the export can fail synchronously (Plotly not loaded, a graph div it will
+     not clone) or asynchronously (the SVG the browser refuses to decode, which is the reported one),
+     and only one path reported anything before. */
+  try {
+    if (embedded && window.Plotly && Plotly.toImage) {
+      Plotly.toImage(gd, { format: 'png', scale: 2 })
+        .then(dataURL => { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename }); })
+        .catch(loamChartSaveFailed);
+    } else if (window.Plotly && Plotly.downloadImage) {
+      /* downloadImage returns a promise too, and it goes through the same toImage machinery, so the
+         web path fails in exactly the same places the embedded one does. */
+      Promise.resolve(Plotly.downloadImage(gd, { format: 'png', scale: 2, filename: filename.replace(/\.png$/, '') }))
+        .catch(loamChartSaveFailed);
+    } else {
+      loamChartSaveFailed();
+    }
+  } catch (e) { loamChartSaveFailed(); }
 }
 
 /* One file per session per SPORT, so two cards can never collide on the same temp path (the iOS
@@ -21671,6 +21709,60 @@ const PLOT_CFG = {
    default dragmode captures a vertical swipe as a zoom-box drag, so the results page cannot be
    scrolled past a chart; dragmode:false hands the swipe back to the page while taps (plotly_click
    pinning) and the modebar save button keep working. Desktop keeps drag-zoom. */
+/* ---------- Text handed to Plotly ----------
+   Plotly's own entity table is exactly eight lowercase names -- mu, amp, lt, gt, nbsp, times,
+   plusmn, deg -- plus numeric references (`&#8212;`, `&#x2014;`). Read it out of the shipping
+   bundle, don't infer it: `Lib.svgTextUtils` maps that set and passes EVERY other named entity
+   through verbatim.
+
+   Verbatim is the whole problem, because it survives into the SVG that `Plotly.toImage` hands to an
+   `Image`, where it is an UNDEFINED XML ENTITY. Measured on the vendored plotly-2.35.2 with a title
+   of `Apex &mdash; x`: the exported SVG still contains `&mdash;`, XML parsing of it fails with
+   "Entity 'mdash' not defined", and the image errors -- on the `data:image/svg+xml` path Safari and
+   WKWebView take AND on the blob path every other browser takes, so this is not a WebKit quirk and
+   a desktop browser reproduces it exactly.
+
+   That is a DEAD "Save snapshot" button, and the entity showing as text on the chart is the only
+   hint you get (owner report, 2026-08-31, on the cross-ride "Apex speed by corner" chart, whose
+   subtitle carried an `&mdash;`: "Apex save snapshot doesn't let me save or share"). Nothing else
+   about the chart misbehaves -- it draws, it scrubs, it hovers -- so the two symptoms read as
+   unrelated, one cosmetic and one a broken button, when they are one character.
+
+   So decode, at the one boundary every chart already passes through, the entities Plotly CANNOT --
+   and leave its eight alone, since rewriting `&amp;` here would change what Plotly renders. The
+   browser's own table does the decoding, so this needs no list of its own to fall out of date;
+   a name it does not know is left exactly as written, which is what Plotly does with it too.
+
+   The single-code-point test is not a formality. HTML's legacy entity matching resolves the longest
+   PREFIX, so `&notit;` comes back as `¬it;` -- a silent corruption of text that was never an entity.
+   Every entity this file has any use for (mdash, larr, rarr, middot, hellip, bull, minus, uarr,
+   darr, omega, Delta) is one code point, and a legacy prefix match always leaves the tail behind,
+   so requiring exactly one rejects that whole class. A rejected name stays literal and the E2E
+   snapshot guard catches it, which is the failure this is willing to have. */
+const PLOTLY_KNOWN_ENTITIES = new Set(['mu', 'amp', 'lt', 'gt', 'nbsp', 'times', 'plusmn', 'deg']);
+const _entityCache = new Map();
+function loamDecodeEntity(name) {
+  if (_entityCache.has(name)) return _entityCache.get(name);
+  const el = document.createElement('div');
+  /* An innerHTML sink, and a safe one: `name` is only ever a `[A-Za-z][A-Za-z0-9]*` capture from the
+     caller's regex, so it cannot carry `<`, `>`, a quote or an `&`, and the node is never attached to
+     the document. Named rather than left to be re-derived, because this page's standing rule is that
+     user text does not reach an HTML sink and the next reader will (rightly) stop here. */
+  el.innerHTML = '&' + name + ';';
+  const t = el.textContent;
+  /* [...t] counts CODE POINTS, not UTF-16 units, so an astral entity is one and not two. */
+  const out = (t && t !== '&' + name + ';' && [...t].length === 1) ? t : null;
+  _entityCache.set(name, out);
+  return out;
+}
+function loamPlotText(s) {
+  if (s.indexOf('&') < 0) return s;
+  return s.replace(/&([a-zA-Z][a-zA-Z0-9]*);/g, (m, name) => {
+    if (PLOTLY_KNOWN_ENTITIES.has(name)) return m;
+    return loamDecodeEntity(name) || m;
+  });
+}
+
 /* ---------- Chart theme (Field Instrument) ----------
    Every chart in the file was hand-rolled against the same light-theme hex
    literals, so instead of editing ~14 layout objects, loamPlot translates the
@@ -21717,7 +21809,12 @@ function loamChartTheme() {
 function loamThemeValue(v, M) {
   if (typeof v === 'string') {
     const k = v.toLowerCase();
-    return Object.prototype.hasOwnProperty.call(M, k) ? M[k] : v;
+    if (Object.prototype.hasOwnProperty.call(M, k)) return M[k];
+    /* Folded into the walk this function already makes rather than given a second pass of its own:
+       it visits every string in the traces and the layout, which is exactly the set Plotly renders
+       into SVG text (titles, axis titles, trace names, tick text, hover templates). A string with no
+       `&` returns immediately, so the data arrays cost nothing. */
+    return loamPlotText(v);
   }
   if (Array.isArray(v)) return v.map((x) => loamThemeValue(x, M));
   /* Recurse into plain objects only: typed arrays, Dates, and other exotic
@@ -29170,7 +29267,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '283c402d0 · 2026-08-31';
+const LOAM_BUILD = '048ec906d · 2026-08-31';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
