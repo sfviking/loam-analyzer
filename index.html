@@ -258,6 +258,8 @@
   }
   .descent-row-actions button:hover { color: var(--text); border-color: var(--accent); }
   .descent-row-actions button.primary { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+  /* The note a tagged run shows in place of "Compare laps" until a second lap exists. */
+  .descent-row-actions .run-laps { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-right: 8px; }
   /* Numbers and action labels never wrap mid-value; the run name is the one cell allowed to. On a
      width where nowrap overflows (small landscape), the wrapper's overflow-x takes over. */
   #runsTable td:not(.run-name), #runsTable th { white-space: nowrap; }
@@ -549,10 +551,9 @@
   /* Beats the accent colour #runsTable tbody tr.opens-detail .run-name sets on drillable rows. */
   #runsTable tbody tr .run-name[data-skipped],
   #runsTable tbody tr.opens-detail .run-name[data-skipped] { color: var(--text-muted); }
-  .focus-hint { font-size: 11px; color: var(--text-muted); text-transform: none; letter-spacing: 0; }
-  /* The hint explains the checkbox next to it and is the first thing to go when the row is tight:
-     at phone width it wraps to a second line of its own and pushes everything below it down. */
-  @media (max-width: 640px) { .focus-hint { display: none; } }
+  /* Set by updateFocusHint: "· 3 hidden" while Focused view is on, so the default-on toggle never
+     removes a section silently. Short enough to share the phone row with the Options button. */
+  .focus-hint { font-size: 11px; color: var(--text-muted); text-transform: none; letter-spacing: 0; white-space: nowrap; }
   #analyzeAnotherBtn, #attachFitBtn { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; font-family: inherit; font-size: 12px; cursor: pointer; }
   #analyzeAnotherBtn:hover, #attachFitBtn:hover { border-color: var(--accent); color: var(--accent); }
   /* In the embedded WKWebView there is no dropzone to return to, so hide the reset. */
@@ -673,6 +674,10 @@
   }
   .section-nav button:hover { border-color: var(--accent); color: var(--accent); }
   .section-nav button.nav-compare { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  /* Scroll-spy: the chip whose section is on screen. */
+  .section-nav button.current { background: color-mix(in srgb, var(--accent) 22%, var(--surface-2)); border-color: var(--accent); }
+  /* The Focused-view escape hatch: reveals the detail sections and scrolls to the first of them. */
+  .section-nav button.nav-more { border-style: dashed; color: var(--text-muted); }
 
   /* Rotate hint for the chart-heavy sections. Display is off in the base rule and only turned on
      inside the media query, so the default for every context that is NOT a phone held upright is
@@ -778,6 +783,10 @@
     .section-nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
     .section-nav::-webkit-scrollbar { display: none; }
     .section-nav button { flex: 0 0 auto; }
+    /* The replay toolbar (play, scrubber, speed, kit) overflowed a 390px phone and cut its last
+       control off at the right edge; the scrubber takes a line of its own below the buttons. */
+    .ghost-controls { flex-wrap: wrap; row-gap: 8px; }
+    .ghost-controls input[type=range] { flex: 1 1 100%; min-width: 0; order: 9; }
     #runsTable, #runsTable tbody { display: block; }
     #runsTable thead { display: none; }
     #runsTable tbody tr { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px 8px; padding: 13px 14px 15px; border-bottom: 1px solid var(--border); }
@@ -1068,6 +1077,17 @@
     color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 12px;
   }
   .mount-notice strong { color: var(--accent-4); font-weight: 600; }
+  /* The reasoning half of a notice, folded behind one tap (see noticeFold). */
+  .notice-more { display: block; margin: 8px 0 0; font-size: 12.5px; }
+  .notice-more summary {
+    cursor: pointer; list-style: none; display: inline-block;
+    color: var(--accent-4); font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .notice-more summary::-webkit-details-marker { display: none; }
+  .notice-more summary::before { content: '+ '; }
+  .notice-more[open] summary::before { content: '\2212 '; }
+  .notice-more p { margin: 6px 0 0; color: var(--text-muted); line-height: 1.5; }
   /* Session pacing verdict, sitting above the splits it is computed from. Deliberately a line of
      prose rather than a tile: it is one sentence about the whole run, and a big number would imply
      more precision than a first-half-versus-second-half comparison of six splits carries. */
@@ -1136,15 +1156,28 @@
   .badge.fit { background: rgba(109,167,196,0.15); color: var(--accent-3); }
   .badge.phone { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 
+  /* Neutral disc, status on the RING only. The fill used to encode left/right in amber vs moss --
+     the same hue family the ring uses for scrubbed/held/carried -- so a moss left-hander read as
+     "carried" (session-analysis-ux-review, map dimension). Direction is written on the marker. */
   .turn-marker {
-    background: var(--accent); color: var(--on-accent); border: 2px solid var(--bg);
+    background: #20291b; color: #f1f5f9; border: 2px solid rgba(255,255,255,0.85);
     border-radius: 50%; width: 26px; height: 26px;
     display: flex; align-items: center; justify-content: center;
     font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 10px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.5);
   }
-  .turn-marker.left { background: var(--accent-2); }
+  .turn-marker .tm-dir { font-size: 8px; font-weight: 500; opacity: 0.8; margin-left: 1px; }
   .turn-marker.highlight { transform: scale(1.4); z-index: 1000 !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent); }
+  /* Crowded markers: at whole-ride zoom on a loop-heavy trail the numbered discs pile into one blob
+     (84 markers on a 358px-wide map, measured). A marker whose nearest neighbour is closer than
+     TURN_MARKER_DENSE_PX collapses to a dot that keeps its ring colour (updateTurnMarkerDensity,
+     per marker rather than per map, so the isolated corners on the same trail keep their numbers);
+     zooming in restores the rest, and a highlighted (tapped) corner is drawn full size whatever its
+     neighbours. The margin re-centres the smaller dot inside Leaflet's fixed 26px icon box. */
+  .turn-marker.tm-dot { width: 10px; height: 10px; margin: 7px; font-size: 0; border-width: 1px; outline-width: 2px !important; }
+  .turn-marker.tm-dot .tm-dir { display: none; }
+  .turn-marker.tm-dot.highlight { width: 26px; height: 26px; margin: 0; font-size: 10px; border-width: 2px; outline-width: 3px !important; }
+  .turn-marker.tm-dot.highlight .tm-dir { display: inline; }
 
   .map-legend {
     font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted);
@@ -1860,7 +1893,7 @@
        "Options" (see .results-controls in the stylesheet for why). -->
   <div class="results-controls">
     <button id="backToCompareBtn" type="button" class="hidden" title="Return to the cross-ride comparison" onclick="backToCompare()">&larr; Back to comparison</button>
-    <label class="focus-toggle"><input type="checkbox" id="focusToggle" checked onchange="document.getElementById('results').classList.toggle('focus-mode', this.checked); buildSectionNav(); setTimeout(() => window.dispatchEvent(new Event('resize')), 60);"> Focused view <span class="focus-hint">on: the essentials · off: every chart &amp; table</span></label>
+    <label class="focus-toggle"><input type="checkbox" id="focusToggle" checked onchange="document.getElementById('results').classList.toggle('focus-mode', this.checked); buildSectionNav(); setTimeout(() => window.dispatchEvent(new Event('resize')), 60);"> Focused view <span class="focus-hint"></span></label>
     <button id="switchRideBtn" type="button" title="Switch to another recent ride without leaving this view" onclick="openRideSwitcher()">&#9776; Switch ride</button>
     <button id="analyzeAnotherBtn" type="button" title="Analyze a different ride">+ Analyze another</button>
     <button id="attachFitBtn" type="button" class="hidden" title="Attach a Specialized/Garmin FIT to this ride for jumps + wheel speed">+ Attach FIT</button>
@@ -2107,7 +2140,7 @@
   <section id="turnSection">
     <div class="section-title">
       Per-turn metrics
-      <span class="subtitle"><span id="turnCountLabel">0</span> turns detected · hover any row to highlight on map</span>
+      <span class="subtitle"><span id="turnCountLabel">0</span> turns detected · tap a row to see it on the map</span>
       <span id="turnFilterTag" class="hidden"></span>
       <select id="ledgerSortSel" title="Order of the corner ledger" style="margin-left:auto;">
         <option value="scrub">Most scrubbed first</option>
@@ -2499,7 +2532,7 @@
   <div class="seg-grid">
     <div class="seg-map-col">
       <div id="segMap"></div>
-      <div class="map-legend">turn ring = speed kept: <span class="lg scrub"></span>scrubbed <span class="lg held"></span>held <span class="lg carry"></span>carried · track colour = speed · hover a corner row</div>
+      <div class="map-legend">turn ring = speed kept: <span class="lg scrub"></span>scrubbed <span class="lg held"></span>held <span class="lg carry"></span>carried · track colour = speed · tap a corner row</div>
     </div>
     <div class="panel corner-ledger" id="segLedger"></div>
   </div>
@@ -5668,9 +5701,16 @@ function drawRuns() {
       title="${skipHint}" aria-label="${skipHint}">${skipped ? '↩' : '⊘'}</button>`;
     let actions = '';
     if (r.src) {
+      /* A tag with fewer than two laps in the library gets a quiet note instead of the primary
+         button, because the button's only possible outcome there is the alert compareWithPastLaps
+         raises for the same case (see matchDescentToTags for where the count comes from). */
+      const laps = r.src.autoTag && r.src.autoTag.laps;
+      const canCompare = !r.src.autoTag || laps == null || laps >= 2;
       actions = r.src.autoTag
-        ? `<button data-act="compare" data-idx="${r.n - 1}" class="primary">Compare laps</button>
-           <button data-act="tag" data-idx="${r.n - 1}">Retag</button>`
+        ? (canCompare
+            ? `<button data-act="compare" data-idx="${r.n - 1}" class="primary">Compare laps</button>`
+            : `<span class="run-laps" title="Compare laps needs two laps of this segment in your library">${laps === 1 ? '1 lap · ' : ''}${sportLex(displaySport(D)).ctaVerb} it again to compare</span>`)
+          + `<button data-act="tag" data-idx="${r.n - 1}">Retag</button>`
         : `<button data-act="tag" data-idx="${r.n - 1}">Tag as…</button>`;
     }
     const metricCells = showTurns
@@ -5886,7 +5926,7 @@ function syncSegTurnMarkers(shown) {
     if (!p) continue;
     const icon = L.divIcon({
       className: '',
-      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnRingColor(T)}; outline-offset:1px;">${T.n}</div>`,
+      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${turnRingColor(T)}; outline-offset:1px;">${T.n}<span class="tm-dir">${T.direction === 'L' ? 'L' : 'R'}</span></div>`,
       iconSize: [26, 26], iconAnchor: [13, 13]
     });
     const mk = L.marker([p.latitude, p.longitude], { icon }).addTo(_segMarkers);
@@ -6700,7 +6740,7 @@ async function setupPlayByPlay(allRuns, D) {
   const comparable = runs.filter(r => refOf.has(r.n));
   if (!comparable.length) {
     sel.classList.add('hidden');
-    body.innerHTML = `<div class="dim" style="font-size:13px;">No lap to compare yet. The turn-by-turn lines up two laps of the same trail: repeated laps in this ${sportNoun(displaySport(D))}, or, once you tag a trail and ${sportLex(displaySport(D)).ctaVerb} it again, your fastest lap from a past ${sportNoun(displaySport(D))}. Then it shows where you gained or lost time on each turn.</div>`;
+    body.innerHTML = `<div class="dim" style="font-size:13px;">No lap to compare yet. Ride the same trail twice in one ${sportNoun(displaySport(D))}, or tag a trail and ${sportLex(displaySport(D)).ctaVerb} it again, and this lines up the two laps corner by corner.</div>`;
     return;
   }
   sel.classList.remove('hidden');
@@ -9809,6 +9849,17 @@ async function matchDescentToTags(descent) {
       best = { taggedSegmentId: tag.id, name: tag.name, matchDistance: avg };
     }
   }
+  /* How many laps the library holds for the matched tag, so the runs panel can offer "Compare laps"
+     only when there is something to compare. It used to render the primary button on every tagged
+     run and answer a first tag with a blocking alert ("Only 1 ride in your library contains ...") --
+     a system dialog in the WKWebView as the first reward for tagging. Best-effort: a count that
+     cannot be read leaves the button in place, which is the old behaviour. */
+  if (best) {
+    try {
+      const tag = tagged.find(t => t.id === best.taggedSegmentId);
+      if (tag) best.laps = buildTagMembers(tag, await listRides()).length;
+    } catch (e) { /* the button stays */ }
+  }
   return best;
 }
 
@@ -9824,7 +9875,7 @@ function descentPolyline(sensors, descent) {
    data (decimated polyline + 1Hz speed). Heavy raw IMU stays out. Also runs
    tag matching so the saved record carries autoTag hints. Returns the inserted
    ride id (Number) so the UI can refer to it for future tagging actions. */
-async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey }) {
+async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey, turnSidesUnreliable }) {
   /* Build descent list with polylines + speed for every recording, not just
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
      net-drop floor; running keeps every graded segment (hill repeats are short).
@@ -9936,13 +9987,26 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
     /* Compact per-ride mechanics for the Progress dashboard's career trends (median apex radius, lean
        symmetry). Computed here so the trend has real body-motion signal, not just volume/speed. Only
        for MTB rides that carry turns; older rides simply lack it and are skipped in the trend. */
+    /* The lean fields are SIDE claims, so this asks the same question the notice, the Sides tile and
+       the coach digest ask, through the same funnel: a body frame twisted sideways manufactures a
+       left/right difference (47L/38R measured as 23L/43R at 30 deg of lateral tilt), and a documented
+       46% of real recordings calibrate from a post-ride window at a median 32.9 deg of it. Passing
+       the flag makes `turnMechanics` withhold `lean_asymmetry` entirely, so `leanGapDeg` and
+       `weakerSide` come out null and the Progress trend has nothing to plot for that ride -- which is
+       the point. Without it this was the fourth surface still storing the weaker-side verdict the
+       2026-08-30 pass removed from the other three, and PERSISTING it, where a rendered claim at
+       least disappears on the next analysis. `turnSidesUnreliable` is recorded so a later reader can
+       tell "this ride was checked and withheld" from "this ride predates the check". */
     mechanics: (isMtbFamily(sport) && turns && turns.length) ? (() => {
-      const mech = (typeof turnMechanics === 'function') ? turnMechanics({ turns }) : null;
+      const sidesBad = !!turnSidesUnreliable;
+      const mech = (typeof turnMechanics === 'function')
+        ? turnMechanics({ turns, turnSidesUnreliable: sidesBad }) : null;
       return {
         medianRadiusM: summary && summary.medianRadius != null ? summary.medianRadius : null,
         leanGapDeg: mech && mech.lean_asymmetry ? mech.lean_asymmetry.gap_deg : null,
         weakerSide: mech && mech.lean_asymmetry ? mech.lean_asymmetry.weaker_side : null,
         scrubbedTurns: mech && mech.braking ? mech.braking.scrubbed_turns : null,
+        turnSidesUnreliable: sidesBad,
       };
     })() : null,
     descents,
@@ -15335,6 +15399,10 @@ async function analyze(files) {
     const saved = await saveRideToLibrary({
       filename: sensorFile.name, sport, sensors, ride, summary,
       turnCount: turns.length, jumpCount: ridingJumps.length, contentKey: contentHash, turns, analysisKey: cacheKey,
+      /* Computed at the CALL SITE, the arrangement the coach digest already uses, so the pinned
+         `turnMechanics` keeps reading a finished field. This is the only saveRideToLibrary caller
+         that passes `turns`, and therefore the only one that stores mechanics at all. */
+      turnSidesUnreliable: dTurnSidesUnreliable({ sensors, R, ride }),
     });
     if (superseded()) return;
     onProgress('rendering');
@@ -16506,7 +16574,7 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTa
     for (const c of (corners || [])) {
       const icon = L.divIcon({
         className: '',
-        html: `<div class="turn-marker ${c.dir === 'L' ? 'left' : ''}" style="outline:3px solid ${c.ring}; outline-offset:1px;">${c.n}</div>`,
+        html: `<div class="turn-marker ${c.dir === 'L' ? 'left' : ''}" style="outline:3px solid ${c.ring}; outline-offset:1px;">${c.n}<span class="tm-dir">${c.dir === 'L' ? 'L' : 'R'}</span></div>`,
         iconSize: [26, 26], iconAnchor: [13, 13],
       });
       const mk = L.marker([c.lat, c.lon], { icon, zIndexOffset: 400 }).addTo(map);
@@ -16617,8 +16685,19 @@ function durTileHTML(sec) {
    are getting faster / tighter / more symmetric across the whole library, not just this ride. Volume
    and speed come from stored summaries; the body-mechanics trends (median apex radius, lean symmetry)
    come from the per-ride `mechanics` written at save time (older rides lack it and are skipped). */
+/* Everything that renders OUTSIDE #results: the coach panel is a top-level sibling of it, the trim
+   bar sits above it, and the three stationary sports render into hosts of their own. Hiding
+   #results alone left the previous session's coach panel and trim bar sitting on top of the
+   Progress page (and of the dropzone after "Analyze another"). */
+function hideOutOfResultsSurfaces() {
+  for (const id of ['coachSection', 'cropSection', 'sampleRateNotice', 'miniSummary',
+                    'strengthResults', 'golfResults', 'swimResults']) {
+    const el = document.getElementById(id); if (el) el.classList.add('hidden');
+  }
+}
 async function openProgress() {
   hide('dropzone'); hide('results'); hide('crossResults'); hide('errorBox'); hide('loading');
+  hideOutOfResultsSurfaces();
   show('progressResults');
   window.scrollTo({ top: 0, behavior: 'smooth' });
   await renderProgress();
@@ -16634,20 +16713,62 @@ function closeProgress() {
    rides with no cached render simply stay blank in those two charts. */
 async function enrichRidesMechanics(rides) {
   await Promise.all(rides.map(async r => {
-    if (r.mechanics || !isMtbFamily(r.sport) || !r.dedupKey) return;
+    /* A ride whose stored mechanics predate the turn-sides check is re-derived too, not only one
+       with no mechanics at all: those records were written without asking whether the body frame
+       could tell left from right, so their lean gap and weaker side may be the artifact the check
+       exists to withhold. The cached analysis carries the gravity channel, the rotation and the ride
+       window, so the question is answerable from here and is asked exactly as a fresh analysis asks
+       it -- the rule renderCalibNotice already follows for a cache replay. */
+    const checked = r.mechanics && r.mechanics.turnSidesUnreliable != null;
+    if (checked || !isMtbFamily(r.sport) || !r.dedupKey) return;
     try {
       const c = await getCachedAnalysis(r.analysisKey || r.dedupKey);
       const D = c && c.data;
       if (!D || !Array.isArray(D.turns) || !D.turns.length) return;
-      const mech = (typeof turnMechanics === 'function') ? turnMechanics({ turns: D.turns }) : null;
+      const sidesBad = dTurnSidesUnreliable(D);
+      const mech = (typeof turnMechanics === 'function')
+        ? turnMechanics({ turns: D.turns, turnSidesUnreliable: sidesBad }) : null;
       r.mechanics = {
         medianRadiusM: (D.summary && D.summary.medianRadius != null) ? D.summary.medianRadius : null,
         leanGapDeg: mech && mech.lean_asymmetry ? mech.lean_asymmetry.gap_deg : null,
         weakerSide: mech && mech.lean_asymmetry ? mech.lean_asymmetry.weaker_side : null,
         scrubbedTurns: mech && mech.braking ? mech.braking.scrubbed_turns : null,
+        turnSidesUnreliable: sidesBad,
       };
     } catch (e) {}
   }));
+}
+/* The count of rides the lean trend cannot speak for, split by WHY, because the two are different
+   claims: a ride that was checked and withheld is one whose body frame provably could not tell left
+   from right (turnSidesUnreliable), and a ride that could not be checked is one saved before the
+   check existed whose analysis is no longer cached. Silence about either would leave the reader
+   treating a thinned line as the whole library. */
+function progLeanWithheld(dated) {
+  let withheld = 0, unchecked = 0;
+  for (const o of dated) {
+    const m = o.r && o.r.mechanics;
+    if (!m || m.leanGapDeg != null) continue;
+    if (m.turnSidesUnreliable === true) withheld++;
+    else if (m.turnSidesUnreliable == null) unchecked++;
+  }
+  return { withheld, unchecked };
+}
+function progLeanNoteText(dated) {
+  const el = document.getElementById('progLeanNote');
+  if (!el) return;
+  const { withheld, unchecked } = progLeanWithheld(dated);
+  const bits = [];
+  if (withheld) {
+    bits.push(`${withheld} ride${withheld > 1 ? 's are' : ' is'} missing from this line on purpose: `
+      + 'the phone sat twisted sideways relative to how it rode, which mixes the bike\'s roll into the '
+      + 'turn signal and can invent a left/right difference, so no side comparison is made for '
+      + (withheld > 1 ? 'those rides' : 'that ride') + '.');
+  }
+  if (unchecked) {
+    bits.push(`${unchecked} ride${unchecked > 1 ? 's were' : ' was'} saved before that check existed `
+      + 'and cannot be re-examined, so ' + (unchecked > 1 ? 'they are' : 'it is') + ' plotted as saved.');
+  }
+  el.textContent = bits.join(' ');
 }
 /* Fitness / fatigue / form model (Performance Management Chart) from stored per-ride TSS. Vendored
    from analyzer/sports/road/fitness-model.js; see it for the CTL/ATL/TSB definitions. */
@@ -16754,7 +16875,7 @@ async function renderProgress() {
   const chartsHost = document.getElementById('progressCharts');
   if (!dated.length) {
     sub.textContent = '';
-    headline.innerHTML = '<p style="color:var(--text-muted); font-size:13px;">No rides saved yet. Analyze a ride and it starts building your progress here.</p>';
+    headline.innerHTML = '<p style="color:var(--text-muted); font-size:13px;">No sessions saved yet. Analyze one and it starts building your progress here.</p>';
     chartsHost.innerHTML = '';
     renderProgressTrails();
     return;
@@ -16765,10 +16886,10 @@ async function renderProgress() {
   const totJumps = dated.reduce((s, o) => s + num(o.r, r => r.jumpCount), 0);
   const bestSpeed = dated.reduce((m, o) => Math.max(m, num(o.r, r => r.summary && r.summary.maxSpeed)), 0);
   const span = `${dated[0].d.toLocaleDateString()} - ${dated[dated.length - 1].d.toLocaleDateString()}`;
-  sub.textContent = `${dated.length} rides · ${span}`;
+  sub.textContent = `${dated.length} ${dated.length === 1 ? 'session' : 'sessions'} · ${span}`;
   const stat = (v, l) => `<div class="prog-stat"><div class="pv">${v}</div><div class="pl">${l}</div></div>`;
   headline.innerHTML = `<div class="prog-stats">`
-    + stat(dated.length, 'rides')
+    + stat(dated.length, 'sessions')
     + stat(U.dist(totDist), 'total distance')
     + stat(U.speed(bestSpeed), 'best top speed')
     + stat(totTurns, 'turns logged')
@@ -16786,12 +16907,19 @@ async function renderProgress() {
   chartsHost.innerHTML = fitnessBlock + `
     <div class="chart" id="progDist" style="height:260px; margin-bottom:16px;"></div>
     <div class="chart" id="progSpeed" style="height:260px; margin-bottom:16px;"></div>
-    <div class="chart detail-chart" id="progRadius" style="height:260px; margin-bottom:16px;"></div>
-    <div class="chart detail-chart" id="progLean" style="height:260px; margin-bottom:16px;"></div>`;
+    <div class="chart" id="progRadius" style="height:260px; margin-bottom:16px;"></div>
+    <div class="chart" id="progLean" style="height:260px; margin-bottom:4px;"></div>
+    <div id="progLeanNote" class="dim" style="font-size:12px; margin-bottom:16px;"></div>`;
   if (pmc.length) renderFitnessDashboard(pmc);
   // Local calendar day, matching the fitness (CTL/ATL/TSB) chart above: an evening ride west of UTC
   // must sit on the same x-axis day here as it does there, not one day later from toISOString().
   const x = dated.map(o => pmcDayKey(o.d));
+  /* A one-session library is a single point, and Plotly's auto-range around one date ticks in
+     sub-second steps ("23:59:59.99 May 23"). Pad the range to a week so the axis reads as dates. */
+  const xRange = dated.length >= 2 ? undefined : (() => {
+    const d = dated[0].d, day = 86400e3;
+    return [pmcDayKey(new Date(d.getTime() - 3 * day)), pmcDayKey(new Date(d.getTime() + 3 * day))];
+  })();
   const metric = (typeof U.metric === 'function') ? U.metric() : false;
   const line = (id, y, title, ytitle, color) => {
     const el = document.getElementById(id);
@@ -16801,16 +16929,21 @@ async function renderProgress() {
       paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
       title: { text: title, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
       margin: { l: 54, r: 16, t: 36, b: 44 },
-      xaxis: { type: 'date', gridcolor: '#e2e8f0' },
+      xaxis: { type: 'date', gridcolor: '#e2e8f0', tickformat: '%b %e', hoverformat: '%b %e, %Y', nticks: 6, range: xRange },
       yaxis: { title: { text: ytitle, font: { size: 11 } }, gridcolor: '#e2e8f0' },
     }, PLOT_CFG);
   };
   line('progDist', dated.map(o => o.r.summary && o.r.summary.distance != null ? +(o.r.summary.distance * (metric ? 0.001 : 0.000621371)).toFixed(2) : null),
-    'Distance per ride', metric ? 'km' : 'mi', '#6da7c4');
+    'Distance per session', metric ? 'km' : 'mi', '#6da7c4');
   line('progSpeed', dated.map(o => o.r.summary && o.r.summary.maxSpeed != null ? +U.speedNum(o.r.summary.maxSpeed).toFixed(1) : null),
-    'Top speed per ride', U.speedUnit(), '#e87b3d');
+    'Top speed per session', U.speedUnit(), '#e87b3d');
   line('progRadius', dated.map(o => o.r.mechanics && o.r.mechanics.medianRadiusM != null ? +U.smallNum(o.r.mechanics.medianRadiusM).toFixed(2) : null),
     'Median apex radius (lower = tighter cornering)', U.smallUnit(), '#8caa6d');
+  /* A gap in this line is a ride whose lean sides were WITHHELD, not a ride with no corners, and a
+     trend that thins itself without saying so is the same over-claim the corner chart was fixed for:
+     the reader takes the remaining points for the whole story. Named here rather than in the title,
+     because it is a fact about the library and changes as rides are added. */
+  progLeanNoteText(dated);
   line('progLean', dated.map(o => o.r.mechanics && o.r.mechanics.leanGapDeg != null ? o.r.mechanics.leanGapDeg : null),
     'Left/right lean gap (lower = more symmetric)', 'deg', '#a78bd9');
   renderProgressTrails();
@@ -20744,7 +20877,7 @@ function renderAllRunning(D) {
     cadence: pedCad,
     agreement: pedCadenceAgreement(D.summary && D.summary.cadMedian, pedCad),
   };
-  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo);
+  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo, sport);
   /* Walking gets the highlights card too (coach parity); the empty-guard hides it if no bullets. */
   renderCoachHighlights(D, sport);
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
@@ -22338,7 +22471,7 @@ function renderGeekStats(D, sport) {
   show('geekStatsSection');
 }
 
-function renderRunStats(s, detection, mount, ped) {
+function renderRunStats(s, detection, mount, ped, sport) {
   const fmt = (v, unit, d=1) => v == null ? '—' : `<span class="value">${v.toFixed(d)}<span class="unit">${unit}</span></span>`;
   /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
      Mark the number itself (~, muted) instead of relying only on the caption below. */
@@ -22408,6 +22541,14 @@ function renderRunStats(s, detection, mount, ped) {
   /* Heart rate, when the watch streamed it. Omitted entirely rather than shown as a dash: a run
      recorded without the watch has no HR to report, and an empty tile in the grid reads as a
      measurement that failed rather than a sensor that was not worn. */
+  /* Vertical oscillation is a RUNNING-form read (the bob of a flight phase). A walk has no flight
+     phase, so the tile captioned "peak-to-peak head/torso bob" described nothing; walks skip it. */
+  const oscTile = sport === 'walking' ? '' : `
+    <div class="stat accent2">
+      <div class="label">Oscillation</div>
+      ${oscVal}
+      <div class="sub">${oscHand ? 'hand carry · upper bound' : 'peak-to-peak head/torso bob'}</div>
+    </div>`;
   const hrTile = s.hrAvg == null ? '' : `
     <div class="stat accent2">
       <div class="label">Heart rate</div>
@@ -22420,11 +22561,7 @@ function renderRunStats(s, detection, mount, ped) {
       ${fmt(s.cadMedian, 'spm', 0)}
       <div class="sub">${cadSub}</div>
     </div>
-    <div class="stat accent2">
-      <div class="label">Oscillation</div>
-      ${oscVal}
-      <div class="sub">${oscHand ? 'hand carry · upper bound' : 'peak-to-peak head/torso bob'}</div>
-    </div>
+    ${oscTile}
     <div class="stat">
       <div class="label">Duration</div>
       <div class="value">${durTileHTML(movingSec)}</div>
@@ -22632,7 +22769,7 @@ function renderRunTimeline(D) {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 56, t: 32, b: 50 },
-    xaxis: { title: { text: 'time in run (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    xaxis: { title: { text: 'time in run', font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start) },
     /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
     yaxis: footSport
       ? { title: { text: `pace (${U.metric() ? 'min/km' : 'min/mi'})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' }, autorange: 'reversed' }
@@ -22643,7 +22780,25 @@ function renderRunTimeline(D) {
   };
   /* The timeline host is shared with the (taller) MTB ride timeline; pin this view's height. */
   document.getElementById('timelineChart').style.height = '320px';
-  loamPlot('timelineChart', traces, layout, PLOT_CFG);
+  loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
+    /* Re-tick on zoom/pan so the m:ss labels follow the visible range (see loamTimeTicks). The guard
+       stops the relayout issued here from re-triggering the handler. */
+    const chart = document.getElementById('timelineChart');
+    if (!chart || !chart.on) return;
+    let busy = false;
+    const retick = (lo, hi) => {
+      if (busy) return;
+      busy = true;
+      const tk = loamTimeTicks(lo, hi);
+      Plotly.relayout(chart, { 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext })
+        .then(() => { busy = false; }).catch(() => { busy = false; });
+    };
+    chart.on('plotly_relayout', (ev) => {
+      if (ev['xaxis.autorange']) retick(0, ride.end - ride.start);
+      else if (ev['xaxis.range[0]'] != null) retick(ev['xaxis.range[0]'], ev['xaxis.range[1]']);
+      else if (ev['xaxis.range']) retick(ev['xaxis.range'][0], ev['xaxis.range'][1]);
+    });
+  }).catch(() => {});
   linkTimelineToMap(D.sensors.location, ride);
 }
 
@@ -25715,6 +25870,32 @@ function declineEmtbPreference() {
   const sec = document.getElementById('emtbNotice');
   if (sec) sec.classList.add('hidden');
 }
+/* Fold a notice's REASONING behind one tap, keeping the instruction and the trust limit in view.
+   Same rule the app's ExpandableText follows (CLAUDE.md, "Help copy leads with the instruction and
+   folds the reasoning away"): on a phone the calibration and e-MTB notices stacked ~1,100px of prose
+   above the share card, and the part a rider can act on is one sentence of each. The fold sits on
+   the notice itself rather than inside the body span, so a re-render that resets the span's text
+   cannot leave a stale fold behind: any existing one is removed first. */
+function noticeFold(body, why) {
+  if (!body) return;
+  const host = body.parentNode;
+  if (!host) return;
+  /* Cleared BEFORE the `why` guard, so `noticeFold(body, '')` is how a branch that shows this notice
+     with no reasoning of its own says so. Hiding the notice does not clear it -- hideAllSections only
+     adds .hidden -- so a fold left by the previous ride survives into the next one and is displayed
+     again by whichever branch un-hides the section. */
+  host.querySelectorAll('.notice-more').forEach(x => x.remove());
+  if (!why) return;
+  const d = document.createElement('details');
+  d.className = 'notice-more';
+  const s = document.createElement('summary');
+  s.textContent = 'Why';
+  const p = document.createElement('p');
+  p.textContent = why;
+  d.append(s, p);
+  host.appendChild(d);
+}
+
 function hideEmtbNotice() {
   try { localStorage.setItem(emtbNoticeKey(), '1'); } catch (e) {}
   const sec = document.getElementById('emtbNotice');
@@ -25772,13 +25953,13 @@ function renderEmtbNotice(D) {
      again, which is the difference between a question and a nag. */
   if (reason === 'no-evidence' && emtbPreference() === 'unset' && !dismissed) {
     lead.textContent = 'Analyzed as MTB.';
-    body.textContent = ' Nothing in this recording can tell an e-bike from an analog one \u2014 a motor'
-      + ' shows up only in a Specialized head unit\'s FIT file, and there is none here. Which do you ride?'
-      + ' The answer is remembered and you will not be asked again.';
-    body.appendChild(document.createTextNode(' '));
+    body.textContent = ' Which do you ride? The answer is remembered and you will not be asked again.';
+    body.appendChild(document.createElement('br'));
     body.appendChild(mkBtn('I ride an e-MTB', acceptEmtbPreference));
     body.appendChild(document.createTextNode(' '));
     body.appendChild(mkBtn('Analog \u2014 keep calling it MTB', declineEmtbPreference));
+    noticeFold(body, 'Nothing in this recording can tell an e-bike from an analog one \u2014 a motor'
+      + ' shows up only in a Specialized head unit\'s FIT file, and there is none here.');
     sec.classList.remove('hidden');
     return;
   }
@@ -25792,11 +25973,11 @@ function renderEmtbNotice(D) {
      settles the question for every future ride, where hiding either notice settles nothing. */
   if (reason === 'preference' && !dismissed) {
     lead.textContent = 'Labelled e-MTB because you said you ride one.';
-    body.textContent = ' Nothing in this recording confirms it \u2014 there is no FIT carrying motor'
-      + ' power \u2014 so this label, and the Strava activity type that follows from it, come from your'
+    body.textContent = ' This label, and the Strava activity type that follows from it, come from your'
       + ' answer rather than from the ride.';
     body.appendChild(document.createTextNode(' '));
     body.appendChild(mkBtn('I don\'t ride an e-MTB', declineEmtbPreferenceAndReanalyze));
+    noticeFold(body, 'Nothing in this recording confirms it \u2014 there is no FIT carrying motor power.');
     sec.classList.remove('hidden');
     return;
   }
@@ -25916,6 +26097,11 @@ function renderCalibNotice(D) {
     if (calibNoticeHidden()) { sec.classList.add('hidden'); return; }
     const only = document.getElementById('mtbCalibNoticeBody');
     if (only) only.textContent = shift.replace(' Your phone also seems', ' Your phone seems');
+    /* This branch has no reasoning to fold, and the heading above it has just said the finding is a
+       mount SHIFT rather than a calibration mismatch. A fold left behind by a previous ride would sit
+       under that heading explaining a sideways twist this ride does not have -- the exact thing the
+       two-heading split exists to prevent. */
+    noticeFold(only, '');
     sec.classList.remove('hidden');
     return;
   }
@@ -25930,16 +26116,20 @@ function renderCalibNotice(D) {
        turn-side reads; a pure fore-aft offset that is large enough to reach the backstop is a
        mounting angle, not a posture, and costs turns rather than sides. */
     const sideways = turnSidesUnreliable(axes);
+    /* The summary carries the measurement and the trust limit (which numbers to distrust); the
+       mechanism and the classic case fold behind "Why" (noticeFold, appended after the branches). */
     body.textContent = sideways
-      ? ` Your phone sat about ${Math.round(lateral)}° twisted sideways relative to how it rode`
-        + (foreAft != null && foreAft >= 5
-            ? ` (plus ${Math.round(foreAft)}° fore-aft, which is normal for a body-worn phone and is not the problem)` : '')
-        + `. A sideways twist mixes the bike's roll into the turn signal, so turn sides and the`
-        + ` left/right lean split are the numbers to distrust. Classic case: calibrated in a pocket,`
-        + ` then moved to a backpack before rolling out.`
+      ? ` Your phone sat about ${Math.round(lateral)}° twisted sideways relative to how it rode, so`
+        + ` turn sides and the left/right lean split are the numbers to distrust.`
       : ` Your phone seems to have sat about ${Math.round(deg)}° differently during calibration than`
-        + ` while riding (classic case: calibrated in a pocket, then moved to a backpack before`
-        + ` rolling out), which is far enough out to cost turns.`;
+        + ` while riding, which is far enough out to cost turns.`;
+    const why = sideways
+      ? (foreAft != null && foreAft >= 5
+          ? `It also sat ${Math.round(foreAft)}° off fore-aft, which is normal for a body-worn phone and is not the problem. `
+          : '')
+        + 'A sideways twist mixes the bike\'s roll into the turn signal. Classic case: calibrated in a'
+        + ' pocket, then moved to a backpack before rolling out.'
+      : 'Classic case: calibrated in a pocket, then moved to a backpack before rolling out.';
     /* Appended rather than folded in: the shift is a SECOND finding and can be true whichever of the
        two mismatch modes above fired, so it reads as another sentence rather than as a qualifier on
        either of them. Empty string when there is nothing to say. */
@@ -25983,9 +26173,8 @@ function renderCalibNotice(D) {
          still pre-ride window existed. Gated on _lastSensorFile because a library/cache replay may
          have been computed under 'quietest' long ago, and diagnosing it from today's localStorage
          preference would fabricate a "no still moment" claim about an attempt that never ran. */
-      body.textContent += ' Final-mount calibration is selected, but this recording has no still moment'
-        + ' before the ride to calibrate from, so the quietest window was used. Next time, stand still'
-        + ' for 20+ seconds in the final mount before rolling out.';
+      body.textContent += ' There was no still moment before the ride to calibrate from, so the quietest'
+        + ' window was used. Next time, stand still for 20+ seconds in the final mount before rolling out.';
     } else if (_lastSensorFile) {
       /* The helper, not an inline copy: there are two of these now (Final-mount here, Riding-pose in
          the branch above), and two hand-rolled buttons would drift. The sub-text is main's, which
@@ -25995,6 +26184,7 @@ function renderCalibNotice(D) {
     } else {
       body.textContent += ' To fix it for this ride, re-open the recording file and set Calibration (under Options in the header) to "Final mount".';
     }
+    noticeFold(body, why);
   }
   sec.classList.remove('hidden');
 }
@@ -26004,6 +26194,32 @@ function renderCalibNotice(D) {
    is not .hidden, and is not display:none (Focused view hides some via CSS). The lap comparison gets
    its own highlighted chip because it is the most-asked-for feature and otherwise lives buried inside
    the Runs panel; it points at the play-by-play (MTB) or the DTW descent comparison (running). */
+/* Focused view hides a fixed set of detail sections by CSS. These are the ones that exist for the
+   current sport and would show if the toggle were off; the count feeds the nav's "+N more" chip and
+   the hint beside the toggle, so the default-on toggle never removes a section without a trace. */
+const FOCUS_HIDDEN_IDS = ['radiusSection', 'geekStatsSection', 'runCadenceSection', 'runOscSection',
+                          'runSegmentsSection', 'fitDataSection'];
+function focusHiddenSections() {
+  const res = document.getElementById('results');
+  if (!res || !res.classList.contains('focus-mode')) return [];
+  return FOCUS_HIDDEN_IDS.map(id => document.getElementById(id))
+    .filter(el => el && !el.classList.contains('hidden') && getComputedStyle(el).display === 'none');
+}
+function updateFocusHint(n) {
+  const hint = document.querySelector('.focus-toggle .focus-hint');
+  const on = document.getElementById('focusToggle');
+  if (!hint) return;
+  hint.textContent = (on && on.checked) ? (n ? `· ${n} hidden` : '· the essentials') : '· every chart & table';
+}
+function revealFocusedSections() {
+  const first = focusHiddenSections()[0];
+  const t = document.getElementById('focusToggle');
+  if (!t) return;
+  t.checked = false;
+  t.dispatchEvent(new Event('change'));
+  if (first) setTimeout(() => first.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
+}
+let _navSpy = null;
 function buildSectionNav() {
   const nav = document.getElementById('sectionNav');
   if (!nav) return;
@@ -26021,6 +26237,11 @@ function buildSectionNav() {
   const cmpTarget = (pbp && !pbp.classList.contains('hidden') && pbpSel && !pbpSel.classList.contains('hidden'))
     ? pbp
     : visible('runCompareSection');
+  /* Every section a sport can show, ordered by where it actually sits on the page (the road path
+     hoists its corners under the map, so DOM source order is not page order). The list used to be
+     twelve ids: Form replay, Splits, Climbs and every road section were unreachable except by
+     scrolling, and a road ride's nav read Map / Timeline / Coach. */
+  const pos = (el) => el.getBoundingClientRect().top + window.scrollY;
   const entries = [
     { el: visible('crashSection'), label: 'Crash' },
     { el: visible('overviewSection'), label: 'Map' },
@@ -26030,18 +26251,37 @@ function buildSectionNav() {
     { el: visible('jumpsSection'), label: 'Jumps' },
     { el: visible('airtimeSection'), label: 'Airtime' },
     { el: visible('turnSection'), label: 'Turns' },
+    { el: visible('radiusSection'), label: 'Radius' },
+    { el: visible('formReplaySection'), label: 'Form replay' },
+    { el: visible('analogSection'), label: 'Motor off' },
+    { el: visible('cadPowerSection'), label: 'Cadence · power' },
+    { el: visible('fitDataSection'), label: 'Bike data' },
     { el: visible('runCadenceSection'), label: 'Cadence' },
+    { el: visible('runOscSection'), label: 'Oscillation' },
+    { el: visible('runSplitsSection'), label: 'Splits' },
+    { el: visible('runDecouplingSection'), label: 'HR drift' },
+    { el: visible('runClimbsSection'), label: 'Climbs' },
     { el: visible('runSegmentsSection'), label: 'Segments' },
+    { el: visible('roadSection'), label: 'Climbs' },
+    { el: visible('roadSpeedSection'), label: 'Speed' },
+    { el: visible('roadDescentsSection'), label: 'Descents' },
+    { el: visible('roadDescentHistorySection'), label: 'Descent history' },
+    { el: visible('roadPowerCurveSection'), label: 'Power curve' },
+    { el: visible('roadQuadrantSection'), label: 'Cadence' },
+    { el: visible('roadLapsSection'), label: 'Laps' },
     { el: visible('gpsUpsellSection'), label: 'Unlock more' },
+    { el: visible('roadUpsellSection'), label: 'Unlock more' },
+    { el: visible('geekStatsSection'), label: 'Raw' },
     { el: visible('coachSection'), label: 'Coach' },
-  ].filter(e => e.el);
+  ].filter(e => e.el).sort((a, b) => pos(a.el) - pos(b.el));
   nav.innerHTML = '';
-  if (entries.length < 2) return;   // a single chip is not worth a nav bar
+  if (entries.length < 2) { updateFocusHint(0); return; }   // a single chip is not worth a nav bar
   showLandscapeTip();
   const lbl = document.createElement('span');
   lbl.className = 'nav-label';
   lbl.textContent = 'Jump to';
   nav.appendChild(lbl);
+  const chips = [];
   for (const e of entries) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -26049,7 +26289,38 @@ function buildSectionNav() {
     if (e.compare) btn.className = 'nav-compare';
     btn.onclick = () => e.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     nav.appendChild(btn);
+    chips.push({ btn, el: e.el });
   }
+  /* Focused view is on by default and removes detail sections with no trace; the chip names how
+     many and is the way back from anywhere on the page, not only the toggle at the top. */
+  const hiddenN = focusHiddenSections().length;
+  updateFocusHint(hiddenN);
+  if (hiddenN) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'nav-more';
+    more.textContent = `+${hiddenN} more`;
+    more.title = 'Show every chart and table (turns Focused view off)';
+    more.onclick = revealFocusedSections;
+    nav.appendChild(more);
+  }
+  /* Scroll-spy: mark the chip whose section is on screen and keep it in view inside the nowrap
+     phone scroller. One listener, replaced on every rebuild so a re-render never stacks them. */
+  const spy = () => {
+    const y = window.scrollY + nav.offsetHeight + 12;
+    let cur = null;
+    for (const c of chips) { if (pos(c.el) <= y) cur = c; }
+    for (const c of chips) c.btn.classList.toggle('current', c === cur);
+    if (cur && nav.scrollWidth > nav.clientWidth) {
+      const l = cur.btn.offsetLeft, r = l + cur.btn.offsetWidth;
+      if (l < nav.scrollLeft || r > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = Math.max(0, l - 40);
+    }
+  };
+  if (_navSpy) window.removeEventListener('scroll', _navSpy);
+  let ticking = false;
+  _navSpy = () => { if (!ticking) { ticking = true; requestAnimationFrame(() => { ticking = false; spy(); }); } };
+  window.addEventListener('scroll', _navSpy, { passive: true });
+  spy();
 }
 
 function renderAll(D) {
@@ -26268,7 +26539,7 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
     const ring = turnRingColor(T);
     const icon = L.divIcon({
       className: '',
-      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${ring}; outline-offset:1px;">${T.n}</div>`,
+      html: `<div class="turn-marker ${T.direction === 'L' ? 'left' : ''}" style="outline:3px solid ${ring}; outline-offset:1px;">${T.n}<span class="tm-dir">${T.direction === 'L' ? 'L' : 'R'}</span></div>`,
       iconSize: [26, 26], iconAnchor: [13, 13]
     });
     const m = L.marker([p.latitude, p.longitude], { icon }).addTo(mapOverlay);
@@ -26315,6 +26586,7 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
       + (c.stopped ? `<br><span style="opacity:0.75">tapped ${Math.round(c.reportDelayS)}s later</span>` : ''),
       { direction: 'top' });
   }
+  updateTurnMarkerDensity();
   return latlngs;
 }
 
@@ -26384,10 +26656,13 @@ function linkTimelineToMap(loc, ride) {
 function setMapLegend(kind, opts = {}) {
   const body = document.getElementById('mapLegendBody');
   if (!body) return;
+  /* The road path hides the whole legend (its map has no ring or grade key), and nothing un-hid it,
+     so every MTB, run or GPS render after a road ride in the same page session was legend-less. */
+  { const lg = body.closest('.map-legend'); if (lg) lg.classList.remove('hidden'); }
   const dot = (cls) => `<span class="lg ${cls}"></span>`;
   if (kind === 'turns') {
     body.innerHTML = `<span>turn ring = speed kept:</span>${dot('scrub')}scrubbed${dot('held')}held${dot('carry')}carried`
-      + `<span style="opacity:0.6;">· track colour = speed · tap a run below to focus</span>`;
+      + `<span style="opacity:0.6;">· number = turn, L/R = side · track colour = speed · tap a run below to focus</span>`;
   } else {
     /* Track colors match renderRunMap: climb green (.lg.carry), descent red (.lg.scrub), lift grey.
        The lift swatch only appears when this ride has a detected lift/gondola segment; runs and
@@ -26396,6 +26671,25 @@ function setMapLegend(kind, opts = {}) {
     body.innerHTML = `<span>track colour = grade:</span>${dot('carry')}climb${dot('scrub')}descent${liftEntry}`
       + `<span style="opacity:0.6;">· start &amp; end marked · tap a segment below to focus</span>`;
   }
+}
+
+/* m:ss tick labels for a seconds x-axis. Plotly cannot format a linear axis as time, and moving the
+   axis to type 'date' would change the unit every relayout, hover and click handler on these charts
+   reads (the linked map cursor, focusSegment, the annotation thinning), so the ticks are handed to
+   it explicitly and recomputed on zoom. A rider was otherwise dividing "2400 s" by sixty in their
+   head on every chart. */
+function loamTimeTicks(lo, hi) {
+  const span = Math.max(1, hi - lo);
+  const steps = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+  const step = steps.find(s => span / s <= 8) || 7200;
+  const fmt = (s) => {
+    s = Math.round(s);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
+  };
+  const tickvals = [], ticktext = [];
+  for (let t = Math.ceil(lo / step) * step; t <= hi; t += step) { tickvals.push(t); ticktext.push(fmt(t)); }
+  return { tickvals, ticktext };
 }
 
 function renderMap(loc, turns, ride, ridingJumps, crashes) {
@@ -26409,6 +26703,10 @@ function renderMap(loc, turns, ride, ridingJumps, crashes) {
   mapInstance = L.map('map', { zoomControl: true, attributionControl: true });
   try { mapInstance.attributionControl.setPrefix(false); } catch (e) {}
   addBasemap(mapInstance);
+  /* moveend as well as zoomend: the first fitBounds on a fresh map is the view that sets the pixel
+     origin, and until then latLngToLayerPoint cannot answer, so the pass drawRideOverlay runs at
+     draw time has nothing to measure. */
+  mapInstance.on('zoomend moveend', updateTurnMarkerDensity);
   /* Tap the map to dismiss a pinned timeline marker (touch has no "hover out"). */
   mapInstance.on('click', () => {
     _linkPinned = false;
@@ -26420,6 +26718,7 @@ function renderMap(loc, turns, ride, ridingJumps, crashes) {
   if (latlngs && latlngs.length) {
     mapInstance.fitBounds(latlngs, { padding: [40, 40] });
     window._fullRideBounds = latlngs;
+    setTimeout(updateTurnMarkerDensity, 300);   /* after any fitBounds animation settles */
   }
 }
 
@@ -26624,9 +26923,13 @@ function renderRideSignature(D, sport) {
     const statCols = stats.map((st, i) => {
       const cx = 40 + i * ((W - 80) / stats.length);
       const cw = (W - 80) / stats.length;
-      return `<text x="${cx}" y="${H-44}" font-size="30" font-weight="700" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">${st.num}<tspan font-size="14" font-weight="500" fill="#cbd5e1"> ${st.unit || ''}</tspan></text>`
-        + `<text x="${cx}" y="${H-24}" font-size="11" letter-spacing="1.5" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${st.label}</text>`
-        + (i > 0 ? `<line x1="${cx-14}" y1="${H-62}" x2="${cx-14}" y2="${H-20}" stroke="#ffffff" stroke-opacity="0.08"/>` : '');
+      /* Sized for the PHONE, where this card is the first thing on screen: the 800-unit viewBox
+         renders at ~358 CSS px there (scale 0.45), so an 11px label came out at 4.9px and the four
+         headline numbers were illegible on the primary surface. 16px labels land at ~7px and 40px
+         values at ~18px; the 2x PNG export grows in step and still reads as a poster. */
+      return `<text x="${cx}" y="${H-46}" font-size="40" font-weight="700" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">${st.num}<tspan font-size="18" font-weight="500" fill="#cbd5e1"> ${st.unit || ''}</tspan></text>`
+        + `<text x="${cx}" y="${H-20}" font-size="16" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${st.label}</text>`
+        + (i > 0 ? `<line x1="${cx-14}" y1="${H-72}" x2="${cx-14}" y2="${H-14}" stroke="#ffffff" stroke-opacity="0.08"/>` : '');
     }).join('');
 
     const defsSvg =
@@ -26665,11 +26968,11 @@ function renderRideSignature(D, sport) {
   <g>${accents}</g>
   <circle cx="${g(X(s0))}" cy="${g(Y(s0))}" r="6.5" fill="#8caa6d" stroke="#0a0d07" stroke-width="2"/>
   <circle cx="${g(X(s1))}" cy="${g(Y(s1))}" r="6.5" fill="#e0573a" stroke="#0a0d07" stroke-width="2"/>
-  <rect width="${W}" height="74" fill="url(#rsScrim)"/>
-  <rect y="${H-96}" width="${W}" height="96" fill="url(#rsScrimB)"/>
+  <rect width="${W}" height="90" fill="url(#rsScrim)"/>
+  <rect y="${H-116}" width="${W}" height="116" fill="url(#rsScrimB)"/>
   <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="#e0a458">A</tspan>M</text>
-  <text x="38" y="72" font-size="11" letter-spacing="2.5" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${subtitle}</text>
-  <text x="${W-38}" y="50" text-anchor="end" font-size="11" letter-spacing="2" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${rideWord} SIGNATURE</text>
+  <text x="38" y="78" font-size="15" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${subtitle}</text>
+  <text x="${W-38}" y="50" text-anchor="end" font-size="14" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${rideWord} SIGNATURE</text>
   ${statCols}`;
 
     const svg =
@@ -26868,7 +27171,7 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 56, t: 32, b: 50 },
-    xaxis: { title: { text: 'time in ride (s)', font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f' },
+    xaxis: { title: { text: 'time in ride', font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi) },
     yaxis: {
       title: { text: 'yaw rate (°/s)', font: { color: '#e87b3d', size: 11 } },
       gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0',
@@ -26893,7 +27196,8 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
     const reThin = (lo, hi) => {
       if (busy) return;
       busy = true;
-      Plotly.relayout(chart, { annotations: thinnedAnnotations(lo, hi) })
+      const tk = loamTimeTicks(lo, hi);
+      Plotly.relayout(chart, { annotations: thinnedAnnotations(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext })
         .then(() => { busy = false; }).catch(() => { busy = false; });
     };
     reThin(fullLo, fullHi);
@@ -27397,6 +27701,21 @@ function turnTooltipHtml(T) {
 }
 const TURN_FOCUS_MAX_ZOOM = 18;   /* one below the satellite basemap's native 19 */
 const TURN_FOCUS_MIN_ZOOM = 16;   /* floor for the no-fixes fallback */
+const TURN_MARKER_DENSE_PX = 28;  /* nearest-neighbour spacing (px) below which a disc becomes a dot */
+/* See .turn-marker.tm-dot in the stylesheet. Recomputed on every zoom and every overlay redraw; a
+   nearest-neighbour pass over a few hundred markers is cheap enough to run on zoomend. */
+function updateTurnMarkerDensity() {
+  if (!mapInstance) return;
+  const ms = Object.values(turnMarkers || {}).filter(m => m && m.getLatLng && m._icon);
+  let pts;
+  try { pts = ms.map(m => mapInstance.latLngToLayerPoint(m.getLatLng())); } catch (e) { return; }
+  for (let i = 0; i < ms.length; i++) {
+    let best = Infinity;
+    for (let j = 0; j < pts.length; j++) { if (j === i) continue; const d = pts[i].distanceTo(pts[j]); if (d < best) best = d; }
+    const el = ms[i]._icon.firstChild;
+    if (el && el.classList) el.classList.toggle('tm-dot', best < TURN_MARKER_DENSE_PX);
+  }
+}
 function rideLocRows() {
   return (_runsD && _runsD.sensors && _runsD.sensors.location) || [];
 }
@@ -27535,7 +27854,7 @@ function renderFitChart(fitInRide, ride, opts = {}) {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 56, r: 56, t: 32, b: 44 },
-    xaxis: { title: { text: 'time in ride (s)', font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    xaxis: { title: { text: 'time in ride', font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, t.length ? t.reduce((m, v) => Math.max(m, v), 0) : 1) },
     yaxis: { title: { text: 'power (W)', font: { color: '#c54b3c', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#c54b3c' } },
     yaxis2: { title: { text: 'HR (bpm) / cad (rpm)', font: { color: '#e87b3d', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#e87b3d' } },
     showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
@@ -28128,6 +28447,7 @@ function renderAllRoad(D) {
   renderRoadLaps(D);
   if (D.laps && D.laps.length >= 2) show('roadLapsSection');
   renderRoadUpsell(D);
+  updateAttachFitVisibility('road', true);   /* a road ride never takes a companion FIT */
   renderCoachHighlights(D, 'road');
   renderCoachPanel(D, 'road');
   try { buildSectionNav(); } catch (e) { console.warn('section nav', e); }
@@ -28838,16 +29158,24 @@ function backToRideFromCross() {
    click to recover from, so point at it. Returned text may contain markup; the message is escaped. */
 function errorGuidance(msg) {
   const m = (msg || '') + '';
-  if (/gyroscope|gyro/i.test(m)) return 'This recording has no gyroscope data, so MTB turn analysis cannot run. Set <strong>Sport</strong> to Running above, or re-record with the gyro enabled.';
-  if (/calibration window/i.test(m)) return 'MTB analysis needs a brief still moment to find the body frame. Pause for ~20s at the trailhead next time, or analyze this as Running.';
+  /* In the app the Sport picker is on the dropzone, which the app hides, so "switch the Sport above"
+     pointed at a control that was not there. The app's door onto the same room is the session's
+     menu on the Sessions tab, and the "Re-run as Running" button below the guidance. */
+  const inApp = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED);
+  const pick = inApp ? 'change the activity from the session\'s menu on the Sessions tab' : 'switch the <strong>Sport</strong> above';
+  if (/gyroscope|gyro/i.test(m)) return 'This recording has no gyroscope data, so MTB turn analysis cannot run. '
+    + (inApp ? 'Re-run it as Running below, or change the activity from the session\'s menu on the Sessions tab.'
+             : 'Set <strong>Sport</strong> to Running above, or re-record with the gyro enabled.');
+  if (/calibration window/i.test(m)) return 'MTB analysis needs a brief still moment to find the body frame. Pause for ~20s at the trailhead next time, or '
+    + (inApp ? 're-run this as Running below.' : 'analyze this as Running.');
   if (/moving window/i.test(m)) return 'No moving window was found in the GPS. The recording may be too short, or Location was off during capture.';
-  if (/run window|accel samples/i.test(m)) return 'The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or switch <strong>Sport</strong> above.';
+  if (/run window|accel samples/i.test(m)) return 'The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or ' + pick + '.';
   if (/accel or GPS|Missing accel/i.test(m)) return 'No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.';
   if (/too short|short/i.test(m)) return 'The recording looks too short to analyze. Capture a longer ride (at least a minute of moving) and try again.';
   if (/Need a sensor file/i.test(m)) return 'Drop a Sensor Logger <strong>.zip</strong> or a Combined <strong>.csv</strong>. A <strong>.fit</strong> works as a companion, or on its own as a GPS-only ride.';
   if (/no usable GPS track/i.test(m)) return 'This FIT carries no positioned records, so there is nothing to map or measure. Export a FIT that includes GPS, or attach this one to a phone recording.';
   /* Always leave the user with something to do, even for an unrecognized failure. */
-  return 'That recording could not be analyzed. Try a different file, switch the Sport above, or re-record with Location and Motion enabled.';
+  return 'That recording could not be analyzed. ' + (inApp ? 'Change the activity from the session\'s menu on the Sessions tab' : 'Try a different file, switch the Sport above') + ', or re-record with Location and Motion enabled.';
 }
 /* Split the error into a one-line message, an always-present recovery row (the picker makes most
    failures one click to recover from), and the collapsible raw stack. */
@@ -28856,7 +29184,11 @@ function showError(msg, detail) {
   const guide = errorGuidance(msg);
   /* "Re-run as Running" only when an MTB-specific failure has a re-runnable file in hand (running needs
      no gyro or calibration, so it usually succeeds where MTB could not). */
-  const canRetryRunning = /gyro|calibration|body.?frame/i.test(m) && !!_lastSensorFile && !LOAM_EMBEDDED;
+  /* Offered in the app too: _lastSensorFile is set there, the re-run works there, and without it an
+     MTB failure in the app was text with no button under it (the Sport picker it pointed at is on
+     the dropzone the app hides). Only "Analyze another file" stays web-only, since the app has no
+     file to pick. */
+  const canRetryRunning = /gyro|calibration|body.?frame/i.test(m) && !!_lastSensorFile;
   const acts = [];
   if (canRetryRunning) acts.push('<button type="button" class="err-action primary" data-act="run">Re-run as Running</button>');
   if (!LOAM_EMBEDDED) acts.push('<button type="button" class="err-action" data-act="reset">Analyze another file</button>');
@@ -28871,6 +29203,9 @@ function showError(msg, detail) {
   const runBtn = box.querySelector('[data-act="run"]');
   if (runBtn) runBtn.onclick = () => {
     const sel = document.getElementById('sportOverride'); if (sel) sel.value = 'running';
+    /* The host's declared sport (window.LOAM_SPORT) is read ahead of the selector for the cache
+       key, so a re-run that left it at the sport that just failed would be cached under that sport. */
+    if (typeof window !== 'undefined' && window.LOAM_SPORT) window.LOAM_SPORT = 'running';
     if (_lastSensorFile) { const f = _lastSensorFile; hide('errorBox'); analyze([f]); }
   };
   const resetBtn = box.querySelector('[data-act="reset"]');
@@ -28961,6 +29296,7 @@ function resetToDropzone() {
   _drilledFromCross = false;
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   hide('results'); hide('crossResults'); hide('errorBox'); hide('loading');
+  hideOutOfResultsSurfaces();
   show('dropzone');
   setStatus('Awaiting data');
   renderRecentRides();
@@ -30119,7 +30455,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '5a05f1ca0 · 2026-09-01';
+const LOAM_BUILD = '6ebc1a866 · 2026-09-02';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
