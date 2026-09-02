@@ -1610,6 +1610,14 @@
   .th-hint { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted, #94a3b8); opacity: .8; }
   .setblock-edit { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--accent, #e87b3d); margin-left: 4px; vertical-align: middle; }
   .strength-tablenote { font-size: 12px; color: var(--text-muted, #94a3b8); padding: 8px 6px 4px; }
+  /* Recording quality rows. A dot rather than an icon font, and the colour is the ONLY thing that
+     ranks them -- there is no score, no bar and no percentage of anything, per the module's rule. */
+  .rq-list { display: flex; flex-direction: column; gap: 14px; }
+  .rq-row { display: flex; gap: 10px; align-items: flex-start; }
+  .rq-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; margin-top: 6px; }
+  .rq-head { font-weight: 600; line-height: 1.35; }
+  .rq-weakens { font-size: 13px; color: var(--accent-amber, #a06f24); margin-top: 2px; }
+  .rq-detail { font-size: 13px; color: var(--text-muted, #94a3b8); margin-top: 3px; line-height: 1.5; }
   /* Golf (Range) view */
   .golf-hero { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 22px; }
   @media (max-width: 900px) { .golf-hero { grid-template-columns: 1fr; } }
@@ -1882,10 +1890,11 @@
             <option value="metric">Metric (km · km/h · m)</option>
           </select>
         </label>
-        <label id="calibStrategyLabel" class="hidden" title="Which still window defines your body frame. Use 'Final mount' if you calibrate in one position (e.g. pocket) then move the phone before riding (e.g. backpack).">Calibration
+        <label id="calibStrategyLabel" class="hidden" title="Which window defines your body frame. Use 'Final mount' if you calibrate in one position (e.g. pocket) then move the phone before riding (e.g. backpack). Use 'Riding pose' when the phone is never in its riding position while you are standing still -- a pack taken off at the trailhead, or a drone session.">Calibration
           <select id="calibStrategySel">
             <option value="preride">Final mount (last still before ride)</option>
             <option value="quietest">Quietest still window</option>
+            <option value="riding">Riding pose (beta)</option>
           </select>
         </label>
         <label id="carryLabel" class="hidden">Carrying the phone
@@ -1927,7 +1936,7 @@
   <section id="mtbCalibNotice" class="hidden">
     <div class="mount-notice">
       <button type="button" class="notice-hide" onclick="hideCalibNotice()" aria-label="Hide this notice for this ride">Hide</button>
-      <strong>Calibration pose may not match your riding pose.</strong>
+      <strong id="mtbCalibNoticeHead">Calibration pose may not match your riding pose.</strong>
       <span id="mtbCalibNoticeBody"></span>
     </div>
   </section>
@@ -2186,6 +2195,10 @@
     <div class="panel">
       <div id="runDecouplingBody"></div>
     </div>
+  </section>
+
+  <section id="recordingQualitySection" class="hidden">
+    <div id="recordingQualityBody"></div>
   </section>
 
   <section id="runClimbsSection" class="hidden">
@@ -3087,6 +3100,41 @@ function imuRateWarning(hz) {
 /* ========== Calibration & rotation ========== */
 function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strategy) {
   const fs = 100, winSec = 20, winN = winSec * fs;
+  /* 'riding': define the body frame from the RIDING window itself rather than from any still window
+     before it (user report #546, a drone session: "I sometimes think the form replay shows that I'm
+     leaning left in a right hand turn").
+
+     Every other strategy assumes the still period shares the riding pose, and some workflows break
+     that assumption structurally: flying a drone means the pack is off for every still moment, so
+     the phone is never in its riding pose while it is still. Measured on that session, against one
+     clip's riding pose: every OTHER riding window agreed to 10-11 deg across ten-plus minutes, while
+     every still window was 35-106 deg off. The backpack was rock solid; the stillness was the lie.
+     A 112 deg error there flips lean sign and turn side independently, and re-cropping the same
+     recording to hand calibration a different still window duly flipped the reported side of the
+     same physical corner.
+
+     There is nothing to search for: the answer IS the ride window, and calibrationRotation already
+     averages gravity over whatever window it is given. `noise` is still the accel spread over that
+     window, which is honestly large -- this is not a still window and the geek-stats line should not
+     pretend otherwise.
+
+     Opt-in, and unvalidated. A riding pose is a MEAN over riding, so it carries average trail pitch
+     and any net cornering bias, and it cannot be checked against video until a ride exists whose
+     calibration is known-good -- which is the circularity #546 describes and the reason this is
+     offered rather than made the default. */
+  if (strategy === 'riding' && rideStart != null && rideEnd != null) {
+    let n = 0, s = 0, ss = 0;
+    for (const r of accelRows) {
+      if (r.t < rideStart || r.t > rideEnd) continue;
+      const m = Math.hypot(r.x, r.y, r.z);
+      n++; s += m; ss += m * m;
+    }
+    if (n) {
+      const mean = s / n;
+      return { start: rideStart, end: rideEnd,
+               noise: Math.sqrt(Math.max(0, ss / n - mean * mean)), strategy: 'riding' };
+    }
+  }
   if (accelRows.length < winN * 1.5) {
     // Recording too short for 20s window; try 10s
     const winNshort = 10 * fs;
@@ -3152,6 +3200,163 @@ function calibrationRotation(gravityRows, calibStart, calibEnd) {
   }
   return { R };
 }
+/*
+ * Did the phone move DURING the ride?
+ *
+ * The pose-mismatch check answers a different question: it compares the calibration window to the
+ * MEAN gravity direction over the whole ride. That is the right question when the phone holds one
+ * pose, and it has a blind spot when it does not -- a mount that shifts partway through averages to
+ * something that matches NEITHER half, and the mean can sit comfortably close to the calibration
+ * while both halves are well off it in opposite directions. So the ride that is worst served by the
+ * existing check is the one where the phone actually moved, which is also the one where lean sign
+ * and turn side are wrong for a known, nameable stretch of the ride rather than for all of it.
+ *
+ * The read is a single step: for each candidate split of the ride, the angle between the mean
+ * gravity direction before it and after it, maximised over the splits. That is the same quantity
+ * gravityPoseMismatch reports and the same quantity crashMountShift reports either side of a crash;
+ * this generalises it from "either side of the tap" to "wherever the step actually is". Prefix sums
+ * make it one pass rather than one pass per candidate.
+ *
+ * MOVING SAMPLES ONLY, on both sides, and that is load-bearing rather than tidy. Standing over the
+ * bike puts the phone at a different angle to gravity than riding does, so a comparison that let
+ * rest stops in would report a mount shift on every ride with a break in it -- crashMountShift
+ * records exactly this trap for the crash case. A ride window routinely contains minutes of standing
+ * around (measured on the Tanga reference ride: six stopped stretches, one of them five minutes), so
+ * this is the common case, not an edge one.
+ *
+ * The reported INSTANT is only ever a moment the athlete was moving, so when the phone moves during
+ * a stop -- which is when a phone in a pack usually does move -- the answer is an edge of that stop
+ * rather than a point inside it. That is honest rather than imprecise: nothing was watched while the
+ * stop was excluded, so "somewhere across this stop" is the whole of what the recording knows, and
+ * the surface says so instead of naming a second.
+ *
+ * What it does NOT do, deliberately: it finds ONE step, the largest. A phone that moved twice is
+ * reported at its biggest move, and a slow continuous creep will report as a step somewhere in the
+ * middle of the creep rather than as a creep. It also says nothing about WHY the phone moved, and
+ * nothing about which side is the "right" pose -- the calibration window decides that, and this only
+ * says that one of the two sides disagrees with it.
+ */
+
+/* The same threshold, for the same quantity, as CALIB_POSE_LATERAL_DEG and CRASH_MOUNT_SHIFT_DEG:
+   an angle between two mean gravity directions, past which the body-frame rotation is materially
+   wrong for one of them. Inherited rather than measured for this use, which is why the surface that
+   shows it is a notice and not a correction. */
+const MOUNT_SHIFT_DEG = 12;
+
+/* Enough moving riding on each side for a mean direction to mean anything. Same value and same
+   reasoning as CRASH_MOUNT_MIN_RIDING_S: below this the "mean pose" of a side is a handful of
+   corners, and one committed lean moves it several degrees. */
+const MOUNT_SHIFT_MIN_SIDE_S = 30;
+
+/* How often to test a split. The event is a phone slipping, which takes a second or two, so there is
+   nothing to gain from a finer grid and the reported instant is honest to about this resolution. */
+const MOUNT_SHIFT_STEP_S = 1.0;
+
+/* Riding, for the purpose of "was the phone being watched". Deliberately the same 1.0 m/s as the
+   turn detector's floor and for the same reason: it sits above a phone being handled at a standstill
+   and below any speed at which a bicycle is balancing rather than being walked. A fix further than
+   MOUNT_SHIFT_NEAR_FIX_S away vouches for nothing. */
+const MOUNT_SHIFT_MOVING_MPS = 1.0;
+const MOUNT_SHIFT_NEAR_FIX_S = 5.0;
+
+/*
+ * gravityRows: [{ t, x, y, z }] over the whole recording (the sensor's gravity channel, already
+ * separated from linear acceleration by CoreMotion). isMoving: (t) => boolean, true where the
+ * recording can show the athlete was actually moving -- see the note above on why this is required
+ * rather than optional. rideStart / rideEnd bound the ride window.
+ *
+ * Returns null when there is nothing to say (no ride window, too little moving riding, or no split
+ * clears the threshold), else { t, deg, beforeS, afterS, samples } where `t` is the instant the pose
+ * steps and `deg` the size of the step.
+ */
+function detectMountShift(gravityRows, rideStart, rideEnd, isMoving, opts) {
+  const o = opts || {};
+  const thresholdDeg = o.thresholdDeg != null ? o.thresholdDeg : MOUNT_SHIFT_DEG;
+  const minSideS = o.minSideS != null ? o.minSideS : MOUNT_SHIFT_MIN_SIDE_S;
+  const stepS = o.stepS != null ? o.stepS : MOUNT_SHIFT_STEP_S;
+  if (rideStart == null || rideEnd == null || !(rideEnd > rideStart)) return null;
+  if (typeof isMoving !== 'function') return null;
+
+  /* One pass to collect the moving riding samples, in time order, then prefix sums over them. The
+     sample COUNT stands in for duration on each side: they are evenly spaced at the IMU rate, so a
+     count is a duration up to that rate, and carrying a real dt would mean deciding what a gap in
+     the samples means -- which is a question this read does not need to answer. */
+  const rows = [];
+  for (const r of gravityRows || []) {
+    if (!r || r.t < rideStart || r.t > rideEnd) continue;
+    if (!isFinite(r.x) || !isFinite(r.y) || !isFinite(r.z)) continue;
+    if (!isMoving(r.t)) continue;
+    rows.push(r);
+  }
+  if (rows.length < 2) return null;
+  rows.sort((a, b) => a.t - b.t);
+
+  /* Sample rate from the median spacing, so minSideS can be expressed in seconds while the counting
+     stays in samples. Median rather than mean because a rest stop leaves one enormous gap. */
+  const gaps = [];
+  for (let i = 1; i < rows.length; i++) {
+    const d = rows[i].t - rows[i - 1].t;
+    if (d > 0) gaps.push(d);
+  }
+  if (!gaps.length) return null;
+  gaps.sort((a, b) => a - b);
+  const dt = gaps[gaps.length >> 1];
+  if (!(dt > 0)) return null;
+  const minSideN = Math.max(2, Math.round(minSideS / dt));
+  if (rows.length < minSideN * 2) return null;
+
+  const px = new Float64Array(rows.length + 1);
+  const py = new Float64Array(rows.length + 1);
+  const pz = new Float64Array(rows.length + 1);
+  for (let i = 0; i < rows.length; i++) {
+    px[i + 1] = px[i] + rows[i].x;
+    py[i + 1] = py[i] + rows[i].y;
+    pz[i + 1] = pz[i] + rows[i].z;
+  }
+  const unit = (lo, hi) => {
+    const x = px[hi] - px[lo], y = py[hi] - py[lo], z = pz[hi] - pz[lo];
+    const m = Math.hypot(x, y, z);
+    return m > 1e-9 ? [x / m, y / m, z / m] : null;
+  };
+
+  let best = null;
+  const strideN = Math.max(1, Math.round(stepS / dt));
+  for (let i = minSideN; i <= rows.length - minSideN; i += strideN) {
+    const a = unit(0, i), b = unit(i, rows.length);
+    if (!a || !b) continue;
+    const dot = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+    const deg = Math.acos(dot) * 180 / Math.PI;
+    if (!best || deg > best.deg) {
+      best = { t: rows[i].t, deg, beforeS: i * dt, afterS: (rows.length - i) * dt };
+    }
+  }
+  if (!best || !(best.deg >= thresholdDeg)) return null;
+  return { ...best, samples: rows.length };
+}
+
+/* "Was the athlete actually moving at time t", answered from the GPS fixes alone, for detectMountShift
+   -- which must compare riding against riding or every rest stop reads as a mount shift.
+
+   A fix must be NEARBY as well as fast: with no GPS there is no nearest fix, so nothing is moving,
+   so the detector returns null and makes no claim. That is the right failure -- a recording with no
+   speed channel cannot tell standing from riding, and guessing would put a notice on every ride
+   without GPS. Nearest-fix rather than interpolated, because the question is a boolean about a
+   moment and interpolating across a dropout would invent riding inside it. */
+function mountShiftIsMoving(locRows) {
+  const g = (locRows || []).filter(r => r && r.speed != null && r.speed >= 0).slice().sort((a, b) => a.t - b.t);
+  if (!g.length) return () => false;
+  const L = g.length - 1;
+  return (tq) => {
+    let lo = 0, hi = L;
+    if (tq <= g[0].t) { lo = hi = 0; }
+    else if (tq >= g[L].t) { lo = hi = L; }
+    else { while (hi - lo > 1) { const m = (lo + hi) >> 1; if (g[m].t <= tq) lo = m; else hi = m; } }
+    const a = g[lo], b = g[hi];
+    const near = (Math.abs(a.t - tq) <= Math.abs(b.t - tq)) ? a : b;
+    return Math.abs(near.t - tq) <= MOUNT_SHIFT_NEAR_FIX_S && near.speed >= MOUNT_SHIFT_MOVING_MPS;
+  };
+}
+
 /* Angle (deg) between the mean gravity direction in the calibration window and the mean gravity
    direction while riding. A phone held in one fixed pose throughout matches to a few degrees (only
    average trail pitch and balanced cornering separate them). A large angle means the phone was
@@ -3210,6 +3415,37 @@ function poseMismatchAxes(gravityRows, R, rideStart, rideEnd) {
     foreAftDeg: Math.atan2(b[2], -b[1]) * DEG,
     lateralDeg: Math.atan2(b[0], -b[1]) * DEG,
   };
+}
+/* Can this ride's body frame tell a left-hander from a right-hander? ONE funnel for a question three
+   surfaces answer (this notice, the Form Replay's Sides tile, the coach digest), because a page that
+   warns "turn sides can be off" and then prints a confident weaker-side verdict two panels down has
+   told the rider both things and helped with neither. The quantity and the bar are poseMismatchAxes'
+   own: lateral error does not merely add noise to the split, it manufactures an asymmetry and
+   eventually inverts it. Lean MAGNITUDES stay usable, so the response is to withhold the SIDE
+   attribution rather than to blank the numbers. See analyzer/core/calibration/calibration.js. */
+function turnSidesUnreliable(axes) {
+  return !!(axes && axes.lateralDeg != null && isFinite(axes.lateralDeg)
+    && Math.abs(axes.lateralDeg) >= CALIB_POSE_LATERAL_DEG);
+}
+/* Where the calibration window sits relative to the activity: 'pre-ride', 'post-ride', or null.
+   findCalibWithWindow never returns a window OVERLAPPING the ride, so these two are the whole space.
+   'post-ride' is common and invisible: 38 of 83 analyzable recordings in the 2026-08-29 corpus audit
+   calibrate from a window taken AFTER the ride ended, a median 66.1 deg from the riding pose. A fact
+   read off two windows, not an estimate. */
+/* The funnel every left/right surface asks, recomputed from the render payload rather than read off
+   calibWin -- the same reason renderCalibNotice recomputes, so a ride replayed from the analysis
+   cache (or analyzed before this shipped) is judged exactly as a fresh one is. */
+function dTurnSidesUnreliable(D) {
+  if (!D || !D.sensors || !D.sensors.gravity || !D.R || !D.ride) return false;
+  return turnSidesUnreliable(poseMismatchAxes(D.sensors.gravity, D.R, D.ride.start, D.ride.end));
+}
+function calibWindowPlacement(calibWin, ride) {
+  if (!calibWin || !ride) return null;
+  const cs = calibWin.start, ce = calibWin.end, rs = ride.start, re = ride.end;
+  if ([cs, ce, rs, re].some(v => v == null || !isFinite(v))) return null;
+  if (ce <= rs) return 'pre-ride';
+  if (cs >= re) return 'post-ride';
+  return null;
 }
 function matmul(A, B) {
   const C = [[0,0,0],[0,0,0],[0,0,0]];
@@ -7338,6 +7574,13 @@ function coachDigestD(D, sport) {
   if (!isMtbFamily(sport) || !D || !D.turns || !D.turns.length || !D.summary || !D.ride || !D.sensors) return D;
   try {
     let out = D;
+    /* Whether this ride's body frame can tell a left-hander from a right-hander. Resolved HERE rather
+       than inside buildDigest for the reason the jump and turn scoping below is: the pinned pure
+       module must stay pure, and this needs the page's rotation matrix and gravity channel. The
+       pinned turnMechanics just reads the finished flag and withholds every read that attributes
+       something to a side. Withheld rather than hedged, because a weaker-side verdict is exactly the
+       claim a laterally tilted frame invents, and the coach would act on a hedge. */
+    if (dTurnSidesUnreliable(D)) out = { ...out, turnSidesUnreliable: true };
     /* Jumps get the same treatment the turns below have, and for the same two reasons.
 
        Scoping: the digest's jump block would otherwise contradict itself, because
@@ -8445,7 +8688,14 @@ function formFrame() {
      here or the question would cite a comparison the rider never saw. */
   if (S.medLeanL != null && S.medLeanR != null) {
     const here = seg ? (lean >= 0 ? 'R' : 'L') : F.turn.direction;
-    const weaker = Math.abs(S.medLeanL - S.medLeanR) < 3 ? 'balanced' : (S.medLeanL < S.medLeanR ? 'left leans less' : 'right leans less');
+    /* Same funnel the coach and the notice use. The magnitudes are gravity roll and survive a
+       fore-aft pose error, so they stay; it is the WHICH-SIDE verdict a laterally tilted body frame
+       invents, so that is what is withheld. If this tile kept saying "left leans less" while the
+       coach refused to, the rider would have been handed the claim anyway. */
+    const sidesBad = dTurnSidesUnreliable(F.D);
+    const weaker = sidesBad
+      ? 'which side is which is unreliable on this ride'
+      : (Math.abs(S.medLeanL - S.medLeanR) < 3 ? 'balanced' : (S.medLeanL < S.medLeanR ? 'left leans less' : 'right leans less'));
     const hl = (on) => on ? 'color:#e0a458;' : '';
     const scope = S.leanScope === 'segment' ? 'this segment' : 'whole ride';
     cards += `<div class="form-metric"><div class="fm-label">Sides · median lean</div><div class="fm-value" style="font-size:18px;"><span style="${hl(here==='L')}">${S.medLeanL.toFixed(0)}°L</span> · <span style="${hl(here==='R')}">${S.medLeanR.toFixed(0)}°R</span></div><div class="fm-sub">${weaker} · ${scope}</div></div>`;
@@ -14898,12 +15148,39 @@ async function analyze(files) {
     const { R } = calibrationRotation(sensors.gravity, calibWin.start, calibWin.end);
     /* Flag a calibration captured in a different pose than the ride (classic: calibrate with the
        phone in a pocket, then move it to a backpack before riding). Surfaced as a notice in renderAll. */
-    calibWin.poseMismatchDeg = gravityPoseMismatch(sensors.gravity, calibWin.start, calibWin.end, ride.start, ride.end);
-    /* The fore-aft / lateral split of that same angle. Only the lateral half predicts damage to the
-       turn-side reads (see poseMismatchAxes), so it is what renderCalibNotice gates on and what the
-       geek-stats dump prints; the total is kept because other surfaces already store it. */
-    { const _axes = poseMismatchAxes(sensors.gravity, R, ride.start, ride.end);
-      if (_axes) { calibWin.poseForeAftDeg = _axes.foreAftDeg; calibWin.poseLateralDeg = _axes.lateralDeg; } }
+    if (calibWin.strategy === 'riding') {
+      /* The calibration window IS the ride window here, so the usual comparison is self-referential
+         and would read a reassuring 0 deg -- not a measurement, and it would silently retire the one
+         notice that tells a rider their lean numbers are suspect. The question that still HAS an
+         answer is whether the phone held one pose throughout, so ask that: the first half's mean
+         gravity direction against the second half's, through the same function. A mount that never
+         moved reads a few degrees; a phone that shifted mid-ride reads large, and no single
+         calibration is right for that ride however it is chosen.
+         The fore-aft / lateral SPLIT is withheld here for the same reason the total is: it decomposes
+         the calibration-vs-riding angle, and under this strategy there is no such angle to
+         decompose. `renderCalibNotice` recomputes the split from the render payload and gates on it,
+         so leaving these unset is what keeps the notice quiet rather than confidently wrong. */
+      calibWin.poseMismatchDeg = null;
+      const mid = (ride.start + ride.end) / 2;
+      calibWin.ridingPoseDriftDeg = gravityPoseMismatch(sensors.gravity, ride.start, mid, mid, ride.end);
+    } else {
+      calibWin.poseMismatchDeg = gravityPoseMismatch(sensors.gravity, calibWin.start, calibWin.end, ride.start, ride.end);
+      /* The fore-aft / lateral split of that same angle. Only the lateral half predicts damage to the
+         turn-side reads (see poseMismatchAxes), so it is what renderCalibNotice gates on and what the
+         geek-stats dump prints; the total is kept because other surfaces already store it. */
+      const _axes = poseMismatchAxes(sensors.gravity, R, ride.start, ride.end);
+      if (_axes) { calibWin.poseForeAftDeg = _axes.foreAftDeg; calibWin.poseLateralDeg = _axes.lateralDeg; }
+    }
+    /* And the question NEITHER branch above can answer: did the phone move DURING the ride. A mount
+       that shifts partway through averages to something matching neither half, so the whole-ride
+       mean can sit comfortably close to the calibration while both halves are well off it in
+       opposite directions -- the ride worst served by the mismatch flag is exactly the one where the
+       phone actually moved. Computed for EVERY strategy, deliberately: under `riding` the body frame
+       is itself an average over a ride that moved, which is the case this most needs to name, and
+       `ridingPoseDriftDeg` only asks whether the two halves differ, not when or by how much.
+       Surfaced in renderCalibNotice. */
+    calibWin.mountShift = detectMountShift(sensors.gravity, ride.start, ride.end,
+                                           mountShiftIsMoving(sensors.location));
 
     onProgress('rotating sensors to body frame');
     const gyroBody = applyRotation(R, sensors.gyro);
@@ -16599,7 +16876,7 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -18919,6 +19196,7 @@ function renderGolf(D) {
   /* Start the Swing Cam once its stage is in the DOM (the section markup is built above). A reader
      who has asked for reduced motion gets the same first frame, held, rather than nothing. */
   if (swingCam) { renderSwingCamFacts(); if (_swingCam.playing) swingCamStart(); else swingCamHold(); }
+  renderRecordingQuality(D, true);
   renderCoachPanel(D, 'golf');
 }
 
@@ -19107,6 +19385,7 @@ function renderStrength(D) {
   `;
   renderLiftSignature(Dc);
   renderLiftForm(Dc);
+  renderRecordingQuality(Dc, true);
   renderCoachPanel(Dc, 'lift');
 }
 
@@ -20495,6 +20774,7 @@ function renderAllRunning(D) {
   })();
   renderRunOsc(D.running.oscSeries);
   renderRunDecoupling(D);
+  renderRecordingQuality(D);
   renderRunClimbs(D.running.climbs || []);
   renderRunSegments(D.running.segments);
   renderRunParams(D);
@@ -20566,6 +20846,7 @@ function renderAllGps(D) {
     placeCornersUnderMap();
   }
   renderGpsUpsell(D);
+  renderRecordingQuality(D);
   renderGeekStats(D, sport);
   renderCoachPanel(D, sport);
   updateAttachFitVisibility(sport, true);
@@ -21674,8 +21955,15 @@ function syncSmoothToggles() { document.querySelectorAll('.smoothToggle').forEac
    value; the default 'preride' produces a suffixed cache key, which the ride record stores as its
    analysisKey so the Library/switcher can still find the render (they must not assume the bare dedupKey).
    See findCalibWithWindow. Persisted in localStorage; takes effect by re-running the current ride. */
-function loamCalibStrategy() { return localStorage.getItem('loam_calib') === 'quietest' ? 'quietest' : 'preride'; }
-function setLoamCalibStrategy(s) { try { localStorage.setItem('loam_calib', s === 'preride' ? 'preride' : 'quietest'); } catch (e) { /* private mode / quota */ } }
+const CALIB_STRATEGIES = ['preride', 'quietest', 'riding'];
+function loamCalibStrategy() {
+  const v = localStorage.getItem('loam_calib');
+  return CALIB_STRATEGIES.includes(v) ? v : 'preride';
+}
+function setLoamCalibStrategy(s) {
+  try { localStorage.setItem('loam_calib', CALIB_STRATEGIES.includes(s) ? s : 'preride'); }
+  catch (e) { /* private mode / quota */ }
+}
 /* Rider settings for road power analysis: FTP (W) and weight (kg), persisted locally. FTP is an
    optional override of the head unit's stored value; weight unlocks W/kg. Both stored as numbers or
    omitted. Kept minimal; the era-correct ftpHistory in the spec is a later (library) concern. */
@@ -22537,6 +22825,288 @@ function runDecouplingSamples(D) {
   return out;
 }
 
+/* ---------- Recording quality: what this session was actually measured from ----------
+   Ported verbatim from analyzer/core/quality/recording-quality.js, which carries the full argument
+   and the corpus measurements behind every bar; recording-quality.test.js runs BOTH copies over the
+   same cases and asserts they agree, so they cannot drift.
+
+   Three rules, restated here because this is the copy that ships: it reports COVERAGE and never
+   quality (so there is no score, and it needs no ground truth); a sensor nobody wore is ABSENT
+   rather than wrong; and time the recording explains -- a pause, a merge seam -- is subtracted
+   before anything is called a gap. */
+/** Share of a ride's GPS fixes whose speed the phone never measured, above which it is worth saying.
+ *  Population: p50 0.1%, p75 2.2%, p90 6.2%, so this names the tail (10 of 82) rather than a
+ *  quarter of the library. Every recording measured to have actually lost distance is far past it
+ *  (15%, 23%, 38%). */
+const RQ_SPEED_UNKNOWN_FRAC = 0.05;
+
+/** The longest hole in the track, minus whatever the recording explains, above which it is worth
+ *  saying. Population: p50 1 s, p75 20 s -- an ordinary recording has essentially no hole at all. */
+const RQ_GAP_S = 30;
+
+/** Two samples this far apart or less count as continuous coverage. The wrist and headphone streams
+ *  arrive in flushed bursts rather than at a steady rate, so a per-sample rate test would read every
+ *  flush boundary as a dropout. */
+const RQ_COVER_GAP_S = 5;
+
+/** A stream that arrived at all but covered less than this share of the ride stopped part way. The
+ *  documented case is the intermittent watch motion stall, which streams heart rate with zero wrist
+ *  data and is invisible until the analysis comes back without a cadence. */
+const RQ_STREAM_MIN_FRAC = 0.5;
+
+/** Share of [t0, t1] covered by `times`, where a step of at most `maxGapS` counts as continuous. */
+function streamCoverage(times, t0, t1, maxGapS = RQ_COVER_GAP_S) {
+  const span = t1 - t0;
+  if (!(span > 0)) return 0;
+  const inW = (times || []).filter((t) => Number.isFinite(t) && t >= t0 - maxGapS && t <= t1 + maxGapS)
+    .sort((a, b) => a - b);
+  if (inW.length < 2) return 0;
+  let covered = 0;
+  for (let i = 1; i < inW.length; i++) {
+    const step = inW[i] - inW[i - 1];
+    if (step > maxGapS) continue;
+    const lo = Math.max(t0, inW[i - 1]), hi = Math.min(t1, inW[i]);
+    if (hi > lo) covered += hi - lo;
+  }
+  return Math.max(0, Math.min(1, covered / span));
+}
+
+/** Seconds of [a, b] that `spans` accounts for. Same arithmetic as pausedOverlapS, re-declared here
+ *  so this module can be run in a bare scope by the drift guard. */
+function rqExplainedS(spans, a, b) {
+  let s = 0;
+  for (const p of spans || []) {
+    if (!p || !Number.isFinite(p.start) || !Number.isFinite(p.end)) continue;
+    s += Math.max(0, Math.min(b, p.end) - Math.max(a, p.start));
+  }
+  return s;
+}
+
+/** The longest hole between consecutive fixes in [t0, t1], MINUS whatever `explained` accounts for.
+ *  `explained` is the pause spans plus a zero-width span at each recording seam, so a merge's seam
+ *  and a deliberate stop are both holes the recording explains about itself. */
+function longestUnexplainedGapS(locRows, t0, t1, explained = []) {
+  const rows = (locRows || []).filter((r) => r && Number.isFinite(r.t) && r.t >= t0 && r.t <= t1)
+    .sort((a, b) => a.t - b.t);
+  let worst = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1].t, b = rows[i].t;
+    const gap = (b - a) - rqExplainedS(explained, a, b);
+    if (gap > worst) worst = gap;
+  }
+  return worst;
+}
+
+/*
+ * The facts, in the order a rider would want them: the two they can do something about first.
+ *
+ * `level` is 'ok' | 'thin' | 'absent'. `weakens` names what to distrust and is the only part that is
+ * allowed to sound like a warning; `detail` carries the reasoning and the measurement, per this
+ * repo's copy rule that a summary must be actionable on its own and only the reasoning folds away.
+ */
+function recordingQuality(D) {
+  const sensors = (D && D.sensors) || {};
+  const ride = (D && D.ride) || {};
+  const t0 = ride.start, t1 = ride.end;
+  if (!Number.isFinite(t0) || !Number.isFinite(t1) || !(t1 > t0)) return { facts: [] };
+  const facts = [];
+
+  /* --- Calibration: the input that is missing most often and is the one a rider can fix on the
+     spot. `strategy` is what the still-window search settled on; 'preride' means it found a still
+     moment BEFORE the riding, which is the pose the body frame is supposed to describe. */
+  const calib = (D && D.calibWin) || null;
+  const axes = (D && D.poseAxes) || null;
+  if (calib) {
+    const preride = calib.strategy === 'preride';
+    /* `riding` is a third state, not a failure. The rider ASKED for the body frame to come from the
+       ride itself -- it is what the Riding-pose strategy does -- so reporting it as "no still moment
+       was found" would be describing a deliberate choice as a fault. It is not `ok` either: a riding
+       pose is a mean over riding, so it carries trail pitch and any net cornering bias, which is
+       exactly why that strategy is beta. Its own line, saying what it is. */
+    const riding = calib.strategy === 'riding';
+    const lat = axes && Number.isFinite(axes.lateralDeg) ? Math.abs(axes.lateralDeg) : null;
+    facts.push({
+      id: 'calibration',
+      level: preride ? 'ok' : 'thin',
+      headline: preride
+        ? 'Calibrated from a still moment before you started'
+        : riding
+        ? 'Calibrated from the ride itself, not from a still moment'
+        : 'No still moment before the activity, so calibration came from elsewhere in the recording',
+      weakens: preride ? null : 'Lean angles, and which way a turn went',
+      detail: preride
+        ? 'The body frame comes from the pose the phone was actually in when you set off, which is what '
+          + 'lean and turn sides are measured against.'
+        : riding
+        ? 'You chose Riding-pose calibration, which is the right answer when the phone is never in its '
+          + 'riding position while you are standing still. It is beta: a riding pose is an average over '
+          + 'the whole ride, so it carries the trail\u2019s average pitch and any net cornering bias, and '
+          + 'nothing here can check it against a known-good frame.'
+        : 'The still-window search found nothing quiet enough before the activity and fell back to the '
+          + 'quietest window anywhere in the file, which can be after you finished. Standing still for '
+          + '20+ seconds in the final mount before you set off is the whole fix, and the Record screen '
+          + 'now tells you when it has one.'
+          + (lat != null ? ` Measured mismatch to your riding pose: ${lat.toFixed(0)} deg sideways.` : ''),
+    });
+  }
+
+  /* --- GPS speed: silent far more often than anyone assumed, and silently costly.
+     Skipped entirely on a stationary sport. A lift, a range session and a pool swim run location in
+     keep-alive and discard every fix, so the track says nothing about them -- and "your phone could
+     not measure a speed for 96% of this activity" is technically true and completely useless about a
+     barbell session. Same reasoning `RecordView` already applies to the live metrics row, and the
+     same reasoning that withholds the crop SUGGESTION from those three sports. */
+  const stationary = !!(D && D.stationary);
+  const loc = stationary ? [] : (sensors.location || []).filter((r) => r && Number.isFinite(r.t) && r.t >= t0 && r.t <= t1);
+  if (loc.length >= 30) {
+    const unknown = loc.filter((r) => r.speed == null).length / loc.length;
+    const thin = unknown > RQ_SPEED_UNKNOWN_FRAC;
+    facts.push({
+      id: 'gps-speed',
+      level: thin ? 'thin' : 'ok',
+      pct: unknown,
+      headline: thin
+        ? `Your phone could not measure a speed for ${Math.round(unknown * 100)}% of this activity`
+        : 'GPS reported a speed throughout',
+      weakens: thin ? 'Distance, average pace, and how steep each climb and descent reads' : null,
+      detail: thin
+        ? 'CoreLocation reports an unknown speed rather than guessing one, usually under trees, in a '
+          + 'canyon or between buildings. Loam measures the ground under your track across those '
+          + 'stretches instead, so nothing is thrown away, but they are the parts of this activity '
+          + 'measured from position rather than from the phone\'s own speed reading.'
+        : 'Every fix carried a speed, which is what distance and pace are integrated from.',
+    });
+  }
+
+  /* --- GPS holes, with the recording's own explanations subtracted first. */
+  if (loc.length >= 30) {
+    const gap = longestUnexplainedGapS(loc, t0, t1, (D && D.explainedSpans) || []);
+    const thin = gap > RQ_GAP_S;
+    facts.push({
+      id: 'gps-gap',
+      level: thin ? 'thin' : 'ok',
+      seconds: gap,
+      headline: thin
+        ? `The track has a ${gap >= 120 ? Math.round(gap / 60) + ' minute' : Math.round(gap) + ' second'} hole the recording does not explain`
+        : 'The track is continuous',
+      weakens: thin ? 'Distance and the shape of the route across that stretch' : null,
+      detail: thin
+        ? 'Time you paused, and the seam between two merged recordings, are already subtracted -- this is '
+          + 'what is left. A hole usually means the phone lost the sky; a case or a pack pocket that '
+          + 'blocks the antenna is the common cause.'
+        : 'No hole longer than half a minute that the recording cannot account for.',
+    });
+  }
+
+  /* --- The two worn sensors, and ONLY for a recording that could have carried them. A bare head-unit
+     FIT imported on its own has no wrist and no AirPods channel because it is a bike computer's
+     file, not because anyone forgot to wear anything, and "No Apple Watch data in this recording" is
+     a false note to strike about it. The phone's own IMU is the discriminator: every Loam capture
+     has one and no imported FIT does. */
+  const phoneCapture = !!((sensors.accel && sensors.accel.length) || (sensors.gravity && sensors.gravity.length));
+  for (const [id, rows, name, gives] of (phoneCapture ? [
+    ['wrist', sensors.wrist, 'Apple Watch', 'Cadence, rep counts and swing detection'],
+    ['head', sensors.headphone, 'AirPods', 'Head stability, and cadence when no watch was worn'],
+  ] : [])) {
+    const times = (rows || []).map((r) => r && r.t).filter(Number.isFinite);
+    const cov = streamCoverage(times, t0, t1);
+    const level = !times.length ? 'absent' : (cov < RQ_STREAM_MIN_FRAC ? 'thin' : 'ok');
+    facts.push({
+      id, level, coverage: cov,
+      headline: level === 'absent' ? `No ${name} data in this recording`
+        : level === 'thin' ? `${name} streamed for ${Math.round(cov * 100)}% of the activity, then stopped`
+        : `${name} streamed throughout`,
+      weakens: level === 'ok' ? null : gives,
+      detail: level === 'absent'
+        ? `Nothing was wrong: this recording simply has no ${name} channel. ${gives} come from it when it is there.`
+        : level === 'thin'
+        ? 'A stream that starts and then stops part way is the documented failure here, not a flat battery: '
+          + 'the watch can keep sending heart rate while its motion stream stalls, which is invisible '
+          + 'until the analysis comes back without the numbers that depend on it.'
+        : `${gives} are measured from a channel that covered the whole activity.`,
+    });
+  }
+
+  return { facts };
+}
+
+/** The one line above the fold. Names what is thin rather than scoring anything, and says plainly
+ *  when nothing is -- a panel that only ever speaks up when something is wrong trains people to read
+ *  its silence as "not checked". */
+function recordingQualitySummary(q) {
+  const facts = (q && q.facts) || [];
+  if (!facts.length) return null;
+  const thin = facts.filter((f) => f.level === 'thin');
+  if (!thin.length) {
+    const absent = facts.filter((f) => f.level === 'absent').length;
+    return absent
+      ? `Everything this recording carried was complete${absent === 1 ? ', and one sensor was not worn' : `, and ${absent} sensors were not worn`}.`
+      : 'Everything this recording needed was there.';
+  }
+  return thin.length === 1
+    ? `One input was thin: ${thin[0].headline.charAt(0).toLowerCase()}${thin[0].headline.slice(1)}.`
+    : `${thin.length} inputs were thin, so some numbers below rest on less than a full recording.`;
+}
+
+/* The panel. Folded closed by default and never a notice: it does not pop, it does not block, and
+   it never demands a dismissal. The app already raises four separate warnings about capture, and a
+   fifth interruption is not what a rider deep in their results wants -- what they want is one
+   address for "how much of this is measured and how much is inferred", which is what this is.
+
+   The summary line above the fold says what is thin AND says when nothing is, deliberately: a panel
+   that only speaks up when something is wrong teaches people to read its silence as "not checked",
+   which is the state this whole feature exists to leave behind. */
+function renderRecordingQuality(D, stationary) {
+  const sec = document.getElementById('recordingQualitySection');
+  const body = document.getElementById('recordingQualityBody');
+  if (!sec || !body) return;
+  /* The pause spans and the merge seams are what the recording says about its own holes, and both
+     are already paired for other surfaces, so this reads them rather than re-deriving them.
+
+     A PAUSE is already a span. A SEAM is an instant -- `SessionMerge` stamps one mark where two
+     recordings were laid end to end -- and the hole it explains is however long the athlete spent
+     between hitting stop and hitting record again, which can be an hour. So each seam is widened to
+     exactly the pair of fixes it falls between: that explains the hole it sits in and nothing else,
+     where a seam left as an instant would explain nothing and a seam given the whole recording
+     would explain every hole in the file. */
+  const marks = (D.sensors && D.sensors.annotations) || [];
+  const locT = ((D.sensors && D.sensors.location) || [])
+    .filter(r => r && Number.isFinite(r.t)).map(r => r.t).sort((a, b) => a - b);
+  const spans = pauseSpans(marks).slice();
+  for (const m of marks) {
+    if (!isSeamMark(m && m.text) || !Number.isFinite(m.t)) continue;
+    let lo = null, hi = null;
+    for (const t of locT) { if (t <= m.t) lo = t; else { hi = t; break; } }
+    if (lo != null && hi != null) spans.push({ start: lo, end: hi });
+  }
+  const q = recordingQuality({
+    sensors: D.sensors, ride: D.ride, calibWin: D.calibWin, stationary,
+    poseAxes: (D.sensors && D.sensors.gravity && D.R && D.ride)
+      ? poseMismatchAxes(D.sensors.gravity, D.R, D.ride.start, D.ride.end) : null,
+    explainedSpans: spans,
+  });
+  if (!q.facts.length) { sec.classList.add('hidden'); return; }
+  const summary = recordingQualitySummary(q);
+  const order = { thin: 0, absent: 1, ok: 2 };
+  const rows = [...q.facts].sort((a, b) => order[a.level] - order[b.level]).map(f => {
+    const dot = f.level === 'thin' ? '#a06f24' : f.level === 'absent' ? '#8b9179' : '#557a2f';
+    return `<div class="rq-row">
+        <span class="rq-dot" style="background:${dot}"></span>
+        <div>
+          <div class="rq-head">${escapeHtml(f.headline)}</div>
+          ${f.weakens ? `<div class="rq-weakens">Treat with care: ${escapeHtml(f.weakens)}</div>` : ''}
+          <div class="rq-detail">${escapeHtml(f.detail)}</div>
+        </div>
+      </div>`;
+  }).join('');
+  body.innerHTML = foldSection('recquality', 'What this was measured from',
+    escapeHtml(summary), `<div class="panel"><div class="rq-list">${rows}</div>
+      <div class="strength-tablenote">Every line here is a count of what the recording contains, not a
+      judgement of how you did. There is deliberately no score: a number out of a hundred would be an
+      invented metric, and it would be the one thing anyone quoted.</div></div>`, false);
+  sec.classList.remove('hidden');
+}
+
 function renderRunDecoupling(D) {
   const sec = document.getElementById('runDecouplingSection');
   const body = document.getElementById('runDecouplingBody');
@@ -23330,7 +23900,18 @@ function turnMechanics(D, metric) {
     (t.direction === 'L' ? leanL : leanR).push(Math.abs(t.leanDelta));
   }
   const out = {};
-  if (leanL.length >= 2 && leanR.length >= 2) {
+  /* Set by the call site when the calibration's LATERAL pose error is large enough to manufacture a
+     left/right asymmetry out of nothing (turnSidesUnreliable). Every read below that attributes
+     something to a SIDE is withheld rather than hedged, because a weaker-side verdict is exactly the
+     claim a tilted body frame invents, and a hedge on it would still be acted on. The lean
+     MAGNITUDES are not withheld: they are gravity roll and survive fore-aft error. */
+  const sidesBad = !!D.turnSidesUnreliable;
+  if (sidesBad) {
+    out.turn_sides_unreliable = {
+      note: 'This ride\'s body frame is twisted sideways relative to how the phone actually rode, which mixes the bike\'s roll into the turn signal and can invent (or invert) a left/right difference. Left-vs-right lean and the by-direction braking split are therefore WITHHELD, not merely uncertain. Do not tell the rider which side is weaker, do not infer a side preference, and do not work around this by counting left and right turns yourself.',
+    };
+  }
+  if (!sidesBad && leanL.length >= 2 && leanR.length >= 2) {
     const ml = median(leanL), mr = median(leanR);
     out.lean_asymmetry = {
       left_median_deg: +ml.toFixed(1), right_median_deg: +mr.toFixed(1),
@@ -23344,7 +23925,10 @@ function turnMechanics(D, metric) {
     const byDir = { L: 0, R: 0 };
     for (const o of scrubbed) byDir[o.dir]++;
     out.braking = {
-      scrubbed_turns: scrubbed.length, by_direction: byDir,
+      scrubbed_turns: scrubbed.length,
+      /* Withheld on an unreliable body frame for the same reason lean_asymmetry is: "you brake more
+         in rights" is a side claim, and the side is what the tilt corrupts. The TOTAL is unaffected. */
+      ...(sidesBad ? {} : { by_direction: byDir }),
       /* The 2 mph selection threshold above stays in mph so the toggle never changes WHICH turns
          count as scrubbed; only the reported number follows the athlete's units. */
       worst: scrubbed.slice(0, 5).map(o => ({ turn: o.n, direction: o.dir, ...u.speed('scrubbed', o.mph / 2.23694) })),
@@ -25254,6 +25838,45 @@ function hideCalibNotice() {
   if (sec) sec.classList.add('hidden');
 }
 
+/* The notice's in-place fix: flip the header's Calibration select through a synthetic change event,
+   which reuses its handler so persistence and the re-run come for free. Returns a fragment rather
+   than appending, so each branch decides where it goes. Callers gate on _lastSensorFile: a
+   library/cache replay has no backing File to re-analyse, and a button that cannot run is worse
+   than a sentence explaining the manual route. */
+function calibTryButton(strategy, label, sub) {
+  const frag = document.createDocumentFragment();
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'notice-action';
+  btn.textContent = label;
+  btn.onclick = () => {
+    const sel = document.getElementById('calibStrategySel');
+    if (!sel) return;
+    sel.value = strategy;
+    sel.dispatchEvent(new Event('change'));
+  };
+  const note = document.createElement('span');
+  note.className = 'notice-action-sub';
+  note.textContent = sub;
+  frag.append(document.createElement('br'), btn, note);
+  return frag;
+}
+
+/* The mount-shift sentence, or '' when there is nothing to say. Kept separate from the body copy
+   because it is a DIFFERENT claim from the pose mismatch and can be true when that one is false:
+   the mismatch says the calibration does not match the ride, this says the ride does not match
+   ITSELF. Descriptive only -- it names when and how far, never why, and never which half is right,
+   because the recording does not know. */
+function mountShiftSentence(D) {
+  const ms = D && D.calibWin && D.calibWin.mountShift;
+  if (!ms || !isFinite(ms.deg)) return '';
+  return ` Your phone also seems to have moved about ${Math.round(ms.deg)}° partway through the ride,`
+    + ` around ${fmtClock(ms.t)}. Lean angles and turn sides on one side of that point are measured`
+    + ` against a body frame that fits the other side, so trust the two stretches separately rather`
+    + ` than the ride as a whole. Which stretch is the good one depends on when the phone was`
+    + ` calibrated, and the recording cannot tell you that.`;
+}
+
 function renderCalibNotice(D) {
   const sec = document.getElementById('mtbCalibNotice');
   if (!sec) return;
@@ -25272,7 +25895,30 @@ function renderCalibNotice(D) {
   const bad = lateral != null
     ? (lateral >= CALIB_POSE_LATERAL_DEG || deg >= CALIB_POSE_TOTAL_DEG)
     : (deg != null && isFinite(deg) && deg >= CALIB_POSE_TOTAL_DEG);
-  if (deg == null || !isFinite(deg) || !bad) { sec.classList.add('hidden'); return; }
+  const shift = mountShiftSentence(D);
+  /* A ride whose calibration matches its AVERAGE pose can still be a ride where the phone moved --
+     that is the blind spot the shift detector exists for -- so the notice fires on either finding.
+     `mismatched` keeps main's decomposition gate (the lateral half is what predicts damage); the
+     shift is a second, independent reason to speak up. */
+  const mismatched = !(deg == null || !isFinite(deg) || !bad);
+  if (!mismatched && !shift) { sec.classList.add('hidden'); return; }
+  /* The heading is a claim as much as the body is, and these are two different claims: the mismatch
+     says the calibration does not match the ride, the shift says the ride does not match ITSELF. A
+     shift-only ride under the mismatch heading would be telling the rider something untrue about
+     their calibration. */
+  const head = document.getElementById('mtbCalibNoticeHead');
+  if (head) {
+    head.textContent = mismatched
+      ? 'Calibration pose may not match your riding pose.'
+      : 'Your phone moved during the ride.';
+  }
+  if (!mismatched) {
+    if (calibNoticeHidden()) { sec.classList.add('hidden'); return; }
+    const only = document.getElementById('mtbCalibNoticeBody');
+    if (only) only.textContent = shift.replace(' Your phone also seems', ' Your phone seems');
+    sec.classList.remove('hidden');
+    return;
+  }
   /* Read the notice, act on it or not, then put it away for this ride. The warning still governs how
      much to trust the lean numbers, so it is dismissible rather than removable: the Calibration
      selector in the header is unaffected and re-running the analysis re-evaluates the mismatch. */
@@ -25283,7 +25929,7 @@ function renderCalibNotice(D) {
        and only one of them is worth acting on. A sideways twist is a mount problem and damages the
        turn-side reads; a pure fore-aft offset that is large enough to reach the backstop is a
        mounting angle, not a posture, and costs turns rather than sides. */
-    const sideways = lateral != null && lateral >= CALIB_POSE_LATERAL_DEG;
+    const sideways = turnSidesUnreliable(axes);
     body.textContent = sideways
       ? ` Your phone sat about ${Math.round(lateral)}° twisted sideways relative to how it rode`
         + (foreAft != null && foreAft >= 5
@@ -25294,12 +25940,42 @@ function renderCalibNotice(D) {
       : ` Your phone seems to have sat about ${Math.round(deg)}° differently during calibration than`
         + ` while riding (classic case: calibrated in a pocket, then moved to a backpack before`
         + ` rolling out), which is far enough out to cost turns.`;
+    /* Appended rather than folded in: the shift is a SECOND finding and can be true whichever of the
+       two mismatch modes above fired, so it reads as another sentence rather than as a qualifier on
+       either of them. Empty string when there is nothing to say. */
+    body.textContent += shift;
     /* Offer the in-app fix right here instead of only advising "next time": Final-mount calibration
        re-derives the body frame from the last still moment before the ride. Flipping the header
        select through a synthetic change event reuses its handler, so persistence and the re-run
        come for free. Needs the backing File (_lastSensorFile); library/cache replays have none. */
+    /* Name a body frame built AFTER the ride, because "calibrated in a pocket, then moved to a
+       backpack" is a specific and WRONG account of what happened to those riders, and it is the
+       common case rather than an exotic one: 38 of the 83 analyzable recordings in the 2026-08-29
+       corpus audit calibrate from a post-ride window, a median 66.1 deg from the riding pose. The
+       phone was on a car seat or a tailgate. Stated before the strategy branches below, since it is
+       the true cause whichever strategy was selected. */
+    if (calibWindowPlacement(D.calibWin, D.ride) === 'post-ride') {
+      body.textContent += ' The still moment it calibrated from is AFTER your ride ended, not before it'
+        + ' \u2014 so the body frame came from wherever the phone was resting once you had finished, not from'
+        + ' how it sat while you rode. That happens when no quiet enough moment exists before you roll out.'
+        + ' Next time, mount the phone and stand still for 20+ seconds before you start moving; the Record'
+        + ' screen will say "Calibration captured" once it has one.';
+    }
     const already = D.calibWin.strategy === 'preride';
-    if (already) {
+    if (already && _lastSensorFile) {
+      /* The reported dead end (#546): Final-mount is already on, the mismatch is still 112 deg, and
+         the notice had nothing to offer but "care". Some workflows cannot produce a still moment in
+         the riding pose at all -- a drone session spends every still moment with the pack off -- so
+         "stand still next time" is advice the rider cannot take. Riding-pose calibration is the one
+         remaining source, and on that session every riding window agreed with every other to
+         10-11 deg while every still window was 35-106 deg out. */
+      body.textContent += ' This analysis already uses Final-mount calibration and the mismatch persists.'
+        + ' If the phone is never in its riding position while you are standing still (a pack taken off'
+        + ' at the trailhead, or a drone session), calibrating from the ride itself is the remaining option.';
+      body.appendChild(calibTryButton('riding', 'Try Riding-pose calibration',
+        'Derives your body frame from the ride itself instead of a still window. Beta: a riding pose is an'
+        + ' average, so it carries trail pitch and any net cornering bias.'));
+    } else if (already) {
       body.textContent += ' This analysis already uses Final-mount calibration and the mismatch persists,'
         + ' so treat lean numbers with care. Next time, mount the phone first, then stand still for 20+ seconds before you roll out.';
     } else if (_lastSensorFile && loamCalibStrategy() === 'preride') {
@@ -25311,20 +25987,11 @@ function renderCalibNotice(D) {
         + ' before the ride to calibrate from, so the quietest window was used. Next time, stand still'
         + ' for 20+ seconds in the final mount before rolling out.';
     } else if (_lastSensorFile) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'notice-action';
-      btn.textContent = 'Try Final-mount calibration';
-      btn.onclick = () => {
-        const sel = document.getElementById('calibStrategySel');
-        if (!sel) return;
-        sel.value = 'preride';
-        sel.dispatchEvent(new Event('change'));
-      };
-      const sub = document.createElement('span');
-      sub.className = 'notice-action-sub';
-      sub.textContent = 'Recalibrates from the last still moment before the ride and re-runs the analysis; you can switch back with the Calibration selector under Options in the header.';
-      body.append(document.createElement('br'), btn, sub);
+      /* The helper, not an inline copy: there are two of these now (Final-mount here, Riding-pose in
+         the branch above), and two hand-rolled buttons would drift. The sub-text is main's, which
+         names the Options popover the selector moved into on 2026-08-30. */
+      body.appendChild(calibTryButton('preride', 'Try Final-mount calibration',
+        'Recalibrates from the last still moment before the ride and re-runs the analysis; you can switch back with the Calibration selector under Options in the header.'));
     } else {
       body.textContent += ' To fix it for this ride, re-open the recording file and set Calibration (under Options in the header) to "Final mount".';
     }
@@ -25420,6 +26087,7 @@ function renderAll(D) {
   if (D.fitInRide && D.fitInRide.length) { show('fitDataSection'); renderFitChart(D.fitInRide, D.ride); renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
   currentRide = D.ride;
   renderRunsPanel(D);
+  renderRecordingQuality(D);
   renderGeekStats(D, rSport);
   renderCoachPanel(D, rSport);
   updateAttachFitVisibility(rSport, D.hasFit);
@@ -28148,7 +28816,7 @@ function renderParams(s, hasFit) {
     <span>exit <strong>${TURN_PARAMS.exitRate}°/s</strong></span>
     <span>min heading <strong>${TURN_PARAMS.minHeadingChg}°</strong></span>
     <span>min duration <strong>${TURN_PARAMS.minDuration}s</strong></span>
-    <span style="margin-left:auto">calib <strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
+    <span style="margin-left:auto">calib <strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.strategy === 'riding' ? ', riding pose' : ''}${s.calibWin.ridingPoseDriftDeg != null && isFinite(s.calibWin.ridingPoseDriftDeg) ? ', drift ' + Math.round(s.calibWin.ridingPoseDriftDeg) + '°' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
   `;
 }
 
@@ -29451,7 +30119,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'cc688ed4c · 2026-09-02';
+const LOAM_BUILD = '5a05f1ca0 · 2026-09-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
