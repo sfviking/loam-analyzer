@@ -580,11 +580,21 @@
   }
   #displayPrefsBtn:hover, #displayPrefsBtn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
   /* Anchored to the button and right-aligned, so it opens inside the page rather than off the edge
-     of a phone; the max-width keeps it there even when the viewport is narrower than its content. */
+     of a phone; the max-width keeps it there even when the viewport is narrower than its content.
+     `max-height` is set from the button's own rect on every open (see initDisplayPrefs), so the
+     popover always fits between the button and the bottom of the screen -- a viewport-relative CSS
+     cap cannot do that, because it does not know where the button is, and in landscape (390px tall
+     on a phone) five preferences ran off the fold.
+     z-index 1200 puts it above every LAYER THIS PAGE PAINTS -- the sticky quick-nav (40), a Leaflet
+     pane or control that escapes its map's stacking context (400-1000), the replay HUD and a
+     highlighted jump marker (1100) -- and below the modals and the drag overlay (3000+), which are
+     opened by a click outside the popover and therefore close it first. It sat at 60, which is
+     under all of those: a menu that another element can cover is a menu that does not work. */
   .prefs-pop {
-    position: absolute; z-index: 60; top: calc(100% + 8px); right: 0;
+    position: absolute; z-index: 1200; top: calc(100% + 8px); right: 0;
     display: grid; gap: 12px; width: max-content; min-width: 190px;
     max-width: min(300px, calc(100vw - 40px));
+    overflow-y: auto; overscroll-behavior: contain;
     padding: 14px; text-align: left;
     background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(15,23,42,0.24);
@@ -727,7 +737,7 @@
     font: 500 11px/1 'JetBrains Mono', monospace; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--muted, #8b9179);
   }
-  .swim-scope-row select { font-size: 13px; padding: 5px 8px; border-radius: 8px; max-width: 100%; }
+  .swim-scope-row select { font-size: 13px; padding: 5px 24px 5px 8px; border-radius: 8px; max-width: 100%; }
   .swim-stroke-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
   .swim-stroke-filter button {
     font: 500 12px/1 'JetBrains Mono', monospace; letter-spacing: 0.06em; text-transform: uppercase;
@@ -870,8 +880,10 @@
   .corner-ledger .delta { font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
   .corner-ledger .delta.pos { color: var(--moss); }
   .corner-ledger .delta.neg { color: var(--clay); }
+  /* Same phone budget as the plain ledger below (this selector is more specific, so it has to say it
+     again rather than inherit): the speeds need 140px or the panel clips them. */
   @media (max-width: 640px) {
-    .corner-ledger.has-delta .ledger-head, .corner-ledger.has-delta .ledger-row { grid-template-columns: 52px 44px 1fr 132px; }
+    .corner-ledger.has-delta .ledger-head, .corner-ledger.has-delta .ledger-row { grid-template-columns: 52px 40px 1fr 140px; }
     .corner-ledger .delta { display: none; }
   }
   /* Fade strip: one row per lap of this segment, apex-speed sparkline + time vs best. */
@@ -947,10 +959,24 @@
     gap: 14px; align-items: center;
     padding: 9px 16px;
   }
+  /* Phone. Two things were wrong here and they pull against each other, which is why the column
+     budget is spelled out: at 390px the panel gives the four columns 284px, so the old
+     52+44+132 + three 14px gaps left the kept-bar 56px -- and the bar's own header,
+     "Speed kept through the turn", is 26 uppercase characters, so the STICKY header stood five lines
+     tall over every row. Meanwhile the speeds ("~11.2 → 11.2 → 11.2") measure 137px in a 132px
+     column and were clipped by the panel. Narrower gaps and a narrower arc pay for both: the speeds
+     get the 140px they need and the bar still gets 62px, which is plenty for a proportion bar.
+     The header label shortens rather than wrapping -- see [data-short] below. */
   @media (max-width: 640px) {
-    .corner-ledger .ledger-head, .corner-ledger .ledger-row { grid-template-columns: 52px 44px 1fr 132px; }
+    .corner-ledger .ledger-head, .corner-ledger .ledger-row { grid-template-columns: 52px 40px 1fr 140px; gap: 10px; }
     .corner-ledger .lg-kept { display: none; }
     .corner-ledger .spd { font-size: 10.5px; }
+    /* The full label stays in the DOM (a screen reader still reads it, and it is the accurate one);
+       only what is PAINTED shortens, so the two cannot say different things by drifting apart. */
+    .corner-ledger .ledger-head span[data-short] { font-size: 0; letter-spacing: 0; }
+    .corner-ledger .ledger-head span[data-short]::after {
+      content: attr(data-short); font-size: 9.5px; letter-spacing: 0.14em;
+    }
   }
   .corner-ledger .ledger-head {
     font-family: 'JetBrains Mono', monospace; font-size: 9.5px; letter-spacing: 0.14em;
@@ -1417,6 +1443,14 @@
     <span id="sampleRateNoticeBody"></span>
   </div>
 </section>
+<!-- A stationary sport Loam GUESSED. Same placement and styling as the notice above, and shown by
+     the lift, range and swim renderers only. -->
+<section id="guessedSportNotice" class="hidden" style="max-width:1100px; margin:0 auto; padding:12px 20px 0;">
+  <div class="mount-notice">
+    <strong id="guessedSportNoticeHead"></strong>
+    <span id="guessedSportNoticeBody"></span>
+  </div>
+</section>
 <!-- Trim (crop) the recording. Lives OUTSIDE #results for the same reason the banner above does: it
      has to show for every sport view, including the three that hide #results entirely and render
      into their own sections. The bar is one line and always present once a recording is loaded, so
@@ -1683,11 +1717,14 @@
   .sc-file input { display: none; }
   .sc-videobar { margin-top: 10px; font: 12px/1.7 'JetBrains Mono', monospace; color: var(--text-dim, #4a5261); }
   .sc-videobar .sc-vrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .sc-videobar button, .sc-videobar select { font: 11px 'JetBrains Mono', monospace; padding: 5px 9px; border-radius: 7px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
+  .sc-videobar button, .sc-videobar select { font: 11px 'JetBrains Mono', monospace; padding: 5px 9px; border-radius: 7px; border: 1px solid var(--border, #e2e8f0); background-color: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
   .sc-videobar button.primary { border-color: var(--accent, #e87b3d); color: var(--accent, #e87b3d); }
   .sc-vwarn { color: var(--accent, #e87b3d); }
   .sc-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
-  .sc-controls button, .sc-controls select { font: 12px 'JetBrains Mono', monospace; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
+  .sc-controls button, .sc-controls select { font: 12px 'JetBrains Mono', monospace; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background-color: var(--surface-2, #eef2f6); color: var(--text, #1a1f26); cursor: pointer; }
+  /* The rules above are shared with buttons, which have no chevron to make room for. */
+  .sc-videobar select { padding-right: 24px; }
+  .sc-controls select { padding-right: 26px; }
   .sc-controls button.on { border-color: var(--accent, #e87b3d); color: var(--accent, #e87b3d); }
 
   /* ---- Range view, Field Instrument pass ----
@@ -1855,9 +1892,21 @@
   .lift-form-row { display: grid; grid-template-columns: minmax(240px, 340px) 1fr; gap: 16px; margin-bottom: 24px; }
   @media (max-width: 720px) { .lift-form-row { grid-template-columns: 1fr; } }
   .lift-form { padding: 14px; }
-  .lf-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  /* A <select>'s min-content width is its LONGEST option -- here "Set 1 · squat · high bar ·
+     parallel" -- and a flex item never shrinks below min-content unless it is told to, so on a
+     phone the set picker grew past the panel and .panel's overflow:hidden cut its right edge and
+     its chevron clean off (measured: 38px gone at 390px, 53px at 375px, 108px at 320px, where the
+     control stops looking like a picker at all). `wrap` gives it a line of its own before it has to
+     shrink, and `min-width: 0` lets it shrink and ellipsize on the phones where a line is still not
+     enough. Both are needed: wrapping alone still overflows at 320px. */
+  .lf-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
   .lf-title { font: 700 13px 'JetBrains Mono', monospace; letter-spacing: 1px; color: var(--text, #1a202c); }
-  .lf-set { font: 500 12px 'JetBrains Mono', monospace; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--border, #2a2e37); background: var(--surface-2, #eef2f6); color: var(--text, #1a202c); }
+  /* `background-color`, never the `background` shorthand: the shorthand resets background-image,
+     which is where the base select rule keeps its chevron, so this picker drew as a flat box that
+     did not read as a control at all. The 24px on the right is the room that glyph needs -- at 8px
+     the option text ran straight over it. Same trap the base select rule names; pinned by assertSelectChevrons in the E2E. */
+  .lf-set { font: 500 12px 'JetBrains Mono', monospace; padding: 4px 24px 4px 10px; border-radius: 7px; border: 1px solid var(--border, #2a2e37); background-color: var(--surface-2, #eef2f6); color: var(--text, #1a202c);
+    min-width: 0; max-width: 100%; }
   .lf-stage { width: 100%; border-radius: 12px; overflow: hidden; line-height: 0; }
   .lf-stage svg { display: block; width: 100%; height: auto; }
   /* Shown in place of the animation for a lift we have no proven pose for, instead of a stand-in body. */
@@ -11243,12 +11292,17 @@ function detectStrength(sensors, ride) {
   }
   if (R.nSets >= 1 && R.nReps >= 3) {
     reasons.push(`${R.nSets} set(s), ${R.nReps} reps of low-frequency pocket-tilt oscillation`);
-    /* Confidence scales with the number of coherent sets and reps. A single short set is the most
-     * likely incidental-motion false positive (a stationary phone jostling in a pocket), so a lone
-     * set stays tentative and only multiple sets read as a confident lift; a dispatcher gates on
-     * this. The exact floor wants a ground-truth stationary-but-not-lifting recording to tune (none
-     * exists yet), so do NOT tighten the rep/set thresholds blind: legitimate strength work runs as
-     * few as 2 to 3 reps per set, and raising the floor would drop real low-rep sets. */
+    /* Confidence scales with the number of coherent sets and reps: a lone short set is the most
+     * likely incidental-motion false positive (a stationary phone jostling in a pocket), so it stays
+     * tentative and only multiple sets read as a confident lift. NOTHING READS THIS VALUE --
+     * detectStationarySport compares `.sport` and logs the rest, and the `{ sport }` post-back to the
+     * host does not carry it -- so it is a report, not a gate, and building a gate on it would not
+     * help: on the stationary NON-LIFT negative (data/strength/stationary-nonlift-2026-08-30, issue
+     * #592) it saturates at 1.0, the MAXIMUM. That recording exists now and strength FAILS it; it is
+     * reproduced by `standingFidget()` in detect.test.js. So do NOT tighten the rep/set thresholds
+     * blind: rep count and per-set amplitude both INTERLEAVE with the real squat reference (four real
+     * sets sit below this negative's best set), legitimate strength work runs as few as 2 to 3 reps
+     * per set, and raising the floor would drop real low-rep sets. */
     const confidence = Math.min(1, 0.4 + 0.13 * R.nSets + 0.02 * R.nReps);
     return { sport: 'strength', confidence: +confidence.toFixed(2), reasons, nSets: R.nSets, nReps: R.nReps };
   }
@@ -14852,6 +14906,12 @@ async function analyze(files) {
        is no tap to infer from -- Water Lock makes the watch untappable mid-swim, which is why this
        is declared-only and the auto path goes through detectSwim further down. */
     let isSwim = /^(swim|swimming)$/.test(userSport);
+    /* Set when a STATIONARY sport was reached by the detector alone -- nothing the athlete did says
+       so. Carried to the view and to the iOS host, because a guess written down as a fact is what
+       issue #592 actually cost: 10.6 minutes of standing and typing became `activity: weightlifting`
+       with deep squats animated over it. Null whenever a declared sport or a Set/club tap made the
+       call, which is the athlete telling us rather than us inferring. */
+    let stationaryGuess = null;
     /* Skiing is the first sport that is NEITHER GPS-moving nor stationary, and which of the two it
        is depends on the VENUE rather than on the sport. Outdoors it has a perfectly ordinary GPS
        ride window and takes the ordinary path; under a snow dome's roof it has none and would
@@ -14891,9 +14951,9 @@ async function analyze(files) {
            detectStationarySport. Auto-detect only, so a declared sport is never overridden. */
         onProgress('checking for a stationary session');
         const stationary = autoSport ? detectStationarySport(sensors, spanRide) : null;
-        if (stationary === 'golf') { isGolf = true; ride = spanRide; }
-        else if (stationary === 'weightlifting') { isLift = true; ride = spanRide; }
-        else if (stationary === 'swimming') { isSwim = true; ride = spanRide; }
+        if (stationary === 'golf') { stationaryGuess = isGolf ? null : 'golf'; isGolf = true; ride = spanRide; }
+        else if (stationary === 'weightlifting') { stationaryGuess = isLift ? null : 'weightlifting'; isLift = true; ride = spanRide; }
+        else if (stationary === 'swimming') { stationaryGuess = isSwim ? null : 'swimming'; isSwim = true; ride = spanRide; }
         /* INDOOR SKIING: a declared ski session that found no GPS window is under a roof. It gets a
            refusal naming the actual limit rather than the generic "no GPS" advice below, which
            would tell a skier to relabel their session as a lift.
@@ -14991,9 +15051,12 @@ async function analyze(files) {
       sport = detection.sport === 'unknown' ? 'running' : detection.sport;
     }
     dbg('[sport detect]', JSON.stringify(detection), '→ using:', sport);
-    /* Tell the iOS host the detected sport so it can auto-label the session's activity type. */
+    /* Tell the iOS host the detected sport so it can auto-label the session's activity type.
+       `provisional` says the call came from a stationary DETECTOR with nothing in the recording to
+       corroborate it, so the host can hold it as a guess awaiting confirmation instead of writing it
+       down. Additive: a host that does not read the field behaves exactly as before. */
     if (LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam) {
-      try { window.webkit.messageHandlers.loam.postMessage({ sport }); } catch (e) {}
+      try { window.webkit.messageHandlers.loam.postMessage({ sport, provisional: !!stationaryGuess }); } catch (e) {}
     }
 
     if (sport === 'running' || sport === 'walking') {
@@ -15089,7 +15152,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
-      const liftRender = { sensors, ride, strength, summary, sport, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const liftRender = { sensors, ride, strength, summary, sport, guessed: stationaryGuess, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link the lift like every other sport so it reopens instantly and is bookmarkable at
          #/ride/<key> (this was the only branch that recomputed on every open and had no URL). The render
          object is structured-cloneable (plain sensor/summary/strength data, no functions), so it round-
@@ -15113,7 +15176,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('golfResults');
-      const golfRender = { sensors, ride, golf, summary, sport, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const golfRender = { sensors, ride, golf, summary, sport, guessed: stationaryGuess, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
       /* Cache + deep-link like every other sport so it reopens instantly at #/ride/<key>. The render
          object is structured-cloneable (plain data, no functions), so it round-trips through the
          IndexedDB analysis cache; renderCachedAnalysis + cachedSportNoun carry a golf branch.
@@ -15182,6 +15245,7 @@ async function analyze(files) {
          about which number is the series; until then a capture is shown on its own. */
       hideAllSections(); hide('loading'); hide('results'); show('swimResults');
       const swimRender = { session, swim, summary, history: swimHistoryLoad(), sport: 'swimming',
+        guessed: stationaryGuess,
         title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name), imuRateHz };
       if (cacheKey) { putCachedAnalysis(cacheKey, sport, swimRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
       renderSwim(swimRender);
@@ -16238,7 +16302,7 @@ function renderCrossRide({ perRide, clusters }) {
       <div class="panel" style="padding:20px; margin-bottom:12px;">
         <div style="display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-bottom:8px;">
           <label for="crossSort_${ci}" style="font-size:11px; color:var(--text-muted);">Sort</label>
-          <select id="crossSort_${ci}" style="background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-family:inherit; font-size:11px;">
+          <select id="crossSort_${ci}" style="background-color:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 24px 4px 8px; font-family:inherit; font-size:11px;">
             <option value="time">Best time</option>
             <option value="date">Date</option>
           </select>
@@ -17009,7 +17073,7 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -19226,6 +19290,7 @@ function renderGolf(D) {
      (analyzer/sports/golf/analysis.js), so the selector's other strategy would change nothing here
      while re-running the whole analysis. Same leak and same fix as renderStrength further down. */
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
   renderFitRepairNotice(D);
   const g = D.golf || {}, s = D.summary || {}, con = g.consistency || {};
@@ -19341,6 +19406,7 @@ function renderStrength(D) {
      rolling 6 s baseline). Hidden here for the same reason renderAllRunning and renderAllGps hide it,
      and for the same reason the Record screen stopped asking a lifter to hold still. */
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
   renderFitRepairNotice(D);
   /* Register for the header Units toggle (rerenderUnits), same as every other renderer. Without this,
@@ -19514,7 +19580,7 @@ function renderStrength(D) {
     <div id="liftHistoryPanel">${liftHistorySection(liftHistory)}</div>
     ${betaCaveat(
       `treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.`,
-      `${liftRepSourceNote(sets) ? liftRepSourceNote(sets) + ' Everywhere else, reps' : 'Reps'}, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus one ground-truth squat session, not yet against a stationary non-lift recording, which is what would measure its false-positive rate. A lift is stationary, so there is no GPS map, turns, or jumps.`)}
+      `${liftRepSourceNote(sets) ? liftRepSourceNote(sets) + ' Everywhere else, reps' : 'Reps'}, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus two ground-truth squat sessions. It has also been run against a recording of someone standing still and not lifting at all, which it wrongly reported as sets and reps -- so it can mistake standing about for a set, and that is why this stays BETA. A lift is stationary, so there is no GPS map, turns, or jumps.`)}
   `;
   renderLiftSignature(Dc);
   renderLiftForm(Dc);
@@ -20865,6 +20931,7 @@ function renderAllRunning(D) {
   const sport = D.sport === 'walking' ? 'walking' : 'running';
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
+  renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
   renderFitRepairNotice(D);
   renderRideSignature(D, sport);
@@ -25793,6 +25860,43 @@ function renderFitRepairNotice(D) {
 /* Sample-rate warning banner. Fed by detectImuRateHz / imuRateWarning (computed once in analyze
    and carried on the render payload, so cached replays keep the warning). All three sport renders
    call this, since every sport consumes the 100 Hz phone-motion assumption somewhere. */
+/*
+ * A stationary sport reached by DETECTION says so, on its face.
+ *
+ * There is no chip, no tap and no declared sport behind these sessions -- the detector inferred the
+ * whole thing from pocket tilt or wrist motion -- and issue #592 is what that costs when it is
+ * presented as settled: a recording of someone standing still and typing came back as 4 sets and 8
+ * reps of weightlifting, at the detector's MAXIMUM confidence, with the Spotter Cam animating deep
+ * squats over it. Nothing here re-litigates the routing: an untapped lifter still reaches the Lift
+ * view, because getting a map of the rack instead is the failure that routing exists to prevent.
+ * What changes is that the view stops asserting.
+ *
+ * This is the tap-to-label idiom the rest of the app already uses when it cannot classify something
+ * -- lift type, club type, "not a trail", pool length. The athlete is the one who knows.
+ */
+function renderGuessedSportNotice(D) {
+  const sec = document.getElementById('guessedSportNotice');
+  if (!sec) return;
+  const guess = D && D.guessed;
+  if (!guess) { sec.classList.add('hidden'); return; }
+  const head = document.getElementById('guessedSportNoticeHead');
+  const body = document.getElementById('guessedSportNoticeBody');
+  const what = guess === 'weightlifting' ? 'a lift' : guess === 'golf' ? 'a range session' : 'a swim';
+  const from = guess === 'weightlifting'
+    ? 'the phone never moved anywhere and its tilt swung in a repeating rhythm'
+    : guess === 'golf'
+      ? 'the phone never moved anywhere and your wrist swung in bursts'
+      : 'the phone never moved anywhere and your wrist stroked in a rhythm';
+  if (head) head.textContent = `Loam guessed this was ${what}.`;
+  if (body) {
+    body.textContent = ` Nothing in the recording says so -- there is no activity picked and no Set`
+      + ` or club tap in it, so this is inferred from motion alone: ${from}. Standing about can look`
+      + ` the same. If it is wrong, pick the activity under Options in the header, and tap the chips`
+      + ` while you record next time so Loam does not have to guess.`;
+  }
+  sec.classList.remove('hidden');
+}
+
 function renderSampleRateNotice(D) {
   const sec = document.getElementById('sampleRateNotice');
   if (!sec) return;
@@ -26339,6 +26443,7 @@ function renderAll(D) {
      the crash context is derived. Assigned onto D because buildDigest reads it off the same object
      the coach panel and the geek-stats dump are handed. */
   D.crashes = crashesForD(D);
+  renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
   renderFitRepairNotice(D);
   renderCalibNotice(D);
@@ -27600,7 +27705,7 @@ function renderCornerLedger(turns, hostId, deltasByN) {
     }
   } catch (e) { sym = ''; }
   host.innerHTML =
-    `<div class="ledger-head"><span>Turn</span><span>Arc</span><span>Speed kept through the turn</span>` +
+    `<div class="ledger-head"><span>Turn</span><span>Arc</span><span data-short="Kept">Speed kept through the turn</span>` +
     `<span style="text-align:right;">Entry → apex → exit (${unit})</span><span class="lg-kept" style="text-align:right;">Kept</span>` +
     (deltasByN ? `<span class="delta">vs best</span>` : '') + `</div>` +
     `<div class="ledger-scroll">${rows}</div>` +
@@ -30086,9 +30191,20 @@ if (focusToggle) {
   const btn = document.getElementById('displayPrefsBtn');
   const pop = document.getElementById('displayPrefs');
   if (!btn || !pop) return;
+  /* The popover is anchored to a button near the top of the results, and it is as tall as the
+     preferences the sport has. Measure the room under the button at each open and cap it there, so
+     it never runs off the bottom of the screen -- portrait it never has to, in landscape (390px of
+     height on a phone, which this view unlocks for the wide charts) it always would. The 120px floor
+     keeps it a scrollable menu rather than a sliver; it is deliberately BELOW the tightest room
+     measured (114px, the web layout in landscape, where the masthead pushes the header down), or the
+     floor would be the thing hanging the menu off the bottom. */
   const setOpen = (open) => {
     pop.classList.toggle('hidden', !open);
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      const b = btn.getBoundingClientRect();
+      pop.style.maxHeight = Math.max(120, Math.round(window.innerHeight - b.bottom - 24)) + 'px';
+    }
   };
   btn.addEventListener('click', (ev) => {
     ev.stopPropagation();
@@ -30455,7 +30571,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '6ebc1a866 · 2026-09-02';
+const LOAM_BUILD = '918ca037b · 2026-09-02';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
