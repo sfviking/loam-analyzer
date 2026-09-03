@@ -3521,6 +3521,14 @@ function dTurnSidesUnreliable(D) {
   if (!D || !D.sensors || !D.sensors.gravity || !D.R || !D.ride) return false;
   return turnSidesUnreliable(poseMismatchAxes(D.sensors.gravity, D.R, D.ride.start, D.ride.end));
 }
+/* The same answer, for the surfaces that ask it repeatedly. `dTurnSidesUnreliable` walks the whole
+   gravity channel (18.6 ms over the reference ride's 468,914 rows), which is nothing once per render
+   and too much per animation frame. renderAll resolves it into `_sidesUnreliable`; this returns that
+   when it is available and falls back to asking directly, so a path that never reached renderAll is
+   still answered correctly rather than silently defaulting to "sides are fine". */
+function sidesUnreliableFor(D) {
+  return _sidesUnreliable != null ? _sidesUnreliable : dTurnSidesUnreliable(D);
+}
 function calibWindowPlacement(calibWin, ride) {
   if (!calibWin || !ride) return null;
   const cs = calibWin.start, ce = calibWin.end, rs = ride.start, re = ride.end;
@@ -8781,7 +8789,11 @@ function formFrame() {
        fore-aft pose error, so they stay; it is the WHICH-SIDE verdict a laterally tilted body frame
        invents, so that is what is withheld. If this tile kept saying "left leans less" while the
        coach refused to, the rider would have been handed the claim anyway. */
-    const sidesBad = dTurnSidesUnreliable(F.D);
+    /* Through the shared accessor: this runs inside formFrame, i.e. on every requestAnimationFrame,
+       and dTurnSidesUnreliable walks the whole gravity channel -- 18.6 ms over the reference ride's
+       468,914 rows, more than a 60 fps frame budget on its own. renderAll resolved it once; the
+       fallback keeps the answer identical on any path that did not. */
+    const sidesBad = sidesUnreliableFor(F.D);
     const weaker = sidesBad
       ? 'which side is which is unreliable on this ride'
       : (Math.abs(S.medLeanL - S.medLeanR) < 3 ? 'balanced' : (S.medLeanL < S.medLeanR ? 'left leans less' : 'right leans less'));
@@ -24178,7 +24190,17 @@ function mtbHighlights(D) {
      median_apex_radius come from D.summary, so rescoping only its mechanics block would leave the
      digest contradicting itself, and fixing that properly means rescoping the summary too. That is a
      larger change and it is tracked in CLAUDE.md rather than half-done here. */
-  const mech = turnMechanics({ ...D, turns: turnsOnLabelledTrails(D) }, U.metric());
+  /* AND the body-frame question, set at the CALL SITE exactly as coachDigestD sets it, because this
+     card makes the same two side claims the digest withholds -- and makes them FIRST, in the hero
+     card at the top of the page. Until 2026-09-03 it did not ask: on the reference Tanga ride
+     (16 deg of lateral pose error) the calibration notice said "turn sides and the left/right lean
+     split are the numbers to distrust" and this card, above it, said "You commit 6.4 deg less lean
+     in left-hand turns ... your less-committed side" and "Most of your scrubbing was in
+     left-handers". Withheld, never hedged: a laterally tilted frame INVENTS a left/right split (the
+     run-belt ride's 47L/38R becomes 23L/43R at 30 deg), so a weaker-side verdict is precisely the
+     claim it manufactures. The lean MAGNITUDES and `braking.worst` survive and are untouched. */
+  const mech = turnMechanics({ ...D, turns: turnsOnLabelledTrails(D),
+                               turnSidesUnreliable: sidesUnreliableFor(D) }, U.metric());
   const cands = [];
   if (mech && mech.lean_asymmetry && mech.lean_asymmetry.gap_deg >= 3) {
     const la = mech.lean_asymmetry;
@@ -24189,10 +24211,13 @@ function mtbHighlights(D) {
   }
   if (mech && mech.braking && mech.braking.worst.length) {
     const w = mech.braking.worst[0];
+    /* Absent when the body frame cannot tell left from right (turnMechanics withholds it), so this
+       has to read as "no by-direction note", not as a crash. The worst-corner line stays: it names
+       ONE corner rather than aggregating a side, which is the same line turnMechanics itself draws. */
     const sk = mech.braking.by_direction;
     let dirNote = '';
-    if (sk.L >= 2 * Math.max(1, sk.R)) dirNote = ' Most of your scrubbing was in left-handers.';
-    else if (sk.R >= 2 * Math.max(1, sk.L)) dirNote = ' Most of your scrubbing was in right-handers.';
+    if (sk && sk.L >= 2 * Math.max(1, sk.R)) dirNote = ' Most of your scrubbing was in left-handers.';
+    else if (sk && sk.R >= 2 * Math.max(1, sk.L)) dirNote = ' Most of your scrubbing was in right-handers.';
     /* turnMechanics already reported this in the active units (the key names which). */
     const scrubbed = U.metric() ? w.scrubbed_kmh : w.scrubbed_mph;
     cands.push(`Hardest braking was turn <strong>T${w.turn}</strong> (${w.direction === 'L' ? 'left' : 'right'}, ${scrubbed.toFixed(1)} ${U.speedUnit()} scrubbed).${dirNote}`);
@@ -26443,6 +26468,13 @@ function renderAll(D) {
      the crash context is derived. Assigned onto D because buildDigest reads it off the same object
      the coach panel and the geek-stats dump are handed. */
   D.crashes = crashesForD(D);
+  /* Resolved here for the same reason `D.crashes` is: exactly one place, so every surface on this
+     page answers the left/right question the same way, and a cached replay is judged like a fresh
+     analysis. Read by the hero card, the corner ledger's symmetry footer and the Form Replay's
+     Sides tile -- see `_sidesUnreliable`. Deliberately NOT assigned onto `D`: `turnMechanics` reads
+     `D.turnSidesUnreliable`, and probes that build a `{ ...D }` with a different gravity channel
+     would then inherit a stale verdict instead of the one their own frame implies. */
+  _sidesUnreliable = dTurnSidesUnreliable(D);
   renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
   renderFitRepairNotice(D);
@@ -27607,6 +27639,15 @@ function cornerArcGlyph(dir, radius) {
     `<circle cx="${x1}" cy="6" r="2.4" fill="${color}"/></svg>`;
 }
 let _ledgerTurns = null;   /* last-rendered turn set, so the sort select can re-render in place */
+/* Whether THIS ride's body frame can tell a left-hander from a right-hander, resolved ONCE per
+   render by renderAll (see `dTurnSidesUnreliable`). Three surfaces ask it and two of them cannot
+   reach `D`: the corner ledger's symmetry footer is handed a bare turn list and re-renders itself
+   from `_ledgerTurns` on every sort change, and the Form Replay's Sides tile is inside `formFrame`,
+   which runs on requestAnimationFrame. That second one is why this is a variable rather than three
+   calls: `poseMismatchAxes` walks the whole gravity channel, measured at 18.6 ms over the reference
+   ride's 468,914 rows, so asking it per animation frame cost more than a 60 fps frame budget on its
+   own. `null` means nothing resolved it yet, and the two readers fall back to asking directly. */
+let _sidesUnreliable = null;
 let _ledgerShowAll = false;   /* expander state; fresh views (new ride, run filter) re-collapse */
 const LEDGER_FOCUS_ROWS = 8;  /* the focused read: the 8 turns that matter for the current sort */
 /* Renders into #cornerLedger (the main Per-turn section) by default; the segment
@@ -27692,16 +27733,34 @@ function renderCornerLedger(turns, hostId, deltasByN) {
      Hidden when there are not enough leaned turns per side. */
   let sym = '';
   try {
-    const mech = (typeof turnMechanics === 'function') ? turnMechanics({ turns: usable }) : null;
+    /* The body-frame question, asked here too. Until 2026-09-03 this footer printed "gap 2.8° ·
+       weaker side: left (leans less)" on the reference Tanga ride while the calibration notice a few
+       sections above said turn sides were the numbers to distrust and the coach digest withheld the
+       same verdict. Same treatment as the Form Replay's Sides tile, which is the sibling surface:
+       the two MEDIANS stay (gravity roll, which survives a fore-aft pose error) and the gap and the
+       which-side verdict go, because those are the things a laterally tilted frame manufactures.
+       Read off `_sidesUnreliable` rather than recomputed, because this function re-renders itself
+       from `_ledgerTurns` on every sort change and expander toggle, with no `D` to ask. */
+    const sidesBad = _sidesUnreliable === true;
+    const mech = (typeof turnMechanics === 'function')
+      ? turnMechanics({ turns: usable, turnSidesUnreliable: sidesBad }) : null;
     const la = mech && mech.lean_asymmetry;
-    if (la) {
-      const maxDeg = Math.max(la.left_median_deg, la.right_median_deg) || 1;
-      const wl = Math.max(6, Math.round(56 * la.left_median_deg / maxDeg));
-      const wr = Math.max(6, Math.round(56 * la.right_median_deg / maxDeg));
+    const leans = { L: [], R: [] };
+    for (const T of usable) if (T.leanDelta != null && !isNaN(T.leanDelta)) leans[T.direction].push(Math.abs(T.leanDelta));
+    const med = (a) => a.length >= 2 ? +median(a).toFixed(1) : null;
+    const mL = la ? la.left_median_deg : med(leans.L);
+    const mR = la ? la.right_median_deg : med(leans.R);
+    if (mL != null && mR != null) {
+      const maxDeg = Math.max(mL, mR) || 1;
+      const wl = Math.max(6, Math.round(56 * mL / maxDeg));
+      const wr = Math.max(6, Math.round(56 * mR / maxDeg));
+      const verdict = la
+        ? `gap ${la.gap_deg}° · weaker side: ${la.weaker_side} (leans less)`
+        : 'which side is which is unreliable on this ride';
       sym = `<div class="ledger-sym"><span>median lean</span>` +
-        `<span class="sym-l" style="width:${wl}px;"></span><b>L ${la.left_median_deg}°</b>` +
-        `<span>·</span><b>R ${la.right_median_deg}°</b><span class="sym-r" style="width:${wr}px;"></span>` +
-        `<span>gap ${la.gap_deg}° · weaker side: ${la.weaker_side} (leans less)</span></div>`;
+        `<span class="sym-l" style="width:${wl}px;"></span><b>L ${mL}°</b>` +
+        `<span>·</span><b>R ${mR}°</b><span class="sym-r" style="width:${wr}px;"></span>` +
+        `<span>${verdict}</span></div>`;
     }
   } catch (e) { sym = ''; }
   host.innerHTML =
@@ -29402,6 +29461,9 @@ function resetToDropzone() {
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   hide('results'); hide('crossResults'); hide('errorBox'); hide('loading');
   hideOutOfResultsSurfaces();
+  /* Nothing is loaded, so nothing has resolved the left/right question: back to "not asked yet", or
+     the next ride's ledger would be judged by the last one's body frame until renderAll ran. */
+  _sidesUnreliable = null;
   show('dropzone');
   setStatus('Awaiting data');
   renderRecentRides();
@@ -30571,7 +30633,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '918ca037b · 2026-09-02';
+const LOAM_BUILD = '2dc808891 · 2026-09-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
