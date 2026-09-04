@@ -5685,7 +5685,7 @@ function drawRuns() {
       if (med > 0) s += ` · ~${fmtDuration(med)} each`;
     }
     /* Discoverability: say a row opens its corners when at least one does (MTB runs with turns). */
-    if (isMtbFamily(D.sport) && runs.some(r => (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd))) {
+    if ((isMtbFamily(D.sport) || isSkiSport(D.sport)) && runs.some(r => (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd))) {
       s += ` · tap a ${nounSingular} for its corners`;
     }
     sub.textContent = s;
@@ -5704,7 +5704,7 @@ function drawRuns() {
          to say "run/walk it" not "ride it" (displaySport), and to track it across runs, not rides. */
       const verb = sportLex(displaySport(D)).ctaVerb;
       const across = sportNoun(displaySport(D), { plural: true });
-      cta.innerHTML = isMtbFamily(D.sport)
+      cta.innerHTML = (isMtbFamily(D.sport) || isSkiSport(D.sport))
         ? `Tag a ${nounSingular} below (Tag as…) to track it across ${across}: next time you ${verb} it,
            Loam auto-recognizes it and unlocks Compare past laps and the segment leaderboard.
            Riding the same trail twice in one session unlocks the turn-by-turn play-by-play and ghost race.`
@@ -5719,7 +5719,10 @@ function drawRuns() {
   /* Turns / L·R / Radius come from body-frame turn detection, which only exists for MTB. On running
      and GPS-only rides those columns are always 0/0/— (dead), so swap in an Avg-speed column and
      rebuild the header to match, instead of showing three columns of zeros. */
-  const showTurns = isMtbFamily(D.sport);
+  /* Skiing included: body-frame turn detection runs for it, the turn table and radius chart render
+     for it, and gating these three columns on the MTB family alone swapped in Avg speed and left a
+     skier's corners visible everywhere except the table that opens them. */
+  const showTurns = isMtbFamily(D.sport) || isSkiSport(D.sport);
   const thead = document.querySelector('#runsTable thead');
   /* The name column's header follows the same mode noun the title, the subtitle and the rows use, so
      the table cannot read "Run" over rows called "Descent 4" under a heading called "Descents". */
@@ -5796,7 +5799,7 @@ function drawRuns() {
          ledger). Sports without body-frame turns keep the in-place map focus, where a page
          with an empty ledger would read as broken. */
       const segTurns = (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
-      if (isMtbFamily(D.sport) && segTurns) { openSegmentPage(r, D); return; }
+      if ((isMtbFamily(D.sport) || isSkiSport(D.sport)) && segTurns) { openSegmentPage(r, D); return; }
       showTurnsForRun(r, D);
       document.querySelectorAll('#runsTable tbody tr').forEach(x => x.style.background = '');
       tr.style.background = 'rgba(127,176,105,0.12)';
@@ -6269,7 +6272,7 @@ function showTurnsForRun(r, D) {
      with it, which is the half that should not have been. */
   const mapSec = document.getElementById('overviewSection');
   if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (!isMtbFamily(D.sport)) return;
+  if (!(isMtbFamily(D.sport) || isSkiSport(D.sport))) return;
   filterTurnTableToRun(r, D);
 }
 /* Filter the per-turn table to one run's window, with the filter tag naming the run and offering
@@ -6671,7 +6674,7 @@ function pbpShowTurnOnMap(n) {
      ledger, with Form Replay already on that corner and one Back button home. Sports without
      body-frame turns have nothing to put on that page, so they keep the in-place map focus. */
   const hasSegTurns = (D.turns || []).some(T => T.tPeak >= run.tStart && T.tPeak <= run.tEnd);
-  if (isMtbFamily(D.sport) && hasSegTurns) { openSegmentPage(run, D, n); return; }
+  if ((isMtbFamily(D.sport) || isSkiSport(D.sport)) && hasSegTurns) { openSegmentPage(run, D, n); return; }
   if (!turnMarkers[n]) {
     showTurnsForRun(run, D);
     /* Keep the Runs table's focused-row highlight in sync, exactly as tapping the row does. */
@@ -7666,9 +7669,14 @@ function turnsOnLabelledTrails(D) {
    a filtered copy rescopes every read at once without touching a pinned body. The four turn counts
    are recomputed here from the same set, so the digest agrees with itself in every direction.
 
-   Not MTB: returned unchanged. Running, road and the stationary sports have no turn census. */
+   Not a turning sport: returned unchanged. Running, road and the stationary sports have no turn
+   census. SKIING IS ONE, and was excluded until 2026-09-04 purely because this predicate named the
+   MTB family rather than the question it is asking. The cost was not cosmetic: `turnSidesUnreliable`
+   is set HERE, so a ski day reached the coach with `mechanics.lean_asymmetry.weaker_side` asserted
+   off a body frame that may not be able to tell left from right -- the exact claim withheld for
+   riders since 2026-08-30, re-opened for the sport that shipped after it. */
 function coachDigestD(D, sport) {
-  if (!isMtbFamily(sport) || !D || !D.turns || !D.turns.length || !D.summary || !D.ride || !D.sensors) return D;
+  if (!(isMtbFamily(sport) || isSkiSport(sport)) || !D || !D.turns || !D.turns.length || !D.summary || !D.ride || !D.sensors) return D;
   try {
     let out = D;
     /* Whether this ride's body frame can tell a left-hander from a right-hander. Resolved HERE rather
@@ -24357,9 +24365,12 @@ function renderCoachHighlights(D, sport) {
       : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D);
   } catch (e) { console.warn('highlights failed', e); bullets = []; }
   if (!bullets.length) { sec.classList.add('hidden'); card.innerHTML = ''; return; }
-  const word = sport === 'running' ? 'Run' : sport === 'walking' ? 'Walk'
-    : sport === 'gps' ? (D.gpsSport === 'run' ? 'Run' : D.gpsSport === 'walk' ? 'Walk' : 'Ride')
-    : 'Ride';
+  /* Through the lexicon rather than an inline ternary, which is what left this card reading "Ride
+     highlights" over a ski day: the signature card was taught the sport noun and this one, which
+     sits ABOVE it and is the first thing on the page, was not. GPS-only foot activities still need
+     their own step, because they carry run/walk in gpsSport while sport stays 'gps'. */
+  const word = sport === 'gps' ? sportLex(D.gpsSport === 'run' ? 'run' : D.gpsSport === 'walk' ? 'walk' : 'ride').activity
+    : sportLex(sport).activity;
   /* The lead insight gets the focus slot (the design doc's DO slot): one line,
      amber rule, always in the same place. The producers put mechanics first, so
      the most coachable read leads; the rest stay as the bullet list. */
@@ -24721,8 +24732,14 @@ function buildDigest(D, sport, metric) {
   /* E-bike pedaling efficiency from the FIT (rider cadence vs motor power), when present, so the
      coach can talk spin vs lug and assist usage on an e-MTB. */
   const cp = cadPowerStats(D.fitInRide);
+  /* Skiing renders through this same path deliberately -- a ski descent and an MTB descent are the
+     same measurement -- but the DIGEST is prose handed to a model, and until 2026-09-04 it said
+     `sport: 'mtb'` in the same request as the ski system prompt. The model was told the day was a
+     bike ride and a ski day at once, and the caveats below described handlebars and a Specialized
+     head unit to a skier. Only the wording forks; every number is identical. */
+  const ski = sport === 'skiing' || sport === 'ski';
   const digest = {
-    sport: 'mtb',
+    sport: ski ? 'alpine skiing' : 'mtb',
     duration_min: r1(s.duration / 60),
     ...u.dist('distance', s.distance),
     ...u.speed('max_speed', s.maxSpeed),
@@ -24761,9 +24778,11 @@ function buildDigest(D, sport, metric) {
       /* Written into the digest rather than only the system prompt because it is a fact about the
          DATA, and a coach that treats distance as a third achievement will produce sentences like
          "great distance AND great speed" that double-count one thing. */
-      note: 'jump distance is NOT measured. The bike computer computes it as takeoff_speed x hang_time, verified to 0.009% on this project\'s reference rides, so distance, takeoff and hang are TWO independent facts, not three: never praise or fault distance and speed as separate achievements. Distance also assumes a level landing, so a downhill landing clears more ground than reported. landing_g is measured by the phone or the bar-locked wrist (the FIT does not record it) and is present only on jumps the phone could corroborate; a missing landing_g means unmatched, NOT a soft landing. NEVER tell the rider to carry more speed into a jump, to go bigger, or to change their approach to a specific feature: nothing here observed the lip, the landing, the transition or the rider, a longer jump is not a better one, and this is the one topic in Loam where bad advice injures someone. Describe what changed between hits; do not prescribe.',
+      note: (ski ? 'these come from a Specialized bike computer and a ski day has none, so this block is empty and must not be discussed. ' : '') + 'jump distance is NOT measured. The bike computer computes it as takeoff_speed x hang_time, verified to 0.009% on this project\'s reference rides, so distance, takeoff and hang are TWO independent facts, not three: never praise or fault distance and speed as separate achievements. Distance also assumes a level landing, so a downhill landing clears more ground than reported. landing_g is measured by the phone or the bar-locked wrist (the FIT does not record it) and is present only on jumps the phone could corroborate; a missing landing_g means unmatched, NOT a soft landing. NEVER tell the rider to carry more speed into a jump, to go bigger, or to change their approach to a specific feature: nothing here observed the lip, the landing, the transition or the rider, a longer jump is not a better one, and this is the one topic in Loam where bad advice injures someone. Describe what changed between hits; do not prescribe.',
     },
-    data_caveats: 'Turns and apex radius are derived from a torso-mounted phone (body-frame yaw rate), so they reflect body motion, not bar inputs. Jump hang and takeoff speed come from the Specialized FIT when present; phone-only jump detection is not used for the jump list, though the phone does supply the measured landing impact. See jumps.note before saying anything about jump distance.'
+    data_caveats: ski
+      ? 'Turns and apex radius are derived from a torso-mounted phone (body-frame yaw rate), so they describe the arc the SKIER travelled and how far the torso tipped into the turn -- never what the skis did. There is no boot sensor in this recording, so edge angle, ski-to-ski pressure, fore/aft balance and carve-vs-skid are not measurable and must never be named or implied. Lean is not edge angle.'
+      : 'Turns and apex radius are derived from a torso-mounted phone (body-frame yaw rate), so they reflect body motion, not bar inputs. Jump hang and takeoff speed come from the Specialized FIT when present; phone-only jump detection is not used for the jump list, though the phone does supply the measured landing impact. See jumps.note before saying anything about jump distance.'
   };
   /* Turn mechanics the coach could not see before: left/right lean symmetry and where speed was
      scrubbed. These are the body-motion signals that separate Loam from a GPS tracker. */
@@ -25411,7 +25430,21 @@ function coachChips(sport, opts) {
     }
     return ['Am I holding my stroke or spinning?', 'How was my pacing across the sets?', 'What should I focus on next swim?'];
   }
-  if (isMtbFamily(sport)) return ['Drills for my weaker turn direction', 'How do I carry more speed through corners?', 'What should I work on next ride?'];
+  /* Skiing has turns, lean and descents, so the neutral fallback under-sold it -- and the ski
+     system prompt forbids edge angle and carve-vs-skid, so these must not drift toward either. */
+  if (isSkiSport(sport)) {
+    return [opts && opts.sidesUnreliable ? 'Which run should I work on?' : 'How balanced were my left and right turns?',
+            'How consistent were my runs through the day?', 'What should I focus on next ski day?'];
+  }
+  /* THE FIRST CHIP USED TO ASK A QUESTION THIS RIDE'S DIGEST REFUSES TO ANSWER. On a ride whose body
+     frame cannot tell left from right, `turnMechanics` withholds `lean_asymmetry` entirely, so the
+     coach would have had to open by refusing its own suggested question -- the exact failure the
+     open-water branch above records, one sport over. `braking.worst` survives the withhold (it names
+     ONE corner rather than aggregating a side), so that is what the substitute asks about. */
+  if (isMtbFamily(sport)) {
+    return [opts && opts.sidesUnreliable ? 'Which corner cost me the most speed?' : 'Drills for my weaker turn direction',
+            'How do I carry more speed through corners?', 'What should I work on next ride?'];
+  }
   return ['What stands out in this session?', 'Where did I fade?', 'What should I focus on next session?'];
 }
 
@@ -25428,7 +25461,8 @@ function coachInputPlaceholder(sport, opts) {
     : isSwimSport(sport) ? ((opts && opts.openWater) ? 'did I hold a straight line?' : 'was I losing hold of the water?')
     : sport === 'road' ? 'how do I pace a long climb?'
     : sport === 'ride' ? 'how do I carry more speed on the descents?'
-    : isMtbFamily(sport) ? 'drills for my weaker turn direction'
+    : isSkiSport(sport) ? 'how consistent were my runs?'
+    : isMtbFamily(sport) ? ((opts && opts.sidesUnreliable) ? 'which corner cost me the most speed?' : 'drills for my weaker turn direction')
     : 'what should I focus on next session?';
   return `Ask a follow-up… (e.g. ${eg})`;
 }
@@ -25518,7 +25552,15 @@ function renderCoachPanel(D, sport) {
      firing while a reply is still streaming. */
   /* hasLengths is the pool/open-water switch the whole Swim view keys on: no lap events means no
      lengths, which means no sets and no per-length stroke numbers. */
-  const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false) };
+  /* `sidesUnreliable` rides alongside `openWater` for the same reason: both name a thing this
+     session's digest will NOT contain, and a suggested question the coach must refuse is worse than
+     no suggestion. Read through the one resolved answer `renderAll` already set, and asked only on
+     the turning sports, so no other render path pays for a whole-gravity-channel walk. */
+  let sidesUnreliable = false;
+  if (isMtbFamily(sport) || isSkiSport(sport)) {
+    try { sidesUnreliable = !!sidesUnreliableFor(D); } catch (e) { sidesUnreliable = false; }
+  }
+  const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false), sidesUnreliable };
   const chipText = coachChips(sport, coachOpts);
   if (chips) {
     chips.innerHTML = chipText.map(t => `<button class="coach-chip">${escapeHtml(t)}</button>`).join('');
@@ -25642,6 +25684,10 @@ function coachAnalyzePrompt(sport) {
   const noun = isGolfSport(sport) ? 'range session'
     : (sport === 'lift' || isLiftSport(sport)) ? 'lift session'
     : isSwimSport(sport) ? 'swim'
+    /* Skiing, added 2026-09-04 -- and it inherited the catch-all for the three days it shipped,
+       which is the failure the comment above predicts in as many words. `ski day` is the lexicon's
+       own noun for a whole ski recording, so this line and `SPORT_LEX` agree. */
+    : isSkiSport(sport) ? 'ski day'
     : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
   return `Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`;
 }
@@ -30633,7 +30679,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '2dc808891 · 2026-09-03';
+const LOAM_BUILD = '3f3e9305c · 2026-09-04';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
