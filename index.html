@@ -1227,6 +1227,19 @@
   }
   .jump-marker-wrap span { transform: rotate(-45deg); display: block; }
   .jump-marker-wrap.highlight { transform: rotate(45deg) scale(1.4); box-shadow: 0 0 0 5px rgba(212,165,116,0.4); z-index: 1100 !important; }
+  /* Crowded jumps, the same rule as .tm-dot above and a worse problem than it ever was: these are
+     the LARGEST markers on the map (32px against a turn disc's 26), one is drawn per jump HIT rather
+     than per feature, and the head unit stamps each with a ~1 Hz fix taken at speed -- adjacent
+     different jumps on the reference ride report positions 0.0 m apart -- so repeated laps do not
+     merely crowd, they land on top of each other. Reported on a real Pacifica ride whose FIT was
+     attached: J1/J4/J6 legible and the rest of the stack buried behind them.
+     Collapsed to a dot rather than MERGED, deliberately: GPS alone cannot decide that two hits are
+     the same jump (JUMP_SAME_SPOT_M needs "different runs" as a second fact before it will say so),
+     and a marker that silently merged two real jumps would be a worse claim than a crowded one. */
+  .jump-marker-wrap.jm-dot { width: 11px; height: 11px; margin: 10px; border-width: 1px; box-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+  .jump-marker-wrap.jm-dot span { display: none; }
+  .jump-marker-wrap.jm-dot.highlight { width: 32px; height: 32px; margin: 0; border-width: 2px; }
+  .jump-marker-wrap.jm-dot.highlight span { display: block; }
 
   .leaflet-container { background: #1a1d22; font-family: 'IBM Plex Sans', sans-serif; }
   .leaflet-tile-pane { filter: brightness(0.65) contrast(1.1) hue-rotate(-10deg); }
@@ -27912,19 +27925,36 @@ function turnTooltipHtml(T) {
 const TURN_FOCUS_MAX_ZOOM = 18;   /* one below the satellite basemap's native 19 */
 const TURN_FOCUS_MIN_ZOOM = 16;   /* floor for the no-fixes fallback */
 const TURN_MARKER_DENSE_PX = 28;  /* nearest-neighbour spacing (px) below which a disc becomes a dot */
-/* See .turn-marker.tm-dot in the stylesheet. Recomputed on every zoom and every overlay redraw; a
-   nearest-neighbour pass over a few hundred markers is cheap enough to run on zoomend. */
-function updateTurnMarkerDensity() {
-  if (!mapInstance) return;
-  const ms = Object.values(turnMarkers || {}).filter(m => m && m.getLatLng && m._icon);
+const JUMP_MARKER_DENSE_PX = 34;  /* the same, for jump diamonds, which are 32px against a turn's 26 */
+/* One nearest-neighbour pass over one KIND of marker, toggling `cls` on the crowded ones.
+   See .turn-marker.tm-dot / .jump-marker-wrap.jm-dot in the stylesheet. */
+function thinMarkerLayer(markers, densePx, cls) {
+  const ms = Object.values(markers || {}).filter(m => m && m.getLatLng && m._icon);
   let pts;
   try { pts = ms.map(m => mapInstance.latLngToLayerPoint(m.getLatLng())); } catch (e) { return; }
   for (let i = 0; i < ms.length; i++) {
     let best = Infinity;
     for (let j = 0; j < pts.length; j++) { if (j === i) continue; const d = pts[i].distanceTo(pts[j]); if (d < best) best = d; }
     const el = ms[i]._icon.firstChild;
-    if (el && el.classList) el.classList.toggle('tm-dot', best < TURN_MARKER_DENSE_PX);
+    if (el && el.classList) el.classList.toggle(cls, best < densePx);
   }
+}
+/* Recomputed on every zoom and every overlay redraw; a nearest-neighbour pass over a few hundred
+   markers is cheap enough to run on zoomend.
+
+   EACH KIND IS THINNED AGAINST ITS OWN KIND, not against everything on the map, and that is the
+   whole reason this is two passes over two collections rather than one over their union. A jump
+   that happens to sit near a corner is not a crowded jump -- collapsing it would hide the rarer
+   fact because of the commoner one, and on a trail with 131 corners and 6 jumps that is every
+   jump. What each pass answers is "can I read this one apart from the others like it".
+
+   The jump layer went uncovered until 2026-09-05, because `ridingJumps` is populated only from a
+   Specialized FIT's unknown_285 messages: before a FIT is attached there is nothing on that layer
+   at all, so the same ride looks fine and then blobs the moment its head-unit file is imported. */
+function updateTurnMarkerDensity() {
+  if (!mapInstance) return;
+  thinMarkerLayer(turnMarkers, TURN_MARKER_DENSE_PX, 'tm-dot');
+  thinMarkerLayer(jumpMarkers, JUMP_MARKER_DENSE_PX, 'jm-dot');
 }
 function rideLocRows() {
   return (_runsD && _runsD.sensors && _runsD.sensors.location) || [];
@@ -30689,7 +30719,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'fe69dfcb3 · 2026-09-05';
+const LOAM_BUILD = '901ba145b · 2026-09-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
