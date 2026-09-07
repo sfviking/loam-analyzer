@@ -1456,6 +1456,14 @@
     <span id="sampleRateNoticeBody"></span>
   </div>
 </section>
+<!-- The CSV stopped before the recording did, caught by the sibling track's span. Outside #results
+     for the same reason the banner above is: it has to show for every sport view. -->
+<section id="truncNotice" class="hidden" style="max-width:1100px; margin:0 auto; padding:12px 20px 0;">
+  <div class="mount-notice">
+    <strong>This file holds less than the session did.</strong>
+    <span id="truncNoticeBody"></span>
+  </div>
+</section>
 <!-- A stationary sport Loam GUESSED. Same placement and styling as the notice above, and shown by
      the lift, range and swim renderers only. -->
 <section id="guessedSportNotice" class="hidden" style="max-width:1100px; margin:0 auto; padding:12px 20px 0;">
@@ -5693,11 +5701,42 @@ function segmentRuns(D, mode) {
 let _runsMode = 'auto';
 let _runsD = null;
 
+/* A TAG CREATED AFTER A RIDE WAS ANALYZED NEVER REACHED THAT RIDE, which is the second half of the
+   same report ("Not recognizing existing runs on hazelnut trail"). `autoTag` is computed exactly
+   once, inside saveRideToLibrary, and both the stored row and the cached render keep whatever the
+   answer was at the time -- so the very descent a segment was NAMED from re-opens as "Tag as...",
+   because the tag was created after that ride's render was cached and a cache replay returns before
+   saveRideToLibrary can run again. Re-ask on every render instead: the tags are a handful of 50-point
+   polylines, this is the same call promptTagDescent already makes the moment a tag is created, and it
+   is fire-and-forget so nothing waits on it.
+   It updates the render in memory only. Writing the answer back to the library row was deliberately
+   left out: buildTagMembers re-derives the match from geometry for any descent whose stored autoTag
+   does not name the tag, so the leaderboard, the PR card and tagProgression already see these runs
+   without a second copy of the answer to keep current. */
+async function refreshDescentTags(D) {
+  const ds = D && D.savedDescents;
+  if (!ds || !ds.length) return;
+  let changed = false;
+  for (const d of ds) {
+    if (!d.polyline) continue;
+    let next;
+    try { next = await matchDescentToTags(d); } catch (e) { continue; }
+    const before = d.autoTag && d.autoTag.taggedSegmentId;
+    const after = next && next.taggedSegmentId;
+    d.autoTag = next;
+    if (after !== before) changed = true;
+  }
+  /* Only redraw on a real change, and only while this ride is still the one on screen: a slow
+     library read must not repaint a panel the rider has since moved on from. */
+  if (changed && _runsD === D) drawRuns();
+}
+
 function renderRunsPanel(D) {
   _runsD = D; _runsMode = 'auto';
   const sel = document.getElementById('runsMode');
   if (sel) { sel.value = 'auto'; sel.onchange = () => { _runsMode = sel.value; drawRuns(); }; }
   drawRuns();
+  refreshDescentTags(D);
 }
 
 /* Nothing to show for the CURRENT segmentation mode.
@@ -10094,32 +10133,96 @@ function decimatePolyline(latlngs, targetN = 50) {
   return out;
 }
 
-/* Average pairwise Haversine distance between two equal-length polylines.
-   Both inputs should already be decimated to the same length. */
-function polylineDistanceAvg(a, b) {
-  const n = Math.min(a.length, b.length);
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    sum += haversineMeters(a[i][0], a[i][1], b[i][0], b[i][1]);
+/* ---------- Descent-to-tagged-segment matching ----------
+   THE TEST IS CONTAINMENT, NOT SHAPE-AT-THE-SAME-INDEX (user report, 2026-09-07: "Not recognizing
+   existing runs on hazelnut trail", with both descents of an already-tagged trail offering "Tag
+   as..."). This used to decimate both tracks to 50 points and average the distance between point i
+   of one and point i of the other, accepting under 40 m -- a comparison that assumes the two tracks
+   cover the SAME GROUND END TO END, because index i is the fraction i/49 of whatever extent each
+   track happens to have. That extent is set by the grade detector, not by the rider, so a run whose
+   window opened 50 m further down the trail paired every point with one 50 m along and scored 54 m;
+   a run 5% longer scored 43 m; a trail that split into two descents this time could not match a tag
+   made from one longer descent at all. Measured on a synthetic 1.7 km trail against the old code:
+   +40 m of length -> 22 m (matched), +80 m -> 43 m (did not), +200 m -> 102 m. The effective bar was
+   about 5% of length, while the 250 m start gate advertised slack the real test never granted.
+   So instead: for every point of the TAGGED track, its sub-vertex distance to the run's track
+   (closestApproachFrac, the same primitive the segment gates resolve through). The tag matches when
+   nearly all of it lies inside a corridor around the run, travelled in the run's own direction. A
+   longer run that CONTAINS the tag matches deliberately -- buildTagMember then clips it to the tag's
+   gates, which is what makes a leaderboard row comparable -- while a run covering only part of the
+   tag does not, because half a lap is not a lap and its gates could not resolve anyway.
+   VALIDATED ON THE REPORTED TRAIL: Hazelnut, run 2026-07-18 and again 2026-09-07 (the screenshot).
+   Six pairs of detected descents are the same stretch of trail, with the two tracks 0.8-4.5 m apart
+   across 100% of the tagged one. The retired rule recognized NONE of the six -- its scores were 75.7
+   to 376.2 m against its own 40 m bar -- and this one recognizes all six, while both correctly refuse
+   all 18 pairs that are different stretches of the loop. SEG_CORRIDOR_M is confirmed by that; the
+   other two are still reasoned from mechanism rather than fitted, since nothing in that pair
+   exercised a half-lap or a self-overlapping trail. Ported to
+   analyzer/sports/mtb/segment-match.js, drift-pinned both ways. */
+/* How far two GPS traces of the same trail sit apart: median horizontal accuracy 4.2 m, p90 10.0,
+   p99 20.9, with anything past 50 m dropped at ingestion, and two independent traces each carry that
+   error. 25 m clears a p90-vs-p90 pair plus a different line through a berm -- the six real Hazelnut
+   pairs measured 0.8-4.5 m -- and sits well below the separation of two trails a rider would want
+   told apart. */
+const SEG_CORRIDOR_M = 25;
+/* How much of the tagged segment a run must cover to be a lap of it. 1.0 would demand the detector
+   open and close outside the tag's ends every ride, which is the brittleness above; 0.8 absorbs a
+   dropout under trees and a window clipped short at one end, and still refuses a run that did only
+   part of the trail (the reported 0.52 mi descent against a whole-trail tag scores about 0.5). */
+const SEG_MATCH_COVERAGE = 0.8;
+/* The ground a run covers BETWEEN the tag's two ends cannot be much more than the tag's own length,
+   or those ends were reached by a different route. Refuses the self-overlapping trail, where a
+   switchbacked descent comes within the corridor of a short tag on several legs (the hazard
+   gatePasses already documents). Two traces of the same ground differ by a couple of percent, so
+   1.5x is more than an order of magnitude of margin. */
+const SEG_MATCH_SPAN_MAX = 1.5;
+/* How much of `tagPoly` the run `candidate` covered, and how cleanly. `missM` is what surfaces as the
+   badge's "auto-matched Nm" (lower is still better); `tagLenM` breaks ties between two tags one run
+   covers; `forward` is that the run passed the tag's start before its end rather than the reverse. */
+function segmentOverlap(candidate, tagPoly) {
+  if (!Array.isArray(candidate) || candidate.length < 2) return null;
+  if (!Array.isArray(tagPoly) || tagPoly.length < 2) return null;
+  let covered = 0, sumMiss = 0, firstFrac = null, lastFrac = null;
+  for (const pt of tagPoly) {
+    const hit = closestApproachFrac(candidate, pt);
+    if (hit.distM > SEG_CORRIDOR_M) continue;
+    covered++;
+    sumMiss += hit.distM;
+    if (firstFrac === null) firstFrac = hit.frac;
+    lastFrac = hit.frac;
   }
-  return sum / n;
+  return {
+    coverage: covered / tagPoly.length,
+    missM: covered ? sumMiss / covered : Infinity,
+    spanM: covered >= 2 ? polylineSpanMeters(candidate, firstFrac, lastFrac) : 0,
+    tagLenM: polylineSpanMeters(tagPoly, 0, 1),
+    forward: firstFrac !== null && lastFrac > firstFrac,
+  };
 }
-
-/* For each descent in a ride, find the closest tagged-segment match (if any).
-   Quick filter on start-point distance (≤250 m) then full polyline distance
-   threshold (≤40 m average) for the match. */
+/* Whether an overlap is a lap of the segment. Kept apart from segmentOverlap so the single-ride
+   matcher and the library's buildTagMembers ask ONE question: a tag that lights up on the ride page
+   and then goes missing from its own leaderboard is what two copies of this rule would produce. */
+function segmentOverlapMatches(ov) {
+  if (!ov || !ov.forward) return false;
+  if (ov.coverage < SEG_MATCH_COVERAGE) return false;
+  return ov.spanM <= ov.tagLenM * SEG_MATCH_SPAN_MAX;
+}
+/* For each descent in a ride, find the tagged segment it is a lap of (if any). Where a run covers two
+   nested tags (a whole trail and a tagged stretch inside it) the LONGER one wins: it explains more of
+   what was ridden, and the shorter is still reachable by riding only that stretch. */
 async function matchDescentToTags(descent) {
   const tagged = await listTaggedSegments();
   if (!tagged.length || !descent.polyline) return null;
   const cand = decimatePolyline(descent.polyline, 50);
-  let best = null;
+  let best = null, bestLen = -1;
   for (const tag of tagged) {
-    const startDist = haversineMeters(cand[0][0], cand[0][1], tag.polyline[0][0], tag.polyline[0][1]);
-    if (startDist > 250) continue;
-    const avg = polylineDistanceAvg(cand, tag.polyline);
-    if (avg < 40 && (!best || avg < best.matchDistance)) {
-      best = { taggedSegmentId: tag.id, name: tag.name, matchDistance: avg };
-    }
+    const ov = segmentOverlap(cand, tag && tag.polyline);
+    if (!segmentOverlapMatches(ov)) continue;
+    const better = !best || ov.tagLenM > bestLen + 1e-6
+      || (Math.abs(ov.tagLenM - bestLen) <= 1e-6 && ov.missM < best.matchDistance);
+    if (!better) continue;
+    best = { taggedSegmentId: tag.id, name: tag.name, matchDistance: ov.missM, coverage: ov.coverage };
+    bestLen = ov.tagLenM;
   }
   /* How many laps the library holds for the matched tag, so the runs panel can offer "Compare laps"
      only when there is something to compare. It used to render the primary button on every tagged
@@ -17092,7 +17195,7 @@ function durTileHTML(sec) {
    #results alone left the previous session's coach panel and trim bar sitting on top of the
    Progress page (and of the dropzone after "Analyze another"). */
 function hideOutOfResultsSurfaces() {
-  for (const id of ['coachSection', 'cropSection', 'sampleRateNotice', 'miniSummary',
+  for (const id of ['coachSection', 'cropSection', 'sampleRateNotice', 'truncNotice', 'miniSummary',
                     'strengthResults', 'golfResults', 'swimResults']) {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   }
@@ -17411,7 +17514,7 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -19630,6 +19733,7 @@ function renderGolf(D) {
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
   renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
+  renderTruncNotice(D);
   renderFitRepairNotice(D);
   const g = D.golf || {}, s = D.summary || {}, con = g.consistency || {};
   const el = document.getElementById('golfResults');
@@ -19746,6 +19850,7 @@ function renderStrength(D) {
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
   renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
+  renderTruncNotice(D);
   renderFitRepairNotice(D);
   /* Register for the header Units toggle (rerenderUnits), same as every other renderer. Without this,
      changing units on a Lift session re-runs the PREVIOUS ride's renderer, which hides the Lift view
@@ -21302,6 +21407,7 @@ function renderAllRunning(D) {
   if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
   renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
+  renderTruncNotice(D);
   renderFitRepairNotice(D);
   renderRideSignature(D, sport);
   /* Pedometer channel, when the recording carries one. Computed here rather than inside
@@ -22257,14 +22363,13 @@ function buildTagMembers(targetTag, allRides) {
   for (const r of allRides) {
     for (const d of (r.descents || [])) {
       const matchesById = d.autoTag && d.autoTag.taggedSegmentId === targetTag.id;
-      let matchesByPolyline = false;
-      if (!matchesById && d.polyline && d.polyline.length >= 4) {
-        const startDist = haversineMeters(d.polyline[0][0], d.polyline[0][1], targetTag.polyline[0][0], targetTag.polyline[0][1]);
-        if (startDist <= 250) {
-          const avg = polylineDistanceAvg(d.polyline, targetTag.polyline);
-          if (avg < 40) matchesByPolyline = true;
-        }
-      }
+      /* The fresh geometry test is the SAME predicate matchDescentToTags asks, so a run the ride page
+         labels with this tag is a run the leaderboard finds, and vice versa. It carries more weight
+         than its "descents saved before the tag existed" comment implies: a stored autoTag is written
+         once, inside saveRideToLibrary, and is never revisited when a tag is created later, so for
+         every ride older than the tag this fallback IS the match. */
+      const matchesByPolyline = !matchesById && d.polyline && d.polyline.length >= 4
+        && segmentOverlapMatches(segmentOverlap(d.polyline, targetTag.polyline));
       if (matchesById || matchesByPolyline) {
         members.push(buildTagMember(r, d, targetTag));
       }
@@ -26397,6 +26502,71 @@ function renderGuessedSportNotice(D) {
   sec.classList.remove('hidden');
 }
 
+/* ---------- A recording whose CSV stopped early ----------
+   Loam writes two files per session from completely different machinery: the CSV is streamed cell by
+   cell during the ride, while the GPX is written once at record-stop from the full in-memory
+   snapshot. So when the streaming writer stops and the app keeps running, the GPX still spans the
+   whole session and the CSV does not, and the disagreement between them IS the evidence. This page
+   alone can never see it -- a short CSV is indistinguishable from a short recording -- so the host
+   hands over the track's span as `window.LOAM_TRACK_SPAN_S`.
+   Found 2026-09-07 under the Hazelnut segment-matching report: that trail's earlier run holds 21
+   minutes of a 57-minute session, and its stored descents are of the CLIMB, which is why today's run
+   matched nothing. Measured across the corpus, 111 of 114 recordings cover 99.88% of their track's
+   span or more (median 100.05%, since the last fix lands before the last flush) and three cover
+   14.9%, 37.5% and 40.5%. The band between is EMPTY, so this bar is wide-margin, not tuned.
+   ONE-SIDED deliberately: a CSV LONGER than its track is ordinary (losing GPS at either end shortens
+   the GPX and nothing else) and must never be flagged.
+   Ported to analyzer/core/recording/truncation.js, drift-pinned. */
+const TRUNC_MIN_COVERAGE = 0.9;
+const TRUNC_MIN_LOST_S = 60;
+function recordingTruncation({ sampledS, trackS } = {}) {
+  if (!Number.isFinite(sampledS) || !Number.isFinite(trackS)) return null;
+  if (trackS < TRUNC_MIN_LOST_S || sampledS < 0) return null;
+  const lostS = trackS - sampledS;
+  if (lostS < TRUNC_MIN_LOST_S) return null;
+  const coveredFrac = sampledS / trackS;
+  if (coveredFrac >= TRUNC_MIN_COVERAGE) return null;
+  return { sampledS, trackS, coveredFrac, lostS };
+}
+/* How far the parsed recording actually reaches: the last sample on ANY channel, not on the location
+   channel alone. A healthy recording that loses GPS under trees at the end has a short location
+   series and a full CSV, and reading location would call that truncated. */
+function sensorsSampledSeconds(sensors) {
+  if (!sensors) return null;
+  let last = null;
+  for (const v of Object.values(sensors)) {
+    if (!Array.isArray(v) || !v.length) continue;
+    const t = v[v.length - 1] && v[v.length - 1].t;
+    if (Number.isFinite(t) && (last == null || t > last)) last = t;
+  }
+  return last;
+}
+function renderTruncNotice(D) {
+  const sec = document.getElementById('truncNotice');
+  if (!sec) return;
+  const trackS = (typeof window !== 'undefined' && Number.isFinite(window.LOAM_TRACK_SPAN_S))
+    ? window.LOAM_TRACK_SPAN_S : null;
+  const t = recordingTruncation({ sampledS: sensorsSampledSeconds(D && D.sensors), trackS });
+  if (!t) { sec.classList.add('hidden'); return; }
+  const body = document.getElementById('truncNoticeBody');
+  if (body) {
+    /* Describes the FILE and what that costs, and names no cause -- deliberately, because the cause
+       is not known and the obvious guess is wrong. The app does detect a mid-ride write failure (a
+       full disk) and says so at the time, but that is not what happened to the recordings this was
+       built from: their own sidecars record the full length, measured from the CSV's last row, so
+       those files were COMPLETE when the app last read them and are short now. Saying "stopped
+       writing" would blame a writer the evidence exonerates. The last sentence is the actionable
+       part: the device may still hold the whole thing. */
+    body.textContent = ` Everything below describes ${fmtDuration(t.sampledS)} of a `
+      + `${fmtDuration(t.trackS)} session: the last ${fmtDuration(t.lostS)} is not in this sensor `
+      + `file, though your GPS track and this session's own saved length both still have it. `
+      + `Distance, climb and time are short by that much, and any segment or descent in the missing `
+      + `stretch is simply absent -- so a trail you have tagged may not be recognized here. The full `
+      + `recording may still be on the phone that made it.`;
+  }
+  sec.classList.remove('hidden');
+}
+
 function renderSampleRateNotice(D) {
   const sec = document.getElementById('sampleRateNotice');
   if (!sec) return;
@@ -26952,6 +27122,7 @@ function renderAll(D) {
   _sidesUnreliable = dTurnSidesUnreliable(D);
   renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
+  renderTruncNotice(D);
   renderFitRepairNotice(D);
   renderCalibNotice(D);
   renderEmtbNotice(D);
@@ -29900,6 +30071,7 @@ function showError(msg, detail) {
     (detail ? `<details class="err-detail"><summary>Show technical details</summary><pre>${escapeHtml((detail || '') + '')}</pre></details>` : '');
   show('errorBox');
   hide('sampleRateNotice');   /* top-level banner (outside #results), so clear it explicitly on error */
+  hide('truncNotice');        /* same: outside #results, so an error must not leave it standing */
   const box = document.getElementById('errorBox');
   const runBtn = box.querySelector('[data-act="run"]');
   if (runBtn) runBtn.onclick = () => {
@@ -31180,7 +31352,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '2655ee485 · 2026-09-07';
+const LOAM_BUILD = '9df4dd4ea · 2026-09-07';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
