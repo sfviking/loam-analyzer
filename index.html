@@ -10776,11 +10776,16 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
     : [];
   _currentRunKey = contentHash;
   onProgress('saving to library');
+  /* FIT timestamps are absolute UTC, so date this from the recording itself. Hoisted out of the
+     library call because the RENDER needs it too: the ride-signature card dates a session by parsing
+     its FILENAME, and a head unit's filename carries no date -- a Garmin export is `<activity id>_
+     ACTIVITY.fit`, so the card read "RUN · 21 MIN · 4141657089 ACTIVITY" with no date anywhere on it
+     (owner report, 2026-09-07). Same lesson the standalone-FIT import entry already records one
+     layer down: identity, and here the DATE, come from the file's CONTENT, never from its name. */
+  const fitRecordedAt = startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null;
   const saved = await saveRideToLibrary({
     filename: fitFile.name, sport: eBike ? 'emtb' : gpsSport, sensors, ride, summary, contentKey: contentHash,
-    /* FIT timestamps are absolute UTC, so date the library entry from the recording itself; FIT
-       filenames rarely carry the full stamp saveRideToLibrary would otherwise parse. */
-    recordedAt: startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null,
+    recordedAt: fitRecordedAt,
   });
   /* Keep the FIT bytes so the ride re-opens from the library forever (Open re-analyzes). */
   await putRideSource(contentHash, fitFile.name, buf);
@@ -10799,7 +10804,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
        caption claims an FFT peak on |accel| and there is no accelerometer anywhere near this. */
     running: { segments, cadSeries, cadSource: 'fit', climbs: runClimbs },
     libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
-    title: fitFile.name,
+    title: fitFile.name, recordedAt: fitRecordedAt,
   };
   renderAllGps(D);
   const noun = gpsSport === 'run' ? 'run' : gpsSport === 'walk' ? 'walk' : (eBike ? 'e-MTB ride' : 'ride');
@@ -21540,11 +21545,19 @@ function renderGpsStats(s, sport) {
          <div class="sub">lifts + stops excluded</div>
        </div>`;
   document.getElementById('statsPanel').innerHTML = first + `
-    <div class="stat accent3">
+    ${foot
+      /* Same call as the highlights bullet above: pace, sustained window, no instantaneous max.
+         The running view has no top-speed tile at all, so this is the closest honest equivalent. */
+      ? `<div class="stat accent3">
+      <div class="label">Fastest 30 s</div>
+      <div class="value">${s.peak30 ? U.pace(s.peak30) : '&mdash;'}</div>
+      <div class="sub">sustained · GPS</div>
+    </div>`
+      : `<div class="stat accent3">
       <div class="label">Top speed</div>
       <div class="value">${U.speed(s.maxSpeed)}</div>
       <div class="sub">best 30 s ${U.speed(s.peak30)}</div>
-    </div>
+    </div>`}
     <div class="stat">
       <div class="label">Time moving</div>
       <div class="value">${mmss(s.movingTime != null ? s.movingTime : s.duration)}</div>
@@ -24679,7 +24692,18 @@ function gpsHighlights(D) {
   if (foot) {
     if (s.distance) out.push(`<strong>${U.dist(s.distance)}</strong> ${D.gpsSport === 'walk' ? 'walked' : 'covered'}${s.avgSpeed ? ' at ' + U.pace(s.avgSpeed) + ' pace' : ''}.`);
     if (s.altGain != null) out.push(`${U.elev(s.altGain)} climbed${s.altLoss != null ? ', ' + U.elev(s.altLoss) + ' descended' : ''}.`);
-    if (s.maxSpeed) out.push(`Top speed <strong>${U.speed(s.maxSpeed)}</strong>${s.peak30 ? ' (best 30 s ' + U.speed(s.peak30) + ')' : ''}.`);
+    /* PACE, not mph, and the SUSTAINED window rather than the instantaneous max (owner report,
+       2026-09-07, on a real Garmin run: "Top speed 14.3 mph (best 30 s 13.3 mph)" under a heading
+       reading Run highlights). Two things were wrong with that line and only one of them was units.
+       A runner reads min/mi -- 14.3 mph is 4:12/mi, and nobody converts that in their head -- and
+       `renderRunStats`, the view a phone-recorded run gets, deliberately shows no top-speed tile at
+       all, so this bullet was a bike fact wearing a run's heading.
+       The instantaneous max is dropped for foot rather than converted, because it is the noisiest
+       number on the page: on the reported run it claimed 4:12/mi from a single fix, against a
+       measured best 400 m of 4:47/mi in the table below it. `peak30` is a sustained 30 s window and
+       survives one bad fix, so it is the only one worth printing. A bike keeps both, where a real
+       top speed is the point and the wheel is not wandering. */
+    if (s.peak30) out.push(`Fastest sustained stretch <strong>${U.pace(s.peak30)}</strong> (best 30 s).`);
   } else {
     const dist = s.riddenDistance != null ? s.riddenDistance : s.distance;
     if (dist) out.push(`<strong>${U.dist(dist)}</strong> ridden, top speed ${U.speed(s.maxSpeed)}.`);
@@ -27365,6 +27389,15 @@ function rsLabel(name) {
   if (m) { const MO = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC']; return `${MO[(+m[2]-1+12)%12]} ${+m[3]}, ${m[1]}`; }
   return pre.toUpperCase().slice(0, 26);
 }
+/* An ISO instant in the same shape rsLabel prints a filename date, so a card dated from the file's
+   CONTENT and one dated from its NAME read identically. Falls back to the raw name's label if the
+   instant is unusable, rather than printing "INVALID DATE" over the map. */
+function rsDateLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const MO = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  return `${MO[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
 let _rideSig = null;   /* last-built ride card pieces (defs, chrome, terrain tiles) for PNG export */
 function renderRideSignature(D, sport) {
   const sec = document.getElementById('rideSignatureSection');
@@ -27533,7 +27566,12 @@ function renderRideSignature(D, sport) {
        summary has no movingTime (MTB, road, GPS-only) fall through to the window as before. */
     const durSec = s.movingTime != null ? s.movingTime : (s.duration || (ride.end - ride.start));
     const durMin = Math.floor(durSec / 60);
-    const label = rsLabel(D.title);
+    /* `D.recordedAt` is set only by the FIT paths, where the filename is a head-unit artifact rather
+       than anything a person chose -- a Garmin export is `<activity id>_ACTIVITY.fit`, which
+       `rsLabel` renders as "4141657089 ACTIVITY" because it looks like a name and carries no date.
+       A phone recording sets no `recordedAt` and keeps its filename label byte-identical, including
+       the case `rsLabel` exists for (a session the rider NAMED, where "MORNING RIDE" beats a date). */
+    const label = D.recordedAt ? rsDateLabel(D.recordedAt) : rsLabel(D.title);
     const lex = sportLex(sport);
     const rideWord = D.eBike ? 'E-MTB' : lex.signature;
     const subtitle = `${rideWord} · ${durMin} MIN${label ? ' · ' + escapeHtml(label) : ''}`;
@@ -27607,7 +27645,8 @@ function renderRideSignature(D, sport) {
        card had already been fixed this way; the moving sports still fell through to the default in
        rideSigDeliver, so every one of them said ride. */
     _rideSig = { defs: defsSvg, chrome: chromeSvg, tiles: sigTiles, W, H, boxX, boxTop, boxW, boxH,
-      filename: loamCardFilename(normalizeSport(sport), parseUTCFromFilename(D.title || '')),
+      filename: loamCardFilename(normalizeSport(sport),
+        D.recordedAt ? new Date(D.recordedAt) : parseUTCFromFilename(D.title || '')),
       caption: `My ${lex.noun}, analyzed with Loam.` };
     const el = document.getElementById('rideSignature');
     if (el) el.innerHTML = svg;
@@ -31141,7 +31180,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '0dcb86cc8 · 2026-09-07';
+const LOAM_BUILD = '2655ee485 · 2026-09-07';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
