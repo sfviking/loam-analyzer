@@ -3044,6 +3044,17 @@ async function loadCombinedCSV(file, onProgress) {
   return { format: 'combined', sensors, filename: file.name };
 }
 
+/* Widest horizontal accuracy, in metres, at which a fix is a POSITION rather than an area.
+   ADOPTED, not tuned: `LiveMetrics.maxHorizontalAccuracyM` on the capture side has shipped this
+   number since the live odometer was written, and inventing a second one here would be a second
+   answer to a question the product has already answered (the same posture the pause hysteresis
+   entry in CLAUDE.md states). Pinned to the Swift copy by gps-accuracy-contract.test.js.
+   Measured across the owner's 120 analyzable recordings (233,682 fixes): median accuracy 4.2 m,
+   p90 10.0, p99 20.9, p99.9 37.3 -- so 50 m sits above the 99.95th percentile and normal riding,
+   including under trees, never approaches it. What lives above it is junk: 102 fixes in 24 of the
+   120 recordings, worst 661 m. */
+const GPS_MAX_HACC_M = 50;
+
 function parseUTCFromFilename(name) {
   const m = name.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
   if (!m) return null;
@@ -3079,7 +3090,17 @@ function addCombinedRow(out, r) {
      the track must not lose a fix just because the Doppler estimate was unavailable. Every consumer
      already filters `speed != null` (or `>= 0`), so this reaches them as the absence it always was.
      Negative rather than exactly -1: a negative ground speed is meaningless whatever wrote it. */
-  if (r.location_speed != null)
+  /* And the same instrument reports its own error bar, which nothing read until 2026-09-06. A fix
+     with a horizontal accuracy of 250 m is not a position, and drawing it puts the athlete somewhere
+     they never were: on the reported recording two such fixes (89 m and 250 m, delivered as the
+     receiver re-acquired after a resume) added 1,130 m of phantom path to a 4.4 km track and drew a
+     half-kilometre spike on the map, which is what a "weird GPS jump" looks like. Unlike the speed
+     sentinel above, the ROW GOES: latitude, longitude and altitude come out of one solution, so when
+     the solution is an area there is nothing on the row worth keeping, and keeping it is what poisons
+     the track. Negative means CoreLocation is declaring the coordinates invalid outright (Apple's own
+     documented meaning); ABSENT is not invalid, so a file with no accuracy column keeps every fix --
+     the permissive reading `RecordingTrack` already takes for third-party exports. */
+  if (r.location_speed != null && !(r.location_horizontalAccuracy < 0) && !(r.location_horizontalAccuracy >= GPS_MAX_HACC_M))
     out.location.push({ t, speed: r.location_speed >= 0 ? r.location_speed : null, latitude: r.location_latitude, longitude: r.location_longitude, altitude: r.location_altitude });
   if (r.barometer_relativeAltitude != null)
     out.baro.push({ t, relativeAltitude: r.barometer_relativeAltitude });
@@ -3149,8 +3170,11 @@ function extractFromZip(zipData) {
   if (zipData.Gyroscope) out.gyro = normT(zipData.Gyroscope);
   if (zipData.Accelerometer) out.accel = normT(zipData.Accelerometer);
   /* Same -1 sentinel as the combined path above, and the same treatment: Sensor Logger's own
-     Location.csv writes CoreLocation's speed through unchanged, so a zip carries it too. */
-  if (zipData.Location) out.location = normT(zipData.Location).map(r => (r.speed != null && r.speed < 0 ? { ...r, speed: null } : r));
+     Location.csv writes CoreLocation's speed through unchanged, so a zip carries it too -- and the
+     same accuracy gate, since it writes `horizontalAccuracy` through unchanged as well. */
+  if (zipData.Location) out.location = normT(zipData.Location)
+    .filter(r => !(r.horizontalAccuracy < 0) && !(r.horizontalAccuracy >= GPS_MAX_HACC_M))
+    .map(r => (r.speed != null && r.speed < 0 ? { ...r, speed: null } : r));
   if (zipData.Barometer) out.baro = normT(zipData.Barometer);
   if (zipData.Headphone) out.headphone = normT(zipData.Headphone);
   if (zipData.Annotation) {
@@ -4864,6 +4888,26 @@ function pausedOverlapS(spans, t0, t1) {
   return s;
 }
 
+/* Which legs of a track cross a stretch the athlete PAUSED, so nothing draws a line across ground
+   the recording never saw (owner report, 2026-09-06: "when I resumed it looks like a weird gps
+   jump"). A pause discards every fix by design, so the next fix can be anywhere -- across town, or a
+   mile further down the trail -- and joining the two with a coloured line claims a journey nobody
+   measured. Returns the set of indices i whose leg (i-1 -> i) overlaps a pause.
+
+   Keyed on `pausedOverlapS`, which is the same predicate `computeRunSummary` already uses to refuse
+   to bridge a paused hop with great-circle ground: the map and the distance agree about which legs
+   are not real by construction rather than by two rules that happen to match. A GPS DROPOUT is
+   deliberately not treated this way -- the athlete kept moving through one, so a straight line there
+   is an interpolation of a real journey, and computeRunSummary bridges it for exactly that reason. */
+function pausedLegBreaks(times, spans) {
+  const brk = new Set();
+  if (!spans || !spans.length || !times || times.length < 2) return brk;
+  for (let i = 1; i < times.length; i++) {
+    if (pausedOverlapS(spans, times[i - 1], times[i]) > 0) brk.add(i);
+  }
+  return brk;
+}
+
 function pairDescentAnnotations(annotations) {
   const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g,' ');
   const isStart = (t) => {
@@ -6092,7 +6136,9 @@ function openSegmentPage(r, D, focusN) {
   _segLoc = loc;
   const latlngs = loc.map(p => [p.latitude, p.longitude]);
   let maxS = 0; for (const p of loc) if ((p.speed || 0) > maxS) maxS = p.speed || 0;
-  if (latlngs.length > 1) drawColoredTrack(latlngs, (i) => speedColor(loc[i].speed || 0, maxS || 1), _segOverlay);
+  const segPausedBrk = pausedLegBreaks(loc.map(p => p.t), (D.ride && D.ride.pausedSpans) || []);
+  if (latlngs.length > 1) drawColoredTrack(latlngs, (i) => speedColor(loc[i].speed || 0, maxS || 1), _segOverlay,
+                                           { brokenAt: (i) => segPausedBrk.has(i) });
   if (latlngs.length) {
     L.circleMarker(latlngs[0], { radius: 6, color: '#1a202c', fillColor: '#8caa6d', fillOpacity: 1, weight: 2 }).addTo(_segOverlay).bindTooltip('Start');
     L.circleMarker(latlngs[latlngs.length - 1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 }).addTo(_segOverlay).bindTooltip('End');
@@ -9090,7 +9136,7 @@ function computeRunSummary(loc, baro, ride, R, hr) {
      Path length cannot tell a 0.1 m walking step from a 0.1 m drift hop; the Doppler speed on the fix
      can, and that is what the floor reads. A hop with no reported speed (or an invalid -1) therefore
      counts as standing, which is right for the case that produces them -- a phone sitting still. */
-  const MOVING_MIN_MPS = 0.5, MOVING_MAX_GAP_S = 5;
+  const MOVING_MIN_MPS = 0.5, MOVING_MAX_GAP_S = 5, MOVING_MAX_MPS = 12;
   let distance = 0, driftDistance = 0, movingTime = 0;
   const toRad = d => d * Math.PI / 180, R_EARTH = 6371000;
   for (let i = 1; i < inRide.length; i++) {
@@ -9112,6 +9158,24 @@ function computeRunSummary(loc, baro, ride, R, hr) {
        entirely. Read as a dropout, a paused drive to the next trailhead joins the run twice over:
        as distance, and (d/dt clears the walking floor comfortably) as moving time. */
     if (pausedOverlapS(pausedSpans, a.t, b.t) > 0) continue;
+    /* THE FLOOR NEVER HAD A CEILING, and a jump clears it comfortably (owner report, 2026-09-06:
+       "the bad gps gave me an unrealistic pace of sub-8 min per mile", on a walk at 108 spm). A fix
+       that teleports and comes back is not ground the athlete covered: the reported walk's
+       best-effort table offered 400 m in 0:02 and a mile 44 s faster than any split, off a receiver
+       that moved several hundred metres between two consecutive fixes. The floor reads the fix's own
+       Doppler speed, which on such a hop is an ordinary walking figure, so it admits it as real
+       ground -- the two channels contradict each other and nothing was comparing them.
+       WIDE-MARGIN, not tuned: nothing on foot covers ground at 12 m/s (a sprinter's PEAK is about
+       12.4, a fast recreational run sits under 6), while the artifact that prompted this implies
+       about 200 m/s. Treated exactly as standing is -- no ground, no seconds -- because that is what
+       it is: the receiver moved and the athlete did not.
+       Deliberately only UNDER the gap limit, and that scoping is what makes this a CONTRADICTION
+       rather than an opinion about human speed: inside the limit the fix reports its OWN Doppler
+       speed, so there are two channels and they disagree flatly -- the position says 200 m/s and
+       the receiver says walking. Past the limit the bridged ground is the only evidence there is,
+       the existing floor already judges it, and raising a ceiling there would re-decide a
+       documented call (a tunnel, a lift, a blackout on a fast descent) with no report behind it. */
+    if (havePos && dt <= MOVING_MAX_GAP_S && d / dt > MOVING_MAX_MPS) { driftDistance += d; continue; }
     if (dt > MOVING_MAX_GAP_S) {
       /* GPS dropout. The samples are missing, so the fix cannot report its own speed and the gap has
          to be judged by the ground it bridged: metres over seconds, against the same walking floor.
@@ -9198,6 +9262,7 @@ const SPLIT_R_EARTH = 6371000;
 const splitToRad = (d) => (d * Math.PI) / 180;
 /* Moving-time rules, deliberately identical to computeRunSummary's walking floor and dropout gap. */
 const SPLIT_MOVING_MIN_MPS = 0.5;
+const SPLIT_MOVING_MAX_MPS = 12;
 const SPLIT_MOVING_MAX_GAP_S = 5;
 
 /** Great-circle metres between two fixes. Inlined so the drift guard can run this standalone. */
@@ -9223,6 +9288,9 @@ function computeSplits(loc, ride, unitM, hr) {
       && r.latitude != null && r.longitude != null)
     .sort((a, b) => a.t - b.t);
   if (inRide.length < 2) return [];
+
+  /* The stretches the athlete paused, off the same ride record computeRunSummary reads them from. */
+  const paused = (ride && ride.pausedSpans) || [];
 
   const hrIn = (hr || []).filter((r) => r && r.bpm != null).sort((a, b) => a.t - b.t);
   /* Mean HR over a split's own time window. Linear scan per split would be O(n*m); the rows are
@@ -9262,7 +9330,27 @@ function computeSplits(loc, ride, unitM, hr) {
        reported 4:51/mi with "4:54 stopped" for a runner whose every other mile was 7:46 or slower.
        Almost none of that was standing. It was a phone hunting for a fix at the trailhead, ~300 s of
        sparse samples that a two-way moving/not-moving test could only file under "stopped". */
+    /* A paused stretch is not a dropout, and splits never learned the difference (owner report,
+       2026-09-06). Same rule and same reasoning as computeRunSummary's, which got it first: the
+       recording is suspended, the athlete may have gone somewhere else entirely, so a hop bridging
+       a pause is ground nobody measured. */
+    if (pausedOverlapS(paused, a.t, b.t) > 0) continue;
+    /* THE FLOOR NEVER HAD A CEILING, and a jump clears it comfortably (owner report, 2026-09-06:
+       "the bad gps gave me an unrealistic pace of sub-8 min per mile", on a walk at 108 spm). A fix
+       that teleports and comes back is not ground the athlete covered, and the floor cannot tell:
+       under the gap limit it reads the fix's own Doppler speed, which on such a hop is an ordinary
+       walking figure, so the hop is admitted as real ground while the two channels flatly
+       contradict each other. WIDE-MARGIN, not tuned: nothing on foot covers ground at 12 m/s (a
+       sprinter's PEAK is about 12.4, a fast recreational run sits under 6), while the reported
+       artifact implies about 200 m/s. Treated exactly as standing is -- no ground, no seconds.
+       Deliberately only UNDER the gap limit, and that scoping is what makes this a CONTRADICTION
+       rather than an opinion about human speed: inside the limit the fix reports its OWN Doppler
+       speed, so there are two channels and they disagree flatly -- the position says 200 m/s and
+       the receiver says walking. Past the limit the bridged ground is the only evidence there is,
+       the existing floor already judges it, and raising a ceiling there would re-decide a
+       documented call (a tunnel, a lift, a blackout on a fast descent) with no report behind it. */
     const overGap = !(dt > 0) || dt > SPLIT_MOVING_MAX_GAP_S;
+    if (!overGap && d / dt > SPLIT_MOVING_MAX_MPS) continue;
     /* A live fix reports its own speed. A blacked-out one cannot, so it is judged by the ground it
        crossed: metres over seconds is an implied speed, and at or above the walking floor the runner
        was plainly still moving. */
@@ -9288,7 +9376,11 @@ function computeSplits(loc, ride, unitM, hr) {
       splits.push({
         index: splits.length + 1,
         meters: unitM,
-        seconds: tCross - splitStartT,
+        /* Elapsed, less any of it the recording was PAUSED for. Everything else the athlete looks
+           at subtracts those minutes -- the duration tile, the Record screen, the wrist, the workout
+           in Health -- and this table did not, so a mile straddling an unnoticed pause reported
+           "+67:12 stopped" on a 39-minute walk (the row's stopped note is elapsed minus moving). */
+        seconds: (tCross - splitStartT) - pausedOverlapS(paused, splitStartT, tCross),
         movingSeconds: movingAccum + hopMoving * (frac - fracDone),
         tStart: splitStartT,
         tEnd: tCross,
@@ -9311,7 +9403,7 @@ function computeSplits(loc, ride, unitM, hr) {
     splits.push({
       index: splits.length + 1,
       meters: leftover,
-      seconds: lastT - splitStartT,
+      seconds: (lastT - splitStartT) - pausedOverlapS(paused, splitStartT, lastT),
       movingSeconds: movingAccum,
       tStart: splitStartT,
       tEnd: lastT,
@@ -9373,6 +9465,7 @@ const beToRad = (d) => (d * Math.PI) / 180;
 /* Identical to computeSplits'. Duplicated rather than shared for the same reason splits duplicates
    them rather than sharing with computeRunSummary: each copy is pinned to its module separately. */
 const BE_MOVING_MIN_MPS = 0.5;
+const BE_MOVING_MAX_MPS = 12;
 const BE_MOVING_MAX_GAP_S = 5;
 /* Track and road standards only. A "fastest 3.7 km" is not a thing anyone has a feel for, so an
    arbitrary grid would be noise dressed as a record. Both unit systems always, because a metric
@@ -9404,13 +9497,33 @@ function beCheckpoints(loc, ride) {
       && r.latitude != null && r.longitude != null)
     .sort((a, b) => a.t - b.t);
   if (inRide.length < 2) return [];
+  const paused = (ride && ride.pausedSpans) || [];
   const pts = [{ d: 0, m: 0, t: inRide[0].t }];
   for (let i = 1; i < inRide.length; i++) {
     const a = inRide[i - 1], b = inRide[i];
     const d = beHop(a, b);
     if (!(d > 0)) continue;
     const dt = b.t - a.t;
+    /* A paused stretch is not a dropout: the recording is suspended and the athlete may have gone
+       somewhere else entirely, so the hop that bridges it is ground nobody measured. Same rule as
+       computeRunSummary's, which got it first. */
+    if (pausedOverlapS(paused, a.t, b.t) > 0) continue;
+    /* THE FLOOR NEVER HAD A CEILING, and a jump clears it comfortably (owner report, 2026-09-06:
+       "the bad gps gave me an unrealistic pace of sub-8 min per mile"). A best-effort table is MORE
+       exposed to this than a splits table, for the reason the header already gives about drift: it
+       actively goes looking for the most favourable window, and a receiver that teleports several
+       hundred metres between two fixes hands it one. The reported walk came back with 400 m in
+       0:02, 800 m in 0:02 and a mile 44 s faster than any split it printed. WIDE-MARGIN, not tuned:
+       nothing on foot covers ground at 12 m/s (a sprinter's PEAK is about 12.4), while that
+       artifact implies about 200. Treated exactly as standing is -- no ground, no seconds.
+       Deliberately only UNDER the gap limit, and that scoping is what makes this a CONTRADICTION
+       rather than an opinion about human speed: inside the limit the fix reports its OWN Doppler
+       speed, so there are two channels and they disagree flatly -- the position says 200 m/s and
+       the receiver says walking. Past the limit the bridged ground is the only evidence there is,
+       the existing floor already judges it, and raising a ceiling there would re-decide a
+       documented call (a tunnel, a lift, a blackout on a fast descent) with no report behind it. */
     const overGap = !(dt > 0) || dt > BE_MOVING_MAX_GAP_S;
+    if (!overGap && d / dt > BE_MOVING_MAX_MPS) continue;
     const impliedMoving = overGap ? (dt > 0 && d / dt >= BE_MOVING_MIN_MPS) : (b.speed >= BE_MOVING_MIN_MPS);
     if (!overGap && !impliedMoving) continue;
     const prev = pts[pts.length - 1];
@@ -22906,12 +23019,13 @@ function renderRunMap(loc, ride, segments) {
   /* Color the track by grade segment: red for downhill, green for uphill, neutral elsewhere.
      Merged into one polyline per same-color stretch (see drawColoredTrack). */
   const inSeg = (t) => segments.find(s => t >= s.tStart && t <= s.tEnd);
+  const runPausedBrk = pausedLegBreaks(inRide.map(r => r.t), (ride && ride.pausedSpans) || []);
   drawColoredTrack(latlngs, (i) => {
     const seg = inSeg(inRide[i].t);
     /* Lift segments (GPS-only FIT rides) draw gray: transport, not riding. */
     if (seg && seg.kind === 'lift') return '#9aa2ad';
     return seg ? (seg.dir === 'down' ? '#e0573a' : '#7fb069') : '#5b9bd5';
-  });
+  }, null, { brokenAt: (i) => runPausedBrk.has(i) });
   /* Start/end markers. */
   L.circleMarker(latlngs[0], { radius: 6, color: '#1a202c', fillColor: '#8caa6d', fillOpacity: 1, weight: 2 }).addTo(mapInstance).bindTooltip('Start');
   L.circleMarker(latlngs[latlngs.length-1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 }).addTo(mapInstance).bindTooltip('End');
@@ -26892,12 +27006,30 @@ function renderStats(s, hasFit) {
    points whose color matches are merged into one polyline on a shared canvas
    renderer. The old approach (one SVG layer per GPS point pair) put thousands
    of DOM nodes on the map for an hour-long ride and made pan/zoom crawl. */
-function drawColoredTrack(latlngs, colorAt, target) {
+/* `opts.brokenAt(i)` marks a leg (i-1 -> i) the track must NOT be drawn across: today, one that
+   spans a pause (see pausedLegBreaks). The two ends are joined by a dashed hairline instead of
+   nothing at all, because a bare gap reads as a rendering fault while a dashed line reads as what it
+   is -- the two ends of a stretch nobody recorded. Muted and thin, so it cannot be mistaken for
+   track at a glance, and it carries the reason on hover. */
+function drawColoredTrack(latlngs, colorAt, target, opts) {
   const dest = target || mapInstance;
   const renderer = L.canvas({ padding: 0.4 });
+  const brokenAt = (opts && opts.brokenAt) || null;
   let pts = [latlngs[0]], cur = colorAt(1);
   const flush = () => { if (pts.length > 1) L.polyline(pts, { color: cur, weight: 4, opacity: 0.9, renderer }).addTo(dest); };
   for (let i = 1; i < latlngs.length; i++) {
+    if (brokenAt && brokenAt(i)) {
+      flush();
+      /* Two fixes at the same point need no connector, and drawing one would put a layer on the map
+         for every second of a pause that recorded fixes anyway (a merged file, or a fixture). */
+      if (latlngs[i - 1][0] !== latlngs[i][0] || latlngs[i - 1][1] !== latlngs[i][1]) {
+        L.polyline([latlngs[i - 1], latlngs[i]], {
+          color: '#8a8f98', weight: 2, opacity: 0.6, dashArray: '4 6', className: 'track-pause-gap', renderer
+        }).addTo(dest).bindTooltip('Paused \u2014 nothing was recorded between these points');
+      }
+      pts = [latlngs[i]]; cur = colorAt(i);
+      continue;
+    }
     const c = colorAt(i);
     if (c !== cur) { flush(); pts = [latlngs[i - 1]]; cur = c; }
     pts.push(latlngs[i]);
@@ -26950,7 +27082,9 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
   const maxS = Math.max(...speeds) || 1;
   const NB = 16;
   const bucket = (s) => Math.min(NB - 1, Math.floor((s / maxS) * NB));
-  drawColoredTrack(latlngs, (i) => speedColor(((bucket(speeds[i]) + 0.5) / NB) * maxS, maxS), mapOverlay);
+  const pausedBrk = pausedLegBreaks(inWin.map(r => r.t), (ride && ride.pausedSpans) || []);
+  drawColoredTrack(latlngs, (i) => speedColor(((bucket(speeds[i]) + 0.5) / NB) * maxS, maxS), mapOverlay,
+                   { brokenAt: (i) => pausedBrk.has(i) });
 
   for (const T of (turns || [])) {
     const ta = T.tPeak != null ? T.tPeak : (T.tStart + T.tEnd) / 2;
@@ -27254,9 +27388,19 @@ function renderRideSignature(D, sport) {
     if (pts[pts.length - 1] !== inRide[inRide.length - 1]) pts.push(inRide[inRide.length - 1]);
 
     const g = (n) => Math.round(n * 10) / 10;
-    const glowPath = 'M' + pts.map(r => `${g(X(r))},${g(Y(r))}`).join(' L');
+    /* Same rule as the maps: a leg spanning a pause crosses ground nothing recorded, so it is not
+       drawn (see pausedLegBreaks). The poster gets no dashed stand-in -- it has no hover to explain
+       one and no legend to put it in -- so the line simply lifts and puts itself down again. Both
+       the glow underlay and the coloured segments break, or the glow would draw the leg the
+       segments refuse. */
+    const sigBrk = pausedLegBreaks(pts.map(r => r.t), (ride && ride.pausedSpans) || []);
+    let glowPath = '';
+    for (let i = 0; i < pts.length; i++) {
+      glowPath += (i === 0 ? 'M' : (sigBrk.has(i) ? ' M' : ' L')) + `${g(X(pts[i]))},${g(Y(pts[i]))}`;
+    }
     let segs = '';
     for (let i = 1; i < pts.length; i++) {
+      if (sigBrk.has(i)) continue;
       segs += `<line x1="${g(X(pts[i-1]))}" y1="${g(Y(pts[i-1]))}" x2="${g(X(pts[i]))}" y2="${g(Y(pts[i]))}" stroke="${speedColor((pts[i].speed||0), maxS)}" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>`;
     }
     /* Turn + jump accents. */
@@ -30944,7 +31088,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '0dd9d68f0 · 2026-09-06';
+const LOAM_BUILD = 'ed62be253 · 2026-09-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
