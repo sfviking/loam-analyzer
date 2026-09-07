@@ -2769,7 +2769,7 @@ function extractFitData(messages) {
       ts: f[253],
       lat: f[0] != null ? f[0] * SEMI_TO_DEG : null,
       lon: f[1] != null ? f[1] * SEMI_TO_DEG : null,
-      hr:  f[3], cad: f[4],
+      hr:  f[3], cad: f[4], fracCad: f[53],
       dist: f[5] != null ? f[5] / 100.0 : null,
       speed, power: f[7], altitude: alt,
       /* The FIT e-bike block (fields 82, 117-120), which a Specialized Levo populates and a
@@ -4161,6 +4161,45 @@ function dftMagAt(sig, ts, f) {
 /* ========== Running analysis ========== */
 /* Works hand-held: uses OS-fused gravity to project accel onto world-vertical.
    No body-frame calibration needed (it would be invalid for a hand-held phone). */
+
+/* Per-segment motion aggregates, hung on the climb/descent segments detectGradeSegments returns.
+   `runningClimbMetrics` reads its cadence, its pace and the speed its GAP column is computed from
+   off the SEGMENT rather than off the series, so a path that builds segments without these renders
+   the Climbs panel with three columns of dashes on a file that carries all three.
+
+   Each channel is applied only when it is PASSED. Passing an empty array still assigns (null),
+   which is the difference between "measured nothing" and "never asked" -- `runningClimbMetrics`
+   reads `!= null`, and the coach digest formats the value, so an unset property is not the same
+   thing as an absent measurement.
+
+   DELIBERATELY NOT YET SHARED with the two copies of this arithmetic inside `analyzeRunning` and
+   `applyWalkBandCadence`. Folding those in is the right eventual cleanup -- the cost of the copies
+   disagreeing is already recorded in this file, since `applyWalkBandCadence` exists precisely
+   because segments[].cadAvg was computed from the run-band series and never revisited, so a walk's
+   headline tile read 113 spm while the table under it read 172 and 183. It is not done here because
+   both of those functions are drift-pinned to `analyzer/sports/running/` (analysis, gait,
+   head-cadence and wrist-cadence guards all extract and re-run them), so consolidating means
+   editing four extracted modules and four guards on the validated running path, which is its own
+   change with its own test surface and does not belong in a FIT-import fix. */
+function attachSegmentMotionAggregates(segments, { cadSeries, oscSeries, location } = {}) {
+  const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  for (const seg of segments || []) {
+    if (cadSeries) {
+      const segCads = cadSeries.filter(c => c.t >= seg.tStart && c.t <= seg.tEnd && c.conf > 0.05);
+      seg.cadAvg = mean(segCads.map(c => c.spm));
+    }
+    if (oscSeries) {
+      const segOscs = oscSeries.filter(o => o.t >= seg.tStart && o.t <= seg.tEnd);
+      seg.oscAvg = mean(segOscs.map(o => o.oscCm));
+    }
+    if (location) {
+      const segLoc = location.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd && r.speed != null);
+      seg.speedAvg = mean(segLoc.map(r => r.speed));
+      seg.paceMinPerKm = seg.speedAvg ? (1000 / seg.speedAvg) / 60 : null;
+    }
+  }
+  return segments;
+}
 
 function analyzeRunning(sensors, ride) {
   const accelInRide = sensors.accel.filter(r => r.t >= ride.start && r.t <= ride.end);
@@ -10270,6 +10309,81 @@ function fitIsEbike(messages) {
   return false;
 }
 
+/* ==== ported from analyzer/core/fit/fit-running.js ==== */
+/* Heart rate and step cadence out of a bare .FIT, for the standalone-import path. The module
+   carries the full argument; the two things that matter at this call site:
+     - FIT record.cadence is STRIDES per minute on a foot sport and every cadence number in Loam is
+       STEPS per minute, so it doubles. Read naively a 174 spm runner renders at 87, which is not an
+       obviously broken number but a plausible-looking wrong one. NOT yet verified against a real
+       Garmin file -- the session median must be checked against what Garmin Connect displays.
+     - conf is 1 because the watch COUNTED this rather than estimating it; the chart names the
+       instrument so nobody reads the series as an FFT peak.
+   fit-running.test.js runs both copies over the same cases and asserts they agree. */
+/** Strides per minute -> steps per minute. One stride is one per leg; a step is one per foot. */
+const FIT_CADENCE_FOOT_MULTIPLIER = 2;
+
+/** `record.fractional_cadence` (field 53) is uint8 at FIT scale 128, in the same RPM units. */
+const FIT_FRACTIONAL_CADENCE_SCALE = 128;
+
+/** Plausible step-rate band, in spm. Wide on purpose: it rejects a standstill (0) and a garbled
+ *  byte, and refuses to arbitrate anything a human might actually have done. A slow shuffle is
+ *  ~50 spm and a sprinter's peak is ~240. */
+const FIT_CADENCE_MIN_SPM = 30;
+const FIT_CADENCE_MAX_SPM = 260;
+
+/** Plausible heart-rate band, in bpm. 0 and the uint8 invalid 255 both fall outside it. */
+const FIT_HR_MIN_BPM = 20;
+const FIT_HR_MAX_BPM = 240;
+
+/**
+ * One record's step cadence in steps/min, or null when it carries none or an implausible one.
+ * `rec.cad` is record field 4 (strides/min), `rec.fracCad` is field 53 when the device writes it.
+ */
+function fitStepCadence(rec) {
+  if (!rec || rec.cad == null) return null;
+  const frac = rec.fracCad != null ? rec.fracCad / FIT_FRACTIONAL_CADENCE_SCALE : 0;
+  const spm = (rec.cad + frac) * FIT_CADENCE_FOOT_MULTIPLIER;
+  if (!(spm >= FIT_CADENCE_MIN_SPM && spm <= FIT_CADENCE_MAX_SPM)) return null;
+  return spm;
+}
+
+/**
+ * Step cadence per record, shaped exactly like `analyzeRunning`'s `cadSeries` ({ t, freq, spm,
+ * conf }) so the cadence chart, the climbs panel and the coach digest read it unchanged.
+ * `startFitSec` rebases FIT timestamps onto the recording clock the rest of `sensors` uses.
+ *
+ * FOOT SPORTS ONLY, and the name says so because the units do not survive being generalised: the
+ * same field on a bike record is crank RPM and must not be doubled. The caller already knows which
+ * it has (`fitDeclaredSport`), so that decision stays at the call site rather than becoming a flag
+ * here that a later reader could pass wrongly.
+ */
+function fitStepCadenceSeries(records, startFitSec) {
+  const out = [];
+  if (startFitSec == null) return out;
+  for (const r of records || []) {
+    if (!r || r.ts == null) continue;
+    const spm = fitStepCadence(r);
+    if (spm == null) continue;
+    out.push({ t: r.ts - startFitSec, freq: spm / 60, spm, conf: 1 });
+  }
+  return out;
+}
+
+/**
+ * Heart rate per record as { t, bpm }, the shape `sensors.heartRate` carries everywhere else
+ * (`computeSplits`, `runDecouplingSamples`, `analyzeRunningClimbs` all read `.bpm`).
+ */
+function fitHeartRateSeries(records, startFitSec) {
+  const out = [];
+  if (startFitSec == null) return out;
+  for (const r of records || []) {
+    if (!r || r.ts == null || r.hr == null) continue;
+    if (!(r.hr >= FIT_HR_MIN_BPM && r.hr <= FIT_HR_MAX_BPM)) continue;
+    out.push({ t: r.ts - startFitSec, bpm: r.hr });
+  }
+  return out;
+}
+
 function fitOnlySensors(records) {
   const sensors = emptyCombinedSensors();
   const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
@@ -10317,6 +10431,14 @@ function fitOnlySensors(records) {
     });
     sensors.baro = altPts.map((a, i) => ({ t: a.t, relativeAltitude: sm[i] - sm[0] }));
   }
+  /* Heart rate rides along on the same records, and a bare FIT was dropping it. That cost the
+     splits table its HR column, the climbs table its HR drift, and `aerobicDecoupling` its only
+     input -- a read whose own header calls distance, time and heart rate "the thinnest data any
+     source carries", which was therefore refusing the one import shape that always has all three.
+     Rebased on `startFitSec` like the track, and cropped for free: `cropSensors` walks every key.
+     Records with no position still contribute, since a heart rate measured while the GPS was
+     hunting for a fix is still a heart rate. */
+  sensors.heartRate = fitHeartRateSeries(records, startFitSec);
   return { sensors, speedDerived: !useFitSpeed, startFitSec };
 }
 
@@ -10477,6 +10599,30 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
     .filter(d => d.drop != null && d.drop >= MIN_DESCENT_DROP_M);
   descents.forEach((d, i) => { d.index = i + 1; });
   const descentGroups = groupRepeatedDescents(descents);
+  /* A foot FIT carries the athlete's own step rate (record field 4) and this page threw it away
+     while telling them "GPS cannot see steps". Clipped to the ride window rather than cropped in
+     `fitOnlySensors`: the crop does not rebase the clock (see cropSensors), so one filter against
+     the window the rest of the render uses covers both the ride window and any trim.
+     FOOT ONLY -- the same field on a bike record is crank RPM and must not be doubled, which is why
+     `fitStepCadenceSeries` refuses to take the sport as a flag. */
+  const cadSeries = foot
+    ? fitStepCadenceSeries(records, startFitSec).filter(c => c.t >= ride.start && c.t <= ride.end)
+    : [];
+  /* Per-climb cards, from the same up-segments the segments table already shows and the same
+     altitude series the timeline is shaded from, so GAP and the shading cannot disagree about the
+     hill. Cadence and HR here are the FIT's own channels, not gait inferences. */
+  /* The climb cards read their cadence, pace and grade-adjusted pace off the SEGMENT, not off the
+     series, so the aggregates have to be attached first -- without this the panel renders with a
+     cadence, pace and GAP column of dashes on a file carrying all three. `oscSeries: []` is passed
+     deliberately: a FIT has no head motion, and null means "measured nothing" where leaving the
+     property unset would mean "never asked". */
+  if (foot) {
+    attachSegmentMotionAggregates(segments, { cadSeries, oscSeries: [], location: sensors.location });
+  }
+  const runClimbs = foot
+    ? analyzeRunningClimbs(segments, climbAltSeries(sensors.baro || [], sensors.location, ride),
+                           cadSeries, sensors.heartRate || [])
+    : [];
   _currentRunKey = contentHash;
   onProgress('saving to library');
   const saved = await saveRideToLibrary({
@@ -10496,8 +10642,11 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
        "descents" are not cornering lines), so the road-corners section + digest corners stay off. */
     descents: foot ? [] : descents, descentGroups: foot ? [] : descentGroups,
     /* renderRunTimeline shades climb/descent segments from D.running.segments; this shim is the
-       only "running" state a GPS ride has. */
-    running: { segments },
+       only "running" state a GPS ride has. On a foot FIT it now also carries the watch's own
+       cadence and the per-climb cards built from it. `cadSource: 'fit'` is a THIRD source beside
+       'wrist' and 'head' rather than falling through to the phone default, because that default's
+       caption claims an FFT peak on |accel| and there is no accelerometer anywhere near this. */
+    running: { segments, cadSeries, cadSource: 'fit', climbs: runClimbs },
     libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
     title: fitFile.name,
   };
@@ -20948,6 +21097,37 @@ let currentSavedDescents = null;
 let currentLibraryRideId = null;
 let currentRide = null;       /* ride window for relative time math */
 
+/* Splits, best efforts and session pacing: the three reads that share ONE splits computation.
+   Extracted verbatim so the running render and the GPS-only render of a foot FIT call the same
+   code. They are together because they must agree: best efforts is meaningless beside splits it
+   was not computed from ("your splits said 7:46" is a comparison the runner checks by eye), and
+   pacing reads the same splits and the same altitude series the Climbs panel's GAP column uses, so
+   computing them twice in two render functions is how a table and the verdict under it end up
+   describing the same run differently.
+
+   Splits follow the athlete's unit setting: an imperial runner gets miles, not a metric table
+   under an imperial headline. */
+function renderRunDistanceReads(D) {
+  const imperial = !U.metric();
+  const unitM = imperial ? 1609.344 : 1000;
+  const unitLabel = imperial ? 'mile' : 'km';
+  const rows = (D.sensors && D.sensors.location) || [];
+  const hrRows = (D.sensors && D.sensors.heartRate) || [];
+  const splits = computeSplits(rows, D.ride, unitM, hrRows);
+  /* The drift figure comes from the summary, which measured it, rather than from the gap between
+     two distances. Both now exclude standing hops under the same rule, so that gap is ~0 and the
+     note it used to drive would have quietly stopped appearing. */
+  renderRunSplits(splits, unitLabel, (D.summary || {}).driftDistance);
+  /* Best efforts sit under the splits table on purpose: they answer the question the table above
+     raises but cannot settle ("so how fast can I run a mile"), and reading them side by side is
+     what makes the difference between the two obvious. */
+  renderRunBestEfforts(computeBestEfforts(rows, D.ride), splits);
+  /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
+     grade adjustment and the GAP column can never disagree about the hill. */
+  const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
+  renderRunPacing(runPacing(splits, alts), unitLabel);
+}
+
 function renderAllRunning(D) {
   _lastRender = { fn: renderAllRunning, D };
   hideAllSections();
@@ -20985,26 +21165,7 @@ function renderAllRunning(D) {
   renderRunCadence(D.running.cadSeries, D.running.cadSource);
   /* Splits follow the athlete's unit setting: an imperial runner gets miles, not a metric table
      under an imperial headline. Computed off the same GPS rows the summary walks. */
-  (() => {
-    const imperial = !U.metric();
-    const unitM = imperial ? 1609.344 : 1000;
-    const unitLabel = imperial ? 'mile' : 'km';
-    const rows = (D.sensors && D.sensors.location) || [];
-    const hrRows = (D.sensors && D.sensors.heartRate) || [];
-    const splits = computeSplits(rows, D.ride, unitM, hrRows);
-    /* The drift figure comes from the summary, which measured it, rather than from the gap between
-       two distances. Both now exclude standing hops under the same rule, so that gap is ~0 and the
-       note it used to drive would have quietly stopped appearing. */
-    renderRunSplits(splits, unitLabel, (D.summary || {}).driftDistance);
-    /* Best efforts sit under the splits table on purpose: they answer the question the table above
-       raises but cannot settle ("so how fast can I run a mile"), and reading them side by side is
-       what makes the difference between the two obvious. */
-    renderRunBestEfforts(computeBestEfforts(rows, D.ride), splits);
-    /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
-       grade adjustment and the GAP column can never disagree about the hill. */
-    const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
-    renderRunPacing(runPacing(splits, alts), unitLabel);
-  })();
+  renderRunDistanceReads(D);
   renderRunOsc(D.running.oscSeries);
   renderRunDecoupling(D);
   renderRecordingQuality(D);
@@ -21050,20 +21211,40 @@ function renderAllGps(D) {
   /* Coach highlights parity: GPS rides get the card too, from a GPS-safe producer (empty-guard hides
      it if the summary yields no bullets). */
   renderCoachHighlights(D, 'gps');
+  /* Does this file carry the athlete's OWN cadence? A Garmin run does; a bare position-only head
+     unit does not. Everything below that used to speak for a foot FIT assumed the second case. */
+  const hasCad = !!(D.running && D.running.cadSeries && D.running.cadSeries.length);
   { const body = document.getElementById('gpsOnlyNoticeBody');
-    /* The notice names exactly what is missing for THIS activity: turns/jumps for a bike, cadence
-       and form for a run/hike. Otherwise a runner reads a bike-flavored disclaimer. */
+    /* The notice names exactly what is missing for THIS activity: turns/jumps for a bike, form for a
+       run/hike. Otherwise a runner reads a bike-flavored disclaimer.
+       A foot FIT carrying cadence must NOT be told cadence is unavailable. That sentence was false
+       for every Garmin run ever dropped in here -- the file had the number, `extractFitData` parsed
+       it, and `fitOnlySensors` dropped it -- and it sat directly above a gateway card offering to
+       measure the thing the file already contained. */
     const missing = foot
-      ? 'cadence, vertical oscillation, and running-form analysis is unavailable'
+      ? (hasCad
+          ? 'vertical oscillation and running-form analysis is unavailable'
+          : 'cadence, vertical oscillation, and running-form analysis is unavailable')
       : 'turn, jump, airtime, and body-motion analysis is unavailable';
     if (body) body.textContent =
       'This FIT file carries a GPS track but no phone motion data, so ' + missing + '.'
+      + (hasCad ? ' Cadence and heart rate below are your watch\'s own recordings, not estimates from this page.' : '')
       + (D.speedDerived ? ' The FIT records no speed either; speed here is derived from GPS positions (median-filtered), so treat top speed as approximate.' : '')
       + ' Record with Loam Capture and attach the FIT to get the full analysis.'; }
   show('gpsOnlyNotice');
   renderRunMap(D.sensors.location, D.ride, D.segments);
   renderRoadCornerMarkers(D);
   renderRunTimeline(D);
+  /* A foot FIT gets the running reads it has the inputs for. Every one of these is arithmetic over
+     distance, time, altitude and heart rate -- no gait inference, so none of them carries the
+     ground-truth gating the oscillation and posture metrics need, and none needs the phone IMU.
+     They were unreachable here only because this path never called them. */
+  if (foot) {
+    renderRunCadence((D.running && D.running.cadSeries) || [], (D.running && D.running.cadSource));
+    renderRunDistanceReads(D);
+    renderRunClimbs((D.running && D.running.climbs) || []);
+    renderRunDecoupling(D);
+  }
   renderRunSegments(D.segments, { motionColumns: false });
   renderGpsParams(D);
   currentRide = D.ride;
@@ -21096,15 +21277,26 @@ function renderGpsUpsell(D) {
   if (!grid) return;
   const sport = D.gpsSport || 'ride';
   const foot = sport === 'run' || sport === 'walk';
-  /* Pitch what a phone recording adds for THIS activity: cornering/jumps for a bike, cadence and
-     running form for a run/hike. Pitching turns and jumps to a runner reads as broken. */
+  /* Pitch what a phone recording adds for THIS activity: cornering/jumps for a bike, form for a
+     run/hike. Pitching turns and jumps to a runner reads as broken.
+     A CARD MUST NOT OFFER TO MEASURE WHAT THE FILE ALREADY CARRIES. A Garmin run was being sold
+     "Cadence -- GPS cannot see steps; the phone or AirPods can" directly beneath a chart drawn from
+     that watch's own per-second step rate, and "Form on the hills" beneath a climbs table already
+     printing cadence fade per climb. An upsell that is visibly false about the page it sits on
+     discredits the cards that are true, and the remaining three are true: oscillation needs AirPods,
+     walk-break detection needs the IMU, and the coach genuinely does read more with motion. */
+  const hasCad = !!(D.running && D.running.cadSeries && D.running.cadSeries.length);
   const cards = foot
     ? [
-        ['Cadence', 'Your step rate through the ' + (sport === 'walk' ? 'walk' : 'run') + ', and how it holds or drops as you fatigue and on the climbs. GPS cannot see steps; the phone or AirPods can.'],
+        ...(hasCad ? [] : [
+          ['Cadence', 'Your step rate through the ' + (sport === 'walk' ? 'walk' : 'run') + ', and how it holds or drops as you fatigue and on the climbs. GPS cannot see steps; the phone or AirPods can.'],
+          ['Form on the hills', 'Whether your cadence stays quick on the climbs or your stride slows and lengthens, per hill split.'],
+        ]),
         ['Vertical oscillation', 'How much you bounce per stride (from AirPods head motion), a proxy for wasted energy. Lower and steadier is more efficient.'],
-        ['Form on the hills', 'Whether your cadence stays quick on the climbs or your stride slows and lengthens, per hill split.'],
         ['Walk-break detection', 'Where a run drops to a walk (or a hike breaks into a jog), so pacing and fade show up honestly across the outing.'],
-        ['Deeper AI coaching', 'The coach below sees only pace and elevation today. With motion data it coaches form: cadence targets, oscillation, and where you tire.'],
+        ['Deeper AI coaching', hasCad
+          ? 'The coach below reads your pace, climbs, cadence and heart rate. With motion data it also coaches form: how much you bounce, where your stride changes, and where you drop to a walk.'
+          : 'The coach below sees only pace and elevation today. With motion data it coaches form: cadence targets, oscillation, and where you tire.'],
       ]
     : [
         ['Turns & cornering', 'Every turn with apex radius, body lean, entry/exit speed, and left/right symmetry. From GPS alone, fewer than 1 in 5 turns are even findable (we measured); body-frame motion finds them all.'],
@@ -22913,10 +23105,20 @@ function renderRunCadence(cadSeries, cadSource) {
     ? '10s windows · FFT peak on watch |rotation rate| · low-confidence windows omitted'
     : cadSource === 'head'
     ? '10s windows · FFT peak on AirPods vertical accel · low-confidence and low-amplitude windows omitted'
+    : cadSource === 'fit'
+    /* Counted by the head unit, not estimated here, so there is no window and no confidence to
+       report -- and the doubling is named because it is an assumption about the file's units that a
+       reader can check against what Garmin Connect shows for the same run. */
+    ? 'per-second step rate counted by your watch · doubled from the FIT\'s strides/min'
     : '10s windows · FFT peak on |accel| (rotation-invariant)';
   if (!cadSeries.length) {
     Plotly.purge('runCadenceChart');
-    document.getElementById('runCadenceChart').innerHTML = '<div style="padding:40px; text-align:center; color:#475569;">No cadence detected (run too short or noisy?)</div>';
+    /* A FIT with no cadence is a file that never carried one (no wrist cadence, no foot pod), which
+       is a different statement from a signal this page looked for and could not find. */
+    const why = cadSource === 'fit'
+      ? 'This FIT carries no cadence — the watch did not record one for this activity.'
+      : 'No cadence detected (run too short or noisy?)';
+    document.getElementById('runCadenceChart').innerHTML = '<div style="padding:40px; text-align:center; color:#475569;">' + why + '</div>';
     return;
   }
   syncSmoothToggles();
@@ -24654,6 +24856,17 @@ function buildDigest(D, sport, metric) {
     const downs = (D.segments || []).filter(x => x.dir === 'down')
       .filter(seg => { const v = segDropM(seg); return v == null || v >= MIN_DESCENT_DROP_M; })
       .map(segStats);
+    /* Cadence and heart rate off a foot FIT: the watch's own channels, which this digest used to
+       omit while its caveat told the model they did not exist. Both had to land here in the same
+       change as the render, because the gateway panel now tells the athlete the coach reads them --
+       a page that advertises a capability its own digest does not carry is the same over-claim in
+       the other direction. Aggregated here rather than in computeGpsSummary, which serves the
+       bike path too and has no cadence concept. */
+    const gpsCadSpm = foot ? (((D.running && D.running.cadSeries) || []).map(c => c.spm)) : [];
+    const gpsHrBpm = foot
+      ? ((D.sensors && D.sensors.heartRate) || []).filter(r => r && r.bpm != null).map(r => r.bpm)
+      : [];
+    const gpsCadSorted = [...gpsCadSpm].sort((a, b) => a - b);
     const label = sport === 'run' ? 'run (GPS-only FIT import, no phone motion data)'
       : sport === 'walk' ? 'walk or hike (GPS-only FIT import, no phone motion data)'
       : D.eBike ? 'e-MTB ride (GPS-only FIT import, e.g. bike-park or lift-served day; motor-assisted)'
@@ -24690,8 +24903,20 @@ function buildDigest(D, sport, metric) {
         })),
         repeated_descents: (D.descentGroups || []).map(g => ({ group: g.group, descent_numbers: g.indexes, note: 'same descent ridden multiple times, in ride order' })),
       } : null,
+      /* Present only when the file carried them; a head unit that logged neither must produce no
+         key at all rather than a null the model could read as a measured zero. */
+      cadence_spm_median: gpsCadSorted.length ? r1(gpsCadSorted[Math.floor(gpsCadSorted.length / 2)], 0) : null,
+      cadence_spm_mean: gpsCadSpm.length ? r1(gpsCadSpm.reduce((a, b) => a + b, 0) / gpsCadSpm.length, 0) : null,
+      heart_rate_bpm: gpsHrBpm.length
+        ? { avg: r1(gpsHrBpm.reduce((a, b) => a + b, 0) / gpsHrBpm.length, 0), max: Math.max(...gpsHrBpm) }
+        : null,
       data_caveats: foot
-        ? 'GPS-only FIT import of a ' + (sport === 'walk' ? 'walk/hike' : 'run') + ': no phone motion data, so there are no cadence, oscillation, or running-form metrics. Coach pace, elevation, and splits only; do not invent form data. Pace/speed may be GPS-derived and approximate.'
+        ? 'GPS-only FIT import of a ' + (sport === 'walk' ? 'walk/hike' : 'run') + ': no phone motion data, so there are no oscillation or running-form metrics. Coach pace, elevation, splits and climbs; do not invent form data.'
+          + (gpsCadSpm.length
+              ? ' Cadence IS present and came from the athlete\'s OWN WATCH (the FIT\'s per-second step rate), not from this app, so it is a measurement rather than an estimate. It is the step rate and nothing more: it says nothing about stride length, ground contact, posture or how they bounce.'
+              : ' This file carries no cadence at all.')
+          + (gpsHrBpm.length ? ' Heart rate is the watch\'s own recording.' : '')
+          + ' Pace/speed may be GPS-derived and approximate.'
         : 'GPS-only FIT import: no phone motion data, so there are no jump, airtime, braking, lean, or cadence metrics, and turn data is limited to the sweeping-corner geometry in the corners block. Speed may be derived from GPS positions and is approximate. Descents are listed in ride order.'
     };
   }
@@ -30719,7 +30944,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '901ba145b · 2026-09-05';
+const LOAM_BUILD = '0dd9d68f0 · 2026-09-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
