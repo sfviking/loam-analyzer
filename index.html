@@ -2290,6 +2290,25 @@
     </div>
   </section>
 
+  <section id="runLapsSection" class="hidden">
+    <div class="section-title">
+      Laps
+      <span class="subtitle">as your watch recorded them &middot; auto-lap, intervals and manual presses</span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table id="runLapsTable">
+          <thead><tr>
+            <th>#</th><th>Dist</th><th>Time</th><th>Pace</th>
+            <th class="lap-hr-col">HR</th><th class="lap-cad-col">Cadence</th><th>Lap</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="strength-tablenote" id="runLapsNote"></div>
+    </div>
+  </section>
+
   <section id="runDecouplingSection" class="hidden">
     <div class="section-title">
       Aerobic decoupling
@@ -10638,6 +10657,128 @@ function fitHeartRateSeries(records, startFitSec) {
   return out;
 }
 
+/* ==== ported from analyzer/core/parsers/specialized-fit.js ==== */
+/** FIT `lap_trigger` (message 19, field 24). A lap the athlete pressed is a different thing from one
+ *  the watch closed at a kilometre, and the whole value of showing laps is telling them apart. */
+const FIT_LAP_TRIGGER = {
+  0: 'manual', 1: 'time', 2: 'distance', 3: 'position start', 4: 'position lap',
+  5: 'position waypoint', 6: 'position marked', 7: 'session end', 8: 'fitness equipment',
+};
+
+/**
+ * The laps the WATCH recorded (message 19), which is a different thing from the splits this app
+ * computes. Loam's splits cut the track at every mile or kilometre; a lap is what the athlete's
+ * watch marked -- an auto-lap at each km, an interval rep they pressed, a manual marker. On a real
+ * session those interleave (a 13.5 km run came back as 1 km auto-laps with 0.05-0.23 km manual reps
+ * between them), and no recomputation from the track can recover which was which.
+ *
+ * `avgCadenceSpm` is DOUBLED like every other foot cadence in Loam -- lap field 17 is strides per
+ * minute exactly as record field 4 is, and the laps on that same file read 58/65/80/81, which are
+ * 116/130/160/162 spm. Applied only when the caller says this is a foot sport, for the reason
+ * `fitStepCadenceSeries` refuses to take the sport as a flag: on a bike the same field is crank RPM.
+ */
+function extractFitLaps(messages, { foot = false } = {}) {
+  const out = [];
+  for (const m of messages || []) {
+    if (m.gm !== 19) continue;
+    const f = m.fields;
+    const distanceM = f[9] != null ? f[9] / 100 : null;
+    const timerS = f[8] != null ? f[8] / 1000 : (f[7] != null ? f[7] / 1000 : null);
+    const elapsedS = f[7] != null ? f[7] / 1000 : timerS;
+    const cadRaw = f[17];
+    out.push({
+      index: out.length + 1,
+      startFitSec: f[2] != null ? f[2] : null,
+      distanceM, elapsedS, timerS,
+      /* The watch's own average speed where it wrote one, else distance over the timer it kept. */
+      avgSpeed: f[13] != null ? f[13] / 1000 : ((distanceM && timerS) ? distanceM / timerS : null),
+      avgHr: f[15] != null ? f[15] : null,
+      maxHr: f[16] != null ? f[16] : null,
+      avgCadenceSpm: cadRaw != null ? cadRaw * (foot ? 2 : 1) : null,
+      ascentM: f[21] != null ? f[21] : null,
+      descentM: f[22] != null ? f[22] : null,
+      trigger: FIT_LAP_TRIGGER[f[24]] || null,
+    });
+  }
+  return out;
+}
+
+/* ==== ported from analyzer/core/fit/resample.js ==== */
+/* Garmin "Smart Recording" writes a record when something changes, not once a second: a real fenix 5
+   run measured a 3.18 s mean gap with 238 gaps of 6-10 s. Every distance and moving-time loop here
+   skips an interval longer than 5 s because "dt > 5 AT ~1 Hz brackets a dropout" -- true of a phone
+   recording, false of this. It cost the athlete 1578 s and 4.02 km (9.16 km shown of a 13.47 km run),
+   and on another export exactly half the distance, with the missing time reappearing as "18m stopped".
+   The MAP was right throughout, because a polyline never consults dt, which is what made it read as
+   arithmetic rather than parsing.
+   Fixed at INGESTION rather than at the ~8 loops that carry the assumption, for the reason the
+   CoreLocation-sentinel fix gives: the call sites that get missed fail silently and in different
+   directions. NO-OP on a 1 Hz recording -- every validated dataset here is 1 Hz, and the input array
+   is returned unchanged -- and a gap past FIT_RESAMPLE_MAX_GAP_S stays a hole, so a genuine dropout
+   is still refused. resample.test.js runs both copies over the same cases. */
+/** Median sample interval at or below which a track is already 1 Hz and is left completely alone. */
+const FIT_RESAMPLE_TRIGGER_S = 1.5;
+
+/** Gaps longer than this are dropouts, not sampling, and are left as holes. */
+const FIT_RESAMPLE_MAX_GAP_S = 30;
+
+/** Median of a numeric array, or null when empty. */
+function fitResampleMedian(xs) {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
+/**
+ * The median gap between consecutive samples, in seconds; null when there are fewer than two.
+ * Exported because the decision to resample is worth reporting, not just acting on.
+ */
+function fitMedianSampleGapS(rows) {
+  const t = (rows || []).map((r) => r && r.t).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (t.length < 2) return null;
+  const gaps = [];
+  for (let i = 1; i < t.length; i++) gaps.push(t[i] - t[i - 1]);
+  return fitResampleMedian(gaps);
+}
+
+/**
+ * Resample `rows` ({ t, ... } with numeric fields) onto whole seconds, linearly interpolating the
+ * fields named in `fields` across gaps up to `maxGapS`. Rows are assumed sorted by `t`.
+ *
+ * Returns the INPUT ARRAY unchanged (same reference) when the track is already 1 Hz, so a caller can
+ * tell "nothing happened" from "rebuilt" and so no 1 Hz recording pays a copy.
+ */
+function fitResampleTo1Hz(rows, fields, opts = {}) {
+  const maxGapS = opts.maxGapS != null ? opts.maxGapS : FIT_RESAMPLE_MAX_GAP_S;
+  const triggerS = opts.triggerS != null ? opts.triggerS : FIT_RESAMPLE_TRIGGER_S;
+  const src = rows || [];
+  if (src.length < 2) return src;
+  const med = fitMedianSampleGapS(src);
+  if (med == null || med <= triggerS) return src;
+
+  const out = [];
+  const lerp = (a, b, f) => a + (b - a) * f;
+  for (let i = 0; i < src.length - 1; i++) {
+    const a = src[i], b = src[i + 1];
+    const dt = b.t - a.t;
+    out.push(a);
+    if (!(dt > 1) || dt > maxGapS) continue;   /* already dense enough, or a genuine hole */
+    /* Whole seconds strictly between the two samples. `t` stays absolute; nothing is rebased. */
+    for (let t = Math.floor(a.t) + 1; t < b.t; t++) {
+      if (t <= a.t) continue;
+      const f = (t - a.t) / dt;
+      const row = { ...a, t };
+      for (const k of fields) {
+        const va = a[k], vb = b[k];
+        row[k] = (va == null || vb == null) ? null : lerp(va, vb, f);
+      }
+      out.push(row);
+    }
+  }
+  out.push(src[src.length - 1]);
+  return out;
+}
+
 function fitOnlySensors(records) {
   const sensors = emptyCombinedSensors();
   const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
@@ -10674,6 +10815,11 @@ function fitOnlySensors(records) {
       altitude: p.altitude != null ? p.altitude : null,
     });
   });
+  /* A smart-recorded FIT is put on a 1 Hz grid HERE, before anything reads it, so every downstream
+     loop sees the shape its dt <= 5 s rule was written for. A 1 Hz file is returned untouched. The
+     baro series below is derived from these rows, so it inherits the same grid rather than needing
+     its own pass. */
+  sensors.location = fitResampleTo1Hz(sensors.location, ['speed', 'latitude', 'longitude', 'altitude']);
   /* GPS altitude smoothed over ~9 s, rebased to the first fix, standing in for the barometer. */
   const altPts = sensors.location.filter(r => r.altitude != null).map(r => ({ t: r.t, alt: r.altitude }));
   if (altPts.length > 10) {
@@ -10806,6 +10952,10 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   if (superseded()) return;
   const messages = parseFIT(buf);
   const { records, jumps } = extractFitData(messages);
+  /* The watch's own laps. Read here rather than re-derived from the track, because nothing in a GPS
+     trace says which press was an interval rep. `foot` is not known until fitDeclaredSport runs a few
+     lines below, so the cadence doubling is applied there. */
+  const fitLapMsgs = messages;
   /* Content hash keys the library upsert (re-analyzing the same FIT updates its row even when an
      algorithm tweak changes the numbers) and persists per-run rename labels, same as CSVs. FIT-only
      renders are not put in the analysis cache, so this is not a cache key here. Computed up here
@@ -10873,10 +11023,14 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   if (foot) {
     attachSegmentMotionAggregates(segments, { cadSeries, oscSeries: [], location: sensors.location });
   }
+  const footAlts = foot ? climbAltSeries(sensors.baro || [], sensors.location, ride) : [];
   const runClimbs = foot
-    ? analyzeRunningClimbs(segments, climbAltSeries(sensors.baro || [], sensors.location, ride),
-                           cadSeries, sensors.heartRate || [])
+    ? analyzeRunningClimbs(segments, footAlts, cadSeries, sensors.heartRate || [])
     : [];
+  /* Grade-adjusted pace for the whole outing, on the summary because that is what the stats tile
+     reads. Foot only: GAP is a cost-of-RUNNING model (Minetti), and it says nothing about a bike. */
+  if (foot) summary.gapSpeed = sessionGapSpeed(sensors.location, footAlts, ride);
+  const fitLaps = extractFitLaps(fitLapMsgs, { foot });
   _currentRunKey = contentHash;
   onProgress('saving to library');
   /* FIT timestamps are absolute UTC, so date this from the recording itself. Hoisted out of the
@@ -10906,6 +11060,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
        'wrist' and 'head' rather than falling through to the phone default, because that default's
        caption claims an FFT peak on |accel| and there is no accelerometer anywhere near this. */
     running: { segments, cadSeries, cadSource: 'fit', climbs: runClimbs },
+    fitLaps,
     libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
     title: fitFile.name, recordedAt: fitRecordedAt,
   };
@@ -17514,8 +17669,7 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.classList.add('hidden');
+  ['strengthResults','golfResults','swimResults','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runLapsSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {    const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
      sport's default (the MTB "yaw rate" timeline subtitle and MTB map legend used to leak this way). */
@@ -21514,6 +21668,14 @@ function renderAllGps(D) {
   if (foot) {
     renderRunCadence((D.running && D.running.cadSeries) || [], (D.running && D.running.cadSource));
     renderRunDistanceReads(D);
+    /* Beside the computed splits, because they answer different questions and reading them together
+       is what makes the difference obvious: a split is every km of ground, a lap is what you pressed. */
+    { const laps = D.fitLaps || [];
+      const pressed = laps.filter(l => l.trigger === 'manual').length;
+      renderRunLaps(laps, laps.length
+        ? `${laps.length} laps from your watch` + (pressed ? `, ${pressed} of them pressed by hand (shaded)` : '')
+          + '. These are the watch\'s own numbers, not recomputed here, so they match what Garmin shows.'
+        : ''); }
     renderRunClimbs((D.running && D.running.climbs) || []);
     renderRunDecoupling(D);
   }
@@ -21638,7 +21800,10 @@ function renderGpsStats(s, sport) {
        <div class="stat accent2">
          <div class="label">Avg pace</div>
          <div class="value">${U.pace(s.avgSpeed)}</div>
-         <div class="sub">${U.speed(s.avgSpeed)} · moving</div>
+         <!-- GAP where there is altitude to correct for, and the plain km/h NEVER: a runner reads
+              min/km, and the speed was already on this tile in the unit they asked for (owner,
+              2026-09-08, "for løping burde all fart være pace ikke km/t og med GAP"). -->
+         <div class="sub">${s.gapSpeed ? U.pace(s.gapSpeed) + ' GAP · moving' : 'moving'}</div>
        </div>`
     : `<div class="stat accent">
          <div class="label">Distance ridden</div>
@@ -23536,6 +23701,53 @@ function runningClimbMetrics(seg, alts, cadSeries, hrRows, index) {
     avgHr, hrDrift,
   };
 }
+/* Session grade-adjusted pace: the flat-equivalent speed for the whole outing (owner request,
+   2026-09-08, "for løping burde all fart være pace ikke km/t og med GAP").
+
+   Over the WHOLE TRACK rather than over the grade SEGMENTS, which was the tempting shortcut and is
+   wrong: `detectGradeSegments` only returns sustained climbs and descents, so a segment-weighted
+   average would describe the hilly parts of a run and silently omit the flat ones -- on a rolling
+   route that is most of it.
+
+   Flat-equivalent TIME is what accumulates, then distance over it, which is a distance-weighted
+   harmonic mean and the only average that composes correctly for speeds. Grade is read over a
+   `GAP_GRADE_WIN_S` window rather than fix to fix, because GPS altitude at 1 Hz is noisy enough that
+   per-sample grade swings tens of percent on flat ground, and the Minetti quintic is steep enough at
+   the ends to turn that into real error. Same reason the Climbs panel reads grade off a segment.
+
+   Returns null rather than a number when there is no altitude to work with: a "grade-adjusted" pace
+   computed over no grade is just the pace, and printing it twice under two names is a claim that
+   something was corrected when nothing was. */
+const GAP_GRADE_WIN_S = 20;
+function sessionGapSpeed(locRows, alts, ride) {
+  if (!alts || alts.length < 2) return null;
+  const rows = (locRows || []).filter(r => r && r.t >= ride.start && r.t <= ride.end && r.speed != null);
+  if (rows.length < 2) return null;
+  /* Altitude at a time, by linear scan; both series are sorted and walked once. */
+  let ai = 0;
+  const altAt = (t) => {
+    while (ai < alts.length - 1 && alts[ai + 1].t <= t) ai++;
+    while (ai > 0 && alts[ai].t > t) ai--;
+    return alts[ai] ? alts[ai].alt : null;
+  };
+  let dist = 0, flatTime = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const dt = rows[i].t - rows[i - 1].t;
+    if (!(dt > 0) || dt > 5) continue;
+    const v = (rows[i].speed + rows[i - 1].speed) / 2;
+    if (!(v > 0)) continue;
+    const d = v * dt;
+    const t = rows[i].t;
+    const a0 = altAt(t - GAP_GRADE_WIN_S / 2), a1 = altAt(t + GAP_GRADE_WIN_S / 2);
+    const run = v * GAP_GRADE_WIN_S;
+    const grade = (a0 != null && a1 != null && run > 0) ? ((a1 - a0) / run) * 100 : 0;
+    const g = gradeAdjustedSpeed(v, grade);
+    if (!(g > 0)) continue;
+    dist += d;
+    flatTime += d / g;
+  }
+  return flatTime > 0 ? dist / flatTime : null;
+}
 /* The climbs of a run/hike: every sustained up-segment carrying at least a 5 m gain, renumbered in
    order. The gain floor drops the sub-metre bumps and near-stationary GPS-wander blips that clear the
    grade-segment test but are not climbs worth a card (they still appear in the full climb/descent
@@ -24462,6 +24674,50 @@ function renderRunSplits(splits, unitLabel, driftM) {
       <td style="width:35%;">${bar}${note}</td>
     </tr>`;
   }).join('');
+}
+
+/* The laps the WATCH recorded, which answer a different question from the Splits table above.
+   Splits cut the track at every mile or km; laps are what the athlete marked -- and on an interval
+   session those are the reps. No recomputation from a GPS track can recover which press was which,
+   so this is the only surface that can show them (owner request, 2026-09-08: "laps (hver km,
+   intervall drag eller manuelt) mer interessant enn climb og descends").
+
+   Rows are the watch's own numbers, not re-derived here, so this panel cannot disagree with Garmin
+   Connect about a lap. Columns with nothing in them are dropped rather than filled with dashes, the
+   same call the splits and climbs tables already make. */
+function renderRunLaps(laps, note) {
+  const sec = document.getElementById('runLapsSection');
+  if (!sec) return;
+  /* One lap is the whole session under another name, and a table of it says nothing. */
+  if (!laps || laps.length < 2) { sec.classList.add('hidden'); return; }
+  const tbody = document.querySelector('#runLapsTable tbody');
+  if (!tbody) return;
+  const clock = (sec2) => {
+    const t = Math.round(sec2 || 0), m = Math.floor(t / 60);
+    return m + ':' + String(t - m * 60).padStart(2, '0');
+  };
+  const anyHr = laps.some(l => l.avgHr != null);
+  const anyCad = laps.some(l => l.avgCadenceSpm != null);
+  document.querySelectorAll('#runLapsTable .lap-hr-col').forEach(th => th.classList.toggle('hidden', !anyHr));
+  document.querySelectorAll('#runLapsTable .lap-cad-col').forEach(th => th.classList.toggle('hidden', !anyCad));
+  /* A lap the athlete PRESSED is the interesting one on an interval session, so it is marked. The
+     watch's own trigger says which; nothing here guesses from the distance. */
+  const pressed = (l) => l.trigger === 'manual';
+  tbody.innerHTML = laps.map(l => {
+    const pace = l.avgSpeed && l.avgSpeed > 0 ? U.pace(l.avgSpeed) : '&mdash;';
+    return '<tr' + (pressed(l) ? ' style="background:var(--surface-2);"' : '') + '>'
+      + `<td>${l.index}</td>`
+      + `<td>${l.distanceM != null ? U.dist(l.distanceM) : '&mdash;'}</td>`
+      + `<td>${clock(l.timerS)}</td>`
+      + `<td>${pace}</td>`
+      + (anyHr ? `<td class="lap-hr-col">${l.avgHr != null ? l.avgHr + ' bpm' : '&mdash;'}</td>` : '')
+      + (anyCad ? `<td class="lap-cad-col">${l.avgCadenceSpm != null ? Math.round(l.avgCadenceSpm) + ' spm' : '&mdash;'}</td>` : '')
+      + `<td class="dim" style="font-size:11px">${escapeHtml(l.trigger || '')}</td>`
+      + '</tr>';
+  }).join('');
+  const el = document.getElementById('runLapsNote');
+  if (el) el.textContent = note || '';
+  sec.classList.remove('hidden');
 }
 
 function renderRunClimbs(climbs) {
@@ -31352,7 +31608,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '9df4dd4ea · 2026-09-07';
+const LOAM_BUILD = 'a94bbf370 · 2026-09-08';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
