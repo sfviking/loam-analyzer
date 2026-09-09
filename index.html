@@ -10736,15 +10736,47 @@ function extractFitLaps(messages, { foot = false } = {}) {
       distanceM, elapsedS, timerS,
       /* The watch's own average speed where it wrote one, else distance over the timer it kept. */
       avgSpeed: f[13] != null ? f[13] / 1000 : ((distanceM && timerS) ? distanceM / timerS : null),
-      avgHr: f[15] != null ? f[15] : null,
-      maxHr: f[16] != null ? f[16] : null,
-      avgCadenceSpm: cadRaw != null ? cadRaw * (foot ? 2 : 1) : null,
+      /* A ZERO IS THE ABSENCE OF A MEASUREMENT, NOT A MEASUREMENT OF ZERO, and a lap is exactly
+         where zeroes turn up: on an interval session the recovery lap between two reps is a lap the
+         athlete pressed, and a watch with no strap writes 0 rather than the uint8 invalid the parser
+         already nulls. Rendered flat, that reads "0 spm" beside a pace the same row prints as a dash
+         for the same reason. Same call `fitStepCadence` makes one file over, and no threshold is
+         needed to make it: > 0 is the whole rule. */
+      avgHr: f[15] > 0 ? f[15] : null,
+      maxHr: f[16] > 0 ? f[16] : null,
+      avgCadenceSpm: cadRaw > 0 ? cadRaw * (foot ? 2 : 1) : null,
       ascentM: f[21] != null ? f[21] : null,
       descentM: f[22] != null ? f[22] : null,
       trigger: FIT_LAP_TRIGGER[f[24]] || null,
     });
   }
   return out;
+}
+
+/* The laps inside a window of the recording, and how many were not.
+
+   LAPS WERE THE ONE SERIES ON THIS PATH THAT NEVER SAW THE CROP. Every other channel is read off
+   `sensors`, which `cropSensors` has already cut, so a trimmed recording is simply a shorter
+   recording and nothing downstream re-scopes itself -- the whole argument for cropping at ingestion.
+   The lap table is fed from the raw `messages`, which bypasses `sensors`, so the crop could not
+   reach it: trim the drive home off a head-unit file and every lap of the drive was still listed
+   under a heading claiming to describe the session.
+
+   Overlap, not containment, and a kept lap keeps the WATCH's numbers: a lap is one press, its
+   distance and time describe the whole lap, and clipping them would break the panel's own promise
+   that these are not recomputed here. A lap with no start_time is kept rather than placed by guess.
+   `dropped` is returned because a thinned table that does not say so is the same over-claim. */
+function fitLapsInWindow(laps, opts = {}) {
+  const { baseFitSec, start, end } = opts;
+  const all = laps || [];
+  if (baseFitSec == null || !Number.isFinite(start) || !Number.isFinite(end)) return { laps: all, dropped: 0 };
+  const kept = all.filter((l) => {
+    if (l.startFitSec == null) return true;
+    const t0 = l.startFitSec - baseFitSec;
+    const span = l.elapsedS != null ? l.elapsedS : (l.timerS != null ? l.timerS : 0);
+    return (t0 + span) > start && t0 < end;
+  });
+  return { laps: kept, dropped: all.length - kept.length };
 }
 
 /* ==== ported from analyzer/core/fit/resample.js ==== */
@@ -10777,8 +10809,8 @@ function fitResampleMedian(xs) {
  * The median gap between consecutive samples, in seconds; null when there are fewer than two.
  * Exported because the decision to resample is worth reporting, not just acting on.
  */
-function fitMedianSampleGapS(rows) {
-  const t = (rows || []).map((r) => r && r.t).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+function fitMedianSampleGapS(rows, timeKey = 't') {
+  const t = (rows || []).map((r) => r && r[timeKey]).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
   if (t.length < 2) return null;
   const gaps = [];
   for (let i = 1; i < t.length; i++) gaps.push(t[i] - t[i - 1]);
@@ -10787,7 +10819,17 @@ function fitMedianSampleGapS(rows) {
 
 /**
  * Resample `rows` ({ t, ... } with numeric fields) onto whole seconds, linearly interpolating the
- * fields named in `fields` across gaps up to `maxGapS`. Rows are assumed sorted by `t`.
+ * fields named in `fields` across gaps up to `maxGapS`. Rows are assumed sorted by time.
+ *
+ * `opts.timeKey` names the field holding the clock, because the two callers hold it under two names:
+ * `sensors.location` keys on `t` (seconds since the recording's zero) and a raw FIT `record` keys on
+ * `ts` (seconds since the FIT epoch). Both are seconds and both are integers on the wire, so the
+ * arithmetic is identical and only the property name differs -- which is exactly the sort of
+ * difference that gets a second copy of a function written, and then lets the two drift.
+ *
+ * Fields NOT named in `fields` are carried forward from the earlier row rather than interpolated,
+ * which is the right reconstruction for a step-shaped channel (a packed L/R balance byte, a lap
+ * index) and the only safe one for a value that is not a number at all.
  *
  * Returns the INPUT ARRAY unchanged (same reference) when the track is already 1 Hz, so a caller can
  * tell "nothing happened" from "rebuilt" and so no 1 Hz recording pays a copy.
@@ -10795,23 +10837,24 @@ function fitMedianSampleGapS(rows) {
 function fitResampleTo1Hz(rows, fields, opts = {}) {
   const maxGapS = opts.maxGapS != null ? opts.maxGapS : FIT_RESAMPLE_MAX_GAP_S;
   const triggerS = opts.triggerS != null ? opts.triggerS : FIT_RESAMPLE_TRIGGER_S;
+  const tk = opts.timeKey || 't';
   const src = rows || [];
   if (src.length < 2) return src;
-  const med = fitMedianSampleGapS(src);
+  const med = fitMedianSampleGapS(src, tk);
   if (med == null || med <= triggerS) return src;
 
   const out = [];
   const lerp = (a, b, f) => a + (b - a) * f;
   for (let i = 0; i < src.length - 1; i++) {
     const a = src[i], b = src[i + 1];
-    const dt = b.t - a.t;
+    const dt = b[tk] - a[tk];
     out.push(a);
     if (!(dt > 1) || dt > maxGapS) continue;   /* already dense enough, or a genuine hole */
-    /* Whole seconds strictly between the two samples. `t` stays absolute; nothing is rebased. */
-    for (let t = Math.floor(a.t) + 1; t < b.t; t++) {
-      if (t <= a.t) continue;
-      const f = (t - a.t) / dt;
-      const row = { ...a, t };
+    /* Whole seconds strictly between the two samples. The clock stays absolute; nothing is rebased. */
+    for (let t = Math.floor(a[tk]) + 1; t < b[tk]; t++) {
+      if (t <= a[tk]) continue;
+      const f = (t - a[tk]) / dt;
+      const row = { ...a, [tk]: t };
       for (const k of fields) {
         const va = a[k], vb = b[k];
         row[k] = (va == null || vb == null) ? null : lerp(va, vb, f);
@@ -11074,7 +11117,16 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   /* Grade-adjusted pace for the whole outing, on the summary because that is what the stats tile
      reads. Foot only: GAP is a cost-of-RUNNING model (Minetti), and it says nothing about a bike. */
   if (foot) summary.gapSpeed = sessionGapSpeed(sensors.location, footAlts, ride);
-  const fitLaps = extractFitLaps(fitLapMsgs, { foot });
+  /* Scoped to the recording AS TRIMMED, which is the cropped sensors' own span: the lap messages
+     come off the raw `messages` and so are the one series here the crop layer cannot reach on its
+     own. Deliberately NOT the ride window -- that is a detector's opinion about when the athlete was
+     moving, and a lap pressed while warming up is still a lap the athlete pressed. With no crop the
+     span is the whole file, so nothing is dropped. */
+  const lapSpan = sensorSpan(sensors);
+  const lapsInWindow = fitLapsInWindow(extractFitLaps(fitLapMsgs, { foot }),
+    { baseFitSec: startFitSec, start: lapSpan && lapSpan.start, end: lapSpan && lapSpan.end });
+  const fitLaps = lapsInWindow.laps;
+  const fitLapsDropped = lapsInWindow.dropped;
   _currentRunKey = contentHash;
   onProgress('saving to library');
   /* FIT timestamps are absolute UTC, so date this from the recording itself. Hoisted out of the
@@ -11104,7 +11156,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
        'wrist' and 'head' rather than falling through to the phone default, because that default's
        caption claims an FFT peak on |accel| and there is no accelerometer anywhere near this. */
     running: { segments, cadSeries, cadSource: 'fit', climbs: runClimbs },
-    fitLaps,
+    fitLaps, fitLapsDropped,
     libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
     title: fitFile.name, recordedAt: fitRecordedAt,
   };
@@ -21751,9 +21803,12 @@ function renderAllGps(D) {
        is what makes the difference obvious: a split is every km of ground, a lap is what you pressed. */
     { const laps = D.fitLaps || [];
       const pressed = laps.filter(l => l.trigger === 'manual').length;
+      /* A trimmed recording says so, rather than quietly showing fewer laps than the watch has. */
+      const dropped = D.fitLapsDropped || 0;
       renderRunLaps(laps, laps.length
         ? `${laps.length} laps from your watch` + (pressed ? `, ${pressed} of them pressed by hand (shaded)` : '')
           + '. These are the watch\'s own numbers, not recomputed here, so they match what Garmin shows.'
+          + (dropped ? ` ${dropped} more ${dropped === 1 ? 'lap fell' : 'laps fell'} outside the trimmed window and ${dropped === 1 ? 'is' : 'are'} not shown.` : '')
         : ''); }
     renderRunClimbs((D.running && D.running.climbs) || []);
     renderRunDecoupling(D);
@@ -27547,7 +27602,12 @@ function buildSectionNav() {
   /* Every section a sport can show, ordered by where it actually sits on the page (the road path
      hoists its corners under the map, so DOM source order is not page order). The list used to be
      twelve ids: Form replay, Splits, Climbs and every road section were unreachable except by
-     scrolling, and a road ride's nav read Map / Timeline / Coach. */
+     scrolling, and a road ride's nav read Map / Timeline / Coach.
+     KEEPING IT COMPLETE IS THE HARD PART, and it drifted three times in the eight days after it was
+     written: `recordingQualitySection`, `runLapsSection` and `hrZonesSection` each shipped without a
+     chip, silently, because a missing entry breaks nothing that renders. `checkSectionNavCovers` in
+     the E2E asks the page itself on every scenario, so the next section to ship has to be listed
+     here or declared unreachable on purpose. */
   const pos = (el) => el.getBoundingClientRect().top + window.scrollY;
   const entries = [
     { el: visible('crashSection'), label: 'Crash' },
@@ -27566,9 +27626,12 @@ function buildSectionNav() {
     { el: visible('runCadenceSection'), label: 'Cadence' },
     { el: visible('runOscSection'), label: 'Oscillation' },
     { el: visible('runSplitsSection'), label: 'Splits' },
+    { el: visible('runLapsSection'), label: 'Laps' },
+    { el: visible('hrZonesSection'), label: 'HR zones' },
     { el: visible('runDecouplingSection'), label: 'HR drift' },
     { el: visible('runClimbsSection'), label: 'Climbs' },
     { el: visible('runSegmentsSection'), label: 'Segments' },
+    { el: visible('recordingQualitySection'), label: 'Measured from' },
     { el: visible('roadSection'), label: 'Climbs' },
     { el: visible('roadSpeedSection'), label: 'Speed' },
     { el: visible('roadDescentsSection'), label: 'Descents' },
@@ -27594,6 +27657,11 @@ function buildSectionNav() {
     btn.type = 'button';
     btn.textContent = e.label;
     if (e.compare) btn.className = 'nav-compare';
+    /* The chip's target, written down rather than only captured in the closure below, so a test can
+       ask what this nav actually reaches. The list above is a CLAIM about coverage and it has been
+       wrong three times in eight days -- Laps, HR zones and "Measured from" each shipped after it was
+       written and none was added, so each was reachable only by scrolling past everything else. */
+    if (e.el.id) btn.dataset.target = e.el.id;
     btn.onclick = () => e.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     nav.appendChild(btn);
     chips.push({ btn, el: e.el });
@@ -29699,9 +29767,22 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   const buf = await fitFile.arrayBuffer();
   if (superseded()) return;
   const messages = parseFIT(buf);
-  const { records } = extractFitData(messages);
+  const { records: rawRecords } = extractFitData(messages);
   const { session, laps } = extractFitSummary(messages);
-  if (records.length < 20) throw new Error('This FIT has no usable ride data.');
+  if (rawRecords.length < 20) throw new Error('This FIT has no usable ride data.');
+  /* A smart-recorded head unit writes a record when something CHANGED, not once a second, so put
+     the records on a 1 Hz grid before anything reads them -- the same treatment `fitOnlySensors`
+     gives the GPS-only path, applied here because EVERY road number is derived from these rows.
+     Missing it cost the most on power: `resampleTo1Hz` below zero-fills a gap over 3 s, and a smart
+     file's MEDIAN gap is 3.18 s, so over half the ride read as zero watts (measured: NP 139 -> 86 W
+     on `Evening Ride.fit`), and those watts are SAVED to the library as the envelope the athlete's
+     next ride is ranked against. Records key their clock on `ts`, hence `timeKey`.
+     The fields named here are the continuous channels; everything else -- a packed L/R balance byte
+     among them -- is carried forward, which is what a step-shaped value wants. A 1 Hz file is
+     returned untouched, so no validated road dataset moves.
+     `extractFitSummary` is deliberately read from the RAW messages: the session and lap rows are the
+     head unit's own numbers and are never re-derived here. */
+  const records = fitResampleTo1Hz(rawRecords, ['power', 'cad', 'hr', 'altitude', 'speed', 'lat', 'lon'], { timeKey: 'ts' });
   const { sensors } = fitRecordsToSensors(records);
   if (sensors.location.length < 10) throw new Error('This FIT has no GPS track, so it cannot be mapped as a road ride yet (indoor trainer support is coming).');
   onProgress('detecting active window');
@@ -31886,7 +31967,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'cb7ee9c45 · 2026-09-09';
+const LOAM_BUILD = '4836a8e2b · 2026-09-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
