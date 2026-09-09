@@ -16569,6 +16569,27 @@ function bestBeforeMember(members, latest) {
   }) || null;
 }
 
+/* Can these laps EVER carry corners? Only ONE saveRideToLibrary call site passes `turns` -- the
+   body-frame path, reached by MTB / e-MTB / skiing -- so a foot activity stores none however many
+   times it is re-analysed. That makes the two corner surfaces below EMPTY rather than pending for a
+   runner, and their copy said the opposite: it told them to "re-open such a ride once to backfill
+   it", which for a run can never backfill anything (owner report, 2026-09-08, on a running segment).
+   Same posture as CalibrationStillness.readBy withholding the hold-still row from a lifter: a
+   surface must not offer to measure what the sport cannot produce.
+   Answered ONLY when every member NAMES a sport and every one of them is on foot. A lap saved
+   before sport detection, one from a multi-file compare drop ('unknown'), or one corner-capable lap
+   all mean the recording COULD hold turns -- absence of evidence is not evidence, so those keep the
+   empty state that says how to backfill. */
+function sportCarriesNoTurns(members) {
+  const ms = (members || []).filter(m => m);
+  if (!ms.length) return false;
+  return ms.every(m => {
+    if (!m.sport || m.sport === 'unknown') return false;
+    const s = normalizeSport(m.sport);
+    return s === 'run' || s === 'walk';
+  });
+}
+
 /* Render the cross-ride dashboard: a per-ride summary panel and one section
    per matched descent cluster, each with a summary table, speed-vs-distance
    overlay, and DTW lag chart vs the longest descent in the cluster. */
@@ -16583,14 +16604,17 @@ function bestBeforeMember(members, latest) {
    cross-ride view to frame that corner on the painted map. Omitted when there is no map to point at
    (the two laps would not DTW-align, so nothing was painted); the corner then stays plain bold text
    rather than a control that does nothing. */
-function renderCrossTurnRead(hostId, subject, reference, onCorner) {
+function renderCrossTurnRead(hostId, subject, reference, onCorner, noTurnsBySport) {
   const host = document.getElementById(hostId);
   if (!host) return;
   const A = (subject && subject.turns) || [], F = (reference && reference.turns) || [];
   if (!subject || !reference || subject === reference || !A.length || !F.length) {
-    /* Honest empty state: descents saved before per-turn storage existed (and every non-MTB save)
-       carry no turns, and re-opening that ride once backfills it. */
-    host.innerHTML = `<div class="dim" style="font-size:12px;">No corner-by-corner read: it needs two selected laps that both stored their turns. Rides saved before per-descent turns existed, and non-MTB rides, carry none &mdash; re-open such a ride once to backfill it.</div>`;
+    /* A sport that never stores turns has no corner read to withhold, so the panel GOES rather than
+       standing empty over an explanation of a feature it does not have. See sportCarriesNoTurns. */
+    if (noTurnsBySport) { host.innerHTML = ''; host.classList.add('hidden'); return; }
+    /* Honest empty state for a sport that CAN carry turns. The backfill only works for a ride the
+       body-frame path will re-analyse; a GPS-only import has no IMU to re-read and never gains any. */
+    host.innerHTML = `<div class="dim" style="font-size:12px;">No corner-by-corner read: it needs two selected laps that both stored their turns. Rides saved before per-descent turns existed carry none, and re-opening such a ride once backfills it; a GPS-only import carries none and cannot be backfilled.</div>`;
     host.classList.remove('hidden');
     return;
   }
@@ -17058,6 +17082,9 @@ function renderCrossRide({ perRide, clusters }) {
        whenever a checkbox toggles. */
     const drawClusterCharts = () => {
       deltaMapView = null;
+      /* A property of the SEGMENT, not of the selected pair: if every lap here is on foot, no
+         selection the rider can make will produce corners. */
+      const noTurnsBySport = sportCarriesNoTurns(members);
       const selected = members.filter(m => selectedMembers.has(m));   /* fastest-first order preserved */
       /* Reference for the DTW lag chart and the painted map: keep the ranked reference when it is
          still selected (the default), else fall back to the fastest selected run. */
@@ -17165,7 +17192,13 @@ function renderCrossRide({ perRide, clusters }) {
           hovermode: 'x unified',
         }, PLOT_CFG);
       } else if (turnEl) {
-        turnEl.innerHTML = `<div style="padding:24px; color:var(--text-muted); font-size:12px;">Apex speed by corner needs two selected laps that stored their turns. Rides saved before per-descent turns existed, and non-MTB rides, carry none.</div>`;
+        /* Same rule as the read below: a foot segment loses the panel rather than carrying 260px of
+           empty chart under an explanation of a feature this sport has never had. */
+        if (noTurnsBySport) { turnEl.innerHTML = ''; turnEl.classList.add('hidden'); }
+        else {
+          turnEl.classList.remove('hidden');
+          turnEl.innerHTML = `<div style="padding:24px; color:var(--text-muted); font-size:12px;">Apex speed by corner needs two selected laps that stored their turns. Rides saved before per-descent turns existed carry none.</div>`;
+        }
       }
 
       let bestPaint = null;
@@ -17216,7 +17249,7 @@ function renderCrossRide({ perRide, clusters }) {
             try { mk.openTooltip(); } catch (e) {}
           }
         : null;
-      renderCrossTurnRead(`crossPbp_${ci}`, chartCmp, chartRef, cornerFocus);
+      renderCrossTurnRead(`crossPbp_${ci}`, chartCmp, chartRef, cornerFocus, noTurnsBySport);
     };
     drawClusterCharts();
   });
@@ -26244,7 +26277,6 @@ ${domain}
 Rules:
 - Ground every claim in the numbers provided. Never invent metrics that are not in the data.
 - If a "history" array is present (recent prior sessions, newest first), use it for trend: call out what is improving or regressing versus those sessions instead of treating this ride in isolation. Do not invent history that is not there.
-- If a "strava_history" block is present, it is the athlete's own Strava data: recent_activities (recent same-sport rides, for volume and trend), pr_efforts (segments where this ride set a personal record), and close_efforts (segments within a few seconds of a PR, where deltaToPRSeconds is the gap left to beat it, and effortCount is how many times they have ridden that segment). Celebrate the real PRs, name a close_effort as a concrete next target, use effortCount to frame progress by experience on the trail, and read recent_activities for training load. Cite the real segment names and times, and never invent efforts that are not listed. For runs it may also carry runQuality, recent runs with splitBalancePct (second-half vs first-half pace, negative means a faster finish), paceVariationPct (how even the splits were), decouplingPct (aerobic decoupling, the pace-to-heart-rate drift, higher means the heart climbed to hold pace), and read (an automatic one-line take). Use runQuality to coach pacing and aerobic fitness across runs (for example rising decoupling means going out too hard or a base that needs work); build on the read rather than contradicting it, and cite the real numbers.
 - If a "health_context" block is present, it is the athlete's own Apple Health vitals, in up to two DATED blocks: "asOfSession" is their state on the day of this recording, and "current" is their state today. Each carries an asOf day, a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, and a basis line naming the measurements used. Use asOfSession to interpret how this session went (they rode it in that state) and current to frame what to do next; when current is absent the session is today and asOfSession serves both. Keep them straight: if the recording is not from today, never narrate asOfSession in the present tense or attribute today's readiness to that session, and when asOfSession is missing say the ride day's recovery state is unknown rather than substituting today's. Low readiness or HRV below baseline biases next-session advice toward easy volume and recovery; high supports pushing. Cite the real numbers, respect the basis (say so when there was no reading yet on that block's day), and never invent vitals.
 - Respect the data_caveats. If data is sparse or a mount/source is uncertain, say so and hedge rather than overclaiming.
 - ${units}
@@ -26738,42 +26770,33 @@ function coachAnalyzePrompt(sport) {
   return `Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`;
 }
 
-// Fold in the athlete's Strava context when the native app has it: recent same-sport activities
-// plus this ride's segment efforts vs their PRs, injected into window.LOAM_STRAVA_CONTEXT once a
-// Strava account is connected (the fetch is async, so read it lazily and attach once). A note
-// travels with it so the model knows what it is, the same pattern descent_history uses. HTML-only,
-// not part of buildDigest, so the coaching drift-guard is unaffected. Attached BEFORE the cache key
-// is hashed, so a reply generated with old Strava data is not replayed after the data changes, and
-// so the write path (sendCoach) and read path (restoreCachedCoach) hash the same digest.
-/* The native app builds its Strava digest with fixed Codable keys (distanceKm / elevGainM), so an
-   imperial athlete would read miles everywhere except this block. Restate those two in their units,
-   named by unit like the rest of the digest; times, counts, and percentages are unit-neutral and pass
-   through. The injected object is never mutated (the app may reuse it). */
-function stravaContextInUnits(sc, metric) {
-  if (metric || !sc || !Array.isArray(sc.recentActivities)) return sc;
-  const u = digestUnits(false);
-  return { ...sc, recentActivities: sc.recentActivities.map(a => {
-    const { distanceKm, elevGainM, ...rest } = a;
-    return { ...rest, ...u.dist('distance', distanceKm != null ? distanceKm * 1000 : null), ...u.elev('elev_gain', elevGainM) };
-  }) };
-}
+/* There is deliberately no Strava context in the coach digest. `attachStravaContext` used to fold
+   the athlete's recent Strava activities and this ride's segment efforts vs their PRs into the
+   prompt as a `strava_history` block, read from a host global the iOS app set. Removed in full
+   2026-08-13: Strava's 2026 API policy forbids Strava Data in the "operation of any AI Application"
+   (5.3, which names retrieval-augmented generation) and forbids disclosing it to "model developers"
+   (5.10), and sending the block to Anthropic is both. The athlete's consent is not a carve-out under
+   those terms; the only carve-out is Strava's own first-party MCP.
 
-function attachStravaContext(state) {
-  try {
-    const sc = window.LOAM_STRAVA_CONTEXT;
-    if (sc && typeof sc === 'object' && state.digest && !state.digest.strava_history) {
-      state.digest.strava_history = stravaContextInUnits(sc, U.metric());
-      state.digest.strava_history_note = "The athlete's own Strava data. recent_activities: recent same-sport rides (each activity's distance and elevation field names its unit). pr_efforts: segments where this ride set a personal record. close_efforts: segments within a few seconds of a PR (deltaToPRSeconds). effortCount on an effort is how many times they have ridden that segment. runQuality (runs only): recent runs with splitBalancePct (second-half vs first-half pace, negative is a faster finish), paceVariationPct (split evenness), decouplingPct (pace-to-heart-rate drift, higher means more cardiac drift), and read (an automatic one-line take). Use for progression, celebrate real PRs, name a close_effort as a concrete target, frame progress by effortCount, and coach pacing and aerobic fitness from runQuality; cite the real numbers and never invent efforts not listed here.";
-    }
-  } catch (e) { /* best-effort; coach runs without Strava context on any error */ }
-}
+   Nothing an athlete LOOKS AT was removed with it -- the segment PR card, the Stats tab, run quality
+   and gear are all native and still fetch and render. What went is the coach's ability to narrate
+   them. Progression coaching survives on Loam's own data: `descent_history` (below) carries per-trail
+   lap history from the rider's own library and is unaffected, as is `health_context`, which is Apple
+   Health rather than Strava. See Finding 1 in strava-developer-review.md; if Strava says the block is
+   permissible after all, this is one revert away.
+
+   This is a BLOCK comment, and that is load-bearing rather than stylistic: the two-sided check in
+   `analyzer/integration/host-globals-contract.test.js` strips block comments and deliberately does
+   not strip `//` lines, so prose naming the removed global in line comments reads to it as a live
+   host global with no writer -- which is exactly the shape of bug that test exists to catch. The
+   name is spelled out once, here, and nowhere in code. */
 
 // Fold in the athlete's Apple Health vitals when the native app has them: readiness with its
 // visible components plus HRV / resting-HR / training-load baselines, injected into
-// window.LOAM_HEALTH_CONTEXT by the iOS app. Purely on-device data, no Strava needed. Same
-// note-travels-with-data pattern as strava_history (so every sport's prompt gets the guidance), and
-// attached BEFORE the cache key is hashed for the same reason: a reply generated against
-// yesterday's readiness is not replayed today.
+// window.LOAM_HEALTH_CONTEXT by the iOS app. Purely on-device data, no Strava needed -- which is
+// why this survived the removal of the Strava block above and is not affected by any Strava term.
+// A note travels with the data so every sport's prompt gets the guidance, and it is attached BEFORE
+// the cache key is hashed: a reply generated against yesterday's readiness is not replayed today.
 //
 // Two dated blocks, not one: asOfSession is the athlete's state on the day of THIS recording and
 // current is their state now. The app used to send a single undated digest built for the moment the
@@ -26801,7 +26824,7 @@ function attachHealthContext(state) {
    SESSION DATA in sendCoach; it just no longer perturbs the cache key. */
 function coachKeyDigest(digest) {
   if (!digest || typeof digest !== 'object') return JSON.stringify(digest);
-  const { strava_history, strava_history_note, health_context, health_context_note, ...rest } = digest;
+  const { health_context, health_context_note, ...rest } = digest;
   return JSON.stringify(rest);
 }
 
@@ -26817,7 +26840,6 @@ function coachFirstTurnKey(state, level, model, text) {
    prior one), replay it from the IndexedDB cache immediately: no click, no API call. Only cache hits
    are shown, so this never spends money; generating a fresh insight still needs the Start button. */
 async function restoreCachedCoach(state, sport) {
-  attachStravaContext(state);
   attachHealthContext(state);
   try { await state.digestReady; } catch (e) { /* history is best-effort */ }
   if (coachState !== state || state.messages.length) return;   // panel re-rendered, or already active
@@ -26870,7 +26892,6 @@ async function sendCoach(text) {
   let coachCacheKey = null;
   const state = coachState;   /* a re-render replaces coachState; never write into the new one */
 
-  attachStravaContext(state);
   attachHealthContext(state);
 
   if (coachState.messages.length === 0) {
@@ -31865,7 +31886,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '450ea4271 · 2026-09-08';
+const LOAM_BUILD = 'cb7ee9c45 · 2026-09-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
