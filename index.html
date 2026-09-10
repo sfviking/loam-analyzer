@@ -2327,13 +2327,13 @@
   <section id="runLapsSection" class="hidden">
     <div class="section-title">
       Laps
-      <span class="subtitle">as your watch recorded them &middot; auto-lap, intervals and manual presses</span>
+      <span class="subtitle" id="runLapsSubtitle">as your watch recorded them &middot; auto-lap, intervals and manual presses</span>
     </div>
     <div class="panel">
       <div style="overflow-x:auto;">
         <table id="runLapsTable">
           <thead><tr>
-            <th>#</th><th>Dist</th><th>Time</th><th>Pace</th>
+            <th>#</th><th>Dist</th><th>Time</th><th id="runLapsPaceHead">Pace</th>
             <th class="lap-hr-col">HR</th><th class="lap-cad-col">Cadence</th><th>Lap</th>
           </tr></thead>
           <tbody></tbody>
@@ -21799,17 +21799,27 @@ function renderAllGps(D) {
   if (foot) {
     renderRunCadence((D.running && D.running.cadSeries) || [], (D.running && D.running.cadSource));
     renderRunDistanceReads(D);
-    /* Beside the computed splits, because they answer different questions and reading them together
-       is what makes the difference obvious: a split is every km of ground, a lap is what you pressed. */
-    { const laps = D.fitLaps || [];
-      const pressed = laps.filter(l => l.trigger === 'manual').length;
-      /* A trimmed recording says so, rather than quietly showing fewer laps than the watch has. */
-      const dropped = D.fitLapsDropped || 0;
-      renderRunLaps(laps, laps.length
-        ? `${laps.length} laps from your watch` + (pressed ? `, ${pressed} of them pressed by hand (shaded)` : '')
-          + '. These are the watch\'s own numbers, not recomputed here, so they match what Garmin shows.'
-          + (dropped ? ` ${dropped} more ${dropped === 1 ? 'lap fell' : 'laps fell'} outside the trimmed window and ${dropped === 1 ? 'is' : 'are'} not shown.` : '')
-        : ''); }
+  }
+  /* THE LAPS ARE THE ATHLETE'S OWN MARKS, WHICH IS NOT A RUNNING CONCEPT, and they were rendered
+     inside the foot branch because that is the sport the panel was built for. `analyzeFitOnly`
+     computes them for every FIT it reads (`extractFitLaps` already takes `foot`, and only to decide
+     the cadence unit), so a bike's laps were parsed, cropped, counted and thrown away one line short
+     of the table. A Garmin Edge with no power meter routes HERE rather than to the road view, so
+     this is not an exotic file: it is every cyclist without a power meter who presses lap.
+     Beside the computed splits on a run, because they answer different questions and reading them
+     together is what makes the difference obvious: a split is every km of ground, a lap is what you
+     pressed. */
+  { const laps = D.fitLaps || [];
+    const pressed = laps.filter(l => l.trigger === 'manual').length;
+    const device = foot ? 'watch' : 'head unit';
+    /* A trimmed recording says so, rather than quietly showing fewer laps than the watch has. */
+    const dropped = D.fitLapsDropped || 0;
+    renderRunLaps(laps, laps.length
+      ? `${laps.length} laps from your ${device}` + (pressed ? `, ${pressed} of them pressed by hand (shaded)` : '')
+        + `. These are the ${device}'s own numbers, not recomputed here, so they match what Garmin shows.`
+        + (dropped ? ` ${dropped} more ${dropped === 1 ? 'lap fell' : 'laps fell'} outside the trimmed window and ${dropped === 1 ? 'is' : 'are'} not shown.` : '')
+      : '', { foot }); }
+  if (foot) {
     renderRunClimbs((D.running && D.running.climbs) || []);
     renderRunDecoupling(D);
   }
@@ -24204,13 +24214,32 @@ function renderRecordingQuality(D, stationary) {
    The HOST wins, exactly as it does for the pool: in the app this is CaptureSettings.maxHR, the same
    value that rides to the watch on every start payload and tints the live heart-rate read-out, so
    reading anything else here would put the wrist and the analysis in different zones for one beat.
-   On the web there is no host, so the page keeps its own answer. */
+   On the web there is no host, so the page keeps its own answer.
+
+   A HOST DEFAULT IS NOT AN ANSWER, and for two days this panel took it as one. `CaptureSettings.maxHR`
+   returns 185 when nothing was ever stored, and it is injected unconditionally (rightly -- a stale
+   global from a previous WebView would be worse), so every session in the app drew zones against 185
+   and captioned them "from your Loam settings" for an athlete who had never opened that stepper --
+   which is buried under Coaching and prompted by nothing. That is the guessed denominator this
+   comment says it refuses, wearing the athlete's own name.
+   The WATCH keeps using the default and is right to: `HRZone.swift`'s own comment draws the line,
+   "a wrong colour misreads an effort by one zone, it does not invent a number", and this panel is
+   the numbers. So the host says whether the value was CHOSEN, and an unchosen one falls through to
+   the refusal -- which on the web offers its own control and in the app points at the setting,
+   because a page control the host would override on the next render is the inert-duplicate trap the
+   pool picker already recorded. */
 function loamMaxHR() {
   const host = typeof window !== 'undefined' ? Number(window.LOAM_MAX_HR) : NaN;
-  if (Number.isFinite(host) && host > 0) return { bpm: Math.round(host), source: 'host' };
+  const chosen = typeof window !== 'undefined' ? window.LOAM_MAX_HR_SET : undefined;
+  if (Number.isFinite(host) && host > 0 && chosen !== false) return { bpm: Math.round(host), source: 'host' };
   const stored = Number(localStorage.getItem('loam_max_hr'));
   if (Number.isFinite(stored) && stored > 0) return { bpm: Math.round(stored), source: 'page' };
   return null;
+}
+
+/** True when a host is answering this question at all, i.e. the page is embedded in the app. */
+function loamHasMaxHRHost() {
+  return typeof window !== 'undefined' && window.LOAM_MAX_HR_SET !== undefined;
 }
 
 /* The control that answers the refusal, offered ONLY when the host did not already answer -- the
@@ -24246,11 +24275,26 @@ function renderHrZones(D) {
   });
 
   if (r.reason) {
+    /* In the app the remedy is the SETTING, not a box on this page: the host injects its answer at
+       document start and wins on every render, so a page control here would take a number and throw
+       it away -- visible, changeable and inert, which is the pool picker's recorded mistake. */
+    /* A refusal that hands over nothing is the dead end the pose-mismatch notice had to be taught
+       about: correct, and impossible to act on. Most people do not know their max, so the one fact
+       this session can contribute is the highest beat in it -- a MEASUREMENT and a floor, never an
+       estimate of the max, and said in those words. */
+    const peak = rows.reduce((a, r) => (r.bpm > a ? r.bpm : a), 0);
+    const floorNote = peak > 0
+      ? `<div class="strength-tablenote">This session peaked at <strong>${Math.round(peak)} bpm</strong>. That is a floor, not your maximum &mdash; yours is at least that.</div>`
+      : '';
+    const remedy = max ? ''
+      : floorNote + (loamHasMaxHRHost()
+        ? `<div class="strength-tablenote">Set it in <strong>Settings &rsaquo; Coaching &rsaquo; Max HR</strong>, then open this session again.</div>`
+        : hrZonesMaxInput(null));
     body.innerHTML = `<div class="strength-tablenote">No zone read for this session: ${escapeHtml(r.reason)}.</div>`
-      + (max ? '' : hrZonesMaxInput(null))
+      + remedy
       + leadNote(
         `Zones are shares of your maximum heart rate, so there is no honest way to draw them without one. Loam will not guess: a max that is ten beats out moves every boundary and relabels the whole session.`,
-        `The app reads this from Settings, where it is also what tints the heart rate on your watch mid-session &mdash; so the wrist and the analysis stay in the same zones. On this page you can set it here; it is remembered.`,
+        `The app reads this from Settings, where it is also what tints the heart rate on your watch mid-session &mdash; so the wrist and the analysis stay in the same zones. Until you set it, the watch still colours your live heart rate against Loam's own default, which is fine for a colour and is not good enough for a table of minutes. On this page you can set it here; it is remembered.`,
         'strength-caveat', 'Why it has to be asked');
     sec.classList.remove('hidden');
     wireHrZonesInput();
@@ -24419,12 +24463,15 @@ function timeInHrZones(rows, opts = {}) {
   const coveredS = seconds.reduce((a, b) => a + b, 0);
   if (!(coveredS > 0)) return { ...empty, reason: 'no heart rate in this session' };
 
+  const haveWindow = Number.isFinite(start) && Number.isFinite(end) && end > start;
+  const wStart = haveWindow ? start : hr[0].t;
+  const wEnd = haveWindow ? end : hr[hr.length - 1].t;
   let pausedInWindow = 0;
   for (const p of pausedSpans) {
-    const a = Math.max(p.start, hr[0].t), b = Math.min(p.end, hr[hr.length - 1].t);
+    const a = Math.max(p.start, wStart), b = Math.min(p.end, wEnd);
     if (b > a) pausedInWindow += b - a;
   }
-  const windowS = Math.max(0, (hr[hr.length - 1].t - hr[0].t) - pausedInWindow);
+  const windowS = Math.max(0, (wEnd - wStart) - pausedInWindow);
   const coverage = windowS > 0 ? Math.min(1, coveredS / windowS) : 0;
 
   const pct = seconds.map(s => (s / coveredS) * 100);
@@ -25029,7 +25076,12 @@ function renderRunSplits(splits, unitLabel, driftM) {
    Rows are the watch's own numbers, not re-derived here, so this panel cannot disagree with Garmin
    Connect about a lap. Columns with nothing in them are dropped rather than filled with dashes, the
    same call the splits and climbs tables already make. */
-function renderRunLaps(laps, note) {
+/* `foot` decides the UNITS, not whether the panel exists. A head unit's lap is the same press a
+   watch's is -- a Garmin Edge with no power meter routes here, and those riders press lap all day --
+   but a bike lap is read in speed and crank RPM, where a run's is pace and steps per minute. The
+   flag is the one `extractFitLaps` already takes, for the same reason: on a bike, field 17 is RPM,
+   and the doubling that makes a runner's strides into steps is wrong there. */
+function renderRunLaps(laps, note, { foot = true } = {}) {
   const sec = document.getElementById('runLapsSection');
   if (!sec) return;
   /* One lap is the whole session under another name, and a table of it says nothing. */
@@ -25042,20 +25094,25 @@ function renderRunLaps(laps, note) {
   };
   const anyHr = laps.some(l => l.avgHr != null);
   const anyCad = laps.some(l => l.avgCadenceSpm != null);
+  { const th = document.getElementById('runLapsPaceHead'); if (th) th.textContent = foot ? 'Pace' : 'Speed'; }
+  { const sub = document.getElementById('runLapsSubtitle');
+    if (sub) sub.textContent = foot
+      ? 'as your watch recorded them \u00b7 auto-lap, intervals and manual presses'
+      : 'as your head unit recorded them \u00b7 auto-lap, intervals and manual presses'; }
   document.querySelectorAll('#runLapsTable .lap-hr-col').forEach(th => th.classList.toggle('hidden', !anyHr));
   document.querySelectorAll('#runLapsTable .lap-cad-col').forEach(th => th.classList.toggle('hidden', !anyCad));
   /* A lap the athlete PRESSED is the interesting one on an interval session, so it is marked. The
      watch's own trigger says which; nothing here guesses from the distance. */
   const pressed = (l) => l.trigger === 'manual';
   tbody.innerHTML = laps.map(l => {
-    const pace = l.avgSpeed && l.avgSpeed > 0 ? U.pace(l.avgSpeed) : '&mdash;';
+    const pace = l.avgSpeed && l.avgSpeed > 0 ? (foot ? U.pace(l.avgSpeed) : U.speed(l.avgSpeed)) : '&mdash;';
     return '<tr' + (pressed(l) ? ' style="background:var(--surface-2);"' : '') + '>'
       + `<td>${l.index}</td>`
       + `<td>${l.distanceM != null ? U.dist(l.distanceM) : '&mdash;'}</td>`
       + `<td>${clock(l.timerS)}</td>`
       + `<td>${pace}</td>`
       + (anyHr ? `<td class="lap-hr-col">${l.avgHr != null ? l.avgHr + ' bpm' : '&mdash;'}</td>` : '')
-      + (anyCad ? `<td class="lap-cad-col">${l.avgCadenceSpm != null ? Math.round(l.avgCadenceSpm) + ' spm' : '&mdash;'}</td>` : '')
+      + (anyCad ? `<td class="lap-cad-col">${l.avgCadenceSpm != null ? Math.round(l.avgCadenceSpm) + (foot ? ' spm' : ' rpm') : '&mdash;'}</td>` : '')
       + `<td class="dim" style="font-size:11px">${escapeHtml(l.trigger || '')}</td>`
       + '</tr>';
   }).join('');
@@ -29739,13 +29796,21 @@ function matchDescentHistory(current, priors, opts = {}) {
    detectGradeSegments then reads GPS altitude, which is what the FIT carries. */
 function fitRecordsToSensors(records) {
   const pts = (records || []).filter(r => r.lat != null && r.lon != null).sort((a, b) => a.ts - b.ts);
-  const sensors = { location: [], baro: [], accel: [], gyro: [], gravity: [], annotations: [] };
+  const sensors = { location: [], baro: [], accel: [], gyro: [], gravity: [], annotations: [], heartRate: [] };
   if (!pts.length) return { sensors, startFitSec: records.length ? records[0].ts : null };
   const t0 = pts[0].ts;
   pts.forEach(p => sensors.location.push({
     t: p.ts - t0, speed: p.speed != null ? p.speed : 0,
     latitude: p.lat, longitude: p.lon, altitude: p.altitude != null ? p.altitude : null,
   }));
+  /* Heart rate rides along on the same records, and this path was dropping it -- the same gap
+     `fitOnlySensors` had until 2026-09-06, one function over, on the sport most likely to have a
+     strap on. `extractFitData` has always parsed record field 3 and the 1 Hz resample above already
+     carries `hr`; nothing here ever put it on `sensors`, so `renderHrZones` had an empty series to
+     read even once the road view called it. Same shape and same series builder as the GPS-only
+     path, so the two cannot disagree about what a heart rate is. Records with no position still
+     contribute: a heart rate measured while the GPS was hunting for a fix is still a heart rate. */
+  sensors.heartRate = fitHeartRateSeries(records, t0);
   return { sensors, startFitSec: t0 };
 }
 /* Power-weighted L/R balance: balance sampled at low power is noise, so weight each reading by the
@@ -29933,6 +29998,11 @@ function renderAllRoad(D) {
   if (D.quadrants) { show('roadQuadrantSection'); renderRoadQuadrant(D); }
   renderRoadLaps(D);
   if (D.laps && D.laps.length >= 2) show('roadLapsSection');
+  /* The road view had every other path's heart-rate panel missing, and it is the sport with the
+     highest chance of a strap: zone time is the standard read on every cycling platform there is.
+     Nothing here is road-specific -- the panel counts seconds against the athlete's own max -- so
+     it is the same call `renderAllRunning`, `renderAllGps` and `renderAll` already make. */
+  renderHrZones(D);
   renderRoadUpsell(D);
   updateAttachFitVisibility('road', true);   /* a road ride never takes a companion FIT */
   renderCoachHighlights(D, 'road');
@@ -31967,7 +32037,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '4836a8e2b · 2026-09-09';
+const LOAM_BUILD = '46db3e583 · 2026-09-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
