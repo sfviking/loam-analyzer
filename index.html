@@ -30711,24 +30711,63 @@ function backToRideFromCross() {
   const r = document.getElementById('results');
   if (r) r.scrollIntoView();
 }
+/* The sport the error copy should SPEAK, resolved the way `analyze()` resolves it: the on-page
+   selector, which `analyze()` seeds from the host's window.LOAM_SPORT before reading it, so a manual
+   pick on the page wins and the copy names whatever the analysis actually ran as. Falls back to the
+   host value for a sport the selector carries no option for. '' and 'auto' fall through
+   normalizeSport's catch-all to the ride lexicon, which is what an undeclared recording IS analyzed
+   as -- detectSport's speed gate returns mtb at confidence 1 above 8 m/s. */
+function errorSport() {
+  const sel = document.getElementById('sportOverride');
+  const picked = ((sel && sel.value) || '').toLowerCase();
+  if (picked && picked !== 'auto') return picked;
+  return ((typeof window !== 'undefined' && window.LOAM_SPORT) || '').toLowerCase();
+}
 /* Turn the common pipeline failures into a recovery hint. The sport picker makes most of these one
-   click to recover from, so point at it. Returned text may contain markup; the message is escaped. */
-function errorGuidance(msg) {
+   click to recover from, so point at it. Returned text may contain markup; the message is escaped.
+   ASKS THE LEXICON for its nouns rather than spelling MTB into them: skiing reaches the body-frame
+   path, so a skier who fails calibration was reading "MTB analysis needs..." under a header saying
+   "Skiing", and under a THROW one line up that already names the sport correctly (`sportLex(sport)
+   .activity` at the gyro check). The message was taught the sport and the guidance rendered beneath
+   it was not, which is the same class as `cachedSportNoun` calling a reopened ski day "a ride". */
+function errorGuidance(msg, sport) {
   const m = (msg || '') + '';
+  const lex = sportLex(sport === undefined ? errorSport() : sport);
   /* In the app the Sport picker is on the dropzone, which the app hides, so "switch the Sport above"
      pointed at a control that was not there. The app's door onto the same room is the session's
      menu on the Sessions tab, and the "Re-run as Running" button below the guidance. */
   const inApp = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED);
   const pick = inApp ? 'change the activity from the session\'s menu on the Sessions tab' : 'switch the <strong>Sport</strong> above';
-  if (/gyroscope|gyro/i.test(m)) return 'This recording has no gyroscope data, so MTB turn analysis cannot run. '
+  if (/gyroscope|gyro/i.test(m)) return `This recording has no gyroscope data, so ${lex.activity} turn analysis cannot run. `
     + (inApp ? 'Re-run it as Running below, or change the activity from the session\'s menu on the Sessions tab.'
              : 'Set <strong>Sport</strong> to Running above, or re-record with the gyro enabled.');
-  if (/calibration window/i.test(m)) return 'MTB analysis needs a brief still moment to find the body frame. Pause for ~20s at the trailhead next time, or '
+  /* "at the trailhead" was a PLACE, and a skier does not start at one. The instruction that is true
+     for every sport on this path is the one the Record screen already gives ("Hold still ~20s to
+     calibrate lean and turns"), so say that instead of inventing a per-sport place noun. */
+  if (/calibration window/i.test(m)) return `${lex.activity} analysis needs a brief still moment to find the body frame. Hold still for ~20s after you start recording next time, or `
     + (inApp ? 're-run this as Running below.' : 'analyze this as Running.');
+  /* INDOOR SKIING. Reported 2026-09-10 from a real dome session (SNO, Lorenskog, 24m 59s) on the VIP
+     build: the refusal above is right, and the catch-all below rendered under it read "That recording
+     could not be analyzed. Change the activity ... or re-record with Location and Motion enabled."
+     All three clauses are wrong here, and the last one is expensive. The recording analyzed fine as
+     far as it went; Location WAS on and there is no fix under a roof, so re-recording produces the
+     identical file after another trip to a dome; and "change the activity" is the exact trap the
+     message above was written to dodge -- it IS a ski session and there is nothing to change it to.
+     What the skier actually needs to know is that the file is good and worth keeping, because a
+     session with a known lap count is the first of the two recordings that would lift the refusal
+     (ski-tracker-spec.md 13.6) and the natural thing to do with a session showing an error is delete it. */
+  if (/indoor ski session/i.test(m)) return 'Nothing is wrong with this recording, and re-recording will not change it: Location was on, there is simply no GPS fix under a roof. Worth keeping \u2014 an indoor session whose lap count you know is exactly what that detector is waiting for.';
+  /* SELF-CONTAINED failures: the message already carries BOTH the diagnosis and the remedy, so the
+     catch-all is not "something to do" but a second and contradictory instruction. The swim one told
+     a swimmer whose phone sat on the deck to "re-record with Location and Motion enabled" -- both
+     were on, and neither is what a swim is read from -- and the lift one stapled a different
+     instruction underneath the one its own message had just given. showError renders no guidance row
+     for '', so the message is left to stand on its own rather than being argued with. */
+  if (/read entirely from the wrist|too little phone orientation/i.test(m)) return '';
   if (/moving window/i.test(m)) return 'No moving window was found in the GPS. The recording may be too short, or Location was off during capture.';
   if (/run window|accel samples/i.test(m)) return 'The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or ' + pick + '.';
   if (/accel or GPS|Missing accel/i.test(m)) return 'No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.';
-  if (/too short|short/i.test(m)) return 'The recording looks too short to analyze. Capture a longer ride (at least a minute of moving) and try again.';
+  if (/too short|short/i.test(m)) return `The recording looks too short to analyze. Capture a longer ${lexNoun(lex)} (at least a minute of moving) and try again.`;
   if (/Need a sensor file/i.test(m)) return 'Drop a Sensor Logger <strong>.zip</strong> or a Combined <strong>.csv</strong>. A <strong>.fit</strong> works as a companion, or on its own as a GPS-only ride.';
   if (/no usable GPS track/i.test(m)) return 'This FIT carries no positioned records, so there is nothing to map or measure. Export a FIT that includes GPS, or attach this one to a phone recording.';
   /* Always leave the user with something to do, even for an unrecognized failure. */
@@ -32037,7 +32076,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '46db3e583 · 2026-09-10';
+const LOAM_BUILD = '4a1b961b2 · 2026-09-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
