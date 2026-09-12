@@ -2765,6 +2765,13 @@ function parseFIT(buffer) {
   const endPos = pos + dataSize;
   const definitions = new Map();
   const messages = [];
+  /* Developer-field descriptions seen so far, keyed "<developer data index>:<field number>".
+     Populated from field_description (gm 206) messages as they are decoded, which is enough for
+     one forward pass because the FIT spec requires a description to be written BEFORE any
+     definition that uses the field it describes. A value we have no description for is skipped by
+     its declared size and left absent rather than guessed at: the size still advances the cursor,
+     so the rest of the file stays readable, which is the property that matters most here. */
+  const devDescs = new Map();
 
   function readField(p, baseType, size, le) {
     const bt = baseType & 0x1F;
@@ -2785,6 +2792,61 @@ function parseFIT(buffer) {
     }
   }
 
+  /* Width in bytes of each FIT base type, indexed by the low 5 bits of the base-type byte. A
+     STANDARD field never needs this -- its width is fixed by the profile and the definition record
+     agrees -- but a DEVELOPER field's definition carries only a byte count, so this is what tells
+     one uint16 from an array of eight of them. Deliberately declared inside parseFIT rather than at
+     module scope: the drift guard compares function BODIES, so a table that lives in the body is
+     pinned by the same comparison that pins the code reading it. Types 13-16 (byte, sint64,
+     uint64, uint64z) are absent because readField does not decode them; they are skipped by size
+     and reported as absent, which is the honest output rather than a degraded one. */
+  const BASE_SIZE = { 0: 1, 1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 1, 8: 4, 9: 8, 10: 1, 11: 2, 12: 4 };
+
+  /* FIT's own scaling convention: physical = raw / scale - offset. A zero scale is treated as 1
+     because dividing by it would report Infinity as a measurement. */
+  function devScaled(v, desc) {
+    if (typeof v !== 'number') return v;
+    const scale = desc.scale != null && desc.scale !== 0 ? desc.scale : 1;
+    const offset = desc.offset != null ? desc.offset : 0;
+    return scale === 1 && offset === 0 ? v : v / scale - offset;
+  }
+
+  /* Decode this message's developer fields onto `msg.dev` and return the cursor past them.
+     Keyed by "<developer data index>:<field number>", NOT by the field's name: the name is what a
+     human wants and it is not unique -- two Connect IQ apps recording at once each get their own
+     developer index and may both call a field "Battery" -- so the unambiguous key is what is
+     stored and fitDevFieldKey() is how a caller resolves a name to one, refusing when the file is
+     ambiguous. */
+  function attachDevFields(msg, def, p) {
+    /* A field_description is an ordinary data message, decoded here like any other and registered
+       on the way past. It must happen BEFORE the early return: a gm 206 message carries no
+       developer fields of its own, so registering it at the end of this function would have meant
+       never registering it at all. */
+    if (msg.gm === 206) {
+      const f = msg.fields;
+      if (f[0] != null && f[1] != null) devDescs.set(`${f[0]}:${f[1]}`, { bt: f[2], scale: f[6], offset: f[7] });
+    }
+    if (!def.devFields.length) return p;
+    const dev = {};
+    for (const df of def.devFields) {
+      const desc = devDescs.get(df.key);
+      const bt = desc && desc.bt != null ? (desc.bt & 0x1F) : null;
+      const w = bt != null ? BASE_SIZE[bt] : null;
+      if (w) {
+        if (bt === 7) dev[df.key] = readField(p, bt, df.sz, def.le);   // string: size IS its length
+        else if (df.sz === w) dev[df.key] = devScaled(readField(p, bt, w, def.le), desc);
+        else {
+          const out = [];
+          for (let i = 0; (i + 1) * w <= df.sz; i++) out.push(devScaled(readField(p + i * w, bt, w, def.le), desc));
+          dev[df.key] = out;
+        }
+      }
+      p += df.sz;
+    }
+    if (Object.keys(dev).length) msg.dev = dev;
+    return p;
+  }
+
   while (pos < endPos) {
     const header = dv.getUint8(pos++);
     const isCompressed = (header & 0x80) !== 0;
@@ -2794,6 +2856,12 @@ function parseFIT(buffer) {
       if (!def) break;
       const msg = { gm: def.gm, fields: {} };
       for (const f of def.fields) { msg.fields[f.fn] = readField(pos, f.bt, f.sz, def.le); pos += f.sz; }
+      /* This branch did not advance past developer fields at all until 2026-09-11, so a compressed-
+         timestamp message under a definition carrying them left the cursor short and every message
+         after it decoded from the wrong offset. Rare (it needs both features in one file) and total
+         when it happens, which is why it goes through the same helper as the ordinary branch rather
+         than a second copy of the same two lines. */
+      pos = attachDevFields(msg, def, pos);
       messages.push(msg);
     } else {
       const isDef = (header & 0x40) !== 0;
@@ -2811,7 +2879,15 @@ function parseFIT(buffer) {
         const devFields = [];
         if (hasDev) {
           const nd = dv.getUint8(pos++);
-          for (let i = 0; i < nd; i++) { devFields.push({ sz: dv.getUint8(pos+1) }); pos += 3; }
+          /* Three bytes each: field number, size, developer data index. Only the SIZE was read
+             until 2026-09-11, which is all a cursor needs; the other two are the key the
+             field_description (gm 206) is looked up by, and without them the value was
+             unreadable. */
+          for (let i = 0; i < nd; i++) {
+            const dfn = dv.getUint8(pos), dsz = dv.getUint8(pos + 1), ddi = dv.getUint8(pos + 2);
+            devFields.push({ fn: dfn, sz: dsz, di: ddi, key: `${ddi}:${dfn}` });
+            pos += 3;
+          }
         }
         definitions.set(localType, { gm, fields, devFields, le });
       } else {
@@ -2819,12 +2895,86 @@ function parseFIT(buffer) {
         if (!def) throw new Error(`undefined local ${localType}`);
         const msg = { gm: def.gm, fields: {} };
         for (const f of def.fields) { msg.fields[f.fn] = readField(pos, f.bt, f.sz, def.le); pos += f.sz; }
-        for (const df of def.devFields) pos += df.sz;
+        pos = attachDevFields(msg, def, pos);
         messages.push(msg);
       }
     }
   }
   return messages;
+}
+
+/**
+ * The developer fields a FIT file declares, read off the field_description messages (gm 206) that
+ * parseFIT already decodes into the message list. One entry per distinct field; a file that
+ * repeats a description (Garmin rewrites them per session on some units) contributes one.
+ *
+ * WHY THIS EXISTS. A developer field is how every Connect IQ data field records to FIT, which is
+ * the only route a lot of e-bike telemetry has: Orbea's RS Toolbox records battery, assist mode,
+ * assist level and cadence off a Shimano EP8-RS this way, and a Shimano motor publishes no motor
+ * power at all, so the standard e-bike block (fields 82 / 118 / 119 -- see extractFitData) is
+ * empty on those files. Until 2026-09-11 parseFIT read the declared SIZE of each developer field
+ * purely to step the cursor past it and discarded the value, so that data was not merely unread,
+ * it was unreachable.
+ *
+ * NOTHING IS WIRED TO THIS YET, DELIBERATELY. Which field a given head unit calls what is not
+ * guessable, and no Orbea, Shimano or Bosch recording exists in this project to read the names
+ * off. Mapping "Battery" onto batteryPct on the strength of a plausible name is exactly the
+ * guess this repo refuses elsewhere. This makes the data reachable and says what is in a file;
+ * deciding what any of it MEANS needs one real recording.
+ */
+function fitDevFieldDescriptions(messages) {
+  const seen = new Set();
+  const out = [];
+  for (const m of messages || []) {
+    if (!m || m.gm !== 206) continue;
+    const f = m.fields;
+    /* developer_data_index (0) and field_definition_number (1) are the identity; a description
+       missing either describes nothing and is dropped rather than keyed on a guess. */
+    if (f[0] == null || f[1] == null) continue;
+    const key = `${f[0]}:${f[1]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      key,
+      developerDataIndex: f[0],
+      fieldDefinitionNumber: f[1],
+      baseType: f[2] != null ? f[2] : null,
+      name: f[3] || null,
+      scale: f[6] != null ? f[6] : null,
+      offset: f[7] != null ? f[7] : null,
+      units: f[8] || null,
+      /* What standard field this one mirrors, when the writer says so. A developer field carrying
+         nativeFieldNum 4 is that unit's own cadence, which is the one case where a name does not
+         have to be trusted. */
+      nativeFieldNum: f[13] != null ? f[13] : null,
+      nativeMesgNum: f[14] != null ? f[14] : null,
+    });
+  }
+  return out;
+}
+/**
+ * Resolve a developer field's human NAME to the key its values are stored under on `msg.dev`.
+ *
+ * Returns null when the name is absent AND when it is ambiguous, which are different facts and
+ * are deliberately not distinguished in the return: both mean "this file cannot tell you which
+ * field you meant", and a caller that acted on either would be acting on a guess. A caller that
+ * needs to tell them apart has the full list from fitDevFieldDescriptions.
+ *
+ * Names are not unique by construction -- the FIT identity is (developer data index, field
+ * number), and two Connect IQ apps recording at once each get their own index -- so two fields
+ * called "Battery" in one file is a shape this has to survive rather than a corrupt file.
+ */
+function fitDevFieldKey(descriptions, name) {
+  if (name == null) return null;
+  const want = String(name).trim().toLowerCase();
+  if (!want) return null;
+  const hits = [];
+  for (const d of descriptions || []) {
+    if (!d || !d.name) continue;
+    if (String(d.name).trim().toLowerCase() !== want) continue;
+    if (!hits.includes(d.key)) hits.push(d.key);
+  }
+  return hits.length === 1 ? hits[0] : null;
 }
 
 function extractFitData(messages) {
@@ -18105,7 +18255,15 @@ const KG_PER_LB = 0.45359237;
 let _golfD = null;    // the rendered range session, for the self-reported swing-count control
 let _liftD = null;    // the raw analysis (auto rep counts), never mutated
 let _liftDc = null;   // the same analysis with the lifter's rep corrections layered on, for sub-renderers
-function liftUnit() { try { return localStorage.getItem('loam.liftUnit') || 'lb'; } catch (e) { return 'lb'; } }
+/* Falls back to the RIDE units rather than to a literal 'lb'. These were two independent
+   preferences with two independent imperial defaults, so a rider who set Metric in Settings still
+   lifted in pounds and nothing on either surface explained why. The lb/kg toggle still writes its
+   own key, because a lifter genuinely may want kg on the bar and miles on the trail -- what changes
+   is only what happens when they have never said. */
+function liftUnit() {
+  try { const v = localStorage.getItem('loam.liftUnit'); if (v) return v; } catch (e) { /* private mode */ }
+  return loamUnits() === 'metric' ? 'kg' : 'lb';
+}
 function setLiftUnitPref(u) { try { localStorage.setItem('loam.liftUnit', u); } catch (e) { /* private mode / quota; the toggle still applies for this render */ } if (_liftD) renderStrength(_liftD); }
 function liftWeightsKg(key) { try { return JSON.parse(localStorage.getItem('loam.liftW.' + key) || '[]'); } catch (e) { return []; } }
 function kgToDisp(kg) { return kg == null ? '' : +(liftUnit() === 'kg' ? kg : kg / KG_PER_LB).toFixed(1); }
@@ -22935,8 +23093,69 @@ function renderDescentComparison(D) {
 
 /* ---------- Units (metric / imperial display) ----------
    Preference: localStorage, else a host-injected default (window.LOAM_UNITS from the
-   iOS Settings tab), else imperial. */
-function loamUnits() { return localStorage.getItem('loam_units') || (typeof window !== 'undefined' && window.LOAM_UNITS) || 'imperial'; }
+   iOS Settings tab), else the BROWSER'S OWN REGION.
+
+   That last step used to be the literal 'imperial', which handed miles and feet to every athlete on
+   earth who opened the hosted page. The app half of this was the same literal in
+   CaptureSettings.units and is fixed alongside; loamRegionUnits is what answers the question on the
+   web, where there is no host to inject anything.
+
+   The host value is only a DEFAULT, and that ordering is deliberate: the Options popover's Units
+   selector writes localStorage, so a rider who has ever touched it has said something and keeps it.
+   What that used to mean is that touching the web selector once permanently deafened the iOS
+   Settings picker -- localStorage always won, and nothing said so. AnalyzerWebView now writes the
+   host preference INTO localStorage on load, so in the app Settings is authoritative and on the web
+   the popover is, and neither surface can silently lose to the other. */
+function loamUnits() {
+  try { const v = localStorage.getItem('loam_units'); if (v) return v; } catch (e) { /* private mode */ }
+  if (typeof window !== 'undefined' && window.LOAM_UNITS) return window.LOAM_UNITS;
+  return loamRegionUnits();
+}
+/* Imperial is a three-country answer, so it is an allow-list rather than a guess. `measurementSystem`
+   would be the direct question and is not broadly supported, so this reads the REGION instead.
+
+   Two sources, because navigator.language is allowed to carry no region at all (bare 'en'), and a
+   region is the whole input here. Intl's resolved locale is the better second source: it comes from
+   the browser's own locale resolution rather than the Accept-Language header, so it normally carries
+   a region even when navigator.language does not.
+
+   Only when NEITHER can name a region does this keep the historical 'imperial' -- which is a
+   deliberate choice of failure: an athlete who was already being shown miles goes on being shown
+   miles, and one tap in the header's Options fixes it either way. */
+const LOAM_IMPERIAL_REGIONS = ['US', 'LR', 'MM'];
+function loamRegionTag(tag) {
+  if (!tag) return '';
+  try { return new Intl.Locale(tag).region || ''; } catch (e) { return (String(tag).split('-')[1] || ''); }
+}
+function loamRegionUnits() {
+  try {
+    const nav = (typeof navigator !== 'undefined' && (navigator.language || (navigator.languages || [])[0])) || '';
+    let region = loamRegionTag(nav);
+    if (!region) { try { region = loamRegionTag(Intl.DateTimeFormat().resolvedOptions().locale); } catch (e) { /* no Intl */ } }
+    if (!region) return 'imperial';
+    return LOAM_IMPERIAL_REGIONS.includes(region.toUpperCase()) ? 'imperial' : 'metric';
+  } catch (e) { return 'imperial'; }
+}
+/* A decimal number in the reader's own notation: "8.42" in en-US, "8,42" in nb-NO.
+
+   The page was already HALF localized and inconsistent about it, which is what makes this worth
+   doing rather than churn. Integer counts have always gone through toLocaleString() (locale
+   grouping), while every decimal went through toFixed() (an ASCII '.', always) -- so on a Norwegian
+   machine one card could read "1 234 turns" beside "8.42 km". Under en-US the two agree, which is
+   why nobody saw it.
+
+   `useGrouping: false` keeps this to the DECIMAL SEPARATOR alone. Turning grouping on here would
+   also restyle every four-digit elevation ("5000 ft" -> "5,000 ft"), which is a different decision
+   about how numbers look, taken in the same breath as a correctness fix, in fixed-width tiles. */
+function loamNum(v, digits) {
+  const n = Number(v);
+  if (!isFinite(n)) return String(v);
+  try {
+    return n.toLocaleString(undefined, {
+      minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false,
+    });
+  } catch (e) { return n.toFixed(digits); }
+}
 function setLoamUnits(u) { try { localStorage.setItem('loam_units', u); } catch (e) { /* private mode / quota; the toggle still applies for this page */ } }
 /* Chart smoothing for the noisy running metrics (cadence, vertical oscillation, pace). A centered
    rolling median suppresses the spikes that a stop or a low-confidence window throws off, so the shape
@@ -22995,13 +23214,13 @@ function setLoamAthlete(patch) {
 }
 const U = {
   metric() { return loamUnits() === 'metric'; },
-  dist(m) { if (m == null || isNaN(m)) return '—'; return U.metric() ? (m >= 1000 ? (m/1000).toFixed(2)+' km' : Math.round(m)+' m') : (m >= 160.9 ? (m/1609.34).toFixed(2)+' mi' : Math.round(m*3.28084)+' ft'); },
-  speed(mps) { if (mps == null || isNaN(mps)) return '—'; return U.metric() ? (mps*3.6).toFixed(1)+' km/h' : (mps*2.23694).toFixed(1)+' mph'; },
+  dist(m) { if (m == null || isNaN(m)) return '—'; return U.metric() ? (m >= 1000 ? loamNum(m/1000, 2)+' km' : Math.round(m)+' m') : (m >= 160.9 ? loamNum(m/1609.34, 2)+' mi' : Math.round(m*3.28084)+' ft'); },
+  speed(mps) { if (mps == null || isNaN(mps)) return '—'; return U.metric() ? loamNum(mps*3.6, 1)+' km/h' : loamNum(mps*2.23694, 1)+' mph'; },
   speedNum(mps) { return U.metric() ? mps*3.6 : mps*2.23694; },
   speedUnit() { return U.metric() ? 'km/h' : 'mph'; },
   pace(mps) { if (!mps || mps <= 0) return '—'; const sp = Math.round(U.metric() ? 1000/mps : 1609.34/mps); const m = Math.floor(sp/60), s = sp - m*60; return `${m}:${String(s).padStart(2,'0')}${U.metric()?'/km':'/mi'}`; },
   elev(m) { if (m == null || isNaN(m)) return '—'; return U.metric() ? Math.round(m)+' m' : Math.round(m*3.28084)+' ft'; },
-  small(m) { if (m == null || isNaN(m)) return '—'; return U.metric() ? m.toFixed(1)+' m' : (m*3.28084).toFixed(1)+' ft'; },
+  small(m) { if (m == null || isNaN(m)) return '—'; return U.metric() ? loamNum(m, 1)+' m' : loamNum(m*3.28084, 1)+' ft'; },
   smallNum(m) { return U.metric() ? m : m * 3.28084; },
   smallUnit() { return U.metric() ? 'm' : 'ft'; },
 };
@@ -26175,11 +26394,51 @@ async function attachCoachDescentHistory(D, sport) {
    the PROSE, which used to answer "you covered 8.4 km" to a rider whose whole page said miles (and
    sometimes convert a number itself, badly). Folded into the cache key with the rest of the prompt, so
    flipping the toggle re-asks rather than replaying a reply written in the other system. */
+
+/* The reader's language as a BCP-47 tag: the host's (the iOS app's effective localization) else the
+   browser's, else English. Same precedence, and the same reasoning, as loamUnits(). */
+function coachLanguage() {
+  try {
+    if (typeof window !== 'undefined' && window.LOAM_LANG) return String(window.LOAM_LANG);
+    if (typeof navigator !== 'undefined' && navigator.language) return String(navigator.language);
+  } catch (e) { /* no host, no navigator */ }
+  return 'en';
+}
+/* Named in English so the instruction is in the prompt's own language. Deliberately a short
+   allow-list plus a fallback to the raw tag: inventing a display name for an unknown tag is how you
+   get a prompt asking for a language nobody speaks. */
+function coachLanguageRule(lang) {
+  const tag = String(lang || 'en');
+  if (/^en(-|$)/i.test(tag)) return '';
+  const names = { nb: 'Norwegian (Bokmal)', nn: 'Norwegian (Nynorsk)', no: 'Norwegian (Bokmal)' };
+  const name = names[tag.slice(0, 2).toLowerCase()] || tag;
+  return ' Language: answer entirely in ' + name + '. The metric NAMES and the digest\'s field names'
+    + ' stay exactly as given (they are English keys, and a renamed figure no longer matches the'
+    + ' panel it came from); translate your prose around them.';
+}
+
+/* The language the coach must ANSWER in, folded into the units rule rather than appended at each
+   call site. `${units}` is interpolated at seven places in this prompt and two in the module, and a
+   separate `${language}` beside every one of them is nine chances to add it in eight -- the shape of
+   omission this file records for the cadence-source arm that was missing from one copy for ten days.
+   One rule, one interpolation, every sport.
+
+   `lang` is a BCP-47 tag from the host (window.LOAM_LANG, the app's effective localization) or the
+   browser. English asks for nothing: the prompt is written in English, so a model given no
+   instruction already answers in it, and an explicit "answer in English" is a sentence that can only
+   ever be redundant. A non-English tag gets a named language, because a coach whose app is Norwegian
+   answering in English is the same mismatch the spoken voice had.
+
+   The METRIC names stay English on purpose. Every field in the digest is an English key
+   (`avg_speed_kmh`, `lean_asymmetry`), and telling a model to translate the numbers' labels is how a
+   cited figure stops matching the panel it came from. So: answer in the reader's language, quote the
+   data as given. */
 function coachUnitsRule(metric) {
   const sys = metric
     ? 'Units: this athlete reads METRIC. Every distance, speed, pace, and elevation you are given is already metric and its field name says which unit (km, km/h, minutes per km, meters). Cite those numbers as given, write every unit metric, and never convert to miles, mph, or feet.'
     : 'Units: this athlete reads IMPERIAL. Every distance, speed, pace, and elevation you are given is already imperial and its field name says which unit (mi, mph, minutes per mile, feet). Cite those numbers as given, write every unit imperial, and never convert to kilometers, km/h, or meters.';
-  return sys + ' Cadence (spm/rpm), power (W), W/kg, heart rate (bpm), grades (%), angles (degrees), bar speed (m/s), and centimetre-scale form numbers (vertical oscillation, head sway) are unit-neutral by convention and stay exactly as given.';
+  return sys + ' Cadence (spm/rpm), power (W), W/kg, heart rate (bpm), grades (%), angles (degrees), bar speed (m/s), and centimetre-scale form numbers (vertical oscillation, head sway) are unit-neutral by convention and stay exactly as given.'
+    + coachLanguageRule(coachLanguage());
 }
 
 function coachSystemPrompt(sport, level, metric, source) {
@@ -32076,7 +32335,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '4a1b961b2 · 2026-09-10';
+const LOAM_BUILD = '42addae77 · 2026-09-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
