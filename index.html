@@ -9941,11 +9941,21 @@ function _req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.
    content hash stamped at save time (dedupKey); fall back to a composite for
    legacy rows saved before dedupKey existed. In the iOS app every recording is
    served to the analyzer as "recording.csv", so the filename alone cannot tell
-   two rides apart; the ride window and distance do. */
+   two rides apart; the ride window and distance do.
+
+   THE DISTANCE IN THIS KEY IS THE DOPPLER INTEGRAL, deliberately, and it is the one place that
+   retired number still does work. Rows saved before the ride distance moved onto the GPS path hold
+   the integral in `summary.distance`; rows saved after hold the path there and the integral in
+   `summary.distanceDoppler`. Reading the path would therefore give one ride two different keys
+   either side of the change, and a re-analysed ride would DUPLICATE its own library row rather than
+   upserting it. Only the zip inputs reach this at all -- `saveRideToLibrary` prefers the CSV content
+   hash -- but a duplicated row is a silently doubled Progress trend, so it is worth a stable key. */
 function rideDedupKey(r) {
   if (r && r.dedupKey) return r.dedupKey;
   if (!r) return null;
-  return `${r.filename || ''}|${Math.round(r.rideStart || 0)}|${Math.round(r.rideEnd || 0)}|${Math.round((r.summary && r.summary.distance) || 0)}`;
+  const s = r.summary;
+  const d = s && s.distanceDoppler != null ? s.distanceDoppler : (s && s.distance) || 0;
+  return `${r.filename || ''}|${Math.round(r.rideStart || 0)}|${Math.round(r.rideEnd || 0)}|${Math.round(d || 0)}`;
 }
 
 async function saveRide(record) {
@@ -10532,8 +10542,11 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
     filename, sport,
     /* Content hash when available (identical CSV in => identical key), else a
        composite of the ride window + distance. saveRide upserts on this so a
-       recording analyzed more than once updates its row instead of duplicating. */
-    dedupKey: contentKey || `${filename}|${Math.round(ride.start)}|${Math.round(ride.end)}|${Math.round((summary && summary.distance) || 0)}`,
+       recording analyzed more than once updates its row instead of duplicating.
+       The distance is the DOPPLER integral where the summary carries one, for the
+       reason rideDedupKey states: it is the figure rows saved before the ride
+       distance moved onto the GPS path stored, so the key survives the change. */
+    dedupKey: contentKey || `${filename}|${Math.round(ride.start)}|${Math.round(ride.end)}|${Math.round((summary && (summary.distanceDoppler != null ? summary.distanceDoppler : summary.distance)) || 0)}`,
     /* The exact key this ride's render was cached under (dedupKey plus the calibration/sport suffix).
        The bare dedupKey is NOT that key when a non-default calibration or a declared sport is in play,
        so the Library/switcher must look the analysis up by this stored key, not by dedupKey, or every
@@ -16546,24 +16559,87 @@ function descentScopedTurns(loc, baro, ride, turns) {
   return { turns: (turns || []).filter(T => onDescent(T.tPeak)), scoped: true };
 }
 
+/* The hop classifier's bars, MTB's copy. Same values and same meaning as computeRunSummary's, and
+   PREFIXED for the reason the SPLIT_ / BE_ / SEG_ copies are: one declaration per name is what lets
+   analyzer/drift-guard-technique.test.js compare a module's constant against the shipping HTML's.
+   Left bare and function-scoped they would be pinned by nothing -- the output guard around them only
+   fails if a changed value changes a fixture's answer, which a floor moved 0.5 -> 0.6 does not, and
+   that is exactly how WRIST_MAX_HOLD_S shipped wrong in the copy that ships (CLAUDE.md). */
+const MTB_MOVING_MIN_MPS = 0.5;
+const MTB_MOVING_MAX_GAP_S = 5;
+const MTB_MOVING_MAX_MPS = 12;
+const MTB_R_EARTH = 6371000;
 function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
-  let distance = 0;
+  /* DISTANCE IS THE GPS PATH, not the Doppler integral, and a wheel odometer is what settled it
+     (measured 2026-08-31 on two Specialized rides that carry all three numbers off one device, see
+     CLAUDE.md). Integrating `speed * dt` under-read the wheel by 8.1% and 6.8%; summing the
+     great-circle hops over-read it by 4.0% and 2.6% -- so the path is about twice as accurate and
+     errs the other way. It is also the method every OTHER surface in the product already uses: the
+     Record screen, the wrist, the GPX, the Strava upload, the HealthKit workout and the segment
+     leaderboard's `polylineSpanMeters`. The ride headline was the one place left disagreeing with the
+     rest of Loam about how far the athlete went, and it was disagreeing in the wrong direction.
+
+     THE HOP CLASSIFIER IS WHY THIS IS NOT A ONE-LINE SWAP. The Doppler integral is structurally
+     immune to stationary drift -- a parked phone reports ~0 m/s, so it integrates nothing -- and a
+     path sum is the exact opposite: a parked phone's fixes wander, and every wander is length.
+     Simulated at the corpus-measured 4.2 m accuracy with realistic error correlation, five minutes
+     parked manufactures ~700 m of path, the same order as the 734 m `computeRunSummary` measured on
+     the real reference run before it learned to refuse them. The Tanga reference ride has six
+     stopped stretches, one of five minutes. So this walks the track under exactly the rules
+     `computeRunSummary` walks it under -- named here rather than shared, for the reason
+     `best-efforts.js` gives: the copies are pinned to the HTML separately, and consolidating means
+     editing four modules and four guards on the validated running path. The constants keep those
+     modules' names, so the derived-constants guard pins all of them against each other.
+
+       moving   - inside the gap limit, at or above the floor: real ground;
+       standing - inside the gap limit, below the floor: the athlete is parked and the only thing
+                  moving is the fix. No ground; the metres come back as `driftDistance` so the tile
+                  can name what it left out;
+       teleport - inside the gap limit but implying a speed nothing rides: the receiver moved and the
+                  athlete did not. No ground;
+       dropout  - past the gap limit: the signal went away, the rider did not, so the ground it
+                  bridged is credited. The old loop refused these outright, which threw away real
+                  distance it had no way to measure; a path sum can measure it.
+
+     A PAUSED stretch is none of the four and is skipped outright: the recording was suspended and the
+     rider may have driven to the next trailhead. The old loop got this right by accident -- a pause
+     leaves a hole longer than the gap limit, and holes were refused -- where a path sum would bridge
+     it as though it were a dropout.
+
+     WHAT THIS DOES NOT FIX: the path still over-reads, by the +2.6% to +4.0% measured above. The
+     cause is inter-fix position noise, and de-biasing it needs a number this project does not have.
+     The inflation scales with the error's CORRELATION TIME, which CoreLocation does not report, and
+     sweeping that over its plausible range moves the answer by a factor of ten -- so a correction
+     would be fitted to one receiver in one terrain. That is a measurement against a paired reference
+     recording, not a constant to be reasoned out. */
+  const pausedSpans = ride.pausedSpans || [];
+  const toRad = d => d * Math.PI / 180;
+  let distance = 0, driftDistance = 0, distanceDoppler = 0;
   for (let i = 1; i < inRide.length; i++) {
-    /* Skip a segment whose either endpoint has no reported speed. A null coerces to 0 in the average,
-       which silently drags total distance DOWN on GPS gaps rather than leaving the gap uncounted (the
-       maxSpeed line above already filters nulls for the same reason). */
-    if (inRide[i].speed == null || inRide[i-1].speed == null) continue;
-    const dt = inRide[i].t - inRide[i-1].t;
-    /* Also skip a segment that spans a long GPS gap. GPS is ~1 Hz, so a dt of several seconds means the
-       fixes bracket a dropout; when both fixes happen to keep a nonzero speed (a fix pause/resume, not a
-       nulled dropout), integrating that speed across the whole gap inflates distance by avgSpeed*gap.
-       Leave the gap uncounted, matching the null-skip above. */
-    if (dt > 5) continue;
-    const v = (inRide[i].speed + inRide[i-1].speed) / 2;
-    distance += v * dt;
+    const a = inRide[i-1], b = inRide[i];
+    const dt = b.t - a.t;
+    /* The retired Doppler integral, still computed because it is the figure every library row saved
+       before this change stored as `summary.distance`. `rideDedupKey`'s legacy fallback keys off it,
+       so a ride re-analysed after this lands still upserts its own row instead of duplicating it.
+       Byte-for-byte the refusals the old loop made, negative-dt edge case included -- including the
+       LITERAL 5, which is deliberately not MTB_MOVING_MAX_GAP_S: this reproduces a number rows on
+       disk were keyed on, so it must not follow a constant somebody later retunes. */
+    if (a.speed != null && b.speed != null && !(dt > 5)) distanceDoppler += ((a.speed + b.speed) / 2) * dt;
+    if (!(dt > 0)) continue;
+    const havePos = a.latitude != null && a.longitude != null && b.latitude != null && b.longitude != null;
+    if (!havePos) continue;
+    const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
+    const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
+             + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+    const d = 2 * MTB_R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
+    if (pausedOverlapS(pausedSpans, a.t, b.t) > 0) continue;
+    if (dt <= MTB_MOVING_MAX_GAP_S && d / dt > MTB_MOVING_MAX_MPS) { driftDistance += d; continue; }
+    if (dt > MTB_MOVING_MAX_GAP_S) { distance += d; continue; }
+    if (b.speed >= MTB_MOVING_MIN_MPS) distance += d;
+    else driftDistance += d;
   }
   let altDrop = null;
   if (baro && baro.length) {
@@ -16597,6 +16673,12 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
        same session. Zero on every recording with no Pause marks, which is every recording made
        before the app grew the button. */
     duration: (ride.end - ride.start) - (ride.pausedS || 0), distance, maxSpeed, altDrop,
+    /* `driftDistance` is the path that piled up while the bike was parked, excluded from `distance`
+       above and reported rather than dropped so the tile can name what it left out -- the same
+       choice `computeRunSummary` makes. `distanceDoppler` is the retired integral: it keeps
+       `rideDedupKey`'s legacy fallback stable, and it lets a real ride be audited both ways from
+       one render, which is the only way the +2.6-4.0% path bias gets measured on a phone. */
+    driftDistance, distanceDoppler,
     /* Carried on the summary so the Duration tile can say WHY it is shorter than the recording. */
     pausedS: ride.pausedS || 0,
     nTurns: descentTurns.length, nTurnsAll: turns.length,
@@ -28161,7 +28243,11 @@ function renderStats(s, hasFit) {
     <div class="stat">
       <div class="label">Distance</div>
       <div class="value">${U.dist(s.distance)}</div>
-      <div class="sub">ride distance</div>
+      <!-- Names the parked metres it left out, the way the running tile does. A path sum counts a
+           stationary phone's wander as length, so the exclusion is doing real work on any ride with
+           a stop, and a tile that silently drops hundreds of metres is the same over-claim as one
+           that silently counts them. Only shown when there is enough of it to be worth a line. -->
+      <div class="sub">ride distance${s.driftDistance != null && s.driftDistance >= 50 ? ` · ${U.dist(s.driftDistance)} parked drift excluded` : ''}</div>
     </div>
     ${jumpCard}
     ${altCard}
@@ -32335,7 +32421,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '42addae77 · 2026-09-11';
+const LOAM_BUILD = 'b4f232faa · 2026-09-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
