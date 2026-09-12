@@ -1580,6 +1580,7 @@
 <div id="strengthResults" class="hidden"></div>
 <div id="golfResults" class="hidden"></div>
 <div id="swimResults" class="hidden"></div>
+<div id="skiResults" class="hidden"></div>
 <style>
   #strengthResults { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
   /* Swim (BETA). An imported Apple Watch swim: no map, no track, no charts of raw motion (there is
@@ -1645,6 +1646,14 @@
   .strength-stats .s-big span { font-size: 14px; color: var(--text-dim, #9aa0aa); font-weight: 400; }
   .s-sub { color: var(--text-dim, #9aa0aa); margin: 3px 0 16px; font: 600 12px 'JetBrains Mono', monospace; letter-spacing: .06em; }
   .stiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .ski-legs { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .ski-legs th, .ski-legs td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  .ski-legs tr.ski-up td { opacity: 0.62; }
+  .ski-yes { color: var(--moss); font-weight: 600; }
+  .ski-no { color: var(--clay); }
+  .ski-why { font-size: 11px; opacity: 0.7; }
+  .ski-dim { opacity: 0.65; }
+  .ski-note { font-size: 12px; margin-top: 10px; line-height: 1.5; }
   .stile-v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stile-l { font: 10px 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); text-transform: uppercase; letter-spacing: .1em; margin-top: 2px; }
   /* Time in heart-rate zones. One row per zone: name, the band in beats, a proportional bar, the
@@ -15335,6 +15344,778 @@ function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayU
     strokeRateSeries, seriesTrendPct, navigationRead, routePoints };
 })();
 
+/* ===== Ski SK1: the indoor (dome) read =============================================
+ *
+ * Ported verbatim from analyzer/sports/ski/, pinned by analyzer/sports/ski/drift.test.js. Nothing
+ * here is new; what is new is that the app now SHOWS it. Until 2026-09-12 a declared indoor ski
+ * session threw instead, on the stated grounds that this detector "has never been graded against a
+ * real recording". That is still true, and the view says so on its own face rather than in a commit
+ * message -- owner's call, and the same call golf's BETA view makes: a hedged read a skier can see
+ * beats a refusal they cannot.
+ *
+ * EACH MODULE KEEPS ITS OWN SCOPE, which is not tidiness. lap-cycles.js and agitation.js declare a
+ * private `medianOf` that takes a PRE-SORTED array; turn-rhythm.js declares one of the same name
+ * that sorts internally. Flattened into one scope the three would collide and whichever lost would
+ * silently compute medians over unsorted input. Sub-IIFEs keep every body byte-identical to its
+ * module, which is what makes the drift guard a real comparison.
+ */
+const LoamSki = (function () {
+  /* ---- ported from analyzer/sports/ski/lap-cycles.js ---- */
+  const SkiLapCycles = (function () {
+    /* ---------------------------------------------------------------------------------------------
+     * Constants. Two are gates (SKI_MIN_DROP_M, SKI_MIN_MEAN_RATE_MPS); the rest are preprocessing,
+     * segmentation or reporting. Each carries the mechanism it came from rather than a fitted value.
+     * ------------------------------------------------------------------------------------------- */
+
+    /* Verbatim from CL2, set on this hardware: the barometer arrives at ~1 Hz (2192 samples over
+       2346 s) with step noise 0.045 m median, 0.14 p90, 0.22 max. A MEDIAN filter rather than a mean
+       because barometric error is spikes -- a door, a gust, a pocket squeezing -- not Gaussian wobble.
+       It costs at most 2.5 s of corner rounding on a 40-60 s leg, and boundaries are placed by an
+       extremum search afterwards, so that cost is not actually paid. */
+    const SKI_BARO_SMOOTH_S = 5;
+
+    /* Below this there is nothing to find: the shortest leg claimed anywhere here is 40-60 s. Returns
+       an empty result rather than a confident one -- no answer, not an answer of zero. */
+    const SKI_MIN_SERIES_S = 60;
+
+    /* A hole longer than this splits the series, and nothing downstream spans a fragment boundary.
+       `grade.js`'s GRADE_MAX_GAP_S = 5 argument: carrying a value across a hole invents ground nobody
+       covered. 30 missed samples at ~1 Hz is far outside sampling jitter, and a 30 s hole inside a
+       40-60 s leg has destroyed that leg regardless. */
+    const SKI_MAX_BARO_GAP_S = 30;
+
+    /* The centred window the vertical rate is fitted over. Both sides of this were computed rather
+       than picked. ABOVE: a leg of length L only yields a full-amplitude plateau of length L - W, so W
+       must sit well under the 40 s shortest leg. BELOW: the OLS slope's noise is about
+       sigma*sqrt(12/(n*T^2)), which with sigma ~ 0.03 m after the median filter and ~10 samples is
+       0.003-0.01 m/s -- roughly 30x under the smallest threshold it feeds. So noise is NOT the binding
+       constraint here; leg resolution is, and 10 s is chosen from the top end. */
+    const SKI_RATE_WIN_S = 10;
+
+    /* Anchor thresholds. Magnitudes, applied to a signed rate.
+       The fall bar sits 4.4x below the slowest descent this venue implies (80 m in 60 s = 1.33 m/s),
+       ~30x above the rate-noise floor and ~135x above measured drift. Deliberately generous: the
+       discrimination lives in the leg GATES, where the evidence is a whole leg, and a leg admitted and
+       then rejected is visible where a leg never segmented is invisible -- `turns.js`'s stated posture,
+       that erring toward admitting junk beats deleting a real event. */
+    const SKI_FALL_ENTER_MPS = 0.30;
+    /* Entry / 3, which is `detectTurns`' own 25 -> 8 deg/s ratio reused rather than re-derived. */
+    const SKI_FALL_EXIT_MPS = 0.10;
+
+    /* The ride up is 3-6x SLOWER than the descent (80 m in 120-240 s = 0.33-0.67 m/s), so one
+       symmetric threshold cannot sit at a wide margin below both. 0.12 is 2.75x below the slowest
+       implied ride-up and ~55x above the measured drift rate -- so drift alone can never open an
+       ascent anchor, which is the claim the merge rule below leans on. */
+    const SKI_RISE_ENTER_MPS = 0.12;
+    const SKI_RISE_EXIT_MPS = 0.04;
+
+    /* An anchor shorter than the rate window shares its samples with its neighbours and is not
+       independent evidence. It also spends the airlock/HVAC confound: a pressure step under 5 s is
+       already gone in the median filter, and one under 8 s cannot open a leg. The shortest real leg
+       carries a ~30 s plateau, so this costs nothing.
+       THIS IS THE CONSTANT MOST EXPOSED TO THE UNMEASURED HALL ENVIRONMENT. */
+    const SKI_ANCHOR_MIN_S = 8;
+
+    /* Two same-direction anchors merge into one leg unless the altitude between them moved the other
+       way by more than this. Structural rather than temporal, and deliberately with no time cap: that
+       is what lets a mid-slope stop of ANY length stay inside one descent. It must exceed the largest
+       genuine counter-move inside a leg (a run-out roller or compression on an 80 m slope, a few
+       metres) and sit under the smallest thing that would really be a separate leg.
+       REASONED, NOT MEASURED. */
+    const SKI_REBOUND_MAX_M = 8;
+
+    /* Boundaries are placed at the LAST sample within this band of the extremum, not at the argmax.
+       During a 20 s dwell at the top the raw argmax is a random noise sample, and a boundary read off
+       it carries +/-10 s of jitter straight into turn scoping; last-within-band is the moment the
+       skier LEFT the top. 0.5 m is ~10-15x smoothed noise, 0.6% of an 80 m leg, and 0.3 s of descent
+       at 1.6 m/s. */
+    const SKI_EXTREMUM_BAND_M = 0.5;
+
+    /* Reported, never gated: seconds inside a leg whose rate sits under this, i.e. a stop. ~7x the
+       rate-noise floor. It exists so a duration inflated by a mid-slope stop is ARGUABLE rather than
+       invisible -- the same move as `burns.js` reporting peakRotationRads beside its floor. */
+    const SKI_STOP_RATE_MPS = 0.05;
+
+    /* GATE 1. MEASURED 2026-09-02 AND THE JUSTIFICATION BELOW IS PARTLY FALSIFIED -- read this first.
+       The reasoning was: above every building-scale excursion that is not the slope, since a storey is
+       ~4-5 m, a two-storey stair descent ~8-10 m, an escalator flight ~5 m. The storey figure holds
+       (five full legs across three real stairwell recordings measure 4.17-4.28 m per storey), and the
+       CONCLUSION does not, because the reasoning stops at two storeys. Buildings are taller than that: a
+       six-storey office stairwell RUN down in one go measured **20.12 m at 0.418 m/s** and was reported
+       as one qualifying descent -- clearing this gate by **12 cm**.
+       GATE 2 is what saves the ordinary case, so the false positive needs BOTH >= 5 storeys AND a
+       running descent -- see there. Reproduced by `buildingStairs` in ski-fixtures.js; the boundary test
+       puts the opening at FIVE storeys, with four refused at 16.4 m.
+       NOT ground truth for stairwells: one building, one athlete, one phone. And NOT a reason to move
+       this number -- see the note under GATE 2 about fitting to n=1.
+       4x below the venue's 80 m, so a run abandoned three-quarters of the way down still clears.
+       DELIBERATELY NOT 30. `MIN_DESCENT_DROP_M` = 30 in the dashboard was set from alpine trails
+       (>= 63 m on Tanga, >= 96 m at Flumserberg) and section 13.5 of ski-tracker-spec.md records it
+       landing in the middle of the indoor population it would now be asked to admit.
+       STATED CONSEQUENCE: the beginner conveyor pitch (published carpet-served pitches run ~10-20 m)
+       sits below this and is OUT OF SCOPE, for CL2's bouldering reason -- at that magnitude a
+       barometer cannot separate it from a staircase, and the honest output is silence. */
+    const SKI_MIN_DROP_M = 20;
+
+    /* GATE 2. drop / duration over the whole leg: the leg-level restatement of "it fell purposefully".
+       4x below the slowest implied descent and ~150x above drift.
+       WHAT IT DOES NOT DO, stated here because the module must not be read as claiming it: it does NOT
+       separate a walk down the venue's internal staircase from a slow beginner descent, and since that
+       staircase spans the same 80 m, SKI_MIN_DROP_M cannot either. Both channels fail on it -- walking
+       is agitated too. That is the false positive section 13.6 names as having no fix, and the response
+       here is to state it, report the discriminating numbers ungated, and require the non-skiing indoor
+       negative before any of this is shown to a person.
+       THE REASONING HERE WAS CONFIRMED BY MEASUREMENT (2026-09-02/03), unlike GATE 1's -- and this gate
+       turns out to DISCRIMINATE on real data, which is more than the paragraph above claims for it.
+       The reasoned band for stair walking was ~0.3-0.5 m/s vertical. Six legs across three recordings of
+       one stairwell measure **0.238 to 0.418 m/s**, and the gate cuts that population in the middle:
+       the SAME five storeys RUN down read 0.418 and QUALIFY, while WALKED down they read 0.305 and are
+       REFUSED. So a walked building stairwell is rejected and only a run one gets through.
+       **A CORRECTION, recorded because the mistake is the one this module exists to avoid.** The
+       2026-09-02 entry here read "effort does not move a stair's vertical rate, so 'they were only
+       walking' is not an escape from this bar". That was fitted to n=1: day one happened to walk UP at
+       0.416 and run DOWN at 0.418, and a rule was read into the coincidence. The next recording ranged
+       0.238-0.407 on the same stairs. Effort moves it by a factor of 1.76.
+       What remains UNKNOWN is the other half of the claim above: whether this also separates a walked
+       staircase from a SLOW BEGINNER descent. That needs the ski recording, and nothing here settles it.
+       DO NOT RE-TUNE EITHER GATE ON THAT EVIDENCE. It is one building, and 30 m -- the obvious next
+       value for GATE 1 -- is the number section 13.5 records as landing in the middle of the indoor
+       population this has to admit. Fitting to n=1 is what this whole module is arranged to avoid.
+       Set on the admit-junk side deliberately, same reason as the anchor threshold. */
+    const SKI_MIN_MEAN_RATE_MPS = 0.35;
+
+    /* ------------------------------------------------------------------------------------------- */
+
+    function medianOf(sorted) {
+      if (!sorted.length) return null;
+      const m = sorted.length >> 1;
+      return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+    }
+
+    /**
+     * Clean the altitude series: sort by time, drop non-finite rows, median-filter over
+     * SKI_BARO_SMOOTH_S, and split into fragments at holes longer than SKI_MAX_BARO_GAP_S.
+     *
+     * Returns `[{ t, alt, frag }]` at the input's own cadence. No resampling: the barometer is already
+     * ~1 Hz and interpolating it would invent samples the sensor never took (CL2's rule).
+     */
+    function skiAltitudeSeries(baro) {
+      const rows = (baro || [])
+        .map(r => ({ t: r.t, alt: r.relativeAltitude != null ? r.relativeAltitude : r.alt }))
+        .filter(r => Number.isFinite(r.t) && Number.isFinite(r.alt))
+        .sort((a, b) => a.t - b.t);
+      if (rows.length < 3) return [];
+
+      /* Fragment first, so the median window cannot straddle a hole. */
+      let frag = 0;
+      const fragOf = new Array(rows.length);
+      fragOf[0] = 0;
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i].t - rows[i - 1].t > SKI_MAX_BARO_GAP_S) frag++;
+        fragOf[i] = frag;
+      }
+
+      const half = SKI_BARO_SMOOTH_S / 2;
+      const out = new Array(rows.length);
+      for (let i = 0; i < rows.length; i++) {
+        const w = [];
+        for (let k = i; k >= 0 && rows[k].t >= rows[i].t - half; k--) {
+          if (fragOf[k] === fragOf[i]) w.push(rows[k].alt);
+        }
+        for (let k = i + 1; k < rows.length && rows[k].t <= rows[i].t + half; k++) {
+          if (fragOf[k] === fragOf[i]) w.push(rows[k].alt);
+        }
+        w.sort((a, b) => a - b);
+        out[i] = { t: rows[i].t, alt: medianOf(w), frag: fragOf[i] };
+      }
+      return out;
+    }
+
+    /**
+     * Centred ordinary-least-squares slope over SKI_RATE_WIN_S, per sample, never spanning a fragment.
+     * Returns a parallel array of m/s, negative while falling. Null where the window holds fewer than
+     * three samples.
+     *
+     * OLS rather than an endpoint difference: the endpoint difference throws away n-2 samples and
+     * inherits the noise of exactly two, where a fit over ~10 divides it by ~sqrt(10) for no cost.
+     */
+    function skiVerticalRate(series) {
+      const n = series.length;
+      const out = new Array(n).fill(null);
+      const half = SKI_RATE_WIN_S / 2;
+      for (let i = 0; i < n; i++) {
+        let lo = i, hi = i;
+        while (lo > 0 && series[lo - 1].t >= series[i].t - half && series[lo - 1].frag === series[i].frag) lo--;
+        while (hi + 1 < n && series[hi + 1].t <= series[i].t + half && series[hi + 1].frag === series[i].frag) hi++;
+        const m = hi - lo + 1;
+        if (m < 3) continue;
+        let st = 0, sa = 0;
+        for (let k = lo; k <= hi; k++) { st += series[k].t; sa += series[k].alt; }
+        const tb = st / m, ab = sa / m;
+        let num = 0, den = 0;
+        for (let k = lo; k <= hi; k++) {
+          const dt = series[k].t - tb;
+          num += dt * (series[k].alt - ab);
+          den += dt * dt;
+        }
+        if (den > 0) out[i] = num / den;
+      }
+      return out;
+    }
+
+    /* Walk the rate series with level hysteresis in one direction. `sign` is -1 for falls, +1 for
+       rises. Returns index ranges that sustained the entry threshold for SKI_ANCHOR_MIN_S. */
+    function anchorsFor(series, rate, sign, enter, exit) {
+      const out = [];
+      let i = 0;
+      while (i < series.length) {
+        const r = rate[i];
+        if (r == null || r * sign < enter) { i++; continue; }
+        let j = i;
+        while (j + 1 < series.length
+          && series[j + 1].frag === series[i].frag
+          && rate[j + 1] != null && rate[j + 1] * sign >= exit) j++;
+        if (series[j].t - series[i].t >= SKI_ANCHOR_MIN_S) out.push({ dir: sign < 0 ? 'down' : 'up', i, j });
+        i = j + 1;
+      }
+      return out;
+    }
+
+    /**
+     * Detect the legs of a session: alternating descents and rides back up, from the barometer alone.
+     *
+     * Down legs carry `qualifies` and `rejectedFor`, CL2's contract: a near miss is visible rather than
+     * absent, because the point is to hand a human a shortlist rather than to be right unaided. UP LEGS
+     * ARE NEVER GATED -- there is no chairlift measurement in existence to gate against, so they are
+     * reported with their numbers and nothing else.
+     */
+    function detectSkiLegs(baro) {
+      const series = skiAltitudeSeries(baro);
+      if (series.length < 3) return [];
+      if (series[series.length - 1].t - series[0].t < SKI_MIN_SERIES_S) return [];
+      const rate = skiVerticalRate(series);
+
+      const anchors = [
+        ...anchorsFor(series, rate, -1, SKI_FALL_ENTER_MPS, SKI_FALL_EXIT_MPS),
+        ...anchorsFor(series, rate, +1, SKI_RISE_ENTER_MPS, SKI_RISE_EXIT_MPS),
+      ].sort((a, b) => a.i - b.i);
+      if (!anchors.length) return [];
+
+      /* Merge consecutive same-direction anchors into one leg. Two anchors are the same leg unless an
+         opposite-direction anchor lies between them (the alternation rule) or the altitude between
+         them rebounded past SKI_REBOUND_MAX_M. This is what absorbs a mid-slope stop of any length,
+         and rule (b) is what stops the merge running away: two falls either side of a genuine 80 m
+         ride-up cannot merge whether or not that ride-up anchored. */
+      const groups = [];
+      for (const a of anchors) {
+        const g = groups[groups.length - 1];
+        if (!g || g.dir !== a.dir || series[a.i].frag !== series[g.anchors[0].i].frag) {
+          groups.push({ dir: a.dir, anchors: [a] });
+          continue;
+        }
+        const prev = g.anchors[g.anchors.length - 1];
+        let rebound = 0;
+        for (let k = prev.j; k <= a.i; k++) {
+          const d = series[k].alt - series[prev.j].alt;
+          /* Counter-move relative to the leg's own direction. */
+          const against = g.dir === 'down' ? d : -d;
+          if (against > rebound) rebound = against;
+        }
+        if (rebound > SKI_REBOUND_MAX_M) groups.push({ dir: a.dir, anchors: [a] });
+        else g.anchors.push(a);
+      }
+
+      /* Place boundaries by extremum search, never by a threshold. The search for a down leg's start
+         runs from the end of the previous group to the anchor's start, and takes the LAST sample
+         within SKI_EXTREMUM_BAND_M of the maximum there -- the moment the skier left the top. */
+      const legs = [];
+      for (let gi = 0; gi < groups.length; gi++) {
+        const g = groups[gi];
+        const first = g.anchors[0], last = g.anchors[g.anchors.length - 1];
+        const prevEnd = gi > 0 ? groups[gi - 1].anchors[groups[gi - 1].anchors.length - 1].j : 0;
+        const nextStart = gi + 1 < groups.length ? groups[gi + 1].anchors[0].i : series.length - 1;
+        const down = g.dir === 'down';
+
+        const lo = Math.max(prevEnd, 0), hi = Math.min(nextStart, series.length - 1);
+        let sIdx = first.i, eIdx = last.j;
+        /* Start: extremum of the leg's origin side (a max for a descent, a min for a rise). */
+        {
+          let best = series[first.i].alt;
+          for (let k = lo; k <= first.i; k++) {
+            if (series[k].frag !== series[first.i].frag) continue;
+            if (down ? series[k].alt > best : series[k].alt < best) best = series[k].alt;
+          }
+          for (let k = lo; k <= first.i; k++) {
+            if (series[k].frag !== series[first.i].frag) continue;
+            if (Math.abs(series[k].alt - best) <= SKI_EXTREMUM_BAND_M) sIdx = k;
+          }
+        }
+        /* End: extremum of the leg's destination side, FIRST sample within the band. */
+        {
+          let best = series[last.j].alt;
+          for (let k = last.j; k <= hi; k++) {
+            if (series[k].frag !== series[last.j].frag) continue;
+            if (down ? series[k].alt < best : series[k].alt > best) best = series[k].alt;
+          }
+          for (let k = hi; k >= last.j; k--) {
+            if (series[k].frag !== series[last.j].frag) continue;
+            if (Math.abs(series[k].alt - best) <= SKI_EXTREMUM_BAND_M) eIdx = k;
+          }
+        }
+        if (eIdx <= sIdx) continue;
+
+        const tStart = series[sIdx].t, tEnd = series[eIdx].t;
+        const durationS = tEnd - tStart;
+        const deltaM = series[eIdx].alt - series[sIdx].alt;
+        const meanRateMps = durationS > 0 ? deltaM / durationS : 0;
+
+        let peakRateMps = 0, stopped = 0, steady = 0, counted = 0;
+        for (let k = sIdx; k <= eIdx; k++) {
+          const r = rate[k];
+          if (r == null) continue;
+          counted++;
+          if (down ? r < peakRateMps : r > peakRateMps) peakRateMps = r;
+          if (Math.abs(r) < SKI_STOP_RATE_MPS) stopped++;
+          if (down ? r <= -SKI_FALL_ENTER_MPS : r >= SKI_RISE_ENTER_MPS) steady++;
+        }
+        const perSample = counted > 1 ? durationS / (counted - 1) : 0;
+
+        const dropM = down ? -deltaM : null;
+        const gainM = down ? null : deltaM;
+        const failed = [];
+        if (down) {
+          if (!(dropM >= SKI_MIN_DROP_M)) failed.push(`dropped ${dropM.toFixed(1)} m < ${SKI_MIN_DROP_M}`);
+          if (!(Math.abs(meanRateMps) >= SKI_MIN_MEAN_RATE_MPS))
+            failed.push(`fell at ${Math.abs(meanRateMps).toFixed(2)} m/s < ${SKI_MIN_MEAN_RATE_MPS}`);
+        }
+
+        legs.push({
+          dir: g.dir,
+          tStart: +tStart.toFixed(1),
+          tEnd: +tEnd.toFixed(1),
+          durationS: +durationS.toFixed(1),
+          /* Both ends in the barometer's own relative frame. Carried because `skiLaps` needs the BASE
+             ALTITUDE to measure drift, and a delta cannot supply it: two laps can share a delta while
+             starting metres apart, which is exactly the thing drift does. */
+          altStart: +series[sIdx].alt.toFixed(2),
+          altEnd: +series[eIdx].alt.toFixed(2),
+          deltaM: +deltaM.toFixed(2),
+          dropM: dropM == null ? null : +dropM.toFixed(2),
+          gainM: gainM == null ? null : +gainM.toFixed(2),
+          meanRateMps: +meanRateMps.toFixed(3),
+          peakRateMps: +peakRateMps.toFixed(3),
+          stoppedS: +(stopped * perSample).toFixed(1),
+          steadyFrac: counted ? +(steady / counted).toFixed(3) : 0,
+          anchorCount: g.anchors.length,
+          qualifies: down ? failed.length === 0 : null,
+          rejectedFor: down && failed.length ? failed.join('; ') : null,
+        });
+      }
+      return legs;
+    }
+
+    /**
+     * Pair each qualifying descent with the ride back up that follows it.
+     *
+     * `baseDeltaM` is this lap's base altitude minus the previous lap's. That is physically the same
+     * place every lap, so the series of them is a DIRECT PER-LAP DRIFT MEASUREMENT -- the session
+     * grading the assumption the constants rest on, which is the closest thing to self-checking
+     * available with no ground truth.
+     */
+    function skiLaps(legs) {
+      const out = [];
+      let prevBase = null;
+      for (let i = 0; i < legs.length; i++) {
+        const d = legs[i];
+        if (d.dir !== 'down' || !d.qualifies) continue;
+        const rideUp = legs[i + 1] && legs[i + 1].dir === 'up' ? legs[i + 1] : null;
+        out.push({
+          lapIndex: out.length + 1,
+          descent: d,
+          rideUp,
+          lapS: rideUp ? +(rideUp.tEnd - d.tStart).toFixed(1) : null,
+          unpaired: rideUp == null,
+          /* The bottom of the slope is physically the same place every lap, so the change in its
+             measured altitude between consecutive laps IS the drift over that lap -- no reference
+             needed and no absolute calibration assumed. */
+          baseDeltaM: prevBase == null ? null : +(d.altEnd - prevBase).toFixed(2),
+        });
+        prevBase = d.altEnd;
+      }
+      return out;
+    }
+
+    /**
+     * Roll the per-lap base deltas into a drift estimate: `{ mPerH, spanM, n }`, or nulls below two
+     * laps. Reported, never acted on -- it exists so a session can say whether the drift assumption
+     * this module was built on held inside a refrigerated hall, which nobody has measured.
+     *
+     * MEDIAN, not mean, and the reason is a real case rather than general caution: `baseDeltaM` assumes
+     * the lap ENDED AT THE BASE, and a run abandoned half way down does not. Such a lap contributes a
+     * delta the size of the unfinished slope -- tens of metres against a true drift of a few -- so a
+     * mean is owned by it outright. The median survives a minority of them, and `spanM` is reported
+     * raw beside it precisely so an abandoned run is VISIBLE rather than smoothed away: a span that
+     * dwarfs `mPerH` is the signature of a lap that finished somewhere else, not of a drifting sensor.
+     */
+    function skiBaseDrift(laps) {
+      const paired = laps.filter(l => Number.isFinite(l.baseDeltaM));
+      if (!paired.length) return { mPerH: null, spanM: null, n: 0 };
+      const deltas = paired.map(l => l.baseDeltaM);
+      const sorted = [...deltas].sort((a, b) => a - b);
+      const perLap = medianOf(sorted);
+      /* Median lap interval, from the descent starts, for the same robustness reason. */
+      const gaps = [];
+      for (let i = 1; i < paired.length; i++) gaps.push(paired[i].descent.tStart - paired[i - 1].descent.tStart);
+      const gapS = gaps.length ? medianOf([...gaps].sort((a, b) => a - b)) : null;
+      return {
+        mPerH: gapS && gapS > 0 ? +(perLap / (gapS / 3600)).toFixed(3) : null,
+        spanM: +(sorted[sorted.length - 1] - sorted[0]).toFixed(2),
+        n: deltas.length,
+      };
+    }
+    return { skiAltitudeSeries, skiVerticalRate, detectSkiLegs, skiLaps, skiBaseDrift, SKI_BARO_SMOOTH_S, SKI_MIN_SERIES_S, SKI_MAX_BARO_GAP_S, SKI_RATE_WIN_S, SKI_FALL_ENTER_MPS, SKI_FALL_EXIT_MPS, SKI_RISE_ENTER_MPS, SKI_RISE_EXIT_MPS, SKI_ANCHOR_MIN_S, SKI_REBOUND_MAX_M, SKI_EXTREMUM_BAND_M, SKI_STOP_RATE_MPS, SKI_MIN_DROP_M, SKI_MIN_MEAN_RATE_MPS };
+  })();
+
+  /* ---- ported from analyzer/sports/ski/agitation.js ---- */
+  const SkiAgitation = (function () {
+    /* One second. Makes the statistic a claim about SECONDS OF THE LEG rather than about samples -- a
+       raw percentile over 100 Hz rows is dominated by however many samples a leg happened to carry --
+       puts it on the barometer's own cadence, and stops one handling spike moving it. */
+    const SKI_OMEGA_BIN_S = 1.0;
+
+    /* 0.44 rad/s = 25 deg/s, which is `TURN_PARAMS.entryRate` in the dashboard, reused rather than
+       invented. The argument is one of magnitude ordering: |omega| >= any single component pointwise,
+       so a second whose |omega| median sits under the turn-entry rate cannot have contained a sustained
+       turn. Honest caveat, because the reuse is not an identity: that 25 deg/s bar applies to the
+       0.6 Hz-filtered BODY-FRAME YAW, not to the raw magnitude, so this is an argument about ordering
+       and not a threshold transplanted intact. */
+    const SKI_ACTIVE_RADS = 0.44;
+
+    /* Share of a leg's seconds that must be active to call it 'agitated'. With a turn about every
+       1.4 s, nearly every second of a real descent contains part of one, so `activeFrac` on a descent
+       should sit at 0.7-0.9 and on a chairlift near zero. 0.5 sits in the middle of a gap that is
+       REASONED rather than measured -- it is literally the number a labelled session would replace. */
+    const SKI_AGITATED_FRAC = 0.50;
+
+    /* And the share below which a leg is 'still'. Loading and unloading a chair takes ~3-5 s at each
+       end of a 120-240 s ride, i.e. ~4-8% of the leg, so 'still' has to tolerate about a tenth of the
+       leg being active or every lift ride reads 'mixed'. A carpet ride, taken standing, may exceed this
+       on balance corrections alone -- which is the explicit reason this labels rather than gates. */
+    const SKI_STILL_FRAC = 0.10;
+
+    /* Below this share of the leg's seconds carrying gyro samples the label is `null`, NEVER 'still'.
+       Mirrors `makeGpsInterpSpeedAt`'s `.covers` predicate: absence of evidence is not evidence, and a
+       phone that stopped reporting must not be reported as a phone that stopped moving. */
+    const SKI_IMU_COVER_FRAC = 0.50;
+
+    function medianOf(sorted) {
+      if (!sorted.length) return null;
+      const m = sorted.length >> 1;
+      return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+    }
+
+    function percentileOf(sorted, p) {
+      if (!sorted.length) return null;
+      return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * p)))];
+    }
+
+    /**
+     * Per-second medians of |omega|, in rad/s. Returns `[{ t, omega }]`, one row per whole second that
+     * carried at least one gyro sample. `t` is the bin's start.
+     */
+    function skiAgitationSeries(gyro) {
+      const rows = (gyro || []).filter(r =>
+        r && Number.isFinite(r.t) && Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.z));
+      if (!rows.length) return [];
+      const bins = new Map();
+      for (const r of rows) {
+        const b = Math.floor(r.t / SKI_OMEGA_BIN_S);
+        let a = bins.get(b);
+        if (!a) { a = []; bins.set(b, a); }
+        a.push(Math.hypot(r.x, r.y, r.z));
+      }
+      return [...bins.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([b, vals]) => ({ t: b * SKI_OMEGA_BIN_S, omega: medianOf(vals.sort((x, y) => x - y)) }));
+    }
+
+    /**
+     * Describe one leg's motion. Everything here is REPORTED; nothing gates.
+     *
+     * `coverFrac` is the share of the leg's seconds that carried gyro at all, which is what separates
+     * "the phone was still" from "the phone was not reporting".
+     */
+    function skiLegAgitation(series, t0, t1) {
+      const span = Math.max(0, t1 - t0);
+      const inLeg = (series || []).filter(r => r.t >= t0 && r.t < t1);
+      const expected = Math.max(1, Math.round(span / SKI_OMEGA_BIN_S));
+      if (!inLeg.length) return { omegaP50: null, omegaP90: null, activeFrac: null, coverFrac: 0 };
+      const sorted = inLeg.map(r => r.omega).sort((a, b) => a - b);
+      const active = inLeg.filter(r => r.omega >= SKI_ACTIVE_RADS).length;
+      return {
+        omegaP50: +medianOf(sorted).toFixed(4),
+        omegaP90: +percentileOf(sorted, 0.9).toFixed(4),
+        activeFrac: +(active / inLeg.length).toFixed(3),
+        coverFrac: +Math.min(1, inLeg.length / expected).toFixed(3),
+      };
+    }
+
+    /**
+     * `'agitated' | 'still' | 'mixed' | null`. See the header for why each name claims only what it
+     * measured, and why this never reaches a gate.
+     */
+    function skiMotionLabel(agitation) {
+      if (!agitation || agitation.activeFrac == null) return null;
+      if (agitation.coverFrac < SKI_IMU_COVER_FRAC) return null;
+      if (agitation.activeFrac >= SKI_AGITATED_FRAC) return 'agitated';
+      if (agitation.activeFrac <= SKI_STILL_FRAC) return 'still';
+      return 'mixed';
+    }
+
+    /**
+     * Angular spread of the gravity direction within a leg, in degrees: how far the phone's pose
+     * wandered from its own mean over the leg, as a p90 of the angle to that mean.
+     *
+     * REPORTED AND NEVER GATED, and the precedent is why. This is the same operator as climbing's
+     * `reachSpreadDeg`, one limb over -- and that operator was FALSIFIED on the first real session: the
+     * climb read 72.7 deg and so did twelve stretches that were not climbing, up to 113.5. A standing
+     * carpet ride holding a near-constant tilt while a skier angulates is a mechanism, not a
+     * measurement, and this project has already watched exactly this reasoning fail once.
+     */
+    function skiTiltSpreadDeg(gravity, t0, t1) {
+      const rows = (gravity || []).filter(r =>
+        r && Number.isFinite(r.t) && r.t >= t0 && r.t < t1
+        && Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.z));
+      if (rows.length < 3) return null;
+      let mx = 0, my = 0, mz = 0;
+      const units = [];
+      for (const r of rows) {
+        const n = Math.hypot(r.x, r.y, r.z);
+        if (!(n > 0)) continue;
+        const u = [r.x / n, r.y / n, r.z / n];
+        units.push(u);
+        mx += u[0]; my += u[1]; mz += u[2];
+      }
+      if (units.length < 3) return null;
+      const mn = Math.hypot(mx, my, mz);
+      if (!(mn > 0)) return null;
+      mx /= mn; my /= mn; mz /= mn;
+      const angles = units
+        .map(u => Math.acos(Math.max(-1, Math.min(1, u[0] * mx + u[1] * my + u[2] * mz))) * 180 / Math.PI)
+        .sort((a, b) => a - b);
+      return +percentileOf(angles, 0.9).toFixed(2);
+    }
+    return { skiAgitationSeries, skiLegAgitation, skiMotionLabel, skiTiltSpreadDeg, SKI_OMEGA_BIN_S, SKI_ACTIVE_RADS, SKI_AGITATED_FRAC, SKI_STILL_FRAC, SKI_IMU_COVER_FRAC };
+  })();
+
+  /* ---- ported from analyzer/sports/ski/turn-rhythm.js ---- */
+  const SkiTurnRhythm = (function () {
+    /* Below three turns a side, the per-side lean medians are withheld as null. Mirrors
+       `LEAN_BASE_MIN_PER_SIDE` in `mtb/form-coaching.js` and exists for the same reason: two
+       right-handers are not a median, they are their mean, and one committed turn moves it by degrees.
+       Withholds a number; never deletes a turn. */
+    const SKI_SIDE_MIN_TURNS = 3;
+
+    /* Four turns is three intervals. A coefficient of variation over fewer than that is arbitrary, so
+       the rhythm block reports null rather than a number computed from two gaps. */
+    const SKI_RHYTHM_MIN_TURNS = 4;
+
+    function medianOf(vals) {
+      if (!vals.length) return null;
+      const s = [...vals].sort((a, b) => a - b);
+      const m = s.length >> 1;
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    }
+
+    function covers(speedAt, t) {
+      return !!(speedAt && typeof speedAt.covers === 'function' && speedAt.covers(t));
+    }
+
+    /**
+     * Strip every speed-derived field a recording cannot vouch for, per field, and tag the turn with
+     * how much of it was covered. Returns a NEW object; the input turn is never mutated.
+     */
+    function sanitizeTurn(turn, speedAt) {
+      const okEntry = covers(speedAt, turn.tStart);
+      const okPeak = covers(speedAt, turn.tPeak);
+      const okExit = covers(speedAt, turn.tEnd);
+      const nCovered = (okEntry ? 1 : 0) + (okPeak ? 1 : 0) + (okExit ? 1 : 0);
+      const vPeak = okPeak ? turn.vPeak : null;
+      /* `radius` also normalises detectTurns' NaN at omega <= 0.05 deg/s, which every call site
+         currently filters ad hoc with `!isNaN`. */
+      const radius = vPeak != null && Number.isFinite(turn.radius) ? turn.radius : null;
+      return {
+        ...turn,
+        vEntry: okEntry ? turn.vEntry : null,
+        vExit: okExit ? turn.vExit : null,
+        vPeak,
+        radius,
+        speedSource: nCovered === 0 ? null : turn.speedSource,
+        speedCoverage: nCovered === 0 ? 'none' : nCovered === 3 ? 'full' : 'partial',
+      };
+    }
+
+    /**
+     * Describe the turns inside one window. Every field is IMU-derived except `medianRadiusM`, which is
+     * null indoors by construction.
+     *
+     * `medianRadiusM` is null and NEVER 0, and it is never omitted either: omitting it lets a
+     * consumer's `?? 0` reinstate the exact defect this module exists to remove. Null is a statement.
+     */
+    function skiDescentRhythm(turns) {
+      const n = turns.length;
+      const left = turns.filter(t => t.direction === 'L').length;
+      const right = turns.filter(t => t.direction === 'R').length;
+      const peaks = turns.map(t => t.tPeak).sort((a, b) => a - b);
+      const intervals = [];
+      for (let i = 1; i < peaks.length; i++) intervals.push(peaks[i] - peaks[i - 1]);
+      const medInt = intervals.length ? medianOf(intervals) : null;
+      let cv = null;
+      if (n >= SKI_RHYTHM_MIN_TURNS && medInt > 0) {
+        const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+        const varr = intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / intervals.length;
+        cv = +((Math.sqrt(varr) / mean) * 100).toFixed(1);
+      }
+      /* Share of consecutive pairs that changed direction. A DESCRIPTION, explicitly not a
+         discriminator: a phone in a trouser pocket swings with the leg at about 1 Hz, alternating
+         perfectly and accumulating well past detectTurns' 25 deg minimum heading change, so WALKING
+         manufactures alternating turns -- and the median interval overlaps too (gait ~1 s against ski
+         turns ~1.4-3 s) rather than separating. This is section 13.6 restated, and the field must not
+         be mistaken for a gate. */
+      let alternating = 0;
+      const byT = [...turns].sort((a, b) => a.tPeak - b.tPeak);
+      for (let i = 1; i < byT.length; i++) if (byT[i].direction !== byT[i - 1].direction) alternating++;
+
+      /* leanDelta is already nulled past 70 deg of roll delta by detectTurns, as a sensor artifact.
+         Drop the nulls before taking a median rather than treating them as zero. */
+      const leanOf = (dir) => turns.filter(t => t.direction === dir && t.leanDelta != null).map(t => Math.abs(t.leanDelta));
+      const l = leanOf('L'), r = leanOf('R');
+      const leftDeg = l.length >= SKI_SIDE_MIN_TURNS ? +medianOf(l).toFixed(1) : null;
+      const rightDeg = r.length >= SKI_SIDE_MIN_TURNS ? +medianOf(r).toFixed(1) : null;
+
+      const covered = turns.filter(t => t.radius != null).map(t => t.radius);
+      const durs = turns.map(t => t.durationS != null ? t.durationS : t.duration).filter(Number.isFinite);
+      const heads = turns.map(t => Math.abs(t.headingChg)).filter(Number.isFinite);
+
+      return {
+        nTurns: n,
+        left,
+        right,
+        sideSkew: n >= SKI_RHYTHM_MIN_TURNS && (left + right) > 0 ? +((right - left) / (right + left)).toFixed(3) : null,
+        turnsPerMin: null,
+        medianIntervalS: medInt == null ? null : +medInt.toFixed(2),
+        intervalCvPct: cv,
+        alternationFrac: byT.length > 1 ? +(alternating / (byT.length - 1)).toFixed(3) : null,
+        medianDurationS: durs.length ? +medianOf(durs).toFixed(2) : null,
+        medianHeadingChgDeg: heads.length ? +medianOf(heads).toFixed(1) : null,
+        lean: {
+          leftDeg,
+          rightDeg,
+          gapDeg: leftDeg != null && rightDeg != null ? +(rightDeg - leftDeg).toFixed(1) : null,
+          usable: leftDeg != null && rightDeg != null,
+        },
+        medianRadiusM: covered.length ? +medianOf(covered).toFixed(2) : null,
+        speedCoveredFrac: n ? +(turns.filter(t => t.speedCoverage !== 'none').length / n).toFixed(3) : 0,
+      };
+    }
+
+    /**
+     * Scope turns to windows and sanitize their speeds.
+     *
+     * A turn is assigned by `tPeak`, matching `runMetrics` in `mtb/runs.js`, so a turn belongs to
+     * exactly one window and one straddling a boundary lands in exactly one.
+     */
+    function skiScopeTurns(turns, windows, speedAt) {
+      const wins = (windows || []).map(w => ({ tStart: w.tStart, tEnd: w.tEnd }));
+      return wins.map((w, windowIndex) => {
+        const inWin = (turns || [])
+          .filter(t => t && Number.isFinite(t.tPeak) && t.tPeak >= w.tStart && t.tPeak <= w.tEnd)
+          .map(t => sanitizeTurn(t, speedAt));
+        const rhythm = skiDescentRhythm(inWin);
+        const durationS = +(w.tEnd - w.tStart).toFixed(1);
+        rhythm.turnsPerMin = durationS > 0 ? +((inWin.length / durationS) * 60).toFixed(2) : null;
+        return { windowIndex, tStart: w.tStart, tEnd: w.tEnd, durationS, turns: inWin, rhythm };
+      });
+    }
+
+    /**
+     * The turns whose `tPeak` fell in NO window -- walking to the lift, sidestepping, shuffling in a
+     * queue. Returned rather than deleted, because their count is the module's own measurement of the
+     * false positive section 13.6 names as having no fix.
+     */
+    function skiUnscopedTurns(turns, windows) {
+      const wins = windows || [];
+      return (turns || []).filter(t =>
+        t && Number.isFinite(t.tPeak) && !wins.some(w => t.tPeak >= w.tStart && t.tPeak <= w.tEnd));
+    }
+    return { skiDescentRhythm, skiScopeTurns, skiUnscopedTurns, SKI_SIDE_MIN_TURNS, SKI_RHYTHM_MIN_TURNS };
+  })();
+
+  const { detectSkiLegs, skiLaps, skiBaseDrift } = SkiLapCycles;
+  const { skiAgitationSeries, skiLegAgitation, skiMotionLabel, skiTiltSpreadDeg } = SkiAgitation;
+  const { skiScopeTurns, skiUnscopedTurns } = SkiTurnRhythm;
+
+  /* ---- ported from analyzer/sports/ski/dome-session.js ---- */
+  /**
+   * Read an indoor session end to end.
+   *
+   * `turns` and `speedAt` are optional: with no turns the lap structure still stands on the barometer
+   * alone, which is the minimum useful output and the one an indoor session can always produce.
+   * `speedAt` is `makeGpsInterpSpeedAt`'s sampler; indoors it covers nothing, which is exactly why
+   * every speed-derived field comes back null rather than zero.
+   */
+  function analyzeSkiDome({ baro, gyro, gravity, turns, speedAt } = {}) {
+    const legs = detectSkiLegs(baro);
+    const omega = skiAgitationSeries(gyro);
+
+    for (const leg of legs) {
+      const ag = skiLegAgitation(omega, leg.tStart, leg.tEnd);
+      leg.omegaP50 = ag.omegaP50;
+      leg.omegaP90 = ag.omegaP90;
+      leg.activeFrac = ag.activeFrac;
+      leg.imuCoverFrac = ag.coverFrac;
+      leg.motion = skiMotionLabel(ag);
+      leg.tiltSpreadDeg = skiTiltSpreadDeg(gravity, leg.tStart, leg.tEnd);
+    }
+
+    const descents = legs.filter(l => l.dir === 'down' && l.qualifies);
+    const laps = skiLaps(legs);
+    const windows = descents.map(d => ({ tStart: d.tStart, tEnd: d.tEnd }));
+    const turnsByDescent = turns ? skiScopeTurns(turns, windows, speedAt) : [];
+    const unscopedTurns = turns ? skiUnscopedTurns(turns, windows) : [];
+
+    const span = (rows) => {
+      const r = (rows || []).filter(x => x && Number.isFinite(x.t));
+      return r.length ? +(r[r.length - 1].t - r[0].t).toFixed(1) : 0;
+    };
+    const coveredTurns = turnsByDescent.reduce(
+      (a, w) => a + w.turns.filter(t => t.speedCoverage !== 'none').length, 0);
+    const scopedTurns = turnsByDescent.reduce((a, w) => a + w.turns.length, 0);
+
+    return {
+      legs,
+      laps,
+      descents,
+      turnsByDescent,
+      unscopedTurns,
+      baseDrift: skiBaseDrift(laps),
+      coverage: {
+        baroS: span(baro),
+        gyroS: span(gyro),
+        gravityS: span(gravity),
+        turnsIn: (turns || []).length,
+        turnsScoped: scopedTurns,
+        /* Zero indoors by construction, and the reason every speed field above is null. Reported so
+           that is a visible property of the recording rather than an unexplained absence. */
+        speedCoveredFrac: scopedTurns ? +(coveredTurns / scopedTurns).toFixed(3) : 0,
+      },
+    };
+  }
+
+  return { analyzeSkiDome, ...SkiLapCycles, ...SkiAgitation, ...SkiTurnRhythm };
+})();
+
+
 /*
  * Why a declared swim found no strokes, said in the swimmer's terms.
  *
@@ -15822,7 +16603,44 @@ async function analyze(files) {
            down a dome's staircase reads as a run). See ski-tracker-spec.md section 13.6 for the two
            recordings that would lift this, and 13.7 for the port that would then wire it. */
         else if (isSki) {
-          throw new Error('No GPS in this recording, so this looks like an indoor ski session — under a dome’s roof GPS cannot get a fix. Loam can read the lap structure of an indoor session from the barometer, but that detector has never been graded against a real recording, so it is not shown yet. An OUTDOOR ski day analyzes normally.');
+          /* INDOOR SKIING. Until 2026-09-12 this threw, and the reasoning was sound at the time:
+             `analyzer/sports/ski/` is graded against fixtures its own author wrote, so rendering it
+             put an ungraded detector in front of a person. What that reasoning left out is that the
+             refusal ALSO withheld the read from the only people who could say whether it is right --
+             a tester skied a real dome session, hit the error page, and the project learned nothing.
+             Owner's call to show it (2026-09-12).
+
+             The protection did not go away, it MOVED: nothing here is presented as fact. Every
+             caveat the refusal used to carry is now on the view's own face, where a skier reads it,
+             and `lap-cycles.test.js` fails if any of them leaves. The 13.6 bar is UNCHANGED -- two
+             recordings still gate any claim that these numbers are CORRECT. This only stops the app
+             refusing to show its own arithmetic.
+
+             NO TURNS ARE PASSED, deliberately. `detectTurns` needs the body frame, which is built
+             forty lines below this branch from a still window; the lap read needs the barometer
+             alone, which `dome-session.js` calls "the minimum useful output and the one an indoor
+             session can always produce". Turning the corner read on indoors is its own change with
+             its own evidence problem (walking manufactures alternating turns -- see 13.6), and
+             bundling it here would smuggle the weaker claim in behind the stronger one. */
+          const dome = LoamSki.analyzeSkiDome({
+            baro: sensors.baro, gyro: sensors.gyro, gravity: sensors.gravity });
+          /* Two different emptinesses, and they want different sentences. No barometer at all is a
+             sensor that was off; a barometer with no structure in it is a session too short or too
+             flat to read. Neither is "the detector is withheld" any more, so neither may say so. */
+          if (!sensors.baro || sensors.baro.length < 2)
+            throw new Error('No GPS and no barometer in this recording, so there is nothing an indoor ski session can be read from \u2014 under a dome\u2019s roof GPS cannot get a fix, and the barometer is the only channel left that can see a descent. Check that Motion sensors were enabled during capture. An OUTDOOR ski day analyzes normally.');
+          if (!dome.legs.length)
+            throw new Error('No climbs or descents found in the barometer for this indoor ski session. The recording may be shorter than a minute, or the phone may have been somewhere the pressure could not follow the skier. An OUTDOOR ski day analyzes normally.');
+          if (superseded()) return;
+          onProgress('rendering');
+          hideAllSections(); hide('loading'); hide('results'); show('skiResults');
+          const skiRender = { dome, sport: 'skiing', guessed: null,
+            title: sensorFile && sensorFile.name,
+            key: contentHash || (sensorFile && sensorFile.name), imuRateHz };
+          if (cacheKey) { putCachedAnalysis(cacheKey, 'skiing', skiRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+          renderSkiIndoor(skiRender);
+          setStatus(`Indoor ski session loaded (${dome.laps.length} lap${dome.laps.length === 1 ? '' : 's'} \u00b7 ${dome.descents.length} descent${dome.descents.length === 1 ? '' : 's'} \u00b7 experimental, not graded)`, true);
+          return;
         }
         else if (!sensors.location.length) {
           /* Two different situations reach this line and they want opposite advice, which the single
@@ -17712,7 +18530,7 @@ function durTileHTML(sec) {
    Progress page (and of the dropzone after "Analyze another"). */
 function hideOutOfResultsSurfaces() {
   for (const id of ['coachSection', 'cropSection', 'sampleRateNotice', 'truncNotice', 'miniSummary',
-                    'strengthResults', 'golfResults', 'swimResults']) {
+                    'strengthResults', 'golfResults', 'swimResults', 'skiResults']) {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   }
 }
@@ -20697,6 +21515,114 @@ function swimHistorySection(D, unit) {
       'strength-tablenote', 'How this is worked out')}`;
 }
 
+/* The indoor (dome) ski view.
+ *
+ * EVERY NUMBER HERE COMES OFF THE BAROMETER AND NOTHING ELSE, which is what makes the caveats
+ * structural rather than decorative. Indoors there is no GPS, so there is no speed, no distance and
+ * no apex radius; a vertical drop and the rate it happened at are the whole of what a pressure
+ * sensor under a roof can say.
+ *
+ * The three warnings are in the SUMMARY and not behind a "Why" tap, per this repo's copy rule: a
+ * limit that changes whether you TRUST A NUMBER stays in the summary. All three do.
+ *   1. ungraded  -- nobody has ever checked this against a ski session with a known lap count;
+ *   2. stairs    -- the module's own tests assert a walked stairwell can clear both gates, so a row
+ *                   in this table may not be a ski run at all;
+ *   3. no speed  -- absent numbers are absent, not zero.
+ * `lap-cycles.test.js` extracts this function and fails if any of the three leaves.
+ *
+ * `rejectedFor` is rendered rather than filtered out. A near miss is the most informative row on the
+ * page when the gates are the thing under suspicion: "fell at 0.31 m/s" is the reader learning what
+ * the detector actually did, which is the whole point of showing an ungraded read at all. */
+function renderSkiIndoor(D) {
+  _lastRender = { fn: renderSkiIndoor, D };
+  /* No body frame was built on this path (the branch returns before calibration), so the header's
+     Calibration selector would offer a still-window strategy that changes nothing here. Same leak,
+     same fix, as renderStrength and renderSwim. */
+  { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  const el = document.getElementById('skiResults');
+  if (!el) return;
+  const R = (D && D.dome) || {};
+  const legs = R.legs || [], laps = R.laps || [], descents = R.descents || [];
+  const drift = R.baseDrift || {};
+  const cov = R.coverage || {};
+
+  const tile = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div></div>`;
+  const dur = (s) => s == null ? '—' : fmtDuration(s);
+  /* Local rather than the page's `mmss`, which lives inside another scope and is not reachable from
+     here. Wall-clock offset into the recording, which is how a skier finds a run again in a video. */
+  const clock = (t) => {
+    if (t == null || !Number.isFinite(t)) return '—';
+    const m = Math.floor(t / 60), sec = Math.round(t - m * 60);
+    return `${m}:${String(sec).padStart(2, '0')}`;
+  };
+  const totalVert = descents.reduce((a, d) => a + (d.dropM || 0), 0);
+  const longest = descents.reduce((a, d) => Math.max(a, d.dropM || 0), 0);
+
+  const tiles = [
+    tile(laps.length, 'laps'),
+    tile(descents.length, 'descents'),
+    tile(U.elev(totalVert), 'vertical down'),
+    tile(U.elev(longest), 'longest descent'),
+  ].join('');
+
+  /* Motion is a LABEL, never a gate -- agitation.js says so at length, and the reason is that a
+     carpet lap is ridden standing. Shown because on a dome session it is the one channel that is
+     not the barometer, so a reader can see the two disagree. */
+  const motionWord = (m) => m == null ? '<span class="ski-dim">no motion data</span>' : m;
+
+  const rows = legs.map((l, i) => {
+    const down = l.dir === 'down';
+    const vert = down ? l.dropM : l.gainM;
+    const verdict = !down ? '<span class="ski-dim">ride up</span>'
+      : l.qualifies ? '<span class="ski-yes">counted</span>'
+      : `<span class="ski-no">not counted</span><div class="ski-why">${escapeHtml(l.rejectedFor || 'below the gates')}</div>`;
+    return `<tr class="${down ? '' : 'ski-up'}">
+      <td>${i + 1}</td>
+      <td>${down ? 'down' : 'up'}</td>
+      <td>${clock(l.tStart)}</td>
+      <td>${dur(l.durationS)}</td>
+      <td>${U.elev(vert)}</td>
+      <td>${l.meanRateMps == null ? '—' : l.meanRateMps.toFixed(2) + ' m/s'}</td>
+      <td>${motionWord(l.motion)}</td>
+      <td>${verdict}</td>
+    </tr>`;
+  }).join('');
+
+  /* Barometric drift over the session, measured from the BOTTOM of the slope lap to lap -- the one
+     place that is physically the same spot every time. Reported because it is the assumption the
+     whole read rests on and nobody has measured it inside a refrigerated hall. */
+  const driftLine = drift.mPerH == null
+    ? 'Not enough laps to measure how far the barometer drifted.'
+    : `Barometer drifted about <strong>${U.small(Math.abs(drift.mPerH))}/hour</strong> over ${drift.n} lap${drift.n === 1 ? '' : 's'}, measured from the bottom of the slope. A dome is refrigerated and nobody has measured what that does to a phone barometer, so read the vertical figures as good to a few metres rather than to the decimal.`;
+
+  el.innerHTML = `
+    <div class="section-title">Indoor ski <span class="beta-badge">EXPERIMENTAL</span></div>
+    ${leadNote(
+      `<strong>Experimental. These numbers have never been graded against a real ski recording</strong> ` +
+      `&mdash; not one, indoor or outdoor, has ever been analysed by this project. ` +
+      `Under a dome's roof there is no GPS, so the barometer is the only thing that can see a run: ` +
+      `there is <strong>no speed, no distance and no turn radius</strong> here, and a blank means ` +
+      `nobody measured it rather than zero. A descent is a sustained drop, which means ` +
+      `<strong>walking down a stairwell can be counted as a run</strong> &mdash; this detector's own ` +
+      `tests say so. Read the table as what the pressure sensor did, not as what you did &mdash; and if it ` +
+      `disagrees with your own count of the day, that disagreement is the most useful thing on this page.`,
+      `The gates are ${LoamSki.SKI_MIN_DROP_M} m of drop and ${LoamSki.SKI_MIN_MEAN_RATE_MPS} m/s of mean descent rate. ` +
+      `Both were reasoned from published venue geometry rather than measured on skis. The rate gate has ` +
+      `been probed once, on an office stairwell: five storeys run down measured 0.418 m/s and cleared it, ` +
+      `the same five walked down measured 0.305 and did not. That is the only real-world evidence either ` +
+      `gate has, and it says nothing about whether a slow beginner descent looks like walking. What would ` +
+      `settle it is two recordings: one dome session whose lap count you know, and one session of walking ` +
+      `around the same building in boots without skiing.`,
+      'ski-caveat', 'What the gates are, and what has actually been measured')}
+    <div class="stiles">${tiles}</div>
+    <div class="ski-note">${driftLine}</div>
+    <table class="ski-legs">
+      <thead><tr><th>#</th><th>Dir</th><th>At</th><th>Time</th><th>Vertical</th><th>Rate</th><th>Motion</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="ski-note ski-dim">Barometer covers ${dur(cov.baroS)} of this recording; motion ${dur(cov.gyroS)}.</div>
+  `;
+}
 function renderSwim(D) {
   _lastRender = { fn: renderSwim, D };
   /* A swim is read off the wrist with the phone flat on a pool deck, so there is no body frame to
@@ -31091,24 +32017,22 @@ function errorGuidance(msg, sport) {
      calibrate lean and turns"), so say that instead of inventing a per-sport place noun. */
   if (/calibration window/i.test(m)) return `${lex.activity} analysis needs a brief still moment to find the body frame. Hold still for ~20s after you start recording next time, or `
     + (inApp ? 're-run this as Running below.' : 'analyze this as Running.');
-  /* INDOOR SKIING. Reported 2026-09-10 from a real dome session (SNO, Lorenskog, 24m 59s) on the VIP
-     build: the refusal above is right, and the catch-all below rendered under it read "That recording
-     could not be analyzed. Change the activity ... or re-record with Location and Motion enabled."
-     All three clauses are wrong here, and the last one is expensive. The recording analyzed fine as
-     far as it went; Location WAS on and there is no fix under a roof, so re-recording produces the
-     identical file after another trip to a dome; and "change the activity" is the exact trap the
-     message above was written to dodge -- it IS a ski session and there is nothing to change it to.
-     What the skier actually needs to know is that the file is good and worth keeping, because a
-     session with a known lap count is the first of the two recordings that would lift the refusal
-     (ski-tracker-spec.md 13.6) and the natural thing to do with a session showing an error is delete it. */
-  if (/indoor ski session/i.test(m)) return 'Nothing is wrong with this recording, and re-recording will not change it: Location was on, there is simply no GPS fix under a roof. Worth keeping \u2014 an indoor session whose lap count you know is exactly what that detector is waiting for.';
   /* SELF-CONTAINED failures: the message already carries BOTH the diagnosis and the remedy, so the
      catch-all is not "something to do" but a second and contradictory instruction. The swim one told
      a swimmer whose phone sat on the deck to "re-record with Location and Motion enabled" -- both
      were on, and neither is what a swim is read from -- and the lift one stapled a different
      instruction underneath the one its own message had just given. showError renders no guidance row
-     for '', so the message is left to stand on its own rather than being argued with. */
-  if (/read entirely from the wrist|too little phone orientation/i.test(m)) return '';
+     for '', so the message is left to stand on its own rather than being argued with.
+
+     THE TWO INDOOR-SKI MESSAGES JOINED THIS SET ON 2026-09-12 and the reason is that their situation
+     changed underneath them. A declared indoor session used to be REFUSED on the grounds that the
+     detector was ungraded, and its guidance told the skier the file was still worth keeping. The
+     session now RENDERS (see the isSki branch in analyze), so the only refusals left are the two
+     where there is genuinely nothing to read -- no barometer at all, or no structure in it -- and
+     both already name their own cause and remedy. The old "nothing is wrong with this recording"
+     line would now be actively false on the first of them: something IS wrong, the barometer was
+     off. */
+  if (/read entirely from the wrist|too little phone orientation|indoor ski session/i.test(m)) return '';
   if (/moving window/i.test(m)) return 'No moving window was found in the GPS. The recording may be too short, or Location was off during capture.';
   if (/run window|accel samples/i.test(m)) return 'The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or ' + pick + '.';
   if (/accel or GPS|Missing accel/i.test(m)) return 'No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.';
@@ -32421,7 +33345,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'b4f232faa · 2026-09-12';
+const LOAM_BUILD = '1ecaeee1e · 2026-09-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
