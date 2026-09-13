@@ -24,7 +24,22 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js" integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs" crossorigin="anonymous"></script>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7" crossorigin="anonymous"></script>
+<!-- plotly-BASIC (1.02 MB), not the full bundle (4.35 MB). Every chart here is a scatter (39) or a
+     bar (1), and the whole API surface used is newPlot / relayout / toImage / downloadImage /
+     purge / Icons, all of which basic carries -- as do the layout shapes (rect, line) and axis
+     types (date, log) this page also sets.
+     It is worth caring about because the app builds a FRESH WKWebView for every open of every
+     session (AnalyzerWebView.makeUIView, no process-pool reuse), so whichever bundle is named here
+     is re-read through AnalyzerSchemeHandler and re-parsed EVERY TIME -- a per-open CPU cost, not a
+     one-off download. Measured in WebKit/JavaScriptCore, the engine WKWebView uses, loaded off disk
+     the way the app loads it, median of 9 on an M-series Mac (e2e/bench-plotly.mjs): reading,
+     parsing, compiling and executing the blocking script costs 190 ms with the full bundle against
+     54 ms with basic -- ~136 ms per open, on a page whose whole load without any Plotly is only
+     about 146 ms. A phone is slower and has NOT been measured. Do NOT quote the Chromium/V8 figures
+     as the app's; V8 reads the same swap as 337 -> 18 ms and is not the engine that ships.
+     A trace type outside scatter/bar/pie needs plotly-cartesian (1.30 MB) or the full bundle, and
+     a re-measure. analyzer/plotly-bundle.test.js pins both halves; see CLAUDE.md. -->
+<script src="https://cdn.plot.ly/plotly-basic-2.35.2.min.js" integrity="sha384-wQ3lfCxuvLfhHGiSdHF5+e3NZ1zNwEMd8/nII+K7VKChF9llO/OwOcn/aVRkB7az" crossorigin="anonymous"></script>
 
 <style>
   /* ---- Field Instrument tokens (analyzer-visual-language.md) ----
@@ -396,6 +411,34 @@
   #progressTrails table { width: 100%; font-size: 12px; }
   #progressTrails th { color: var(--text-muted); text-align: left; font-weight: 500; }
   #progressTrails .prog-lead { background: var(--accent); border: none; color: var(--on-accent); border-radius: var(--radius-sm); padding: 3px 10px; font-size: 11px; cursor: pointer; font-family: inherit; }
+  /* Training plan (Progress page). Inputs at 16px, or iOS zooms the page in when one is focused --
+     the rule checkTouchFormZoom pins for every text field. */
+  #progressPlan .stiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px 18px; }
+  .plan-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px 14px; align-items: end; margin-top: 12px; }
+  .plan-form label { display: flex; flex-direction: column; gap: 4px; font: 10px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); }
+  .plan-form input { font-size: 16px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-family: inherit; min-width: 0; }
+  .plan-form select { font-size: 16px; }
+  .plan-form .plan-actions { grid-column: 1 / -1; }
+  .plan-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .plan-btn { background: var(--accent); border: none; color: var(--on-accent); border-radius: var(--radius-sm); padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .plan-btn.secondary { background: var(--surface); color: var(--accent); border: 1px solid var(--border); }
+  .plan-err { color: var(--clay); font-size: 13px; }
+  .plan-goal { margin-top: 14px; font-size: 14px; line-height: 1.5; }
+  .plan-goal-l { font: 10px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); margin-right: 8px; }
+  .plan-verdict { font-size: 15px; line-height: 1.55; margin: 16px 0 6px; }
+  .plan-badge { display: inline-block; font: 11px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; padding: 2px 9px; border-radius: 999px; margin-right: 8px; vertical-align: middle; }
+  .plan-badge.ok { background: var(--moss); color: #fff; }
+  .plan-badge.short { background: var(--clay); color: #fff; }
+  .plan-badge.dim { background: var(--surface-2); color: var(--text-muted); }
+  .plan-weeks { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .plan-weeks th, .plan-weeks td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .plan-weeks th { color: var(--text-muted); font-weight: 500; }
+  .plan-weeks tr.plan-recovery td, .plan-weeks tr.plan-taper td { opacity: 0.68; }
+  .plan-weeks tr.plan-event td { font-weight: 600; }
+  .plan-note { font-size: 12px; margin-top: 10px; line-height: 1.5; color: var(--text-dim); }
+  /* In the app the Progress page is presented under a native Done button, and its Back would land
+     on the dropzone the embedded page hides. */
+  body.embedded #progressResults .page-back-bar { display: none; }
   #libraryModal, #whatsNewModal { position: fixed; inset: 0; background: rgba(10,12,15,0.85); z-index: 4000;
                   display: flex; align-items: center; justify-content: center; }
   #libraryModal.hidden, #whatsNewModal.hidden { display: none; }
@@ -1817,6 +1860,9 @@
   .hrz-z4 { background: var(--accent); }
   .hrz-z5 { background: var(--critical); }
   .hrz-thin { font: 11px/1.6 'JetBrains Mono', monospace; color: var(--text-muted, #7a808c); margin: -8px 0 14px; }
+  /* The caveat under an ESTIMATED or DEFAULT max carries a warm rule so it cannot be read as part of
+     the caption above it: the caption says what the max is, this says how far to trust it. */
+  .hrz-caveat { border-left: 2px solid var(--amber); padding-left: 10px; margin-left: 6px; }
   .hrz-set { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 4px; }
   .hrz-set label { font: 10px 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: .1em; color: var(--text-muted, #7a808c); }
   /* 16px is the floor iOS zooms the page in below, which is what put the segment modal's Save
@@ -2820,6 +2866,12 @@
 
 <div id="progressResults" class="hidden">
   <div class="page-back-bar"><button type="button" class="prog-back" onclick="closeProgress()">&larr; Back</button></div>
+  <!-- The training plan leads the page: it is the one section here that asks the athlete for
+       something (a goal) and answers with the weeks ahead; the trends below describe the past. -->
+  <section id="progressPlanSection">
+    <div class="section-title" id="progressPlanTitle"></div>
+    <div class="panel" id="progressPlan" style="padding:20px;"></div>
+  </section>
   <section>
     <div class="section-title">Your progress<span class="subtitle" id="progressSubtitle"></span></div>
     <div class="panel" id="progressHeadline" style="padding:20px;"></div>
@@ -16501,7 +16553,8 @@ const LoamSki = (function () {
         edges: e.length,
         medianPeriodS: +median([...periods].sort((a, b) => a - b)).toFixed(2),
         alternationFrac: +(alt / (e.length - 1)).toFixed(3),
-        edgesPerMin: span > 0 ? +(e.length / (span / 60)).toFixed(1) : null,
+        /* N edges bracket N-1 intervals; dividing N by their span read a four-edge run a third fast. */
+        edgesPerMin: span > 0 ? +((e.length - 1) / (span / 60)).toFixed(1) : null,
       };
     }
 
@@ -16727,8 +16780,9 @@ const LoamSki = (function () {
 
     /**
      * Steps CMPedometer counted inside a window. The channel is CUMULATIVE and sparse (one update every
-     * ~2.6 s), so it is differenced between the last update before the window and the last one inside
-     * it; fewer than two updates in the window is null, never 0.
+     * ~2.6 s), so it is differenced between the FIRST and the last update inside the window -- the steps
+     * between the window's start and its first update (up to one update interval) are not counted, so
+     * this is a slight UNDER-count; fewer than two updates in the window is null, never 0.
      */
     function skiStepsBetween(pedometer, tStart, tEnd) {
       const rows = (pedometer || []).filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.steps))
@@ -17037,6 +17091,822 @@ const LoamSki = (function () {
   return { analyzeSkiDome, ...SkiLapCycles, ...SkiAgitation, ...SkiTurnRhythm, ...SkiEdgeLoad, ...SkiSessionReads };
 })();
 
+/* ===== Training plan: history, scaffold and coach ==================================
+ *
+ * Ported verbatim from analyzer/core/training/, pinned by analyzer/core/training/drift.test.js
+ * (every top-level function of the three modules, exported or not, compared against this block, and
+ * the PLAN_* constants by the derived-constants guard). The rationale for every rule lives in the
+ * module headers; the page's own rendering is in renderTrainingPlan, further down.
+ *
+ * One scope on purpose, unlike LoamSki: the three modules share the plan* prefix and declare no
+ * duplicate names, so a flat block keeps every body byte-identical to its module with nothing to
+ * collide. `digestUnits` resolves to the page's own copy at call time, exactly as the module
+ * imports it from core/coaching.
+ */
+const LoamTraining = (function () {
+  /* ---- ported from analyzer/core/training/history.js ---- */
+  /*
+   * Training history: the athlete's own recorded sessions, bucketed into local calendar weeks.
+   *
+   * WHAT THIS IS FOR. A training plan is written against where the athlete IS, and the only honest
+   * statement of that is what they actually did: the ride library, the lift history and the swim
+   * history are the three stores Loam keeps across sessions, and every session in them was either
+   * recorded on this phone or imported into it. Nothing here is estimated. A week's hours are the sum
+   * of the moving time each session already stored, a week's distance the sum of each session's
+   * distance, and the longest session is the one with the most moving time. The plan module reads the
+   * summary this produces and never the stores themselves.
+   *
+   * WHAT IT DELIBERATELY DOES NOT DO. No training-stress score, no fitness/fatigue model and no
+   * heart-rate weighting: TSS exists only on road rides with a power meter (`summary.tss`, and the
+   * Progress page already draws a CTL/ATL/TSB chart from it), and a load number that is exact for one
+   * sport and invented for the others would put a false precision on the whole week. Hours are the one
+   * quantity every timed session carries, so hours are the unit. Strava activities are NOT read: the
+   * coach may not receive Strava data under the 2026 API policy (see strava-developer-review.md), and
+   * a history the coach cannot be shown is not a history the plan can be built on.
+   *
+   * WEEKS START ON MONDAY, in the athlete's LOCAL calendar, matching `pmcDayKey` on the fitness chart:
+   * an evening ride west of UTC must land on the day it was ridden, and a plan is read against a
+   * calendar, not against UTC. The current week is carried as a PARTIAL bucket and excluded from every
+   * average, the same rule the readiness engine applies to today (a week that is two days old would
+   * otherwise read as a collapse in volume).
+   *
+   * THREE STORES, THREE SHAPES. A library ride carries `recordedAt` (ISO), `duration` (moving seconds),
+   * `summary.distance` and `summary.altGain`. A lift-history record carries `start` in epoch SECONDS
+   * and no duration at all (see analyzer/sports/strength/history.js: the record is per-lift volume, not
+   * a session clock), so a lift is COUNTED as a session and never timed, and the digest says so. A
+   * swim-history record carries `start`, `durationS` and `totalDistanceM`. `planEpochMs` accepts an
+   * ISO string, epoch seconds or epoch milliseconds, because the three stores never agreed and this is
+   * the one place that has to read all three.
+   */
+
+  /* Complete weeks of history summarized. Twelve, because the recent/prior comparison below needs two
+     four-week windows with something before them, and a plan is written against a season, not a
+     month. */
+  const PLAN_HISTORY_WEEKS = 12;
+  /* The "where you are now" window: the mean over the last four COMPLETE weeks. Four rather than one,
+     because one week is a single sample of a weekly cycle that routinely contains a recovery week. */
+  const PLAN_RECENT_WEEKS = 4;
+  /* The window for the longest session and for "has this athlete been training at all": eight
+     complete weeks plus the current partial one. A long session two months ago still says what the
+     athlete can do; one from last winter does not. */
+  const PLAN_LONGEST_WEEKS = 8;
+
+  /* Local calendar day key, yyyy-mm-dd. Same arithmetic as the fitness chart's pmcDayKey; kept private
+     here rather than imported from a sport module, because core must not depend on sports. */
+  function planDayKey(d) {
+    const dt = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(dt)) return null;
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  }
+
+  /* Local Monday 00:00 of the week containing `d`. */
+  function planWeekStart(d) {
+    const dt = (d instanceof Date) ? new Date(d.getTime()) : new Date(d);
+    if (isNaN(dt)) return null;
+    dt.setHours(0, 0, 0, 0);
+    const dow = (dt.getDay() + 6) % 7;   // Monday = 0 ... Sunday = 6
+    dt.setDate(dt.getDate() - dow);
+    return dt;
+  }
+
+  /* The week key (its Monday's day key) for any date. */
+  function planWeekKey(d) {
+    const s = planWeekStart(d);
+    return s ? planDayKey(s) : null;
+  }
+
+  function planAddDays(d, n) {
+    const x = new Date(d.getTime());
+    x.setDate(x.getDate() + n);
+    return x;
+  }
+
+  /* A finite, non-negative number, else null. Every store writes null or omits a field it could not
+     measure, and a negative here would be a bug upstream rather than a value. */
+  function planNum(v) {
+    const n = Number(v);
+    return (v == null || !Number.isFinite(n) || n < 0) ? null : n;
+  }
+
+  /* One instant, in epoch milliseconds, from whichever spelling a store used: an ISO string, epoch
+     seconds (the lift and swim histories) or epoch milliseconds. The seconds/milliseconds split is at
+     1e11, which is 1973 in milliseconds and the year 5138 in seconds, so no real timestamp sits on the
+     wrong side of it. */
+  function planEpochMs(t) {
+    if (t == null || t === '') return null;
+    if (typeof t === 'string' && !/^\s*-?\d+(\.\d+)?\s*$/.test(t)) {
+      const p = Date.parse(t);
+      return Number.isFinite(p) ? p : null;
+    }
+    const n = Number(t);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n < 1e11 ? n * 1000 : n;
+  }
+
+  /* The family a sport id belongs to, which is what a goal is written against: a road ride and an MTB
+     ride both build the legs a century needs, and a walk and a run both carry a hiker. Unknown ids
+     land in 'other' rather than being dropped, so their hours still count toward the week. */
+  function planSportFamily(sport) {
+    const s = String(sport || '').toLowerCase();
+    if (s === 'mtb' || s === 'emtb' || s === 'road' || s === 'ride' || s === 'gravel' || s === 'cycling') return 'bike';
+    if (s === 'running' || s === 'run' || s === 'walking' || s === 'walk' || s === 'hiking' || s === 'hike') return 'foot';
+    if (s === 'skiing' || s === 'ski') return 'ski';
+    if (s === 'swimming' || s === 'swim') return 'swim';
+    if (s === 'weightlifting' || s === 'strength' || s === 'lift') return 'lift';
+    if (s === 'golf') return 'golf';
+    return 'other';
+  }
+
+  /*
+   * The three stores, normalized into one flat list of sessions, oldest first.
+   *
+   *   { date (epoch ms), day, sport, family, durationS, distanceM, climbM, source }
+   *
+   * A library row with neither a duration nor a distance is skipped: that is the multi-file cross-ride
+   * row (`sport: 'unknown', summary: null`), which is a comparison, not a session. A row that cannot
+   * be dated is skipped too, since a week is the only thing this list is for.
+   */
+  function planSessions({ rides, lifts, swims } = {}) {
+    const out = [];
+    for (const r of (rides || [])) {
+      if (!r) continue;
+      const ms = planEpochMs(r.recordedAt || r.savedAt);
+      if (ms == null) continue;
+      const s = r.summary || {};
+      const durationS = planNum(r.duration);
+      const distanceM = planNum(s.distance);
+      const climbM = planNum(s.altGain);
+      if (durationS == null && distanceM == null) continue;
+      const sport = String(r.sport || 'unknown');
+      out.push({ date: ms, day: planDayKey(ms), sport, family: planSportFamily(sport),
+                 durationS, distanceM, climbM, source: 'ride' });
+    }
+    for (const l of (lifts || [])) {
+      if (!l) continue;
+      const ms = planEpochMs(l.start);
+      if (ms == null) continue;
+      out.push({ date: ms, day: planDayKey(ms), sport: 'weightlifting', family: 'lift',
+                 durationS: null, distanceM: null, climbM: null, source: 'lift' });
+    }
+    for (const w of (swims || [])) {
+      if (!w) continue;
+      const ms = planEpochMs(w.start);
+      if (ms == null) continue;
+      out.push({ date: ms, day: planDayKey(ms), sport: 'swimming', family: 'swim',
+                 durationS: planNum(w.durationS), distanceM: planNum(w.totalDistanceM), climbM: null, source: 'swim' });
+    }
+    out.sort((a, b) => a.date - b.date);
+    return out;
+  }
+
+  /*
+   * Sessions bucketed into weeks: `weeks` complete weeks ending last Monday, plus the current week
+   * flagged `partial`, oldest first. Every total is a plain sum of what the sessions carried; a lift
+   * adds one to `sessions` and nothing to `timedSessions` or `durationS`.
+   */
+  function planWeeks(sessions, opts = {}) {
+    const n = opts.weeks == null ? PLAN_HISTORY_WEEKS : Math.max(0, Math.floor(opts.weeks));
+    const now = (opts.now instanceof Date) ? opts.now : new Date(opts.now == null ? Date.now() : opts.now);
+    const monday = planWeekStart(now);
+    const buckets = [];
+    for (let i = n; i >= 0; i--) {
+      const start = planAddDays(monday, -7 * i);
+      buckets.push({ weekStart: planDayKey(start), startMs: start.getTime(), endMs: planAddDays(start, 7).getTime(),
+                     partial: i === 0, sessions: 0, timedSessions: 0, durationS: 0, distanceM: 0, climbM: 0, bySport: {} });
+    }
+    for (const s of (sessions || [])) {
+      if (!s || !Number.isFinite(s.date)) continue;
+      const b = buckets.find(w => s.date >= w.startMs && s.date < w.endMs);
+      if (!b) continue;
+      const f = s.family || 'other';
+      const bs = b.bySport[f] || (b.bySport[f] = { sessions: 0, durationS: 0, distanceM: 0, climbM: 0 });
+      b.sessions++; bs.sessions++;
+      if (s.durationS != null) { b.timedSessions++; b.durationS += s.durationS; bs.durationS += s.durationS; }
+      if (s.distanceM != null) { b.distanceM += s.distanceM; bs.distanceM += s.distanceM; }
+      if (s.climbM != null) { b.climbM += s.climbM; bs.climbM += s.climbM; }
+    }
+    return buckets.map(({ startMs, endMs, ...w }) => ({
+      ...w,
+      durationS: Math.round(w.durationS),
+      distanceM: Math.round(w.distanceM),
+      climbM: Math.round(w.climbM),
+    }));
+  }
+
+  /* Mean per week over a list of complete weeks; null when there are none to average. */
+  function planWeekMeans(ws) {
+    const n = ws.length;
+    if (!n) return null;
+    const sum = (f) => ws.reduce((s, w) => s + (w[f] || 0), 0);
+    return {
+      weeks: n,
+      sessionsPerWeek: +(sum('sessions') / n).toFixed(2),
+      /* The sessions that carry a duration, which is what hoursPerWeek is summed over. */
+      timedSessionsPerWeek: +(sum('timedSessions') / n).toFixed(2),
+      hoursPerWeek: +(sum('durationS') / 3600 / n).toFixed(2),
+      distanceMPerWeek: Math.round(sum('distanceM') / n),
+      climbMPerWeek: Math.round(sum('climbM') / n),
+    };
+  }
+
+  /* The session with the largest value of `field`, as a compact record; null when nothing carried it. */
+  function planLongestBy(sessions, field) {
+    let best = null;
+    for (const s of sessions) {
+      if (s[field] == null) continue;
+      if (!best || s[field] > best[field]) best = s;
+    }
+    if (!best) return null;
+    return { durationS: best.durationS, distanceM: best.distanceM, climbM: best.climbM,
+             day: best.day, sport: best.sport, family: best.family };
+  }
+
+  /*
+   * The summary the plan is built from.
+   *
+   *   recent / prior    means over the last 4 complete weeks, and the 4 before those
+   *   trendPct          recent hours against prior hours, null when there is no prior volume
+   *   activeWeeks       complete weeks with at least one session, over the whole window
+   *   activeRecentWeeks the same over the last PLAN_LONGEST_WEEKS complete weeks (the plan's gate)
+   *   longest*          over the last PLAN_LONGEST_WEEKS complete weeks PLUS the partial week (a big
+   *                     session yesterday is exactly the evidence a plan wants)
+   *   bySport           per family over the whole window, with the mean speed over sessions that
+   *                     carried both a distance and a duration, and that family's own longest session
+   */
+  function planHistory(weeks, sessions, opts = {}) {
+    const all = weeks || [];
+    const complete = all.filter(w => !w.partial);
+    const now = (opts.now instanceof Date) ? opts.now : new Date(opts.now == null ? Date.now() : opts.now);
+    const recent = planWeekMeans(complete.slice(-PLAN_RECENT_WEEKS));
+    const prior = planWeekMeans(complete.slice(-2 * PLAN_RECENT_WEEKS, -PLAN_RECENT_WEEKS));
+    const trendPct = (recent && prior && prior.hoursPerWeek > 0)
+      ? Math.round((recent.hoursPerWeek / prior.hoursPerWeek - 1) * 100) : null;
+    const activeWeeks = complete.filter(w => w.sessions > 0).length;
+    const activeRecentWeeks = complete.slice(-PLAN_LONGEST_WEEKS).filter(w => w.sessions > 0).length;
+
+    const windowWeeks = all.slice(-(PLAN_LONGEST_WEEKS + 1));
+    const windowStartMs = windowWeeks.length ? new Date(windowWeeks[0].weekStart + 'T00:00:00').getTime() : Infinity;
+    const inWindow = (sessions || []).filter(s => s && Number.isFinite(s.date) && s.date >= windowStartMs && s.date <= now.getTime());
+
+    const bySport = {};
+    const allStartMs = all.length ? new Date(all[0].weekStart + 'T00:00:00').getTime() : Infinity;
+    for (const s of (sessions || [])) {
+      if (!s || !Number.isFinite(s.date) || s.date < allStartMs || s.date > now.getTime()) continue;
+      const f = s.family || 'other';
+      const b = bySport[f] || (bySport[f] = { sessions: 0, durationS: 0, distanceM: 0, climbM: 0, pairedDistanceM: 0, pairedDurationS: 0 });
+      b.sessions++;
+      if (s.durationS != null) b.durationS += s.durationS;
+      if (s.distanceM != null) b.distanceM += s.distanceM;
+      if (s.climbM != null) b.climbM += s.climbM;
+      if (s.durationS > 0 && s.distanceM != null) { b.pairedDistanceM += s.distanceM; b.pairedDurationS += s.durationS; }
+    }
+    for (const f of Object.keys(bySport)) {
+      const b = bySport[f];
+      const fam = inWindow.filter(s => (s.family || 'other') === f);
+      bySport[f] = {
+        sessions: b.sessions,
+        durationS: Math.round(b.durationS),
+        distanceM: Math.round(b.distanceM),
+        climbM: Math.round(b.climbM),
+        speedMps: b.pairedDurationS > 0 ? +(b.pairedDistanceM / b.pairedDurationS).toFixed(3) : null,
+        longest: planLongestBy(fam, 'durationS'),
+        longestDistance: planLongestBy(fam, 'distanceM'),
+        longestClimb: planLongestBy(fam, 'climbM'),
+      };
+    }
+
+    return {
+      asOf: planDayKey(now),
+      weeksCounted: complete.length,
+      activeWeeks,
+      activeRecentWeeks,
+      recent,
+      prior,
+      trendPct,
+      longest: planLongestBy(inWindow, 'durationS'),
+      longestDistance: planLongestBy(inWindow, 'distanceM'),
+      longestClimb: planLongestBy(inWindow, 'climbM'),
+      bySport,
+    };
+  }
+
+  /* ---- ported from analyzer/core/training/plan.js ---- */
+  /*
+   * The training-plan scaffold: a goal, set against the athlete's own history, turned into a
+   * week-by-week progression the AI coach then writes sessions into.
+   *
+   * WHAT THIS IS AND IS NOT. The plan module is arithmetic over two inputs: the summary
+   * `planHistory` builds from what the athlete actually recorded, and a goal they typed. It answers
+   * one question deterministically -- "from where you are, at a safe rate of increase, is this goal
+   * reachable by its date, and what does each week look like on the way?" -- and hands the answer to
+   * the coach as a scaffold of weekly CEILINGS. It is not a physiological model. There is no TSS, no
+   * fitness/fatigue curve, no VO2 estimate and no race-time prediction here; the event's duration is
+   * scaled from the athlete's own recent average speed for that sport, which is a rough scale, not a
+   * forecast, and the digest says so. triathlon-spec.md records the decision not to compete with
+   * TrainingPeaks on training load, and this does not: it competes on being built from the athlete's
+   * own recordings, with every rule visible.
+   *
+   * EVERY CONSTANT HERE IS A COACHING CONVENTION, NOT A MEASUREMENT, and that is the opposite of how
+   * most numbers in this repo were arrived at. `PLAN_RAMP_MAX_PCT` = 10 is the widely taught
+   * "no more than about ten percent per week"; the recovery week every fourth week, the two-week
+   * taper, the long session at ~80% of the event and the long session at no more than half the week
+   * are all textbook periodization. None of them has been validated on any Loam athlete, none is a
+   * property of physiology, and the literature behind the 10% figure in particular is mixed. They are
+   * shipped because a plan needs a rate and these are the conservative, conventional ones; they are
+   * named on screen so the athlete can see what the plan rests on. What would earn any of them a
+   * number of its own is a season of an athlete's plans set against the sessions they then recorded.
+   *
+   * THE RAMP IS A CEILING, NOT A PRESCRIPTION. A build week is at most 10% above the last build week;
+   * a recovery week is 70% of the last build week and does not advance the ramp; the event's taper is
+   * 75% then 50% of the peak. The long session grows at the same rate, and in the hours-based scaffold
+   * it never exceeds half the week -- but it also never SHRINKS below what the athlete has already
+   * done: a rider whose one weekly ride is three hours is not told to cut it in half so the arithmetic
+   * balances. The weekly target for an event is derived from the long-session target through that
+   * same share, so the two ramps arrive together.
+   *
+   * VERDICTS ARE HONEST ABOUT WHAT THE RAMP CANNOT DO. `weeksNeeded` is how many weeks the safe ramp
+   * takes to reach the target from the start, recovery weeks included; if that is more than the build
+   * weeks available before the taper, the verdict is `short` and the plan ramps as far as the rate
+   * allows and reports where it gets to. It never compresses the ramp to make a date work. A goal
+   * whose date has passed is `past`; an athlete with fewer than two active weeks in the last eight has
+   * `no-history`, because a plan built from one session is a guess wearing a table.
+   *
+   * NOTHING HERE IS ABOUT TECHNIQUE, AND NOTHING MAY BECOME SO. The coach prompt forbids feature-
+   * specific instruction (jumps, drops, a named corner) for the reason the crash and jump entries in
+   * CLAUDE.md give: bad advice there injures someone. A plan is volume, frequency, the long session,
+   * recovery and pacing, and that is the whole of its scope.
+   */
+
+  /* Maximum increase in weekly hours (and in the long session) from one build week to the next, in
+     percent. The conventional figure; see the header. */
+  const PLAN_RAMP_MAX_PCT = 10;
+  /* Every Nth week of the plan is a recovery week. */
+  const PLAN_RECOVERY_EVERY = 4;
+  /* A recovery week's hours as a fraction of the last build week's. */
+  const PLAN_RECOVERY_FRACTION = 0.7;
+  /* Weeks of taper before an event week. */
+  const PLAN_TAPER_WEEKS = 2;
+  /* The two taper weeks' hours as fractions of the peak build week, first then last. */
+  const PLAN_TAPER_FIRST_FRACTION = 0.75;
+  const PLAN_TAPER_LAST_FRACTION = 0.5;
+  /* The longest pre-event session as a fraction of the event itself. */
+  const PLAN_EVENT_LONG_FRACTION = 0.8;
+  /* The long session as a share of the week's hours: the weekly target is the long-session target
+     divided by this, and a growing long session is capped by it. */
+  const PLAN_LONG_MAX_SHARE = 0.5;
+  /* The floor for the long-session start when the athlete has nothing recent to start from, as a
+     fraction of the long-session target: from 30% to 80% of an event at 10% a week is ten build
+     weeks, which is a season rather than a fantasy. */
+  const PLAN_LONG_START_FRACTION = 0.3;
+  /* The most weeks a plan is written for. A goal further out than half a year gets its first
+     26 weeks scaffolded and a note saying so. */
+  const PLAN_MAX_WEEKS = 26;
+  /* Complete weeks with at least one session, in the last PLAN_LONGEST_WEEKS, before a plan is built
+     at all. */
+  const PLAN_MIN_ACTIVE_WEEKS = 2;
+  /* The smallest starting week: a 10% ramp from a few minutes goes nowhere. */
+  const PLAN_MIN_START_HOURS = 1;
+  /* The shortest session used to turn weekly hours into a session count, and the length assumed
+     when the history has no timed sessions to read one from. */
+  const PLAN_MIN_SESSION_HOURS = 0.5;
+  const PLAN_DEFAULT_SESSION_HOURS = 1;
+  const PLAN_MIN_SESSIONS_PER_WEEK = 2;
+  const PLAN_MAX_SESSIONS_PER_WEEK = 6;
+  /* The two goal shapes, and the sport families an event can be set in. */
+  const PLAN_GOAL_TYPES = ['event', 'weekly-hours'];
+  const PLAN_GOAL_SPORTS = ['bike', 'foot', 'ski', 'swim'];
+
+  function planPosNum(v) {
+    const n = Number(v);
+    return (v == null || v === '' || !Number.isFinite(n) || n <= 0) ? null : n;
+  }
+  function planNonNeg(v) {
+    const n = Number(v);
+    return (v == null || v === '' || !Number.isFinite(n) || n < 0) ? null : n;
+  }
+  function planRound2(x) {
+    return (x == null || !Number.isFinite(x)) ? null : +x.toFixed(2);
+  }
+  function planRoundM(x) {
+    return (x == null || !Number.isFinite(x)) ? null : Math.round(x);
+  }
+
+  /*
+   * A goal as typed, validated into the one shape the plan reads, or the field that failed.
+   *
+   *   { type: 'event', date, label, sport, distanceM, climbM|null }
+   *   { type: 'weekly-hours', date, label, sport|null, hoursPerWeek }
+   *
+   * The date is a local calendar day (yyyy-mm-dd). The sport is a FAMILY (see planSportFamily), which
+   * is what a goal is honestly written against: a century is trained for on any bike.
+   */
+  function normalizeGoal(raw) {
+    const g = (raw && typeof raw === 'object') ? raw : {};
+    const type = String(g.type || '');
+    if (!PLAN_GOAL_TYPES.includes(type)) return { ok: false, error: 'type' };
+    const date = String(g.date || '');
+    /* A date that parses is not a date that exists: V8 rolls 2026-02-31 over to March 3, so the key must
+       survive the round trip. */
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(date + 'T00:00:00'))
+        || planDayKey(new Date(date + 'T00:00:00')) !== date) return { ok: false, error: 'date' };
+    const label = g.label == null ? '' : String(g.label).trim().slice(0, 80);
+    const sport = PLAN_GOAL_SPORTS.includes(String(g.sport)) ? String(g.sport) : null;
+    if (type === 'event') {
+      if (!sport) return { ok: false, error: 'sport' };
+      const distanceM = planPosNum(g.distanceM);
+      if (distanceM == null) return { ok: false, error: 'distance' };
+      return { ok: true, goal: { type, date, label, sport, distanceM, climbM: planNonNeg(g.climbM) } };
+    }
+    const hoursPerWeek = planPosNum(g.hoursPerWeek);
+    if (hoursPerWeek == null) return { ok: false, error: 'hours' };
+    return { ok: true, goal: { type, date, label, sport, hoursPerWeek } };
+  }
+
+  /* Whole weeks from the week containing `todayDay` to the week containing `goalDay`: 0 means the goal
+     is this week, negative means it has passed. Both are local day keys. */
+  function planWeeksToGo(goalDay, todayDay) {
+    const g = planWeekStart(new Date(String(goalDay) + 'T00:00:00'));
+    const t = planWeekStart(new Date(String(todayDay) + 'T00:00:00'));
+    if (!g || !t) return null;
+    return Math.round((g.getTime() - t.getTime()) / (7 * 86400e3));
+  }
+
+  function planClampSessions(n) {
+    if (n == null || !Number.isFinite(n)) return null;
+    return Math.min(PLAN_MAX_SESSIONS_PER_WEEK, Math.max(PLAN_MIN_SESSIONS_PER_WEEK, Math.round(n)));
+  }
+
+  /*
+   * The scaffold.
+   *
+   *   goal, today, weeksToGo, verdict          'past' | 'no-history' | 'on-track' | 'reachable' | 'short'
+   *   start   { hoursPerWeek, sessionsPerWeek, sessionHours, longH, longM, longClimbM }
+   *   target  { hoursPerWeek, longUnit, longH, longM, eventH, speedMps, climbM }
+   *   weeksNeeded, buildWeeksAvailable, reached { hoursPerWeek, longH, longM }
+   *   weeks   [{ n, weekStart, kind, hours, sessions, longH, longM }]   kind: build | hold | recovery | taper | event
+   *   truncated                                 true when the goal is further out than PLAN_MAX_WEEKS
+   *
+   * The long session is ramped in HOURS when the athlete's history gives a speed for the goal's sport
+   * (then the distance is derived from it), and in METRES when it does not (then hours hold, since
+   * nothing links the two). `longUnit` says which.
+   */
+  function buildPlan(goal, summary, opts = {}) {
+    const today = (opts.today instanceof Date) ? opts.today : new Date(opts.today == null ? Date.now() : opts.today);
+    const todayKey = planDayKey(today);
+    const weeksToGo = (goal && goal.date) ? planWeeksToGo(goal.date, todayKey) : null;
+    const base = { goal: goal || null, today: todayKey, weeksToGo, verdict: null, start: null, target: null,
+                   weeksNeeded: null, buildWeeksAvailable: null, reached: null, weeks: [], truncated: false };
+    if (!goal || weeksToGo == null) return { ...base, verdict: 'invalid' };
+    /* weeksToGo counts WEEKS, so a goal on Monday of this week reads 0 on Sunday -- the same as one on
+       Sunday -- and was planned for. The day key decides past; both are yyyy-mm-dd. */
+    if (weeksToGo < 0 || String(goal.date) < todayKey) return { ...base, verdict: 'past' };
+    const recent = summary && summary.recent;
+    if (!summary || !recent || !(summary.activeRecentWeeks >= PLAN_MIN_ACTIVE_WEEKS)) return { ...base, verdict: 'no-history' };
+
+    const isEvent = goal.type === 'event';
+    const ramp = 1 + PLAN_RAMP_MAX_PCT / 100;
+    const eps = 1e-9;
+    const startH = Math.max(PLAN_MIN_START_HOURS, recent.hoursPerWeek || 0);
+    /* Hours per TIMED session: an untimed lift adds a session and no hours, so dividing by every session
+       halved a rider's session length the weeks they also lifted. Older summaries lack the field. */
+    const timedPerWeek = recent.timedSessionsPerWeek != null ? recent.timedSessionsPerWeek : recent.sessionsPerWeek;
+    const sessionH = (timedPerWeek > 0 && recent.hoursPerWeek > 0)
+      ? Math.max(PLAN_MIN_SESSION_HOURS, recent.hoursPerWeek / timedPerWeek)
+      : PLAN_DEFAULT_SESSION_HOURS;
+    const fam = (summary.bySport && goal.sport) ? summary.bySport[goal.sport] : null;
+    const famLongest = fam && fam.longest ? fam.longest : null;
+    const famLongestDist = fam && fam.longestDistance ? fam.longestDistance : null;
+    const famLongestClimb = fam && fam.longestClimb ? fam.longestClimb : null;
+
+    let targetH, longUnit = 'h', longTarget = null, longStart = null, eventH = null, speedMps = null;
+    if (isEvent) {
+      speedMps = (fam && fam.speedMps > 0) ? fam.speedMps : null;
+      if (speedMps) {
+        eventH = goal.distanceM / speedMps / 3600;
+        longTarget = eventH * PLAN_EVENT_LONG_FRACTION;
+        const doneH = (famLongest && famLongest.durationS) ? famLongest.durationS / 3600 : 0;
+        /* The floor is itself capped at half the STARTING week: a first plan from a one-hour week must
+           not open with a long ride longer than the week. What the athlete has already done is never
+           cut, whichever side of that cap it sits. */
+        longStart = Math.max(doneH, Math.min(longTarget * PLAN_LONG_START_FRACTION, startH * PLAN_LONG_MAX_SHARE));
+        targetH = Math.max(startH, longTarget / PLAN_LONG_MAX_SHARE);
+      } else {
+        longUnit = 'm';
+        longTarget = goal.distanceM * PLAN_EVENT_LONG_FRACTION;
+        const doneM = (famLongestDist && famLongestDist.distanceM) ? famLongestDist.distanceM : 0;
+        longStart = Math.max(doneM, longTarget * PLAN_LONG_START_FRACTION);
+        targetH = startH;
+      }
+    } else {
+      /* The RAMP never runs below what the athlete already does: a goal under the current week is
+         on-track and its copy says HOLD, so a table stepping straight down to the goal (8 h a week
+         to 5, a 37% cut labelled "hold") contradicted it. The target is still REPORTED as typed. */
+      targetH = Math.max(startH, goal.hoursPerWeek);
+    }
+
+    /* One build step: hours up by at most the ramp, to the target; the long session likewise, never
+       shrinking, and in the hours scaffold never past half the week. */
+    const step = (h, l) => {
+      const nh = Math.min(targetH, h * ramp);
+      let nl = l;
+      if (longTarget != null) {
+        const grown = Math.min(longTarget, l * ramp);
+        nl = Math.min(longTarget, Math.max(l, longUnit === 'h' ? Math.min(grown, nh * PLAN_LONG_MAX_SHARE) : grown));
+      }
+      return [nh, nl];
+    };
+    const reachedAt = (h, l) => h >= targetH - eps && (longTarget == null || l >= longTarget - eps);
+
+    /* How many weeks the safe ramp needs, recovery weeks included, on an unbounded horizon. */
+    let weeksNeeded = reachedAt(startH, longStart) ? 0 : null;
+    {
+      let h = startH, l = longStart;
+      for (let i = 0; weeksNeeded == null && i < 4 * PLAN_MAX_WEEKS; i++) {
+        if ((i + 1) % PLAN_RECOVERY_EVERY === 0) continue;
+        [h, l] = step(h, l);
+        if (reachedAt(h, l)) weeksNeeded = i + 1;
+      }
+    }
+
+    const taper = isEvent ? Math.min(PLAN_TAPER_WEEKS, weeksToGo) : 0;
+    const buildWeeksAvailable = weeksToGo - taper;
+    const monday = planWeekStart(today);
+    const lastIndex = Math.min(weeksToGo, PLAN_MAX_WEEKS - 1);
+    const weeks = [];
+    let lastBuildH = startH, lastBuildL = longStart, peakH = startH, peakL = longStart;
+    for (let i = 0; i <= lastIndex; i++) {
+      const weekStart = planDayKey(planAddDays(monday, 7 * i));
+      let kind, hours, long;
+      if (isEvent && i === weeksToGo) {
+        kind = 'event';
+        hours = eventH;
+        long = longUnit === 'h' ? eventH : goal.distanceM;
+      } else if (isEvent && i >= buildWeeksAvailable) {
+        kind = 'taper';
+        const f = (i === weeksToGo - 1) ? PLAN_TAPER_LAST_FRACTION : PLAN_TAPER_FIRST_FRACTION;
+        hours = peakH * f;
+        long = longTarget != null ? peakL * f : null;
+      } else if ((i + 1) % PLAN_RECOVERY_EVERY === 0 && !(!isEvent && i === weeksToGo)) {
+        kind = 'recovery';
+        hours = lastBuildH * PLAN_RECOVERY_FRACTION;
+        long = longTarget != null ? lastBuildL * PLAN_RECOVERY_FRACTION : null;
+      } else {
+        const already = reachedAt(lastBuildH, lastBuildL);
+        [lastBuildH, lastBuildL] = step(lastBuildH, lastBuildL);
+        kind = already ? 'hold' : 'build';
+        hours = lastBuildH;
+        long = longTarget != null ? lastBuildL : null;
+        peakH = Math.max(peakH, hours);
+        if (long != null) peakL = Math.max(peakL, long);
+      }
+      if (!isEvent && hours != null) long = hours * PLAN_LONG_MAX_SHARE;
+      const longH = (kind === 'event') ? eventH : (longUnit === 'h' ? long : null);
+      const longM = (kind === 'event') ? goal.distanceM
+        : (longUnit === 'h' ? (speedMps && long != null ? long * 3600 * speedMps : null) : long);
+      weeks.push({
+        n: i + 1,
+        weekStart,
+        kind,
+        hours: planRound2(hours),
+        sessions: kind === 'event' ? null : planClampSessions(hours == null ? null : hours / sessionH),
+        longH: planRound2(longH),
+        longM: planRoundM(longM),
+      });
+    }
+
+    const verdict = weeksNeeded === 0 ? 'on-track'
+      : (weeksNeeded != null && weeksNeeded <= buildWeeksAvailable) ? 'reachable' : 'short';
+    const toM = (h) => (speedMps && h != null) ? h * 3600 * speedMps : null;
+    return {
+      ...base,
+      verdict,
+      start: {
+        hoursPerWeek: planRound2(startH),
+        sessionsPerWeek: recent.sessionsPerWeek,
+        sessionHours: planRound2(sessionH),
+        longH: famLongest ? planRound2(famLongest.durationS / 3600) : null,
+        longM: famLongestDist ? planRoundM(famLongestDist.distanceM) : null,
+        longClimbM: famLongestClimb ? planRoundM(famLongestClimb.climbM) : null,
+      },
+      target: {
+        hoursPerWeek: planRound2(isEvent ? targetH : goal.hoursPerWeek),
+        longUnit,
+        longH: longUnit === 'h' ? planRound2(longTarget) : null,
+        longM: longUnit === 'h' ? planRoundM(toM(longTarget)) : planRoundM(longTarget),
+        eventH: planRound2(eventH),
+        speedMps,
+        climbM: isEvent ? (goal.climbM == null ? null : goal.climbM) : null,
+      },
+      weeksNeeded,
+      buildWeeksAvailable,
+      reached: {
+        hoursPerWeek: planRound2(lastBuildH),
+        longH: longUnit === 'h' ? planRound2(lastBuildL) : null,
+        longM: longUnit === 'h' ? planRoundM(toM(lastBuildL)) : planRoundM(lastBuildL),
+      },
+      weeks,
+      truncated: weeksToGo > lastIndex,
+    };
+  }
+
+  /* ---- ported from analyzer/core/training/coaching.js ---- */
+  /*
+   * The training plan's half of the AI coach: the digest the model is handed, the system prompt that
+   * tells it what the scaffold is and is not, and the three deterministic strings the panel shows.
+   *
+   * THE COACH WRITES SESSIONS INTO A SCAFFOLD IT DID NOT CHOOSE. `buildPlan` decides the weekly
+   * hours, the long session and the week's kind; the model's job is the part arithmetic cannot do --
+   * which days, which session types, how to describe the effort, what to swap when a week goes wrong
+   * -- under the scaffold's ceilings. That split is the whole design. A model asked to plan a season
+   * from a history alone invents a progression rate, and a rate invented per reply is not a plan an
+   * athlete can hold it to. The prompt says the scaffold's numbers are ceilings, in as many words.
+   *
+   * WHAT REACHES THE MODEL. Weekly totals of the athlete's own recorded sessions (never a raw sensor
+   * row, and never Strava -- see strava-developer-review.md), the goal as typed, the scaffold, and the
+   * same Apple Health readiness block every other coach mode already receives when the host provides
+   * it. `data_caveats` names what the history cannot see: training done outside Loam, lifts that are
+   * counted but not timed, and that every progression rule is a convention rather than a measurement.
+   *
+   * DESCRIPTIVE ON TECHNIQUE, PRESCRIPTIVE ON VOLUME. The plan may say "ride 2 h 30 easy on Sunday";
+   * it may not say how to ride a feature. The jump and crash entries in CLAUDE.md are why: the one
+   * topic in Loam where bad advice injures someone is the one this prompt forbids outright.
+   */
+
+  /* One-line prose for each verdict, in the digest so the model reads the same call the page shows. */
+  function planVerdictNote(plan) {
+    const v = plan && plan.verdict;
+    if (v === 'past') return 'The goal date has passed; there is no plan to write, only a next goal to set.';
+    if (v === 'no-history') return 'Fewer than two active weeks in the last eight, so there is no history to build a plan on; say so and ask the athlete to record or import a few sessions first.';
+    if (v === 'on-track') return 'The athlete already trains at or above what this goal asks; the plan holds volume, keeps the long session, and tapers for an event.';
+    if (v === 'reachable') return 'The safe ramp reaches the target before the taper; the scaffold shows the way.';
+    if (v === 'short') return 'The safe ramp does NOT reach the target by the date. Say so plainly, show where it does get to, and offer the honest options: move the date, lower the target, or accept arriving under-prepared. Never compress the ramp to make the date work.';
+    return 'The goal could not be read.';
+  }
+
+  /*
+   * The digest. Every distance, speed and climb is in the athlete's units via digestUnits, the same
+   * converter the session digests use, so the coach speaks what the athlete reads.
+   */
+  function trainingDigest({ goal, summary, weeks, plan, metric, asOf } = {}) {
+    const u = digestUnits(metric);
+    const hours = (s) => (s == null || !Number.isFinite(s)) ? null : +(s / 3600).toFixed(2);
+    const means = (m) => m ? {
+      weeks: m.weeks,
+      sessions_per_week: m.sessionsPerWeek,
+      hours_per_week: m.hoursPerWeek,
+      ...u.dist('distance_per_week', m.distanceMPerWeek),
+      ...u.elev('climb_per_week', m.climbMPerWeek),
+    } : null;
+    const session = (s) => s ? {
+      day: s.day,
+      sport: s.sport,
+      hours: hours(s.durationS),
+      ...u.dist('distance', s.distanceM),
+      ...u.elev('climb', s.climbM),
+    } : null;
+    const bySport = {};
+    for (const [f, b] of Object.entries((summary && summary.bySport) || {})) {
+      bySport[f] = {
+        sessions: b.sessions,
+        hours: hours(b.durationS),
+        ...u.dist('distance', b.distanceM),
+        ...u.elev('climb', b.climbM),
+        ...u.speed('avg_speed', b.speedMps),
+        longest_session: session(b.longest),
+      };
+    }
+    const g = goal || {};
+    const p = plan || {};
+    const caveats = [
+      'Every weekly total is only what was recorded with Loam or imported into it. Training done elsewhere is invisible here, so the athlete may be fitter, or more tired, than this history shows; ask before assuming.',
+      'The scaffold\'s rules are coaching conventions, not measurements on this athlete: at most ' + '10% more per build week, a recovery week every fourth week, a two-week taper, the long session at about 80% of the event and at most half the week. Treat its weekly hours and long session as ceilings.',
+      'Lift sessions are counted but not timed (the lift history stores sets and loads, not a clock), so a week with lifting is heavier than its hours say.',
+    ];
+    if (p.target && p.target.speedMps) {
+      caveats.push('The event duration is the goal distance at the athlete\'s recent average speed over every recorded session in that sport, which mixes terrain, stops and easy days. It is a scale for the long session, not a finishing-time prediction.');
+    }
+    if (p.target && p.target.longUnit === 'm') {
+      caveats.push('No recorded session in the goal\'s sport carries both a distance and a time, so the long session is ramped in distance and the weekly hours hold at their current level.');
+    }
+    if (p.truncated) caveats.push('The goal is further out than 26 weeks; only the first 26 are scaffolded.');
+    return {
+      kind: 'training_plan',
+      as_of: asOf || (summary && summary.asOf) || null,
+      goal: {
+        type: g.type || null,
+        label: g.label || null,
+        date: g.date || null,
+        sport: g.sport || null,
+        ...u.dist('distance', g.distanceM),
+        ...u.elev('climb', g.climbM),
+        hours_per_week: g.hoursPerWeek == null ? null : g.hoursPerWeek,
+      },
+      weeks_to_go: p.weeksToGo == null ? null : p.weeksToGo,
+      verdict: p.verdict || null,
+      verdict_note: planVerdictNote(p),
+      history: summary ? {
+        weeks_counted: summary.weeksCounted,
+        active_weeks: summary.activeWeeks,
+        recent_4wk: means(summary.recent),
+        prior_4wk: means(summary.prior),
+        hours_trend_pct: summary.trendPct,
+        longest_recent_session: session(summary.longest),
+        by_sport: bySport,
+        weekly: (weeks || []).map(w => ({
+          week_start: w.weekStart,
+          ...(w.partial ? { partial: true } : {}),
+          sessions: w.sessions,
+          hours: hours(w.durationS),
+          ...u.dist('distance', w.distanceM),
+          ...u.elev('climb', w.climbM),
+        })),
+      } : null,
+      scaffold: (p.start && p.target) ? {
+        start: {
+          hours_per_week: p.start.hoursPerWeek,
+          sessions_per_week: p.start.sessionsPerWeek,
+          longest_session_hours: p.start.longH,
+          ...u.dist('longest_session', p.start.longM),
+          ...u.elev('longest_session_climb', p.start.longClimbM),
+        },
+        target: {
+          hours_per_week: p.target.hoursPerWeek,
+          long_session_hours: p.target.longH,
+          ...u.dist('long_session', p.target.longM),
+          event_hours_estimate: p.target.eventH,
+          ...u.speed('assumed_speed', p.target.speedMps),
+          ...u.elev('event_climb', p.target.climbM),
+        },
+        weeks_needed_at_safe_ramp: p.weeksNeeded,
+        build_weeks_available: p.buildWeeksAvailable,
+        reached_by_last_build_week: p.reached ? {
+          hours_per_week: p.reached.hoursPerWeek,
+          long_session_hours: p.reached.longH,
+          ...u.dist('long_session', p.reached.longM),
+        } : null,
+        weeks: (p.weeks || []).map(w => ({
+          week: w.n,
+          starts: w.weekStart,
+          kind: w.kind,
+          hours: w.hours,
+          sessions: w.sessions,
+          long_session_hours: w.longH,
+          ...u.dist('long_session', w.longM),
+        })),
+      } : null,
+      data_caveats: caveats,
+    };
+  }
+
+  /* The first, deterministic turn. Same wording on every open so its cached reply can be found. */
+  function trainingAnalyzePrompt() {
+    return 'Write my training plan: this week in detail, the weeks after in outline, and what would change it.';
+  }
+
+  /* Three follow-ups, none of which asks for what the digest cannot answer. */
+  function trainingChips() {
+    return ['Adjust this week to how I feel today', 'What if I miss a week?', 'Which session matters most, and why?'];
+  }
+
+  function trainingInputPlaceholder() {
+    return 'Ask a follow-up… (e.g. can the long session move to Sunday?)';
+  }
+
+  /*
+   * The system prompt. `unitsRule` is the caller's `coachUnitsRule(metric)`, which also carries the
+   * reader's language; passed in as a string so this module needs nothing from the page.
+   */
+  function trainingCoachPrompt(level, unitsRule) {
+    return `You are Loam, an endurance coach writing a TRAINING PLAN. You are given, as JSON: the athlete's own recorded training history (weekly totals from sessions recorded with Loam or imported into it), a goal with a date, and a deterministic progression scaffold computed from that history. Turn them into a specific, honest week-by-week program.
+
+The scaffold is load-bearing:
+- Its weekly hours and long session are CEILINGS for each week. Write sessions that add up to them, never above them. A recovery week is a recovery week; a taper week is a taper week; an event week is the event plus rest.
+- It was built by fixed rules named in data_caveats (a safe ramp, recovery weeks, a taper). Do not re-derive a faster ramp, and do not promise the goal is reachable when verdict says it is not.
+- The verdict and verdict_note are the plan's headline. If the verdict is "short", say so first and offer the honest options (move the date, lower the target, or arrive under-prepared and say what that costs); never compress the ramp to make the date work.
+
+Method: for each week, name the sessions (long, steady, easy, and intervals only when the athlete's level and history support them), each with a duration or distance in the athlete's units and an effort described in words (easy and conversational, steady, hard). Put the long session where the history shows the athlete already trains long when that is visible. Keep at least one easy day between hard days.
+
+Rules:
+- Ground every number in the JSON. The history is what the athlete actually did; do not invent sessions or fitness that are not there, and do not assume training outside Loam unless the athlete tells you.
+- Respect data_caveats. Lift sessions are counted, not timed.
+- If a "health_context" block is present, its "current" readiness adjusts THIS WEEK only: red means swap the next hard or long session for easy or rest and say why; amber means keep the volume and drop the intensity; green changes nothing. Never rewrite the whole plan from one morning's reading, and cite the real numbers.
+- Volume, frequency, the long session, recovery and pacing are in scope. Technique is not: never instruct on jumps, drops, a specific trail feature or a named corner, and never tell the athlete to go bigger or faster on a feature.
+- This is not medical advice. If the athlete mentions pain, illness or injury, say to see a professional and keep the plan easy until they have.
+- ${unitsRule}
+- The athlete is at ${level} level; pitch depth and vocabulary accordingly.
+- Be direct and encouraging, never fluffy. Do not restate the whole dataset.
+
+Format your FIRST reply as compact markdown:
+- One bold headline: the verdict in one line, with the key number (what the goal asks, what the athlete does now, and how many weeks the ramp needs).
+- "**This week**": a day-by-day list, Monday to Sunday, each line a session or rest with duration or distance and effort.
+- "**The weeks after**": one line per remaining week (the week's start date, its kind, its hours and its long session).
+- "**What would change this plan**": two or three bullets.
+For follow-up questions, answer briefly and conversationally, and keep any edit inside the scaffold's ceilings. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training toward their goal. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
+  }
+
+  return { PLAN_HISTORY_WEEKS, PLAN_RECENT_WEEKS, PLAN_LONGEST_WEEKS, planDayKey, planWeekStart, planWeekKey, planAddDays, planEpochMs, planSportFamily, planSessions, planWeeks, planHistory, PLAN_RAMP_MAX_PCT, PLAN_RECOVERY_EVERY, PLAN_RECOVERY_FRACTION, PLAN_TAPER_WEEKS, PLAN_TAPER_FIRST_FRACTION, PLAN_TAPER_LAST_FRACTION, PLAN_EVENT_LONG_FRACTION, PLAN_LONG_MAX_SHARE, PLAN_LONG_START_FRACTION, PLAN_MAX_WEEKS, PLAN_MIN_ACTIVE_WEEKS, PLAN_MIN_START_HOURS, PLAN_MIN_SESSION_HOURS, PLAN_DEFAULT_SESSION_HOURS, PLAN_MIN_SESSIONS_PER_WEEK, PLAN_MAX_SESSIONS_PER_WEEK, PLAN_GOAL_TYPES, PLAN_GOAL_SPORTS, normalizeGoal, planWeeksToGo, buildPlan, trainingDigest, trainingAnalyzePrompt, trainingChips, trainingInputPlaceholder, trainingCoachPrompt };
+})();
+
 
 /*
  * Why a declared swim found no strokes, said in the swimmer's terms.
@@ -17195,10 +18065,236 @@ function renderMinimalSummary(sensors, span, positioned) {
   }
 }
 
+/* ---------- Open-path timing ----------
+   There was no timing instrumentation anywhere in this page, so "opening a session is slow" could
+   only ever be answered by guessing at which of the five steps of an open was the expensive one.
+   These marks answer it, and they answer it ON THE DEVICE, which is the only place the question was
+   ever really asked: a desktop browser is several times faster at every one of these steps.
+
+   The report goes three ways, deliberately. `console.log` is readable from Safari Web Inspector
+   attached to a phone; `window.__loamPerf` is what an automated harness reads; and a `perf` message
+   to the native host puts the line in the unified log, which is the only one of the three that can
+   be collected from a device with no debugger attached and no browser UI.
+
+   The native post is guarded exactly as every other postMessage site in this page is, so the
+   ANALYSIS PREFETCH -- which deliberately registers no message handler to stay read-only -- silently
+   posts nothing, and the property that makes that feature correct is untouched. */
+const _perf = { t0: 0, label: '', marks: [] };
+function perfStart(label) {
+  _perf.t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+  _perf.label = label || ''; _perf.marks = [];
+}
+/* Marks are absolute from t0; perfReport differences them, so a caller never has to know what ran
+   before it. A mark with no perfStart is a no-op, which is what the file-input path wants. */
+function perfMark(name) {
+  if (!_perf.t0) return;
+  _perf.marks.push([name, performance.now() - _perf.t0]);
+}
+function perfReport(label) {
+  if (!_perf.t0) return;
+  const total = performance.now() - _perf.t0;
+  let prev = 0; const steps = [];
+  for (const m of _perf.marks) { steps.push(m[0] + ' ' + Math.round(m[1] - prev) + 'ms'); prev = m[1]; }
+  /* The page load is on every open of every session, because the app builds a fresh WKWebView each
+     time -- so a report that left it out would describe a fraction of what the athlete waited for. */
+  let loadMs = null;
+  try { const n = performance.getEntriesByType('navigation')[0]; if (n && n.loadEventEnd) loadMs = Math.round(n.loadEventEnd); } catch (e) {}
+  const line = '[loam-perf] ' + (label || _perf.label) + ' · open ' + Math.round(total) + 'ms'
+    + (loadMs != null ? ' · pageload ' + loadMs + 'ms' : '') + (steps.length ? ' · ' + steps.join(' · ') : '');
+  try { window.__loamPerf = { label: label || _perf.label, openMs: total, loadMs, marks: _perf.marks.slice(), line }; } catch (e) {}
+  try { console.log(line); } catch (e) {}
+  try { window.webkit.messageHandlers.loam.postMessage({ type: 'perf', line: line, openMs: total, loadMs: loadMs }); } catch (e) {}
+  _perf.t0 = 0;
+}
+
+/* ---------- The analysis cache key, in ONE place ----------
+   Every input that changes what the analysis was computed over is a suffix on the recording's
+   content hash. This is a function rather than a run of locals inside analyze() because
+   loamAnalyzeURL's fast reopen (below) derives the SAME key without ever reading the file, and a
+   key derived in two places is a key that drifts -- silently, into a permanent cache MISS that
+   looks exactly like the feature simply not working. Both callers ask this. */
+function analysisKeyParts(contentHash, fallbackName) {
+    /* contentHash identifies the recording (drives run labels, carry, and library dedup, all of which
+       must NOT vary by calibration strategy). cacheKey is the analysis-cache key: contentHash plus a
+       calibration/sport suffix (empty only for the legacy 'quietest' calibration). The default 'preride'
+       calibration DOES produce a suffixed key, so the ride record stores this exact cacheKey as its
+       analysisKey and the Library/switcher look the render up by that, not by the bare dedupKey. */
+    const calibStrategy = loamCalibStrategy();
+    /* The declared sport (host LOAM_SPORT or the on-page selector) changes the whole analysis, so it is
+       part of the cache key. Without it, re-tagging a session's sport replays the stale render for the
+       old sport: a walk that auto-detected as a bike, then re-tagged to Walking, would keep showing the
+       ride because the cache check below runs before the sport override is read. Empty / 'auto' adds no
+       suffix, so existing auto-detected cache entries still hit. */
+    const declaredSportKey = ((typeof window !== 'undefined' && window.LOAM_SPORT)
+      || (document.getElementById('sportOverride') && document.getElementById('sportOverride').value) || '').toLowerCase();
+    const sportSuffix = (declaredSportKey && declaredSportKey !== 'auto') ? ':sport=' + declaredSportKey : '';
+    /* The POOL LENGTH is the same kind of input and was missing from the key. It is the single value
+       that turns detected blocks into a distance, and it multiplies every distance, pace and
+       distance-per-stroke in the render, so a cached analysis is only valid for the pool it was
+       computed in. Without it, naming a pool for the first time -- or correcting a wrong one -- replays
+       the stale render, so the swim comes back looking exactly as it did and the pick appears to have
+       done nothing. That is the same failure the sport suffix above was added for, on the input the
+       Swim view most often asks the swimmer to change.
+       Only added where a swim is possible (declared, or still undecided on Auto). A declared ride or
+       run is unaffected by a pool length, so it must not take a cache miss for one it once picked. */
+    const poolKeyM = loamPoolLengthM();
+    const poolSuffix = (poolKeyM && (!declaredSportKey || declaredSportKey === 'auto' || isSwimSport(declaredSportKey)))
+      ? ':pool=' + poolKeyM : '';
+    /* The CROP is the same kind of input as the two above and belongs in the key for the same reason:
+       it changes what the analysis is computed over, so a cached render is only valid for the window
+       it was computed in. Read from STORAGE rather than derived from the span, because the span needs
+       the file read and this has to be decided before that; cropStore only ever writes an
+       already-normalized window, so what is on disk is always valid for this recording.
+
+       Keyed by the recording's content hash where there is one and by its filename otherwise --
+       exactly the fallback the lift / golf / swim renders already use for their per-recording keys,
+       and it inherits that fallback's known limit: a zip has no content hash here, so its crop is
+       keyed by name and is orphaned (not mis-applied) if the ride is deleted from the library. */
+    const cropKey = contentHash || fallbackName || null;
+    const storedCrop = cropStored(cropKey);
+    const cropSuffix = storedCrop ? `:crop=${Math.round(storedCrop.start)}-${Math.round(storedCrop.end)}` : '';
+    /* The e-MTB preference is an INPUT to the analysis for exactly the reason the pool length and
+       the crop are: it changes the sport the render is computed under, and the sport reaches the
+       library record, the Strava activity type and the coach digest. Without it in the key, answering
+       the e-MTB question replays the stale render and the answer appears to do nothing -- which is
+       the identical failure the two comments above were written for, on a third input. Caught by the
+       `mtb-emtb` browser scenario rather than by reasoning, which is what that scenario is for.
+       Only meaningful on an auto-detected ride, since a declared sport ignores the preference. */
+    const emtbSuffix = (prefersEmtbRides() && (!declaredSportKey || declaredSportKey === 'auto')) ? ':emtb=1' : '';
+  const cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy)
+    + sportSuffix + poolSuffix + cropSuffix + emtbSuffix);
+  return { calibStrategy, declaredSportKey, cropKey, storedCrop, cacheKey };
+}
+
+/* ---------- Reopening a session: the key without the bytes ----------
+   On a cache HIT the recording was being read END TO END purely to derive a lookup key and then
+   thrown away: loamAnalyzeURL fetches the whole file (in the app that is a gunzip of the entire
+   recording through AnalyzerSchemeHandler) and analysisCacheKeyForFile then streams every byte of
+   it. Once the render payload is projected (cacheableRender) that is the largest remaining cost of
+   reopening an already-analyzed session -- see CLAUDE.md for the measurement.
+
+   So the content hash is REMEMBERED against the recording's identity, and a later open looks the
+   cache up before fetching anything.
+
+   IDENTITY IS (name, size, mtime), and all three are load-bearing. A content hash cannot be
+   recovered without the content, so the index has to be invalidated by something cheap the host can
+   state WITHOUT reading the file -- which is the same (name, size, mtime) triple every build system
+   uses, for the same reason. This file records recordings SHORTENING after the fact (3 of 114), and
+   a shortened recording changes size, so that case invalidates correctly. What it cannot catch is
+   content that changed with size AND mtime both identical, which an ordinary rewrite does not
+   produce. That is the one correctness cost of the fast path, and it is stated rather than hidden.
+
+   A MISS IS ALWAYS SAFE, which is what makes the rest of it cheap to reason about. Nothing here
+   ever WRITES under a remembered key: the index only supplies a hash to TRY, and anything that does
+   not resolve falls through to the existing fetch-and-hash path unchanged. So a stale, absent,
+   evicted or wrong entry costs exactly what reopening costs today -- never a wrong render, except
+   for the size-and-mtime case named above.
+
+   The web dropzone, and any host that injects no identity, get nothing and are untouched. */
+const CKEY_INDEX = 'loam_ckeyidx';
+const CKEY_INDEX_MAX = 200;
+
+/* The recording this WebView was configured for, as the HOST describes it. Null unless all three
+   are stated: two of the three cannot invalidate anything on their own. */
+function recordingIdentity() {
+  if (typeof window === 'undefined') return null;
+  const name = window.LOAM_SESSION_NAME, size = window.LOAM_RECORDING_SIZE, mtime = window.LOAM_RECORDING_MTIME;
+  if (!name || !(size > 0) || !(mtime > 0)) return null;
+  return encodeURIComponent(String(name)) + '|' + size + '|' + mtime;
+}
+function ckeyIndexLoad() {
+  try { const raw = localStorage.getItem(CKEY_INDEX); return raw ? (JSON.parse(raw) || {}) : {}; }
+  catch (e) { return {}; }
+}
+function contentKeyRecall(identity) {
+  if (!identity) return null;
+  const v = ckeyIndexLoad()[identity];
+  return (typeof v === 'string' && v) ? v : null;
+}
+/* ONE localStorage entry holding the whole map, FIFO-capped. A key per recording would grow without
+   bound and could not be evicted without scanning every key in the store. */
+function contentKeyRemember(identity, contentHash) {
+  if (!identity || !contentHash) return;
+  try {
+    const map = ckeyIndexLoad();
+    if (map[identity] === contentHash) return;
+    delete map[identity];
+    map[identity] = contentHash;
+    const keys = Object.keys(map);
+    for (let i = 0; i < keys.length - CKEY_INDEX_MAX; i++) delete map[keys[i]];
+    localStorage.setItem(CKEY_INDEX, JSON.stringify(map));
+  } catch (e) { /* private mode / quota: the fast path is an optimisation, never a requirement */ }
+}
+
+/* The replay, in ONE place, for the same reason analysisKeyParts is: analyze() and the fast reopen
+   both land here, and two copies would drift in what a cached ride renders. */
+function replayCachedRender(cached, cropKey, storedCrop) {
+  hide('loading'); show('results');
+  renderCachedAnalysis(cached);
+  /* A replay never reads the file, so the crop panel is rebuilt from the context stored beside the
+     crop. Without it a cached ride could only ever be trimmed further, never widened back, since
+     the cached sensors ARE the cropped ones. */
+  setupCropUI(cropKey, cropCtxLoad(cropKey), storedCrop);
+  setStatus('Loaded from cache (' + cachedSportNoun(cached) + ')', true);
+}
+
+/* Reopen from the analysis cache without touching the recording. Answers true ONLY when a render was
+   actually put on screen; every other outcome returns false and the caller proceeds exactly as it
+   did before. */
+/* A stand-in for the recording a FAST reopen never read. Every control that re-runs the analysis --
+   trim, the Calibration selector, the pose-mismatch notice's "try another calibration" buttons, the
+   e-MTB notice, the swim pool fix, Re-run as Running -- is gated on `_lastSensorFile` and calls
+   analyze([_lastSensorFile]). tryFastReopen used to leave it null, so after the fast path shipped
+   (2026-09-12) every one of those went dead on every reopened session in the app: a trim saved and
+   re-ran nothing, and the pose notice told an app user to "re-open the recording file". This handle
+   keeps the fast path's whole point -- nothing is fetched on open -- and pays the fetch only when a
+   control actually asks for a re-run, which is when analyze() resolves it (loamResolveLazyFile). */
+function loamLazyRecording(url) {
+  return { lazyUrl: url, name: loamCsvName(window.LOAM_SESSION_NAME || String(url).split('/').pop()) };
+}
+async function loamResolveLazyFile(f) {
+  if (!f || !f.lazyUrl) return f;
+  const resp = await fetch(f.lazyUrl);
+  if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
+  return new File([await resp.blob()], f.name, { type: 'text/csv' });
+}
+async function tryFastReopen(url) {
+  const identity = recordingIdentity();
+  if (!identity) return false;
+  const contentHash = contentKeyRecall(identity);
+  if (!contentHash) return false;
+  const gen = ++_analyzeGen;
+  const parts = analysisKeyParts(contentHash, null);
+  if (!parts.cacheKey) return false;
+  let cached = null;
+  try { cached = await getCachedAnalysis(parts.cacheKey); }
+  catch (e) { console.warn('analysis cache: fast reopen failed, reading the recording', e); return false; }
+  if (gen !== _analyzeGen) return true;   /* superseded by a real analyze(); it owns the screen now */
+  if (!cached || !cached.data) return false;
+  perfMark('cacheGet');
+  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults');
+  hide('progressResults'); hide('miniSummary'); hide('cropSection');
+  _currentRunKey = parts.cropKey;
+  /* Set BEFORE the replay, because the replay renders the notices whose re-run buttons test it. */
+  _lastSensorFile = url ? loamLazyRecording(url) : null; _lastFitFile = null; _lastHadFit = false;
+  replayCachedRender(cached, parts.cropKey, parts.storedCrop);
+  perfMark('render');
+  perfReport('reopen (fast)');
+  return true;
+}
+
 async function analyze(files) {
   const gen = ++_analyzeGen;
   const superseded = () => gen !== _analyzeGen;
   files = Array.from(files);
+  /* A fast reopen's stand-in for the recording (see loamLazyRecording) is read only now, when a
+     control has actually asked for a re-run. */
+  if (files.some(f => f && f.lazyUrl)) {
+    show('loading'); hide('errorBox');
+    try { files = await Promise.all(files.map(loamResolveLazyFile)); }
+    catch (e) { hide('loading'); showError('Could not load this recording.', (e && e.stack) || String(e)); setStatus('Error'); return; }
+    if (superseded()) return;
+  }
   /* A fresh analysis clears any cross-ride drill-in context; drillIntoRide re-shows the button after. */
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   /* Expand any Loam backup zip into its per-session recordings before dispatching, so dropping a
@@ -17259,60 +18355,21 @@ async function analyze(files) {
     /* Analysis cache: an identical CSV input replays the prior render and skips the
        whole pipeline. Scoped to single combined-CSV recordings (the common case and the
        in-app path); FIT-augmented and zip inputs always recompute. */
-    /* contentHash identifies the recording (drives run labels, carry, and library dedup, all of which
-       must NOT vary by calibration strategy). cacheKey is the analysis-cache key: contentHash plus a
-       calibration/sport suffix (empty only for the legacy 'quietest' calibration). The default 'preride'
-       calibration DOES produce a suffixed key, so the ride record stores this exact cacheKey as its
-       analysisKey and the Library/switcher look the render up by that, not by the bare dedupKey. */
-    const calibStrategy = loamCalibStrategy();
-    /* The declared sport (host LOAM_SPORT or the on-page selector) changes the whole analysis, so it is
-       part of the cache key. Without it, re-tagging a session's sport replays the stale render for the
-       old sport: a walk that auto-detected as a bike, then re-tagged to Walking, would keep showing the
-       ride because the cache check below runs before the sport override is read. Empty / 'auto' adds no
-       suffix, so existing auto-detected cache entries still hit. */
-    const declaredSportKey = ((typeof window !== 'undefined' && window.LOAM_SPORT)
-      || (document.getElementById('sportOverride') && document.getElementById('sportOverride').value) || '').toLowerCase();
-    const sportSuffix = (declaredSportKey && declaredSportKey !== 'auto') ? ':sport=' + declaredSportKey : '';
-    /* The POOL LENGTH is the same kind of input and was missing from the key. It is the single value
-       that turns detected blocks into a distance, and it multiplies every distance, pace and
-       distance-per-stroke in the render, so a cached analysis is only valid for the pool it was
-       computed in. Without it, naming a pool for the first time -- or correcting a wrong one -- replays
-       the stale render, so the swim comes back looking exactly as it did and the pick appears to have
-       done nothing. That is the same failure the sport suffix above was added for, on the input the
-       Swim view most often asks the swimmer to change.
-       Only added where a swim is possible (declared, or still undecided on Auto). A declared ride or
-       run is unaffected by a pool length, so it must not take a cache miss for one it once picked. */
-    const poolKeyM = loamPoolLengthM();
-    const poolSuffix = (poolKeyM && (!declaredSportKey || declaredSportKey === 'auto' || isSwimSport(declaredSportKey)))
-      ? ':pool=' + poolKeyM : '';
     let cacheKey = null, contentHash = null;
     const cacheable = !fitFile && /\.csv$/i.test(sensorFile.name);
     if (cacheable) {
       try { contentHash = await analysisCacheKeyForFile(sensorFile); }
       catch (e) { console.warn('analysis cache: hashing failed', e); contentHash = null; }
+      perfMark('hash');
       if (superseded()) return;
     }
-    /* The CROP is the same kind of input as the two above and belongs in the key for the same reason:
-       it changes what the analysis is computed over, so a cached render is only valid for the window
-       it was computed in. Read from STORAGE rather than derived from the span, because the span needs
-       the file read and this has to be decided before that; cropStore only ever writes an
-       already-normalized window, so what is on disk is always valid for this recording.
-
-       Keyed by the recording's content hash where there is one and by its filename otherwise --
-       exactly the fallback the lift / golf / swim renders already use for their per-recording keys,
-       and it inherits that fallback's known limit: a zip has no content hash here, so its crop is
-       keyed by name and is orphaned (not mis-applied) if the ride is deleted from the library. */
-    const cropKey = contentHash || (sensorFile && sensorFile.name) || null;
-    const storedCrop = cropStored(cropKey);
-    const cropSuffix = storedCrop ? `:crop=${Math.round(storedCrop.start)}-${Math.round(storedCrop.end)}` : '';
-    /* The e-MTB preference is an INPUT to the analysis for exactly the reason the pool length and
-       the crop are: it changes the sport the render is computed under, and the sport reaches the
-       library record, the Strava activity type and the coach digest. Without it in the key, answering
-       the e-MTB question replays the stale render and the answer appears to do nothing -- which is
-       the identical failure the two comments above were written for, on a third input. Caught by the
-       `mtb-emtb` browser scenario rather than by reasoning, which is what that scenario is for.
-       Only meaningful on an auto-detected ride, since a declared sport ignores the preference. */
-    const emtbSuffix = (prefersEmtbRides() && (!declaredSportKey || declaredSportKey === 'auto')) ? ':emtb=1' : '';
+    /* The suffixes come from the ONE definition the fast reopen also uses, so the two paths cannot
+       derive different keys for one recording -- which would be a permanent silent MISS rather than
+       a visible fault. Remembering the hash against the recording's identity is what lets the NEXT
+       open skip both the fetch and the hash. */
+    const { calibStrategy, cropKey, storedCrop, cacheKey: derivedCacheKey } =
+      analysisKeyParts(contentHash, sensorFile && sensorFile.name);
+    if (contentHash) contentKeyRemember(recordingIdentity(), contentHash);
     /* The recording's IDENTITY, hoisted out of the cache decision, because those are two different
        questions and answering them together made one recording's edits land on another's.
 
@@ -17334,20 +18391,17 @@ async function analyze(files) {
        `'x'` are left where they are rather than migrated: they cannot be attributed to a ride. */
     _currentRunKey = cropKey;
     if (cacheable) {
-      cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy) + sportSuffix + poolSuffix + cropSuffix + emtbSuffix);
+      cacheKey = derivedCacheKey;
       if (cacheKey) {
         try {
           const cached = await getCachedAnalysis(cacheKey);
+          perfMark('cacheGet');
           if (superseded()) return;
           if (cached && cached.data) {
             onProgress('loading cached analysis');
-            hide('loading'); show('results');
-            renderCachedAnalysis(cached);
-            /* A replay never reads the file, so the crop panel is rebuilt from the context stored
-               beside the crop. Without it a cached ride could only ever be trimmed further, never
-               widened back, since the cached sensors ARE the cropped ones. */
-            setupCropUI(cropKey, cropCtxLoad(cropKey), storedCrop);
-            setStatus('Loaded from cache (' + cachedSportNoun(cached) + ')', true);
+            replayCachedRender(cached, cropKey, storedCrop);
+            perfMark('render');
+            perfReport('reopen (read the recording)');
             return;
           }
         } catch (e) { console.warn('analysis cache: replay failed, recomputing', e); }
@@ -19554,9 +20608,11 @@ async function openProgress() {
   hideOutOfResultsSurfaces();
   show('progressResults');
   window.scrollTo({ top: 0, behavior: 'smooth' });
+  setStatus(loamT('Your progress'));
   await renderProgress();
 }
 function closeProgress() {
+  trainingPlanCoachHome();
   hide('progressResults');
   resetToDropzone();
 }
@@ -19727,6 +20783,7 @@ async function renderProgress() {
   const sub = document.getElementById('progressSubtitle');
   const headline = document.getElementById('progressHeadline');
   const chartsHost = document.getElementById('progressCharts');
+  await renderTrainingPlan(rides);
   if (!dated.length) {
     sub.textContent = '';
     headline.innerHTML = '<p style="color:var(--text-muted); font-size:13px;">No sessions saved yet. Analyze one and it starts building your progress here.</p>';
@@ -19829,6 +20886,268 @@ async function renderProgressTrails() {
     <tbody>${rows}</tbody></table></div>`;
   el.querySelectorAll('.prog-lead').forEach(b => { b.onclick = () => renderSegmentLeaderboard(+b.dataset.id); });
 }
+/* ---------- Training plan (Progress page) ----------
+   A goal, set against what the athlete has actually recorded, turned into a week-by-week scaffold
+   by LoamTraining (analyzer/core/training/, drift-pinned) and written into sessions by the AI coach.
+   Everything below is RENDER code: it reads the three stores, hands them to the port, and writes
+   text -- through loamT, never inside a pinned body. The rules the scaffold rests on are named on
+   the page rather than in a commit message, because every one of them is a coaching convention and
+   not a measurement (see plan.js). */
+const TRAINING_GOAL_KEY = 'loam_training_goal';
+function trainingGoalLoad() {
+  try { const raw = localStorage.getItem(TRAINING_GOAL_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+}
+function trainingGoalSave(goal) {
+  try {
+    if (goal) localStorage.setItem(TRAINING_GOAL_KEY, JSON.stringify(goal));
+    else localStorage.removeItem(TRAINING_GOAL_KEY);
+  } catch (e) { /* private mode / quota */ }
+}
+let _planState = null;        /* { raw, goal, goalError, weeks, summary, plan } of the last render */
+let _planCoachHome = null;    /* where #coachSection came from when the plan borrowed it */
+let _planFormOpen = false;
+
+/* "3 h 20 min" from seconds; "45 min" under an hour; a dash for nothing. */
+function planHoursText(sec) {
+  if (sec == null || !isFinite(sec)) return '—';
+  const total = Math.round(sec / 60);
+  const h = Math.floor(total / 60), m = total % 60;
+  if (h === 0) return loamT('{m} min', { m });
+  if (m === 0) return loamT('{h} h', { h });
+  return loamT('{h} h {m} min', { h, m });
+}
+function planSportWord(family) {
+  return family === 'bike' ? loamT('Bike') : family === 'foot' ? loamT('On foot')
+    : family === 'ski' ? loamT('Ski') : family === 'swim' ? loamT('Swim') : loamT('Any sport');
+}
+function planKindWord(kind) {
+  return kind === 'build' ? loamT('build') : kind === 'hold' ? loamT('hold') : kind === 'recovery' ? loamT('recovery')
+    : kind === 'taper' ? loamT('taper') : kind === 'event' ? loamT('event') : kind;
+}
+function planDateText(dayKey) {
+  try { return new Date(dayKey + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return dayKey; }
+}
+
+/* The three stores into the port, plus the saved goal, in one pass. `rides` is what renderProgress
+   already loaded; the lift and swim histories are read here because nothing else on this page reads
+   them. */
+function trainingPlanCompute(rides, raw, now) {
+  const sessions = LoamTraining.planSessions({ rides: rides || [], lifts: liftHistoryLoad(), swims: swimHistoryLoad() });
+  const weeks = LoamTraining.planWeeks(sessions, { now });
+  const summary = LoamTraining.planHistory(weeks, sessions, { now });
+  const norm = raw ? LoamTraining.normalizeGoal(raw) : null;
+  const goal = norm && norm.ok ? norm.goal : null;
+  const plan = goal ? LoamTraining.buildPlan(goal, summary, { today: now }) : null;
+  return { raw, goal, goalError: norm && !norm.ok ? norm.error : null, sessions, weeks, summary, plan };
+}
+
+/* The goal form. Distances and climbs are typed in the athlete's units and stored in SI, so a units
+   toggle re-renders the same goal rather than re-reading a number in the wrong system. */
+function trainingGoalFormHtml(raw, error) {
+  const metric = U.metric();
+  const g = raw || {};
+  const type = g.type === 'weekly-hours' ? 'weekly-hours' : 'event';
+  const distShown = g.distanceM != null ? +(metric ? g.distanceM / 1000 : g.distanceM / 1609.34).toFixed(1) : '';
+  const climbShown = g.climbM != null ? Math.round(metric ? g.climbM : g.climbM * 3.28084) : '';
+  const opt = (v, label, cur) => `<option value="${v}"${v === cur ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+  const errText = !error ? '' : error === 'date' ? loamT('Pick a date.') : error === 'distance' ? loamT('Enter a distance.')
+    : error === 'hours' ? loamT('Enter the hours per week.') : error === 'sport' ? loamT('Pick a sport.') : loamT('Check the goal.');
+  return `<form class="plan-form" id="planGoalForm" onsubmit="return false;">
+    <label>${loamT('Goal')}<select id="planGoalType">${opt('event', loamT('An event'), type)}${opt('weekly-hours', loamT('Weekly hours'), type)}</select></label>
+    <label>${loamT('Sport')}<select id="planGoalSport">${opt('bike', loamT('Bike'), g.sport || 'bike')}${opt('foot', loamT('On foot'), g.sport || 'bike')}${opt('ski', loamT('Ski'), g.sport || 'bike')}${opt('swim', loamT('Swim'), g.sport || 'bike')}</select></label>
+    <label>${loamT('Date')}<input type="date" id="planGoalDate" value="${escapeHtml(g.date || '')}"></label>
+    <label class="plan-event-only">${loamT('Distance ({unit})', { unit: metric ? 'km' : 'mi' })}<input type="number" inputmode="decimal" min="0" step="0.1" id="planGoalDistance" value="${distShown}"></label>
+    <label class="plan-event-only">${loamT('Climb ({unit}, optional)', { unit: metric ? 'm' : 'ft' })}<input type="number" inputmode="numeric" min="0" step="1" id="planGoalClimb" value="${climbShown}"></label>
+    <label class="plan-hours-only">${loamT('Hours per week')}<input type="number" inputmode="decimal" min="0" step="0.5" id="planGoalHours" value="${g.hoursPerWeek != null ? g.hoursPerWeek : ''}"></label>
+    <label>${loamT('Name (optional)')}<input type="text" id="planGoalLabel" maxlength="80" value="${escapeHtml(g.label || '')}"></label>
+    <div class="plan-actions">
+      <button type="button" class="plan-btn" id="planGoalSave">${loamT('Save goal')}</button>
+      ${raw ? `<button type="button" class="plan-btn secondary" id="planGoalClear">${loamT('Clear goal')}</button>` : ''}
+      ${errText ? `<span class="plan-err">${errText}</span>` : ''}
+    </div>
+  </form>`;
+}
+function trainingGoalFormRead() {
+  const metric = U.metric();
+  const v = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const num = (s) => { const n = parseFloat(String(s).replace(',', '.')); return isFinite(n) ? n : null; };
+  const type = v('planGoalType') === 'weekly-hours' ? 'weekly-hours' : 'event';
+  const raw = { type, sport: v('planGoalSport'), date: v('planGoalDate'), label: v('planGoalLabel') };
+  if (type === 'event') {
+    const d = num(v('planGoalDistance'));
+    raw.distanceM = d == null ? null : Math.round(d * (metric ? 1000 : 1609.34));
+    const c = num(v('planGoalClimb'));
+    raw.climbM = c == null ? null : Math.round(metric ? c : c / 3.28084);
+  } else {
+    raw.hoursPerWeek = num(v('planGoalHours'));
+  }
+  return raw;
+}
+function trainingGoalFormWire() {
+  const form = document.getElementById('planGoalForm');
+  if (!form) return;
+  const sync = () => {
+    const isEvent = (document.getElementById('planGoalType') || {}).value !== 'weekly-hours';
+    form.querySelectorAll('.plan-event-only').forEach(el => { el.style.display = isEvent ? '' : 'none'; });
+    form.querySelectorAll('.plan-hours-only').forEach(el => { el.style.display = isEvent ? 'none' : ''; });
+  };
+  sync();
+  const typeSel = document.getElementById('planGoalType');
+  if (typeSel) typeSel.onchange = sync;
+  const save = document.getElementById('planGoalSave');
+  if (save) save.onclick = () => {
+    const raw = trainingGoalFormRead();
+    const norm = LoamTraining.normalizeGoal(raw);
+    if (!norm.ok) { renderTrainingPlan(_planState ? _planState.rides : [], { formRaw: raw, formError: norm.error }); return; }
+    trainingGoalSave(norm.goal);
+    _planFormOpen = false;
+    renderTrainingPlan(_planState ? _planState.rides : []);
+  };
+  const clear = document.getElementById('planGoalClear');
+  if (clear) clear.onclick = () => { trainingGoalSave(null); _planFormOpen = false; trainingPlanCoachHome(); renderTrainingPlan(_planState ? _planState.rides : []); };
+}
+
+function trainingGoalLine(goal) {
+  if (goal.type === 'event') {
+    const bits = [planSportWord(goal.sport), U.dist(goal.distanceM)];
+    if (goal.climbM != null && goal.climbM > 0) bits.push(loamT('{climb} of climbing', { climb: U.elev(goal.climbM) }));
+    return `${goal.label ? `<strong>${escapeHtml(goal.label)}</strong> · ` : ''}${bits.join(' · ')} · ${planDateText(goal.date)}`;
+  }
+  return `${goal.label ? `<strong>${escapeHtml(goal.label)}</strong> · ` : ''}${loamT('{hours} a week by {date}', { hours: planHoursText(goal.hoursPerWeek * 3600), date: planDateText(goal.date) })}${goal.sport ? ` · ${planSportWord(goal.sport)}` : ''}`;
+}
+
+function trainingVerdictHtml(st) {
+  const p = st.plan;
+  const badge = (cls, t) => `<span class="plan-badge ${cls}">${t}</span>`;
+  const H = (h) => planHoursText(h * 3600);
+  const isEvent = st.goal.type === 'event';
+  let body;
+  if (p.verdict === 'past') body = badge('dim', loamT('Past')) + loamT('The goal date has passed. Set a new one.');
+  else if (p.verdict === 'no-history') body = badge('dim', loamT('Not yet')) + loamT('Not enough recorded training to build a plan on: it needs at least two active weeks in the last eight. Record or import a few sessions and come back.');
+  else if (p.verdict === 'on-track') body = badge('ok', loamT('On track')) + loamT('You already train at or above what this goal asks ({start} a week). Hold that, keep the long session, and ease off before the day.', { start: H(p.start.hoursPerWeek) });
+  else if (p.verdict === 'reachable') body = badge('ok', loamT('Reachable')) + loamT('From {start} to {target} a week at a safe rate takes {needed} weeks; you have {available} build weeks before {what}.', {
+    start: H(p.start.hoursPerWeek), target: H(p.target.hoursPerWeek), needed: p.weeksNeeded, available: p.buildWeeksAvailable,
+    what: isEvent ? loamT('the taper') : loamT('the date') });
+  else if (p.verdict === 'short') body = badge('short', loamT('Not at a safe rate')) + loamT('This asks for {target} a week, and a safe ramp reaches {reached} by then. Move the date, lower the target, or plan to arrive under-prepared.', {
+    target: H(p.target.hoursPerWeek), reached: H(p.reached.hoursPerWeek) });
+  else body = badge('dim', '?') + loamT('Check the goal.');
+  const extra = [];
+  if (isEvent && p.target && p.target.eventH != null) {
+    extra.push(loamT('The event is about {hours} at your recent average speed ({speed}); your longest recent session was {longest}.', {
+      hours: H(p.target.eventH), speed: U.speed(p.target.speedMps),
+      longest: p.start.longH != null ? `${H(p.start.longH)}${p.start.longM != null ? ` · ${U.dist(p.start.longM)}` : ''}` : '—' }));
+  } else if (isEvent && p.target && p.target.longUnit === 'm') {
+    extra.push(loamT('No recorded session in this sport carries both a distance and a time, so the long session is planned in distance and the weekly hours hold.'));
+  }
+  if (p.truncated) extra.push(loamT('The goal is more than 26 weeks out; the first 26 are scaffolded.'));
+  return `<div class="plan-verdict">${body}</div>${extra.length ? `<div class="plan-note">${extra.join(' ')}</div>` : ''}`;
+}
+
+function trainingWeeksTable(st) {
+  const p = st.plan;
+  const rows = p.weeks.map(w => {
+    const long = w.kind === 'event'
+      ? U.dist(w.longM)
+      : [w.longH != null ? planHoursText(w.longH * 3600) : null, w.longM != null ? U.dist(w.longM) : null].filter(Boolean).join(' · ');
+    return `<tr class="plan-${w.kind}">
+      <td>${w.n}</td><td>${planDateText(w.weekStart)}</td><td>${planKindWord(w.kind)}</td>
+      <td>${w.kind === 'event' ? (w.hours != null ? '~' + planHoursText(w.hours * 3600) : '—') : planHoursText(w.hours * 3600)}</td>
+      <td>${w.sessions == null ? '—' : w.sessions}</td><td>${long || '—'}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto;"><table class="plan-weeks">
+    <thead><tr><th>${loamT('Week')}</th><th>${loamT('Starts')}</th><th>${loamT('Kind')}</th><th>${loamT('Hours')}</th><th>${loamT('Sessions')}</th><th>${loamT('Long session')}</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+async function renderTrainingPlan(rides, opts = {}) {
+  const host = document.getElementById('progressPlan');
+  const title = document.getElementById('progressPlanTitle');
+  if (!host) return;
+  if (title) title.innerHTML = `${loamT('Training plan')} <span class="beta-badge">${loamT('BETA')}</span><span class="subtitle">${loamT('a goal, set against what you have actually recorded')}</span>`;
+  const now = new Date();
+  const raw = opts.formRaw || trainingGoalLoad();
+  const st = trainingPlanCompute(rides, opts.formRaw ? null : raw, now);
+  st.rides = rides || [];
+  _planState = st;
+  const s = st.summary, r = s.recent || {};
+  const tile = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div></div>`;
+  const sessionsCounted = (st.weeks || []).reduce((n, w) => n + (w.sessions || 0), 0);
+  const trend = s.trendPct == null ? '—' : `${s.trendPct > 0 ? '+' : ''}${s.trendPct}%`;
+  const history = `<div class="stiles">
+    ${tile(planHoursText((r.hoursPerWeek || 0) * 3600), loamT('hours a week, last 4'))}
+    ${tile(loamNum(r.sessionsPerWeek || 0, 1), loamT('sessions a week, last 4'))}
+    ${tile(U.dist(r.distanceMPerWeek || 0), loamT('distance a week, last 4'))}
+    ${tile(U.elev(r.climbMPerWeek || 0), loamT('climb a week, last 4'))}
+    ${tile(s.longest ? `${planHoursText(s.longest.durationS)}${s.longest.distanceM != null ? ` · ${U.dist(s.longest.distanceM)}` : ''}` : '—', loamT('longest session, last 8 weeks'))}
+    ${tile(trend, loamT('hours vs the 4 weeks before'))}
+  </div>
+  <div class="plan-note">${loamT('{n} sessions over the last 12 weeks: your rides, runs, walks and imports, plus lift and swim sessions from their own histories. Lifts are counted, not timed.', { n: sessionsCounted })}</div>`;
+
+  const showForm = opts.formRaw || !st.goal || _planFormOpen;
+  let goalBlock;
+  if (showForm) {
+    goalBlock = `<div class="plan-note">${st.goal ? '' : loamT('No goal yet. Set one and the plan is built from your last 12 weeks.')}</div>` + trainingGoalFormHtml(opts.formRaw || st.raw, opts.formError);
+  } else {
+    goalBlock = `<div class="plan-goal"><span class="plan-goal-l">${loamT('Goal')}</span> ${trainingGoalLine(st.goal)}
+      <div class="plan-actions"><button type="button" class="plan-btn secondary" id="planGoalChange">${loamT('Change goal')}</button></div></div>`;
+  }
+
+  let planBlock = '';
+  if (st.plan && !opts.formRaw) {
+    planBlock = trainingVerdictHtml(st);
+    if (st.plan.weeks.length) {
+      planBlock += trainingWeeksTable(st);
+      planBlock += `<div class="plan-actions"><button type="button" class="plan-btn" id="planCoachBtn">${loamT('Write my plan with the coach')}</button></div>`;
+      planBlock += `<div class="plan-note">${loamT('The coach writes the sessions into this scaffold: which days, what kind, what effort. The weekly hours and the long session above are ceilings it is told not to exceed.')}</div>`;
+    }
+  }
+  const caveat = betaCaveat(
+    loamT('every number here is a coaching convention applied to your own recorded sessions, not a measurement of you: at most 10% more per build week, a recovery week every fourth week, a two-week taper, the long session at about 80% of the event and at most half the week. Training done outside Loam is invisible here. Not medical advice.'),
+    loamT('The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages. An event\'s duration is its distance at your recent average speed over every recorded session in that sport, which mixes terrain, stops and easy days, so it scales the long session and predicts nothing. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.'));
+  /* A borrowed coach panel lives INSIDE this host, and rewriting the host's innerHTML would detach
+     it from the document -- not hide it, remove it, so every later render on this page would find no
+     #coachSection at all. Park it at home for the rewrite and bring it back into the new host, with
+     its thread, its messages and any stream in flight untouched (it is the same node). */
+  const coach = document.getElementById('coachSection');
+  const borrowed = !!(coach && _planCoachHome && host.contains(coach));
+  if (borrowed) { try { _planCoachHome.parent.insertBefore(coach, _planCoachHome.next); } catch (e) {} }
+  host.innerHTML = history + goalBlock + planBlock + caveat + '<div id="progressPlanCoachHost"></div>';
+  if (borrowed) {
+    const h = document.getElementById('progressPlanCoachHost');
+    if (h) h.appendChild(coach);
+  }
+  trainingGoalFormWire();
+  const change = document.getElementById('planGoalChange');
+  if (change) change.onclick = () => { _planFormOpen = true; renderTrainingPlan(st.rides); };
+  const coachBtn = document.getElementById('planCoachBtn');
+  if (coachBtn) coachBtn.onclick = trainingPlanCoach;
+}
+
+/* The coach button. Borrows #coachSection into the plan (the way the segment page does, and for
+   the same reason: a panel that is shown while parked under the Trails table is a button that
+   visibly does nothing), hands it the plan digest, and asks the first, cacheable question. */
+function trainingPlanCoach() {
+  const st = _planState;
+  if (!st || !st.plan || !st.plan.weeks.length || !st.goal) return;
+  const coach = document.getElementById('coachSection');
+  const host = document.getElementById('progressPlanCoachHost');
+  if (coach && host && coach.parentNode !== host) {
+    if (!_planCoachHome) _planCoachHome = { parent: coach.parentNode, next: coach.nextElementSibling };
+    host.appendChild(coach);
+  }
+  const digest = LoamTraining.trainingDigest({ goal: st.goal, summary: st.summary, weeks: st.weeks, plan: st.plan, metric: U.metric(), asOf: st.summary.asOf });
+  renderCoachPanel(null, 'training', { digest });
+  const cta = document.getElementById('coachCta');
+  if (cta && !cta.classList.contains('hidden')) startCoachConversation({ focusInput: false });
+  scrollToCoach();
+}
+function trainingPlanCoachHome() {
+  const coach = document.getElementById('coachSection');
+  if (coach && _planCoachHome && coach.parentNode !== _planCoachHome.parent) {
+    try { _planCoachHome.parent.insertBefore(coach, _planCoachHome.next); } catch (e) {}
+  }
+  _planCoachHome = null;
+}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -19867,6 +21186,8 @@ function hideAllSections() {
       if (cs && cs.parentNode !== _segCoachHome.parent) _segCoachHome.parent.insertBefore(cs, _segCoachHome.next);
     }
   } catch (e) {}
+  /* And from the Progress page's training plan, which borrows it the same way. */
+  try { trainingPlanCoachHome(); } catch (e) {}
   ['strengthResults','golfResults','swimResults','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
@@ -23250,8 +24571,23 @@ function drawSkiRhythm(byDescent) {
   }
   if (intervals.length < LoamSki.SKI_RHYTHM_MIN_EDGES) { skiChartNote(el, 'Too few edge changes for a rhythm.'); return; }
   const med = LoamSki.skiMedian(intervals);
+  /* BINNED HERE, and drawn as a `bar` rather than declared as a `histogram`, because the shipped
+     Plotly is plotly-basic and basic registers exactly three trace types: bar, pie and scatter.
+     A `histogram` there does not throw and does not warn -- it draws NOTHING, which is the blank
+     chart analyzer/plotly-bundle.test.js exists to catch and did. The bins are the ones the
+     histogram declared (0 to 6 s in 0.25 s steps), so this is the same picture by a route the
+     bundle can actually draw, and it keeps the 1.02 MB bundle rather than paying ~136 ms of extra
+     parse on EVERY open of EVERY session for one chart on one sport. */
+  const BIN = 0.25, LO = 0, HI = 6, nBins = Math.round((HI - LO) / BIN);
+  const counts = new Array(nBins).fill(0);
+  for (const d of intervals) {
+    if (d < LO || d > HI) continue;               /* the histogram's own xbins dropped these too */
+    const i = Math.min(nBins - 1, Math.floor((d - LO) / BIN));
+    counts[i]++;
+  }
+  const centres = counts.map((_, i) => LO + (i + 0.5) * BIN);
   loamPlot(el, [{
-    x: intervals, type: 'histogram', xbins: { start: 0, end: 6, size: 0.25 },
+    x: centres, y: counts, type: 'bar', width: BIN,
     marker: { color: '#1f7ba6' }, hovertemplate: '%{x} s<br>%{y}<extra></extra>',
   }], {
     margin: { l: 44, r: 12, t: 8, b: 42 },
@@ -26152,7 +27488,7 @@ const LOAM_NB = {
   'minutes': 'minutter',
   'descent': 'nedkjøring',
   'at the bottom': 'nederst',
-  'ride up': 'heis opp',
+  /* 'ride up' is declared once, up in the legs-table entries; the lap-anatomy chart reads that same entry. */
   'at the top': 'øverst',
   'No counted laps to draw.': 'Ingen medregnede runder å tegne.',
   'No barometer series to draw.': 'Ingen barometerserie å tegne.',
@@ -26177,6 +27513,123 @@ const LOAM_NB = {
   'up {n}': 'opp {n}',
   'L': 'V',
   'R': 'H',
+  /* Time in heart-rate zones: what the max is and how far to trust it (renderHrZones). */
+  '<strong>Settings &rsaquo; Coaching &rsaquo; Max HR</strong>':
+    '<strong>Innstillinger &rsaquo; Trener &rsaquo; Makspuls</strong>',
+  'Zones are shares of a <strong>{max} bpm</strong> max (from your Loam settings).':
+    'Sonene er andeler av en makspuls på <strong>{max} bpm</strong> (fra Loam-innstillingene dine).',
+  'Zones are shares of a <strong>{max} bpm</strong> max (set on this page).':
+    'Sonene er andeler av en makspuls på <strong>{max} bpm</strong> (satt på denne siden).',
+  'Zones are shares of an <strong>estimated ~{max} bpm</strong> max: the highest heart rate in your Apple Health over the past year, seen on more than one day.':
+    'Sonene er andeler av en <strong>anslått makspuls på ~{max} bpm</strong>: den høyeste pulsen i Apple Helse det siste året, sett på mer enn én dag.',
+  'An estimate, not your answer. A max ten beats away moves every boundary, so if you know yours, set it under {settings} and open this session again.':
+    'Et anslag, ikke svaret ditt. En makspuls som bommer med ti slag flytter hver eneste grense, så vet du din, sett den under {settings} og åpne økten på nytt.',
+  'Zones are shares of an <strong>estimated ~{max} bpm</strong> max from your age in Apple Health (208 &minus; 0.7 &times; age); nothing recorded there has reached it.':
+    'Sonene er andeler av en <strong>anslått makspuls på ~{max} bpm</strong> fra alderen din i Apple Helse (208 &minus; 0,7 &times; alder); ingenting registrert der har nådd den.',
+  'A population formula, not a measurement of you: it misses by ten beats or more for roughly one athlete in three. If you know your max, set it under {settings} and open this session again.':
+    'En befolkningsformel, ikke en måling av deg: den bommer med ti slag eller mer for omtrent én av tre. Vet du makspulsen din, sett den under {settings} og åpne økten på nytt.',
+  'Zones are shares of <strong>Loam&rsquo;s default ~{max} bpm</strong> max, which is not a measurement of you.':
+    'Sonene er andeler av <strong>Loams standardverdi på ~{max} bpm</strong>, som ikke er en måling av deg.',
+  'A default can be twenty beats out, which relabels the whole session. Connect Apple Health on the Stats tab and Loam estimates your max from the heart rates recorded there, or set it under {settings}.':
+    'En standardverdi kan bomme med tjue slag, noe som gir hele økten nye etiketter. Koble til Apple Helse under Statistikk, så anslår Loam makspulsen din fra pulsen som er registrert der, eller sett den under {settings}.',
+  'A default can be twenty beats out, which relabels the whole session. Set yours below; this page remembers it.':
+    'En standardverdi kan bomme med tjue slag, noe som gir hele økten nye etiketter. Sett din nedenfor; siden husker den.',
+  'the max you set': 'makspulsen du satte',
+  'the estimate': 'anslaget',
+  'the default': 'standardverdien',
+  'This session peaked at <strong>{peak} bpm</strong>, above {noun}. A heart cannot beat faster than its maximum, so either {noun} is low or a reading spiked.':
+    'Denne økten toppet seg på <strong>{peak} bpm</strong>, over {noun}. Et hjerte kan ikke slå fortere enn sitt maksimum, så enten ligger {noun} for lavt, eller så spratt en måling.',
+  'How to find your max heart rate': 'Slik finner du makspulsen din',
+  'Not sure of it? There is a half-hour field test below.': 'Usikker på den? Det ligger en halvtimes felttest nedenfor.',
+  'After a 15-minute warm-up, do three hard 3-minute climbs with 2 easy minutes between, the last one all-out to the end: the highest heart rate in that last minute is within a few beats of your max.':
+    'Etter 15 minutters oppvarming tar du tre harde motbakkedrag på 3 minutter med 2 rolige minutter mellom, det siste helt ut til slutt: den høyeste pulsen i det siste minuttet ligger få slag under makspulsen din.',
+  'Only if you are healthy enough for an all-out effort &mdash; with a heart condition or any doubt, ask a doctor first. A steady climb works best, on foot or on a bike, and a chest strap catches the final surge better than a wrist sensor. Record it with Loam and this panel names the session&rsquo;s peak (a lab test usually reads a couple of beats higher); then set that number under {settings}. Set it by hand rather than waiting for the estimate: Loam&rsquo;s estimate needs a second day within ten beats before it believes a lone peak, precisely so one bad strap reading cannot become your max, so a single test day will not move it on its own.':
+    'Bare hvis du er frisk nok til en maksimal innsats &mdash; har du en hjertelidelse eller noen tvil, spør en lege først. En jevn motbakke fungerer best, til fots eller på sykkel, og et pulsbelte fanger sluttspurten bedre enn en håndleddssensor. Ta det opp med Loam, så oppgir dette panelet øktens toppuls (en laboratorietest leser gjerne et par slag høyere); sett så det tallet under {settings}. Sett det for hånd i stedet for å vente på anslaget: Loams anslag krever en dag nummer to innenfor ti slag før det tror på en enkeltstående topp, nettopp for at én dårlig beltemåling ikke skal bli makspulsen din, så én testdag flytter det ikke alene.',
+  'This counts seconds, and that is all it does. There is no model of you in it &mdash; a zone is a restatement of the heart rate already recorded, which is why it needs no ground truth the way a form or a lean read does.':
+    'Dette teller sekunder, og ikke noe mer. Det finnes ingen modell av deg i det &mdash; en sone er en omskriving av pulsen som allerede er registrert, og derfor trenger den ingen fasit slik en teknikk- eller helningsavlesning gjør.',
+  'The boundaries are the conventional 60/70/80/90% of max split, and they are the same ones your watch tints live heart rate by, so a beat cannot be amber on your wrist and &ldquo;Moderate&rdquo; here. The max is the one number here that is about you rather than the recording: yours if you set it, else Loam&rsquo;s estimate from Apple Health (the highest heart rate recorded there, or your age), else a default &mdash; and the caption always says which. Paused stretches are excluded, and a gap longer than {gap} s between readings is left uncounted rather than credited to whichever zone sat at the edge of it. What the split MEANS for training is a judgement about you that these seconds cannot make.':
+    'Grensene er den vanlige inndelingen på 60/70/80/90 % av maks, og de er de samme som klokken din farger pulsen etter underveis, så et hjerteslag kan ikke være gult på håndleddet og &laquo;Moderat&raquo; her. Makspulsen er det ene tallet her som handler om deg og ikke om opptaket: din egen hvis du har satt den, ellers Loams anslag fra Apple Helse (den høyeste pulsen registrert der, eller alderen din), ellers en standardverdi &mdash; og teksten under sier alltid hvilken. Pauser holdes utenfor, og et hull på mer enn {gap} s mellom målinger telles ikke i stedet for å bli gitt til den sonen som lå i kanten av det. Hva fordelingen BETYR for treningen er en vurdering av deg som disse sekundene ikke kan gjøre.',
+  /* --- Training plan (renderTrainingPlan and friends, on the Progress page) ------------------------
+     Every string the plan writes, including the caveat in full: the rules it rests on are coaching
+     conventions rather than measurements, and a Norwegian reader losing that sentence would be
+     handed the plan as a fact. Entries identical in both languages ('BETA', '{m} min', 'Ski') are
+     deliberately absent -- a miss falls back to the English source, which is the same text. */
+  'Your progress': 'Din fremgang',
+  'Training plan': 'Treningsplan',
+  'a goal, set against what you have actually recorded': 'et mål, satt opp mot det du faktisk har registrert',
+  '{h} h': '{h} t',
+  '{h} h {m} min': '{h} t {m} min',
+  'Bike': 'Sykkel',
+  'On foot': 'Til fots',
+  'Swim': 'Svømming',
+  'Any sport': 'Alle idretter',
+  'build': 'oppbygging',
+  'hold': 'vedlikehold',
+  'recovery': 'restitusjon',
+  'taper': 'nedtrapping',
+  'event': 'arrangement',
+  'Pick a date.': 'Velg en dato.',
+  'Enter a distance.': 'Skriv inn en distanse.',
+  'Enter the hours per week.': 'Skriv inn timer per uke.',
+  'Pick a sport.': 'Velg en idrett.',
+  'Check the goal.': 'Sjekk målet.',
+  'Goal': 'Mål',
+  'An event': 'Et arrangement',
+  'Weekly hours': 'Timer per uke',
+  'Sport': 'Idrett',
+  'Date': 'Dato',
+  'Distance ({unit})': 'Distanse ({unit})',
+  'Climb ({unit}, optional)': 'Stigning ({unit}, valgfritt)',
+  'Hours per week': 'Timer per uke',
+  'Name (optional)': 'Navn (valgfritt)',
+  'Save goal': 'Lagre mål',
+  'Clear goal': 'Fjern mål',
+  'Change goal': 'Endre mål',
+  '{climb} of climbing': '{climb} stigning',
+  '{hours} a week by {date}': '{hours} i uka innen {date}',
+  'Past': 'Passert',
+  'Not yet': 'Ikke ennå',
+  'On track': 'I rute',
+  'Reachable': 'Innen rekkevidde',
+  'Not at a safe rate': 'Ikke i et trygt tempo',
+  'The goal date has passed. Set a new one.': 'Måldatoen er passert. Sett et nytt mål.',
+  'Not enough recorded training to build a plan on: it needs at least two active weeks in the last eight. Record or import a few sessions and come back.':
+    'Ikke nok registrert trening til å bygge en plan på: den trenger minst to aktive uker av de siste åtte. Ta opp eller importer noen økter og kom tilbake.',
+  'You already train at or above what this goal asks ({start} a week). Hold that, keep the long session, and ease off before the day.':
+    'Du trener allerede like mye som eller mer enn dette målet krever ({start} i uka). Hold det, behold den lange økta, og trapp ned før dagen.',
+  'From {start} to {target} a week at a safe rate takes {needed} weeks; you have {available} build weeks before {what}.':
+    'Fra {start} til {target} i uka i et trygt tempo tar {needed} uker; du har {available} oppbyggingsuker før {what}.',
+  'the taper': 'nedtrappingen',
+  'the date': 'datoen',
+  'This asks for {target} a week, and a safe ramp reaches {reached} by then. Move the date, lower the target, or plan to arrive under-prepared.':
+    'Dette krever {target} i uka, og en trygg opptrapping når {reached} innen da. Flytt datoen, senk målet, eller planlegg for å stille mindre forberedt.',
+  'The event is about {hours} at your recent average speed ({speed}); your longest recent session was {longest}.':
+    'Arrangementet tar omtrent {hours} i din nylige snittfart ({speed}); din lengste økt i det siste var {longest}.',
+  'No recorded session in this sport carries both a distance and a time, so the long session is planned in distance and the weekly hours hold.':
+    'Ingen registrert økt i denne idretten har både distanse og tid, så den lange økta planlegges i distanse og timene per uke holdes.',
+  'The goal is more than 26 weeks out; the first 26 are scaffolded.': 'Målet er mer enn 26 uker fram i tid; de første 26 er satt opp.',
+  'Week': 'Uke',
+  'Starts': 'Starter',
+  'Kind': 'Type',
+  'Hours': 'Timer',
+  'Sessions': 'Økter',
+  'Long session': 'Lang økt',
+  'hours a week, last 4': 'timer i uka, siste 4',
+  'sessions a week, last 4': 'økter i uka, siste 4',
+  'distance a week, last 4': 'distanse i uka, siste 4',
+  'climb a week, last 4': 'stigning i uka, siste 4',
+  'longest session, last 8 weeks': 'lengste økt, siste 8 uker',
+  'hours vs the 4 weeks before': 'timer mot de 4 ukene før',
+  '{n} sessions over the last 12 weeks: your rides, runs, walks and imports, plus lift and swim sessions from their own histories. Lifts are counted, not timed.':
+    '{n} økter de siste 12 ukene: turer, løpeturer, gåturer og importer, pluss styrke- og svømmeøkter fra sine egne historikker. Styrkeøkter telles, men tas ikke tid på.',
+  'No goal yet. Set one and the plan is built from your last 12 weeks.': 'Ingen mål ennå. Sett ett, så bygges planen fra dine siste 12 uker.',
+  'Write my plan with the coach': 'Skriv planen min med treneren',
+  'The coach writes the sessions into this scaffold: which days, what kind, what effort. The weekly hours and the long session above are ceilings it is told not to exceed.':
+    'Treneren skriver øktene inn i dette rammeverket: hvilke dager, hva slags økt, hvilken innsats. Timene per uke og den lange økta over er tak den får beskjed om ikke å overskride.',
+  'every number here is a coaching convention applied to your own recorded sessions, not a measurement of you: at most 10% more per build week, a recovery week every fourth week, a two-week taper, the long session at about 80% of the event and at most half the week. Training done outside Loam is invisible here. Not medical advice.':
+    'hvert tall her er en trenerkonvensjon brukt på dine egne registrerte økter, ikke en måling av deg: høyst 10 % mer per oppbyggingsuke, en restitusjonsuke hver fjerde uke, to ukers nedtrapping, den lange økta på omtrent 80 % av arrangementet og høyst halve uka. Trening gjort utenfor Loam er usynlig her. Ikke medisinske råd.',
+  'The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages. An event\'s duration is its distance at your recent average speed over every recorded session in that sport, which mixes terrain, stops and easy days, so it scales the long session and predicts nothing. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.':
+    'Ukestallene er summer av tiden i bevegelse og distansen hver økt lagret da den ble analysert, delt inn i uker som starter på mandag i din lokale kalender; inneværende uke holdes utenfor gjennomsnittene. Varigheten av et arrangement er distansen i din nylige snittfart over alle registrerte økter i den idretten, som blander terreng, stopp og rolige dager, så den skalerer den lange økta og spår ingenting. Reglene er de vanlig underviste, og ingen av dem er validert på en Loam-utøver; det som ville gi noen av dem et eget tall, er en sesong med planer satt opp mot øktene som ble registrert etterpå. Styrkeøkter har ingen klokke i historikken sin, så de telles som økter og legger ikke til timer.',
 };
 
 /* The reader's language as a two-letter code for the copy table. Falls back to 'en', which selects
@@ -27461,35 +28914,35 @@ function renderRecordingQuality(D, stationary) {
   sec.classList.remove('hidden');
 }
 
-/* The athlete's max heart rate, or null. ASKED, NEVER INFERRED, for the reason the pool length is:
-   it scales every zone boundary, so a wrong one relabels the whole session rather than nudging a
-   number, and there is no 220-minus-age fallback because nothing in a recording reveals an age
-   either -- a guessed denominator is indistinguishable on screen from a real one.
+/* The max heart rate the zones are drawn against, and what kind of number it is. Never null:
+   `resolveMaxHR` (ported, drift-pinned) ranks set > typed on this page > the app's Apple Health
+   estimate > the default, and `renderHrZones` captions whichever it gets -- an estimate as an
+   estimate, the default as the default -- with the way to correct it.
 
-   The HOST wins, exactly as it does for the pool: in the app this is CaptureSettings.maxHR, the same
-   value that rides to the watch on every start payload and tints the live heart-rate read-out, so
-   reading anything else here would put the wrist and the analysis in different zones for one beat.
-   On the web there is no host, so the page keeps its own answer.
+   The HOST wins whenever it has an ANSWER, exactly as it does for the pool: in the app this is
+   CaptureSettings.maxHR, the same value that rides to the watch on every start payload and tints the
+   live heart-rate read-out, so reading anything else here would put the wrist and the analysis in
+   different zones for one beat. What the host may not do is pass its estimate or its default off as
+   the athlete's answer, which is what LOAM_MAX_HR_SET and LOAM_MAX_HR_SOURCE are for.
 
-   A HOST DEFAULT IS NOT AN ANSWER, and for two days this panel took it as one. `CaptureSettings.maxHR`
-   returns 185 when nothing was ever stored, and it is injected unconditionally (rightly -- a stale
-   global from a previous WebView would be worse), so every session in the app drew zones against 185
-   and captioned them "from your Loam settings" for an athlete who had never opened that stepper --
-   which is buried under Coaching and prompted by nothing. That is the guessed denominator this
-   comment says it refuses, wearing the athlete's own name.
-   The WATCH keeps using the default and is right to: `HRZone.swift`'s own comment draws the line,
-   "a wrong colour misreads an effort by one zone, it does not invent a number", and this panel is
-   the numbers. So the host says whether the value was CHOSEN, and an unchosen one falls through to
-   the refusal -- which on the web offers its own control and in the app points at the setting,
-   because a page control the host would override on the next render is the inert-duplicate trap the
-   pool picker already recorded. */
+   THIS REPLACED A REFUSAL (2026-09-12, owner report). For four days an unchosen host value fell
+   through to "no max heart rate set" and a pointer at Settings > Coaching > Max HR -- a stepper that
+   sat behind the coach toggles, and that SHOWED 185 without having stored it, so the only way to
+   make the panel appear was to step to 186 and back. The refusal's argument, that a guessed
+   denominator is indistinguishable on screen from a real one, was right about a silent guess and
+   wrong as a reason to draw nothing: the fix is to label, which this does. The page still offers no
+   control of its own in the app, because the host re-injects at document start and would overwrite
+   it on the next render -- the pool picker's inert-duplicate lesson. */
 function loamMaxHR() {
-  const host = typeof window !== 'undefined' ? Number(window.LOAM_MAX_HR) : NaN;
-  const chosen = typeof window !== 'undefined' ? window.LOAM_MAX_HR_SET : undefined;
-  if (Number.isFinite(host) && host > 0 && chosen !== false) return { bpm: Math.round(host), source: 'host' };
-  const stored = Number(localStorage.getItem('loam_max_hr'));
-  if (Number.isFinite(stored) && stored > 0) return { bpm: Math.round(stored), source: 'page' };
-  return null;
+  const hasWindow = typeof window !== 'undefined';
+  let stored = null;
+  try { stored = localStorage.getItem('loam_max_hr'); } catch (e) { /* private mode */ }
+  return resolveMaxHR({
+    hostBpm: hasWindow ? window.LOAM_MAX_HR : undefined,
+    hostSet: hasWindow ? window.LOAM_MAX_HR_SET : undefined,
+    hostSource: hasWindow ? window.LOAM_MAX_HR_SOURCE : undefined,
+    pageBpm: stored,
+  });
 }
 
 /** True when a host is answering this question at all, i.e. the page is embedded in the app. */
@@ -27517,42 +28970,23 @@ function renderHrZones(D) {
 
   const rows = ((D.sensors && D.sensors.heartRate) || []).filter(r => r && r.bpm != null);
   /* No heart rate at all is not a refusal worth showing: this session simply had no strap, and a
-     panel explaining that on every phone-only ride is noise. A session WITH heart rate and no max HR
-     is different -- that one is a settings answer away, so it is shown. */
+     panel explaining that on every phone-only ride is noise. */
   if (!rows.length) { sec.classList.add('hidden'); return; }
 
   const max = loamMaxHR();
   const ride = D.ride || {};
   const r = timeInHrZones(rows, {
-    maxHR: max ? max.bpm : null,
+    maxHR: max.bpm,
     start: ride.start, end: ride.end,
     pausedSpans: ride.pausedSpans || [],
   });
 
   if (r.reason) {
-    /* In the app the remedy is the SETTING, not a box on this page: the host injects its answer at
-       document start and wins on every render, so a page control here would take a number and throw
-       it away -- visible, changeable and inert, which is the pool picker's recorded mistake. */
-    /* A refusal that hands over nothing is the dead end the pose-mismatch notice had to be taught
-       about: correct, and impossible to act on. Most people do not know their max, so the one fact
-       this session can contribute is the highest beat in it -- a MEASUREMENT and a floor, never an
-       estimate of the max, and said in those words. */
-    const peak = rows.reduce((a, r) => (r.bpm > a ? r.bpm : a), 0);
-    const floorNote = peak > 0
-      ? `<div class="strength-tablenote">This session peaked at <strong>${Math.round(peak)} bpm</strong>. That is a floor, not your maximum &mdash; yours is at least that.</div>`
-      : '';
-    const remedy = max ? ''
-      : floorNote + (loamHasMaxHRHost()
-        ? `<div class="strength-tablenote">Set it in <strong>Settings &rsaquo; Coaching &rsaquo; Max HR</strong>, then open this session again.</div>`
-        : hrZonesMaxInput(null));
-    body.innerHTML = `<div class="strength-tablenote">No zone read for this session: ${escapeHtml(r.reason)}.</div>`
-      + remedy
-      + leadNote(
-        `Zones are shares of your maximum heart rate, so there is no honest way to draw them without one. Loam will not guess: a max that is ten beats out moves every boundary and relabels the whole session.`,
-        `The app reads this from Settings, where it is also what tints the heart rate on your watch mid-session &mdash; so the wrist and the analysis stay in the same zones. Until you set it, the watch still colours your live heart rate against Loam's own default, which is fine for a colour and is not good enough for a table of minutes. On this page you can set it here; it is remembered.`,
-        'strength-caveat', 'Why it has to be asked');
+    /* The max is always resolved to a number (see loamMaxHR), so the one refusal left is about the
+       RECORDING -- a lone reading, or a series of zeros -- and it is shown rather than hidden, per
+       the decoupling panel's rule: a panel that silently disappears looks like a bug. */
+    body.innerHTML = `<div class="strength-tablenote">No zone read for this session: ${escapeHtml(r.reason)}.</div>`;
     sec.classList.remove('hidden');
-    wireHrZonesInput();
     return;
   }
 
@@ -27572,12 +29006,12 @@ function renderHrZones(D) {
   }).join('');
 
   const topLabel = HR_ZONE_LABELS[r.top - 1];
-  const source = max.source === 'host' ? 'from your Loam settings' : 'set on this page';
   /* Coverage is named whenever it is thin, per the rule the thinned corner chart established: a
      percentage of a fraction of the session is worth having only if the surface says which fraction. */
   const cover = r.thin
     ? `<div class="hrz-thin">Read from ${Math.round(r.coverage * 100)}% of the session &mdash; the rest has no heart rate to place. The shares below are of what was covered, not of the whole session.</div>`
     : '';
+  const prov = hrZonesProvenance(max, r.maxBpm);
 
   body.innerHTML = `
     <div class="swim-tiles">
@@ -27588,14 +29022,72 @@ function renderHrZones(D) {
     </div>
     ${cover}
     <div class="hrz-list">${bars}</div>
-    <div class="strength-tablenote">Zones are shares of a <strong>${r.maxHR} bpm</strong> max (${escapeHtml(source)}).</div>
-    ${max.source === 'host' ? '' : hrZonesMaxInput(r.maxHR)}
+    <div class="strength-tablenote">${prov.caption}</div>
+    ${prov.caveat ? `<div class="strength-tablenote hrz-caveat">${prov.caveat}</div>` : ''}
+    ${prov.peakNote ? `<div class="strength-tablenote">${prov.peakNote}</div>` : ''}
+    ${loamHasMaxHRHost() ? '' : hrZonesMaxInput(r.maxHR)}
+    ${prov.method}
     ${leadNote(
-      `This counts seconds, and that is all it does. There is no model of you in it &mdash; a zone is a restatement of the heart rate already recorded, which is why it needs no ground truth the way a form or a lean read does.`,
-      `The boundaries are the conventional 60/70/80/90% of max split, and they are the same ones your watch tints live heart rate by, so a beat cannot be amber on your wrist and &ldquo;Moderate&rdquo; here. Paused stretches are excluded, and a gap longer than ${HR_ZONE_MAX_GAP_S} s between readings is left uncounted rather than credited to whichever zone sat at the edge of it. What the split MEANS for training is a judgement about you that these seconds cannot make.`,
+      loamT(`This counts seconds, and that is all it does. There is no model of you in it &mdash; a zone is a restatement of the heart rate already recorded, which is why it needs no ground truth the way a form or a lean read does.`),
+      loamT(`The boundaries are the conventional 60/70/80/90% of max split, and they are the same ones your watch tints live heart rate by, so a beat cannot be amber on your wrist and &ldquo;Moderate&rdquo; here. The max is the one number here that is about you rather than the recording: yours if you set it, else Loam&rsquo;s estimate from Apple Health (the highest heart rate recorded there, or your age), else a default &mdash; and the caption always says which. Paused stretches are excluded, and a gap longer than {gap} s between readings is left uncounted rather than credited to whichever zone sat at the edge of it. What the split MEANS for training is a judgement about you that these seconds cannot make.`, { gap: HR_ZONE_MAX_GAP_S }),
       'strength-caveat', 'How to read it')}`;
   sec.classList.remove('hidden');
   wireHrZonesInput();
+}
+
+/* The lines under the bars that say WHAT the max is: a caption naming its kind and source, a caveat
+   sized to how far that kind can be trusted, and a note when the session itself beat it. Split out
+   of the renderer so each source's copy is one case rather than a nest of ternaries, and so the
+   peak note can be reasoned about on its own: a heart cannot beat faster than its maximum, so a
+   session above the max is evidence the max is low -- or that a reading spiked -- and the panel
+   NAMES that evidence and never acts on it, since one session's peak is exactly what an artifact
+   looks like. Raising the max here would also put this panel out of step with the wrist, which
+   tinted the whole session against the number the host sent. */
+function hrZonesProvenance(max, peakBpm) {
+  const bpm = max.bpm;
+  const settings = loamT('<strong>Settings &rsaquo; Coaching &rsaquo; Max HR</strong>');
+  let caption, caveat = '', noun;
+  switch (max.source) {
+    case 'set':
+      caption = loamT('Zones are shares of a <strong>{max} bpm</strong> max (from your Loam settings).', { max: bpm });
+      noun = loamT('the max you set');
+      break;
+    case 'page':
+      caption = loamT('Zones are shares of a <strong>{max} bpm</strong> max (set on this page).', { max: bpm });
+      noun = loamT('the max you set');
+      break;
+    case 'health':
+      caption = loamT('Zones are shares of an <strong>estimated ~{max} bpm</strong> max: the highest heart rate in your Apple Health over the past year, seen on more than one day.', { max: bpm });
+      caveat = loamT('An estimate, not your answer. A max ten beats away moves every boundary, so if you know yours, set it under {settings} and open this session again.', { settings });
+      noun = loamT('the estimate');
+      break;
+    case 'age':
+      caption = loamT('Zones are shares of an <strong>estimated ~{max} bpm</strong> max from your age in Apple Health (208 &minus; 0.7 &times; age); nothing recorded there has reached it.', { max: bpm });
+      caveat = loamT('A population formula, not a measurement of you: it misses by ten beats or more for roughly one athlete in three. If you know your max, set it under {settings} and open this session again.', { settings });
+      noun = loamT('the estimate');
+      break;
+    default:
+      caption = loamT('Zones are shares of <strong>Loam&rsquo;s default ~{max} bpm</strong> max, which is not a measurement of you.', { max: bpm });
+      caveat = loamHasMaxHRHost()
+        ? loamT('A default can be twenty beats out, which relabels the whole session. Connect Apple Health on the Stats tab and Loam estimates your max from the heart rates recorded there, or set it under {settings}.', { settings })
+        : loamT('A default can be twenty beats out, which relabels the whole session. Set yours below; this page remembers it.');
+      noun = loamT('the default');
+  }
+  const peakNote = peakBpm > bpm
+    ? loamT('This session peaked at <strong>{peak} bpm</strong>, above {noun}. A heart cannot beat faster than its maximum, so either {noun} is low or a reading spiked.', { peak: Math.round(peakBpm), noun })
+    : '';
+  /* THE METHOD, for anyone whose max is an estimate or a default (owner, 2026-09-12: "if it can't be
+     auto determined maybe provide a method to find out"). A caveat that says "set it if you know it"
+     is a dead end for the athlete who does not, which is most of them; a half-hour field test is how
+     the number is actually measured, and it is folded rather than inline because the panel is about
+     the session and this is about the athlete. Withheld under a SET max: that athlete has answered.
+     The same protocol is the `maxhr` topic in the app's Tips guide, and the two must keep agreeing. */
+  const method = max.source === 'set' || max.source === 'page' ? '' : leadNote(
+    loamT('After a 15-minute warm-up, do three hard 3-minute climbs with 2 easy minutes between, the last one all-out to the end: the highest heart rate in that last minute is within a few beats of your max.'),
+    loamT('Only if you are healthy enough for an all-out effort &mdash; with a heart condition or any doubt, ask a doctor first. A steady climb works best, on foot or on a bike, and a chest strap catches the final surge better than a wrist sensor. Record it with Loam and this panel names the session&rsquo;s peak (a lab test usually reads a couple of beats higher); then set that number under {settings}. Set it by hand rather than waiting for the estimate: Loam&rsquo;s estimate needs a second day within ten beats before it believes a lone peak, precisely so one bad strap reading cannot become your max, so a single test day will not move it on its own.', { settings }),
+    'strength-caveat', loamT('How to find your max heart rate'));
+  if (method) caveat += ' ' + loamT('Not sure of it? There is a half-hour field test below.');
+  return { caption, caveat, peakNote, method };
 }
 
 function wireHrZonesInput() {
@@ -27654,6 +29146,9 @@ function renderRunDecoupling(D) {
    Time in heart-rate zones: seconds at each level of effort. The BOUNDARIES ARE ADOPTED from
    ios/Sources/Capture/HRZone.swift, which is what the watch tints live heart rate by -- a second
    table here would put the wrist and the analysis in different zones for the same beat.
+   `resolveMaxHR` ranks the answers to "what max?" (set > typed here > the app's Apple Health
+   estimate > the default) and `renderHrZones` names whichever it draws against; the estimate
+   itself is made on the phone (MaxHREstimate.swift) and arrives as LOAM_MAX_HR + LOAM_MAX_HR_SOURCE.
    Pinned to the module by the drift guard in hr-zones.test.js, and to the Swift by
    analyzer/hr-zone-contract.test.js -- edit both or neither. */
 const HR_ZONE_BOUNDS = [0.60, 0.70, 0.80, 0.90];
@@ -27661,6 +29156,7 @@ const HR_ZONE_DEFAULT_MAX = 185;
 const HR_ZONE_MAX_GAP_S = 30;
 const HR_ZONE_THIN_COVERAGE = 0.6;
 const HR_ZONE_LABELS = ['Recovery', 'Easy', 'Moderate', 'Hard', 'Max'];
+const HR_MAX_HR_HOST_SOURCES = ['set', 'health', 'age', 'default'];
 
 function hrZoneOf(bpm, maxHR) {
   if (!(bpm > 0) || !(maxHR > 0)) return null;
@@ -27673,6 +29169,16 @@ function hrZoneRange(zone, maxHR) {
   const lo = zone === 1 ? 0 : Math.round(HR_ZONE_BOUNDS[zone - 2] * maxHR);
   const hi = zone === 5 ? null : Math.round(HR_ZONE_BOUNDS[zone - 1] * maxHR) - 1;
   return { lo, hi };
+}
+
+function resolveMaxHR({ hostBpm, hostSet, hostSource, pageBpm } = {}) {
+  const host = Number(hostBpm);
+  const hostOk = Number.isFinite(host) && host > 0;
+  if (hostOk && hostSet === true) return { bpm: Math.round(host), source: 'set' };
+  const page = Number(pageBpm);
+  if (Number.isFinite(page) && page > 0) return { bpm: Math.round(page), source: 'page' };
+  if (hostOk && (hostSource === 'health' || hostSource === 'age')) return { bpm: Math.round(host), source: hostSource };
+  return { bpm: hostOk ? Math.round(host) : HR_ZONE_DEFAULT_MAX, source: 'default' };
 }
 
 function hrZonesOverlapsPause(a, b, pausedSpans) {
@@ -29485,6 +30991,11 @@ function coachSystemPrompt(sport, level, metric, source) {
      someone who just recorded one is the specific failure the split exists to prevent, so the source
      is threaded from the digest at both call sites rather than defaulted here. */
   if (isSwimSport(sport)) return LoamSwim.swimCoachPrompt(level, source);
+  /* The TRAINING PLAN is not a session: its digest is the athlete's weekly history, a goal and the
+     deterministic scaffold buildPlan wrote, and the prompt tells the model those are ceilings. It
+     delegates to the port the way swim and golf do, so the prompt is pinned by
+     analyzer/core/training/drift.test.js rather than by the coaching guard (which declares it). */
+  if (sport === 'training') return LoamTraining.trainingCoachPrompt(level, units);
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
   /* SKIING. It reuses the MTB READS -- descents, body-frame turns, lean off the gravity vector --
      because a ski run and an MTB descent are the same measurement, but it must not reuse the MTB
@@ -29896,6 +31407,9 @@ function promptCoachKey() {
    sport's digest and system prompt can actually answer. isMtbFamily/isLiftSport/isGolfSport are
    explicit here so an unrecognized sport lands on the neutral fallback instead of inheriting MTB's. */
 function coachChips(sport, opts) {
+  /* The training plan's chips come from its own port, so a chip can never ask for what that digest
+     does not carry (the same rule as the open-water and withheld-sides branches below). */
+  if (sport === 'training') return LoamTraining.trainingChips();
   if (isGolfSport(sport)) return ['How do I make my swings repeat?', 'Is my tempo consistent?', 'What should I work on next range session?'];
   if (sport === 'lift' || isLiftSport(sport)) return ['Where did my bar speed fade?', 'Was my depth consistent?', 'High bar vs low bar for my goals?'];
   if (sport === 'running') return ['How do I lower my vertical oscillation?', 'Cadence drills for me', 'Pacing advice for the climbs'];
@@ -29936,6 +31450,7 @@ function coachChips(sport, opts) {
 /* The follow-up box's example question, same rule as the chips: it used to name a turn drill on every
    sport, which reads as the wrong coach entirely on a range or a lift session. */
 function coachInputPlaceholder(sport, opts) {
+  if (sport === 'training') return LoamTraining.trainingInputPlaceholder();
   /* 'running'/'walking' are phone-motion sessions (cadence and oscillation exist); 'run'/'walk' are
      GPS-only imports where the system prompt forbids coaching cadence, so their example asks about
      pacing instead of a metric the coach would have to refuse. */
@@ -29983,18 +31498,21 @@ function refreshCoachFacts(D, sport) {
   ]);
 }
 
-function renderCoachPanel(D, sport) {
+function renderCoachPanel(D, sport, opts = {}) {
   const sec = document.getElementById('coachSection');
   if (!sec) return;
   /* The digest carries the athlete's chosen units (U.metric()); flipping the toggle re-renders through
-     _lastRender, which rebuilds this panel, so the coach never holds a digest in the other system. */
-  coachState = { sport, digest: buildDigest(coachDigestD(D, sport), sport, U.metric()), messages: [], streaming: false };
+     _lastRender, which rebuilds this panel, so the coach never holds a digest in the other system.
+     `opts.digest` is a digest built elsewhere -- the training plan's, which is not a session and has
+     no D to build one from -- and it arrives complete, so nothing is attached to it below. */
+  const prebuilt = opts && opts.digest;
+  coachState = { sport, digest: prebuilt || buildDigest(coachDigestD(D, sport), sport, U.metric()), messages: [], streaming: false };
   show('coachSection');
   /* Fold recent same-sport sessions from the library into the digest so coaching can speak to a
      trend ("your weak-side radius improved since last week"), not just this one ride. Async and
      best-effort; sendCoach awaits digestReady before hashing its cache key so the same ride
      produces the same key whether or not the user clicks before the attach resolves. */
-  coachState.digestReady = Promise.allSettled([
+  coachState.digestReady = prebuilt ? Promise.resolve([]) : Promise.allSettled([
     attachCoachHistory(D, sport),
     attachCoachDescentHistory(D, sport),
   ]);
@@ -30022,9 +31540,15 @@ function renderCoachPanel(D, sport) {
   const onBundled = !coachHasOwnKey() && !!coachBundledKey();
   const note = document.getElementById('coachCtaNote');
   if (note) {
+    /* The plan sends weekly TOTALS of the athlete's recorded training and their goal, never a
+       session's metrics, and the note says which, because "this session" would be a false
+       statement about what is leaving the device. */
+    const what = sport === 'training'
+      ? 'Sends weekly totals of your recorded training (hours, sessions, distance, climb; never raw sensor data), your goal and the scaffold above, plus a summary of your Apple Health vitals when connected,'
+      : 'Sends this session\'s metrics (not raw sensor data), plus a summary of your Apple Health vitals and recent Strava activity when those are connected,';
     note.textContent = onBundled
-      ? `Sends this session's metrics (not raw sensor data), plus a summary of your Apple Health vitals and recent Strava activity when those are connected, to Anthropic on the developer's shared account (up to ${COACH_MAX_DAILY_BUNDLED} questions a day per device; add your own key in the settings above to lift that).`
-      : `Sends this session's metrics (not raw sensor data), plus a summary of your Apple Health vitals and recent Strava activity when those are connected, to Anthropic and streams back a coaching insight. Roughly $0.02-0.10 per insight, billed to your key.`;
+      ? `${what} to Anthropic on the developer's shared account (up to ${COACH_MAX_DAILY_BUNDLED} questions a day per device; add your own key in the settings above to lift that).`
+      : `${what} to Anthropic and streams back a coaching insight. Roughly $0.02-0.10 per insight, billed to your key.`;
   }
   const sub = document.getElementById('coachSubtitle');
   if (sub) sub.textContent = onBundled
@@ -30160,6 +31684,9 @@ function lockCoachInput(reason) {
    can be found and replayed. Shared by the Start button and the auto-restore path so both build
    byte-identical text (any drift would miss the cache). */
 function coachAnalyzePrompt(sport) {
+  /* A training plan is not analyzed, it is written: the port owns the opening question, and it is
+     as byte-frozen as the session nouns below because it is part of the coaching cache key. */
+  if (sport === 'training') return LoamTraining.trainingAnalyzePrompt();
   /* Golf and lift come first: without them a range session opened with "Analyze this ride", which is
      the one line the athlete always sees. 'range session' matches cachedSportNoun's wording for golf.
      Swim was added after shipping, having reintroduced exactly that bug: an imported swim opened with
@@ -35095,11 +36622,24 @@ window.loamAnalyzeCSV = function (text, filename) {
   return loamAnalyzeBlobFile(new Blob([text], { type: 'text/csv' }), filename);
 };
 
+/* The Progress page (trends and the training plan) for the app, which has no header button to reach
+   it: a library view over IndexedDB rather than an analysis of a recording, so nothing is fetched. */
+window.loamOpenProgress = async function () {
+  await openProgress();
+  return true;
+};
+
 window.loamAnalyzeURL = async function (url) {
   try {
+    perfStart('reopen');
+    /* Ask the cache BEFORE reading the recording. On a hit this is the whole open: no fetch (which
+       in the app gunzips the entire recording through AnalyzerSchemeHandler) and no hash stream over
+       every byte of it. Any miss falls straight through to the path below, unchanged. */
+    if (await tryFastReopen(url)) return;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
     const blob = await resp.blob();
+    perfMark('fetch');
     /* The recording is always served at the virtual path /recording.csv, so the URL
        cannot tell two sessions apart. Prefer the real session name the host injects
        (window.LOAM_SESSION_NAME) so each ride is labelled and de-duplicated distinctly. */
@@ -35402,9 +36942,11 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'c91a28b50 · 2026-09-12';
+const LOAM_BUILD = 'b89d69981 · 2026-09-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
+    /* Untagged: the plan reads every sport's history and is offered on every channel. */
+    ['Training plan (beta)', 'set a goal, an event with a distance and a date or a number of hours a week, and Loam sets it against what you have actually recorded: the last twelve weeks of rides, runs, walks, imports, lifts and swims. You get an honest verdict (reachable at a safe rate, already on track, or not by that date), a week-by-week scaffold with recovery weeks and a taper, and a coach button that writes the sessions into it. Every rule is a coaching convention and the page names them. In the app it is on the Stats tab under Training; on the web it leads the Progress page.'],
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
        channel that drops that sport from the Record screen's Activity picker, and swimming reached
        that picker only late in this release; an untagged item is announced on every channel, which
@@ -35427,7 +36969,7 @@ const LOAM_WHATS_NEW = [
     ['Recording a climb (beta)', 'there is no Climbing activity yet and no climbing analysis: what there is, is the set-up that makes a session readable later, in Tips & best results > Climbing. Record it as a Weightlifting session so you get the Start set / End set brackets on your watch, bracket every burn, tap Press when you go on belay, and carry the phone on your body if the route allows it, because the barometer is the only channel that has ever tracked a real climb. Roped routes only. Your session will open as a lift with a rep count that means nothing, and that is expected: right now the recording is the point.', 'climbing'],
     /* Deliberately UNTAGGED: this reads a heart rate and does not care which sport produced
        it, so there is no sport a channel could hide it with. */
-    ['Time in heart-rate zones', 'if you wore a watch, every session now shows how long you actually spent at each level of effort -- five bars with the beats each band covers, the time and the share. A heart-rate trace cannot tell you whether an easy run was actually easy; this counts the seconds. It uses the max heart rate from your Loam settings, the same number your watch tints your live heart rate by, so a beat cannot be one colour on your wrist and a different zone in the analysis. Without one it shows nothing rather than guessing: a max ten beats out moves every boundary and relabels the whole session. Pauses are left out, a gap in the data is reported rather than counted, and imported Garmin runs get it too.'],
+    ['Time in heart-rate zones', 'if you wore a watch, every session now shows how long you actually spent at each level of effort -- five bars with the beats each band covers, the time and the share. A heart-rate trace cannot tell you whether an easy run was actually easy; this counts the seconds. It uses your max heart rate from Settings > Coaching, the same number your watch tints your live heart rate by, so a beat cannot be one colour on your wrist and a different zone in the analysis. Until you set one, Loam estimates it from Apple Health -- the highest heart rate recorded there in the past year, or your age -- and the panel says so, because a max ten beats out moves every boundary; a value you set always wins, and Apple Health itself holds no max heart rate to read. Pauses are left out, a gap in the data is reported rather than counted, and imported Garmin runs get it too.'],
     ['Loam on your watch face', 'a complication that opens the watch app with one tap (circular, corner, inline, or rectangular slot).'],
     ['Health vitals + daily readiness', 'HRV, resting HR, and VO2max trends against your own normal band, plus a transparent 0-100 readiness score (iOS Stats tab).'],
     ['Strava athlete dashboard', 'totals, trend charts back to 2 years, KOMs, records, a training heatmap, and your Eddington number (iOS Stats tab).'],
