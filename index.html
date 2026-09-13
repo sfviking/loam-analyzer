@@ -436,6 +436,20 @@
   .plan-weeks tr.plan-recovery td, .plan-weeks tr.plan-taper td { opacity: 0.68; }
   .plan-weeks tr.plan-event td { font-weight: 600; }
   .plan-note { font-size: 12px; margin-top: 10px; line-height: 1.5; color: var(--text-dim); }
+  @media (max-width: 600px) {
+    .plan-weeks, .plan-weeks tbody { display: block; width: 100%; }
+    .plan-weeks { font-size: 12px; }
+    .plan-weeks thead { display: none; }
+    .plan-weeks tbody { display: grid; gap: 8px; }
+    .plan-weeks tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 14px;
+      padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); }
+    .plan-weeks td { display: block; padding: 0; border: 0; white-space: normal; min-width: 0; }
+    .plan-weeks td:first-child { display: none; }
+    .plan-weeks td:last-child { grid-column: 1 / -1; }
+    .plan-weeks td::before { content: attr(data-label); display: block; margin-bottom: 2px;
+      color: var(--text-muted); font: 500 9px/1.2 'JetBrains Mono', monospace; letter-spacing: 0.08em;
+      text-transform: uppercase; }
+  }
   /* In the app the Progress page is presented under a native Done button, and its Back would land
      on the dropzone the embedded page hides. */
   body.embedded #progressResults .page-back-bar { display: none; }
@@ -722,7 +736,7 @@
   }
   .focus-toggle { margin-right: auto; display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .prefs { position: relative; }
-  #displayPrefsBtn {
+  #displayPrefsBtn, #saveCalibrationBtn {
     background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 5px 12px; font-family: inherit; font-size: 12px; cursor: pointer;
   }
@@ -754,6 +768,9 @@
     text-transform: uppercase; color: var(--text-muted);
   }
   .prefs-pop select { width: 100%; }
+  #calibStrategyLabel { display: grid; gap: 8px; min-width: 0; }
+  #saveCalibrationBtn { white-space: normal; }
+  #saveCalibrationBtn:disabled { opacity: .5; cursor: default; }
   .section-title {
     font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600;
     font-size: 20px; letter-spacing: -0.01em; color: var(--text);
@@ -1296,6 +1313,9 @@
   .run-pacing .rp-note {
     display: block; margin-top: 5px; font-size: 11.5px; color: var(--text-muted);
   }
+  /* The mechanism sentence sits inline after the verdict, at body weight: it is a finding, not a
+     footnote, but it must not compete with the verdict it explains. */
+  .run-pacing .rp-why { color: var(--text); }
   #runBestEfforts { border-top: 1px solid var(--border); padding-top: 14px; }
   .be-title {
     font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; font-weight: 600;
@@ -2183,7 +2203,7 @@
 
 <div id="dropOverlay" aria-hidden="true">
   <div class="drop-inner">Drop to analyze
-    <div class="drop-sub">Sensor Logger .zip · Loam Capture .csv / .csv.gz · .fit (companion, or alone for a GPS-only ride)</div>
+    <div class="drop-sub">Sensor Logger .zip · Loam Capture .csv / .csv.gz · .fit (companion, or alone for a GPS-only session)</div>
   </div>
 </div>
 
@@ -2192,10 +2212,14 @@
   <!-- Ride actions stay in the row; the five set-and-forget preferences live in the popover behind
        "Options" (see .results-controls in the stylesheet for why). -->
   <div class="results-controls">
-    <button id="backToCompareBtn" type="button" class="hidden" title="Return to the cross-ride comparison" onclick="backToCompare()">&larr; Back to comparison</button>
+    <button id="backToCompareBtn" type="button" class="hidden" title="Return to the cross-session comparison" onclick="backToCompare()">&larr; Back to comparison</button>
     <label class="focus-toggle"><input type="checkbox" id="focusToggle" checked onchange="document.getElementById('results').classList.toggle('focus-mode', this.checked); buildSectionNav(); setTimeout(() => window.dispatchEvent(new Event('resize')), 60);"> Focused view <span class="focus-hint"></span></label>
-    <button id="switchRideBtn" type="button" title="Switch to another recent ride without leaving this view" onclick="openRideSwitcher()">&#9776; Switch ride</button>
-    <button id="analyzeAnotherBtn" type="button" title="Analyze a different ride">+ Analyze another</button>
+    <!-- "Session", the neutral noun, on the two chrome buttons that sit above every sport's results:
+         they are in the markup once and not re-rendered per sport, and the drawer the first one opens
+         lists the whole library, which spans sports. A run analyzed on the web read "Switch ride" in
+         its own header until 2026-09-12. -->
+    <button id="switchRideBtn" type="button" title="Switch to another recent session without leaving this view" onclick="openRideSwitcher()">&#9776; Switch session</button>
+    <button id="analyzeAnotherBtn" type="button" title="Analyze a different session">+ Analyze another</button>
     <button id="attachFitBtn" type="button" class="hidden" title="Attach a Specialized/Garmin FIT to this ride for jumps + wheel speed">+ Attach FIT</button>
     <input type="file" id="attachFitInput" accept=".fit" style="display:none">
     <div class="prefs">
@@ -2223,13 +2247,18 @@
             <option value="metric">Metric (km · km/h · m)</option>
           </select>
         </label>
-        <label id="calibStrategyLabel" class="hidden" title="Which window defines your body frame. Use 'Final mount' if you calibrate in one position (e.g. pocket) then move the phone before riding (e.g. backpack). Use 'Riding pose' when the phone is never in its riding position while you are standing still -- a pack taken off at the trailhead, or a drone session.">Calibration
+        <div id="calibStrategyLabel" class="hidden" title="Which window defines your body frame. Use 'Final mount' if you calibrate in one position (e.g. pocket) then move the phone before riding (e.g. backpack). Use 'Riding pose' when the phone is never in its riding position while you are standing still -- a pack taken off at the trailhead, or a drone session."><label for="calibStrategySel">Calibration</label>
           <select id="calibStrategySel">
             <option value="preride">Final mount (last still before ride)</option>
             <option value="quietest">Quietest still window</option>
             <option value="riding">Riding pose (beta)</option>
           </select>
-        </label>
+          <button id="saveCalibrationBtn" type="button"></button>
+          <label><span id="borrowCalibrationLabel"></span>
+            <select id="borrowCalibrationSel"></select>
+          </label>
+          <span id="borrowCalibrationNote" style="display:block;max-width:440px;font-size:12px;white-space:normal"></span>
+        </div>
         <label id="carryLabel" class="hidden">Carrying the phone
           <select id="carryToggle">
             <option value="">Auto-detect</option>
@@ -2268,7 +2297,7 @@
 
   <section id="mtbCalibNotice" class="hidden">
     <div class="mount-notice">
-      <button type="button" class="notice-hide" onclick="hideCalibNotice()" aria-label="Hide this notice for this ride">Hide</button>
+      <button type="button" class="notice-hide" onclick="hideCalibNotice()" aria-label="Hide this notice for this session">Hide</button>
       <strong id="mtbCalibNoticeHead">Calibration pose may not match your riding pose.</strong>
       <span id="mtbCalibNoticeBody"></span>
     </div>
@@ -2357,7 +2386,8 @@
       <div id="playByPlay" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
           Play-by-play
-          <span class="subtitle">vs your best comparable lap of the same trail · biggest give-ups first · tap a corner to open it</span>
+          <!-- Set per sport by setupPlayByPlay: the corner clause only where corners exist. -->
+          <span class="subtitle" id="pbpSubtitle">vs your best comparable lap of the same segment</span>
           <select id="pbpRun" style="margin-left:auto;"></select>
         </div>
         <div id="pbpBody"></div>
@@ -2365,7 +2395,8 @@
       <div id="ghostRace" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
           Ghost race
-          <span class="subtitle">replay a run against your fastest lap of the same trail</span>
+          <!-- Set by setupGhostRace in the runs panel's own row noun (descent / lap / run). -->
+          <span class="subtitle" id="ghostSubtitle">replay a lap against your fastest lap of the same segment</span>
           <select id="ghostRun" style="margin-left:auto;"></select>
         </div>
         <div class="ghost-controls" id="ghostControls">
@@ -2378,7 +2409,7 @@
             <option value="8">8x</option>
           </select>
         </div>
-        <div id="ghostHow" class="dim" style="font-size:12px; margin-top:6px;">Your run races a ghost of the fastest run on the map above. The live gap is seconds ahead of or behind the ghost at the same point along the track.</div>
+        <div id="ghostHow" class="dim" style="font-size:12px; margin-top:6px;">Your lap races a ghost of the fastest lap on the map above. The live gap is seconds ahead of or behind the ghost at the same point along the track.</div>
         <!-- Deliberately NOT the accent colour: this note is the EXPECTED state of a ride that only
              went down each trail once, and --accent is what the calibration and GPS-gap notices use
              for something actually wrong. An amber block reads as an error report. -->
@@ -2472,7 +2503,7 @@
       <strong>Phone in hand detected.</strong> Arm-swing energy at half cadence
       dominates the horizontal accel. <span id="runMountCadenceNote">Cadence and pace are reliable</span>; vertical
       oscillation may be inflated by hand motion (treat it as an upper bound).
-      For cleanest form metrics, switch to a hip pack or armband on your next run.
+      For cleanest form metrics, switch to a hip pack or armband on your next <span id="runMountNextNoun">run</span>.
     </div>
   </section>
 
@@ -2667,7 +2698,7 @@
       <button id="formAskCoach" class="ghost-btn hidden" type="button" style="margin-top:10px;">Ask the coach about this corner &rarr;</button>
       <div id="formNote" class="dim" style="font-size:12px; margin:8px 2px 4px;"></div>
       <div class="dim" style="font-size:12px; margin-top:6px;">Left: you from behind, leaning as you leaned. Right: the same turn from above on the real map, rotated so you are always heading up. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.
-        <details class="caveat-more"><summary>Every part of the picture</summary>On the left, the ghost needle marks this turn's peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where the bike is going (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the rider, while the trail stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.</details>
+        <details class="caveat-more"><summary>Every part of the picture</summary>On the left, the ghost needle marks this turn's peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where you are heading (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the figure on the left, while the ground stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.</details>
       </div>
     </div>
   </section>
@@ -2850,7 +2881,7 @@
        ride to go back to, and an empty sticky strip pinned to the top of that page would be the
        button's ghost. -->
   <div class="page-back-bar hidden" id="crossBackBar">
-    <button type="button" id="crossBackBtn" onclick="backToRideFromCross()"
+    <button type="button" id="crossBackBtn" onclick="backFromCross()"
       style="display:inline-flex; align-items:center; gap:6px; padding:9px 15px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--accent); font-size:14px; font-weight:600; cursor:pointer;">
       &larr; Back to ride
     </button>
@@ -2920,8 +2951,9 @@
 </div>
 
 <div id="rideSwitcherScrim" onclick="closeRideSwitcher()"></div>
-<div id="rideSwitcher" aria-label="Switch ride">
-  <div class="rs-head"><h3>Your rides</h3><button class="rs-close" type="button" title="Close" onclick="closeRideSwitcher()">&times;</button></div>
+<div id="rideSwitcher" aria-label="Switch session">
+  <!-- The drawer lists the whole library, which spans sports, so it takes the neutral noun. -->
+  <div class="rs-head"><h3>Your sessions</h3><button class="rs-close" type="button" title="Close" onclick="closeRideSwitcher()">&times;</button></div>
   <div class="rs-list" id="rideSwitcherList"></div>
 </div>
 
@@ -4011,7 +4043,7 @@ function sidesUnreliableFor(D) {
   return _sidesUnreliable != null ? _sidesUnreliable : dTurnSidesUnreliable(D);
 }
 function calibWindowPlacement(calibWin, ride) {
-  if (!calibWin || !ride) return null;
+  if (!calibWin || !ride || calibWin.strategy === 'borrowed') return null;
   const cs = calibWin.start, ce = calibWin.end, rs = ride.start, re = ride.end;
   if ([cs, ce, rs, re].some(v => v == null || !isFinite(v))) return null;
   if (ce <= rs) return 'pre-ride';
@@ -4436,26 +4468,34 @@ function renderPathSport(sport) { return isSkiSport(sport) ? 'skiing' : 'mtb'; }
    canonical sport; the render paths pass seven raw strings (mtb/emtb/road/running/walking/ride and
    the GPS gpsSport), so route them through normalizeSport() before lookup. Nouns only, no analysis. */
 const SPORT_LEX = {
-  mtb:  { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns', noun: 'ride', nounPlural: 'rides' },
-  emtb: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'turns', noun: 'ride', nounPlural: 'rides' },
-  road: { activity: 'Ride', signature: 'ROAD', ctaVerb: 'ride', legend: 'grade', noun: 'ride', nounPlural: 'rides' },
-  run:  { activity: 'Run',  signature: 'RUN',  ctaVerb: 'run',  legend: 'grade', noun: 'run',  nounPlural: 'runs' },
-  walk: { activity: 'Walk', signature: 'WALK', ctaVerb: 'walk', legend: 'grade', noun: 'walk', nounPlural: 'walks' },
-  ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', legend: 'grade', noun: 'ride', nounPlural: 'rides' },   /* GPS-only generic */
-  lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', legend: 'sets', noun: 'lift', nounPlural: 'lifts' },
-  golf: { activity: 'Range', signature: 'GOLF', ctaVerb: 'swing', legend: 'swings', noun: 'range session', nounPlural: 'range sessions' },
-  swim: { activity: 'Swim', signature: 'SWIM', ctaVerb: 'swim', legend: 'lengths', noun: 'swim', nounPlural: 'swims' },
+  mtb:  { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', gerund: 'riding', done: 'ridden', legend: 'turns', noun: 'ride', nounPlural: 'rides' },
+  emtb: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', gerund: 'riding', done: 'ridden', legend: 'turns', noun: 'ride', nounPlural: 'rides' },
+  road: { activity: 'Ride', signature: 'ROAD', ctaVerb: 'ride', gerund: 'riding', done: 'ridden', legend: 'grade', noun: 'ride', nounPlural: 'rides' },
+  run:  { activity: 'Run',  signature: 'RUN',  ctaVerb: 'run',  gerund: 'running', done: 'run', legend: 'grade', noun: 'run',  nounPlural: 'runs' },
+  walk: { activity: 'Walk', signature: 'WALK', ctaVerb: 'walk', gerund: 'walking', done: 'walked', legend: 'grade', noun: 'walk', nounPlural: 'walks' },
+  ride: { activity: 'Ride', signature: 'RIDE', ctaVerb: 'ride', gerund: 'riding', done: 'ridden', legend: 'grade', noun: 'ride', nounPlural: 'rides' },   /* GPS-only generic */
+  lift: { activity: 'Lift', signature: 'LIFT', ctaVerb: 'lift', gerund: 'lifting', done: 'lifted', legend: 'sets', noun: 'lift', nounPlural: 'lifts' },
+  golf: { activity: 'Range', signature: 'GOLF', ctaVerb: 'swing', gerund: 'swinging', done: 'swung', legend: 'swings', noun: 'range session', nounPlural: 'range sessions' },
+  swim: { activity: 'Swim', signature: 'SWIM', ctaVerb: 'swim', gerund: 'swimming', done: 'swum', legend: 'lengths', noun: 'swim', nounPlural: 'swims' },
   /* `legend: 'turns'` because a ski descent is read the same way an MTB descent is -- body-frame
      yaw rate, hysteretic segmentation, lean off the gravity vector. The row noun stays the
      segmentation mode (descent / lap / run) as for every other sport, so "ski day" is the whole
      RECORDING: "drop another ski day covering this segment". */
-  ski:  { activity: 'Ski',  signature: 'SKI',  ctaVerb: 'ski',  legend: 'turns', noun: 'ski day', nounPlural: 'ski days' },
+  ski:  { activity: 'Ski',  signature: 'SKI',  ctaVerb: 'ski',  gerund: 'skiing', done: 'skied', legend: 'turns', noun: 'ski day', nounPlural: 'ski days' },
 };
 /* `noun`/`nounPlural` name a whole RECORDING, for the copy that talks about OTHER recordings: "drop
    another ride covering this segment", "N rides", "past rides keep their label". Every one of those
    said "ride" until 2026-08-12, so a runner who tapped Compare laps under their own run was told to
    drop another RIDE (owner report). Distinct from `activity` (a title-case label, "Range") and from
-   the runs panel's row noun (descent / lap / run), which is the segmentation MODE, not the sport. */
+   the runs panel's row noun (descent / lap / run), which is the segmentation MODE, not the sport.
+   `gerund` ("riding") and `done` ("ridden") are the two other forms the shared copy needs -- "your
+   riding pose", "while you were riding", "distance ridden" -- and they were added on 2026-09-12 when
+   a runner's Compare-laps panel read "Ride the same trail twice in one run" (owner report). That
+   sentence had been half-converted: the noun went through the lexicon and the verb in front of it
+   did not, which is what a lexicon missing a word form invites, so every form the copy uses is now
+   on every entry (pinned by sport-routing.test.js). A verb, a gerund and a participle are three
+   words in English and not derivable from one another ("run"/"running"/"run", "swim"/"swimming"/
+   "swum"), so they are spelled out rather than suffixed. */
 /* One predicate for "is this a weightlifting session". Two identifiers legitimately reach here: a
    declared/tapped lift is tagged 'weightlifting' (the sport picker's value), while an AUTO-detected lift
    carries 'strength' (detectStrength's return), and either can be persisted in an older cached entry. So
@@ -4518,7 +4558,7 @@ function displaySport(D) { return (D && D.gpsOnly && D.gpsSport) ? D.gpsSport : 
    drop, a segment ridden AND run). normalizeSport's catch-all turns anything unrecognized into
    'ride', which is exactly the bug the nouns above fix, so a mixed or unknown set must not go
    through it: it gets the neutral word instead of MTB's. */
-const MIXED_SPORT_LEX = { activity: 'Session', ctaVerb: 'record', noun: 'session', nounPlural: 'sessions' };
+const MIXED_SPORT_LEX = { activity: 'Session', ctaVerb: 'record', gerund: 'recording', done: 'covered', noun: 'session', nounPlural: 'sessions' };
 function sportsLex(sports) {
   const known = [...new Set((sports || []).filter(s => s && s !== 'unknown').map(normalizeSport))];
   return known.length === 1 ? sportLex(known[0]) : MIXED_SPORT_LEX;
@@ -4529,6 +4569,27 @@ function lexNoun(lex, { plural = false, cap = false } = {}) {
 }
 function sportNoun(sport, opts) { return lexNoun(sportLex(sport), opts); }
 function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+/* The lexicon for the recording ON SCREEN. The descents-and-turns render path (renderAll and the
+   helpers under it: the stat tiles, the timeline axis, the segment page, the corner ledger, the form
+   replay's tiles, the calibration and crash notices) hands its functions slices of D rather than D
+   itself, so none of them can ask displaySport(). They read this instead. `_lastRender` is set first
+   thing by every render path -- a cache replay goes through the same renderer -- so it answers the
+   same way for a replay as for a fresh analysis, which is the rule renderCalibNotice already follows
+   for its own decomposition. Byte-identical for MTB and e-MTB, whose noun is the literal every one
+   of those surfaces used to carry; what it changes is a declared ski day, which had been reading
+   "fastest moment of the ride" and "Back to ride" under a SKI SIGNATURE card. */
+function pageLex() { return sportLex(displaySport(_lastRender && _lastRender.D)); }
+/* The sports whose corners come from body-frame turn detection, i.e. the sports for which "corner"
+   copy (the play-by-play's per-turn read, the ledger, the not-a-trail toggle's coaching clause) means
+   anything. Skiing is in because a ski turn is the same measurement as an MTB turn (see drawRuns).
+   Running, walking, road and GPS-only imports get no body-frame turns -- GPS-only turn detection was
+   measured and rejected (CLAUDE.md) -- so a surface that says "corner by corner" to them is offering
+   a read it cannot produce. */
+function hasBodyFrameTurns(sport) { return isMtbFamily(sport) || isSkiSport(sport); }
+/* The runs panel's ROW noun: the segmentation mode, not the sport (descents -> descent, laps -> lap,
+   marks -> run). One function so the panel title, the subtitle, the rows, the ghost-race note and the
+   play-by-play cannot pluralise or capitalise three different words for one table. */
+function runsRowNoun(mode) { return mode === 'descents' ? 'descent' : mode === 'laps' ? 'lap' : 'run'; }
 function detectSport(sensors, ride) {
   const inRide = sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end && r.speed != null);
   if (!inRide.length) return { sport: 'unknown', confidence: 0, reasons: ['no GPS speed in ride window'] };
@@ -6254,9 +6315,12 @@ function drawRuns() {
   show('runsSection');
   /* Title and count-noun follow the segmentation MODE (the row noun), not the sport, so the panel
      never reads "N runs (descents)": descents -> Descents, laps -> Laps, marks -> Runs. */
-  const nounSingular = mode === 'descents' ? 'descent' : mode === 'laps' ? 'lap' : 'run';
+  const nounSingular = runsRowNoun(mode);
   const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : 'Runs';
   { const t = document.getElementById('runsTitle'); if (t) t.textContent = nounTitle; }
+  /* Every word below that names the SPORT comes from here. The row noun above names the MODE. */
+  const lex = sportLex(displaySport(D));
+  const showTurns = hasBodyFrameTurns(D.sport);
   const sub = document.getElementById('runsSubtitle');
   if (sub) {
     let s = `${runs.length} ${nounSingular}${runs.length > 1 ? 's' : ''}`;
@@ -6279,7 +6343,7 @@ function drawRuns() {
       if (med > 0) s += ` · ~${fmtDuration(med)} each`;
     }
     /* Discoverability: say a row opens its corners when at least one does (MTB runs with turns). */
-    if ((isMtbFamily(D.sport) || isSkiSport(D.sport)) && runs.some(r => (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd))) {
+    if (showTurns && runs.some(r => (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd))) {
       s += ` · tap a ${nounSingular} for its corners`;
     }
     sub.textContent = s;
@@ -6295,13 +6359,16 @@ function drawRuns() {
          rides, only the GPS-based features (auto-match, Compare past laps, leaderboard) work, so do
          not promise the turn features the same page says are unavailable. */
       /* GPS-only foot activities carry run/walk in gpsSport while D.sport stays 'ride', so resolve it
-         to say "run/walk it" not "ride it" (displaySport), and to track it across runs, not rides. */
-      const verb = sportLex(displaySport(D)).ctaVerb;
-      const across = sportNoun(displaySport(D), { plural: true });
-      cta.innerHTML = (isMtbFamily(D.sport) || isSkiSport(D.sport))
+         to say "run/walk it" not "ride it" (displaySport), and to track it across runs, not rides.
+         The third sentence's verb was the literal "Riding" until 2026-09-12, under a ski day whose
+         first two sentences already said "ski" -- the same half-converted shape as the play-by-play's
+         "Ride the same trail twice in one run". */
+      const verb = lex.ctaVerb;
+      const across = lexNoun(lex, { plural: true });
+      cta.innerHTML = showTurns
         ? `Tag a ${nounSingular} below (Tag as…) to track it across ${across}: next time you ${verb} it,
            Loam auto-recognizes it and unlocks Compare past laps and the segment leaderboard.
-           Riding the same trail twice in one session unlocks the turn-by-turn play-by-play and ghost race.`
+           ${capitalize(lex.gerund)} the same segment twice in one session unlocks the turn-by-turn play-by-play and ghost race.`
         : `Tag a ${nounSingular} below (Tag as…) to track it across ${across}: next time you ${verb} it, Loam
            auto-recognizes it and unlocks Compare past laps and the segment leaderboard.`;
       cta.classList.remove('hidden');
@@ -6315,8 +6382,7 @@ function drawRuns() {
      rebuild the header to match, instead of showing three columns of zeros. */
   /* Skiing included: body-frame turn detection runs for it, the turn table and radius chart render
      for it, and gating these three columns on the MTB family alone swapped in Avg speed and left a
-     skier's corners visible everywhere except the table that opens them. */
-  const showTurns = isMtbFamily(D.sport) || isSkiSport(D.sport);
+     skier's corners visible everywhere except the table that opens them (`showTurns`, above). */
   const thead = document.querySelector('#runsTable thead');
   /* The name column's header follows the same mode noun the title, the subtitle and the rows use, so
      the table cannot read "Run" over rows called "Descent 4" under a heading called "Descents". */
@@ -6342,15 +6408,21 @@ function drawRuns() {
            title="No Segment Start tap, so this ${nounSingular} starts ${r.tStart <= D.ride.start + 0.5 ? 'at the beginning of the recording' : 'where the previous segment ended'}">start assumed</span>`
       : '';
     /* Marked "not a trail": a road transit or the ride home that grade segmentation admitted as a
-       descent. Muted badge, so an excluded run reads as excluded rather than missing. */
+       descent. Muted badge, so an excluded run reads as excluded rather than missing.
+       What the mark DOES depends on whether the sport has corners: on a bike or skis it withdraws the
+       run from corner coaching as well as from the lap comparison; on foot there is no corner
+       coaching to withdraw it from, so the hint promises only the half that happens. */
     const skipped = runIsSkipped(r, skipWins);
+    const skipEffect = showTurns
+      ? 'skip it for corner coaching'
+      : 'leave it out of the lap comparison';
     const skipBadge = skipped
       ? ` <span class="tag-badge" style="background:rgba(127,176,105,0.10);color:var(--text-muted);"
-           title="Excluded from corner coaching: no lap comparison, and its corners are not offered as lines to study">not a trail</span>`
+           title="${showTurns ? 'Excluded from corner coaching: no lap comparison, and its corners are not offered as lines to study' : 'Excluded from the lap comparison'}">not a trail</span>`
       : '';
     const skipHint = skipped
       ? `Count ${nounSingular} ${r.n} as a trail again`
-      : `Mark ${nounSingular} ${r.n} as not a trail (a road transit or the ride home): skip it for corner coaching`;
+      : `Mark ${nounSingular} ${r.n} as not a trail (a road transit or the way home): ${skipEffect}`;
     const skipToggle = ` <button type="button" class="run-skip" data-idx="${r.n - 1}"
       title="${skipHint}" aria-label="${skipHint}">${skipped ? '↩' : '⊘'}</button>`;
     let actions = '';
@@ -6363,7 +6435,7 @@ function drawRuns() {
       actions = r.src.autoTag
         ? (canCompare
             ? `<button data-act="compare" data-idx="${r.n - 1}" class="primary">Compare laps</button>`
-            : `<span class="run-laps" title="Compare laps needs two laps of this segment in your library">${laps === 1 ? '1 lap · ' : ''}${sportLex(displaySport(D)).ctaVerb} it again to compare</span>`)
+            : `<span class="run-laps" title="Compare laps needs two laps of this segment in your library">${laps === 1 ? '1 lap · ' : ''}${lex.ctaVerb} it again to compare</span>`)
           + `<button data-act="tag" data-idx="${r.n - 1}">Retag</button>`
         : `<button data-act="tag" data-idx="${r.n - 1}">Tag as…</button>`;
     }
@@ -6393,7 +6465,7 @@ function drawRuns() {
          ledger). Sports without body-frame turns keep the in-place map focus, where a page
          with an empty ledger would read as broken. */
       const segTurns = (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
-      if ((isMtbFamily(D.sport) || isSkiSport(D.sport)) && segTurns) { openSegmentPage(r, D); return; }
+      if (showTurns && segTurns) { openSegmentPage(r, D); return; }
       showTurnsForRun(r, D);
       document.querySelectorAll('#runsTable tbody tr').forEach(x => x.style.background = '');
       tr.style.background = 'rgba(127,176,105,0.12)';
@@ -6428,7 +6500,7 @@ function drawRuns() {
          replaces the coach's facts without rebuilding the panel, so a conversation in progress
          survives -- see its header for why that distinction is the whole reason it exists. */
       try {
-        if (_runsD && (isMtbFamily(_runsD.sport) || isSkiSport(_runsD.sport))) {
+        if (_runsD && hasBodyFrameTurns(_runsD.sport)) {
           const rSport = renderPathSport(_runsD.sport);
           renderCoachHighlights(_runsD, rSport);
           renderGeekStats(_runsD, rSport);
@@ -6452,7 +6524,7 @@ function drawRuns() {
   });
   drawRunsOverlay(runs, D);
   drawRunsDtw(runs, D);
-  setupPlayByPlay(runs, D);
+  setupPlayByPlay(runs, D, nounSingular);
   setupGhostRace(runs, D, nounSingular);
   /* Run mode (Auto/Descents/Laps) can change whether a comparable lap exists, so refresh the nav's
      Compare chip. Cheap and idempotent; also covers the initial render. */
@@ -6611,6 +6683,8 @@ function openSegmentPage(r, D, focusN) {
   document.getElementById('segStats').innerHTML = chips.map(c =>
     `<div class="stat"><div class="label">${c.l}</div><div class="value">${c.v}</div>${c.s ? `<div class="sub">${c.s}</div>` : ''}</div>`).join('');
 
+  /* "Back to ski day" under a ski day's segment; the markup's default is the MTB word. */
+  { const back = document.getElementById('segBackBtn'); if (back) back.textContent = `← Back to ${lexNoun(pageLex())}`; }
   _segReturnScroll = window.scrollY;
   hide('results'); show('segmentPage');
   const coach = document.getElementById('coachSection');
@@ -6839,7 +6913,7 @@ function closeSegmentPage() {
   }
   segTurnMarkers = {};
   _segPinnedN = null;
-  setStatus('Back to ride', true);
+  setStatus(`Back to ${lexNoun(pageLex())}`, true);
   setTimeout(() => {
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
     /* Re-frame the replay's tile map for the width it now lives at, then repaint
@@ -6855,7 +6929,8 @@ function showTurnsForRun(r, D) {
   focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline, label }, D.ride);
   const mapTag = document.getElementById('mapFocusTag');
   if (mapTag) {
-    mapTag.innerHTML = `showing <strong>${escapeHtml(label)}</strong> · <a id="mapFocusReset">show full ride</a>`;
+    /* "show full run" / "show full walk": this tag is reached from every sport's runs panel. */
+    mapTag.innerHTML = `showing <strong>${escapeHtml(label)}</strong> · <a id="mapFocusReset">show full ${sportNoun(displaySport(D))}</a>`;
     mapTag.classList.remove('hidden');
     document.getElementById('mapFocusReset').onclick = () => clearTurnFilter(D);
   }
@@ -6868,7 +6943,7 @@ function showTurnsForRun(r, D) {
      with it, which is the half that should not have been. */
   const mapSec = document.getElementById('overviewSection');
   if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (!(isMtbFamily(D.sport) || isSkiSport(D.sport))) return;
+  if (!hasBodyFrameTurns(D.sport)) return;
   filterTurnTableToRun(r, D);
 }
 /* Filter the per-turn table to one run's window, with the filter tag naming the run and offering
@@ -6884,7 +6959,7 @@ function filterTurnTableToRun(r, D) {
   const label = escapeHtml(runLabel(r.tStart) || r.label);
   const tag = document.getElementById('turnFilterTag');
   tag.classList.remove('hidden');
-  tag.innerHTML = `Turn-by-turn: <strong>${label}</strong> · ${turns.length} turns · <a id="turnFilterReset">show full ride</a>`;
+  tag.innerHTML = `Turn-by-turn: <strong>${label}</strong> · ${turns.length} turns · <a id="turnFilterReset">show full ${sportNoun(displaySport(D))}</a>`;
   document.getElementById('turnFilterReset').onclick = () => clearTurnFilter(D);
 }
 function clearTurnFilter(D) {
@@ -7056,6 +7131,7 @@ function pbpTurnDeltas(run, fastest, D) {
    which matched nothing else on the page and gave the reader nowhere to go with the insight. */
 let _pbpCtx = null;   /* { run, D } behind the rendered play-by-play, for its turn links */
 let _pbpShowAll = false;   /* expander state; a fresh panel or a run change re-collapses */
+let _pbpRowNoun = 'run';   /* the runs panel's row noun (descent / lap / run), set by setupPlayByPlay */
 const PBP_FOCUS_LINES = 3;   /* the focused read: the corners that cost the most, worst first */
 /* Rank paired turn deltas into the coaching read, shared by the in-ride play-by-play and the
    cross-ride descent comparison so the two cannot drift apart. `cmp` drops the pairings whose speeds
@@ -7107,6 +7183,9 @@ function renderPlayByPlay(run, ref, D) {
   if (!body) return;
   const labA = escapeHtml(runLabel(run.tStart) || run.label);
   const labF = escapeHtml(ref.label);
+  /* The row noun of the panel this sits under, so "these runs" and "pick two runs" count the rows
+     the table above calls descents or laps rather than reusing the running sport's own name. */
+  const rowNoun = _pbpRowNoun || 'run';
   if (!ref.sameSegmentOK) {
     _pbpCtx = null;   /* nothing actionable rendered, so leave no stale turn-link context behind */
     /* Two different refusals. In-ride, the runs are geographically different trails and the fix is
@@ -7115,12 +7194,12 @@ function renderPlayByPlay(run, ref, D) {
        rider to pick a different run would be advice about a control that cannot fix it. */
     body.innerHTML = ref.crossRide
       ? `<div class="dim" style="font-size:13px;"><strong>${labA}</strong> and <strong>${labF}</strong> `
-        + `are the same trail, but Loam could not line them up to the same start and finish gates, so `
-        + `their times measure different amounts of trail and comparing them would be misleading. `
+        + `are the same segment, but Loam could not line them up to the same start and finish gates, so `
+        + `their times measure different amounts of ground and comparing them would be misleading. `
         + `Adjusting the segment's gates (Runs &rarr; the segment page) usually fixes this.</div>`
       : `<div class="dim" style="font-size:13px;">`
         + `<strong>${labA}</strong> and <strong>${labF}</strong> do not look like the same segment, `
-        + `so a turn-by-turn comparison would not be meaningful. Pick two runs of the same trail `
+        + `so a lap-to-lap comparison would not be meaningful. Pick two ${rowNoun}s of the same segment `
         + `(laps, or marked runs of one descent).</div>`;
     return;
   }
@@ -7159,7 +7238,7 @@ function renderPlayByPlay(run, ref, D) {
      fastest, so the two surfaces contradicted each other with no way for the reader to tell which
      was right. */
   const refWhat = ref.crossRide
-    ? (ref.excluded ? 'your best lap here that this can line up' : 'your fastest lap on this trail')
+    ? (ref.excluded ? 'your best lap here that this can line up' : 'your fastest lap on this segment')
     : 'fastest on this segment';
   const verdict = tied
     ? `<span style="color:var(--text-muted);">too close to call${Math.abs(dt) >= 0.05 ? `, ${Math.abs(dt).toFixed(1)}s apart` : ''}</span>`
@@ -7172,7 +7251,7 @@ function renderPlayByPlay(run, ref, D) {
       + `moves by. The corners below are still measured, and two laps can tie on the clock while differing at them.</div>`;
   if (ref.crossRide)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Compared across ${sportNoun(displaySport(D), { plural: true })}, `
-      + `both cut to this segment's start and finish gates so the two times measure the same trail.</div>`;
+      + `both cut to this segment's start and finish gates so the two times measure the same ground.</div>`;
   if (ref.crossRide && ref.excluded)
     html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">Your fastest lap here is `
       + `${fmtDuration(ref.fastestDuration)}${ref.fastestLabel ? ` (${escapeHtml(ref.fastestLabel)})` : ''}, and it is not the `
@@ -7181,7 +7260,7 @@ function renderPlayByPlay(run, ref, D) {
           : `reference because it was saved without per-corner data, so there is nothing to line up turn for turn.`)
       + `</div>`;
   if (countA !== countF)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These runs have different turn counts (${countA} vs ${countF}). The turns are lined up in order, so a missed or extra turn can shift the pairing; the per-turn notes below read best for repeated runs of the same segment.</div>`;
+    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">These ${rowNoun}s have different turn counts (${countA} vs ${countF}). The turns are lined up in order, so a missed or extra turn can shift the pairing; the per-turn notes below read best for repeated ${rowNoun}s of the same segment.</div>`;
   /* Speed deltas follow the Units toggle like the turn table (they used to hardcode mph). The delta
      math stays in mph (pbpDeltasFromTurns, thresholds below); only the display converts. */
   const spd = (mph) => `${U.speedNum(Math.abs(mph) / 2.23694).toFixed(1)} ${U.speedUnit()}`;
@@ -7218,7 +7297,7 @@ function renderPlayByPlay(run, ref, D) {
     /* No per-turn data for the selected run (turn detection is MTB body-frame only), so only the
        total time above is comparable. Say that instead of "no differences", which reads as "you
        matched the fastest lap everywhere". */
-    html += `<div class="dim">No per-turn data for this run, so only the total time is compared.</div>`;
+    html += `<div class="dim">No per-turn data for this ${rowNoun}, so only the total time is compared.</div>`;
   } else if (!cmp.length) {
     /* Turns exist but their speeds never resolved, so every delta would be an artifact. */
     html += `<div class="dim">No usable turn speeds on this lap, so the turns cannot be compared. Only the total time above is.</div>`;
@@ -7302,11 +7381,24 @@ function pbpShowTurnRow(n) {
   const row = document.querySelector(`#turnTable tbody tr[data-n="${n}"]`);
   if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
-async function setupPlayByPlay(allRuns, D) {
+/* rowNoun is the runs panel's row noun (descent / lap / run), the segmentation MODE, passed in for the
+   same reason setupGhostRace takes it: the copy below counts and names the rows the table shows. */
+async function setupPlayByPlay(allRuns, D, rowNoun) {
   const panel = document.getElementById('playByPlay');
   if (!panel) return;
   const sel = document.getElementById('pbpRun');
   const body = document.getElementById('pbpBody');
+  const lex = sportLex(displaySport(D));
+  _pbpRowNoun = rowNoun || 'run';
+  /* What this read can DO depends on whether the sport has corners. On a bike or skis it lines two
+     laps up turn by turn; on foot, on the road and on a GPS-only import there are no body-frame
+     turns, so it compares the clock and says so -- a subtitle promising "tap a corner to open it"
+     over a run's panel was offering a control that never appears (owner screenshot, 2026-09-12). */
+  const corners = hasBodyFrameTurns(D.sport);
+  { const st = document.getElementById('pbpSubtitle');
+    if (st) st.textContent = corners
+      ? 'vs your best comparable lap of the same segment · biggest give-ups first · tap a corner to open it'
+      : 'vs your best comparable lap of the same segment · on total time'; }
   /* A run marked "not a trail" is neither compared nor offered as a reference lap: comparing the
      ride home against itself produces a wall of corner notes about turning off a road. Matched by
      window rather than by tStart so a mark survives a change of segmentation mode (see
@@ -7396,7 +7488,16 @@ async function setupPlayByPlay(allRuns, D) {
   const comparable = runs.filter(r => refOf.has(r.n));
   if (!comparable.length) {
     sel.classList.add('hidden');
-    body.innerHTML = `<div class="dim" style="font-size:13px;">No lap to compare yet. Ride the same trail twice in one ${sportNoun(displaySport(D))}, or tag a trail and ${sportLex(displaySport(D)).ctaVerb} it again, and this lines up the two laps corner by corner.</div>`;
+    /* Every sport word from the lexicon, INCLUDING the verb that opens the sentence. Until
+       2026-09-12 this read "Ride the same trail twice in one run" on a run: the noun had been
+       routed through sportNoun and the capitalised verb in front of it left as the literal, which is
+       the half-converted shape a lexicon missing a word form produces (owner screenshot). "In one
+       recording" rather than "in one ${noun}" because "Run the same segment twice in one run" is
+       correct and reads as a stutter, and it is the phrase the ghost-race note beside it already
+       uses. "Segment" rather than "trail": the road and running sports have no trail, and segment
+       is this project's word for the stretch itself (CLAUDE.md, "Segment and run are different
+       things"). The closing clause promises the corner-by-corner line-up only where corners exist. */
+    body.innerHTML = `<div class="dim" style="font-size:13px;">No lap to compare yet. ${capitalize(lex.ctaVerb)} the same segment twice in one recording, or tag a segment and ${lex.ctaVerb} it again, and this ${corners ? 'lines up the two laps corner by corner' : 'compares the two laps'}.</div>`;
     return;
   }
   sel.classList.remove('hidden');
@@ -7479,6 +7580,14 @@ function setupGhostRace(runs, D, rowNoun) {
   const scrub = document.getElementById('ghostScrub');
   const controls = document.getElementById('ghostControls');
   const how = document.getElementById('ghostHow');
+  /* The subtitle and the how-it-works line name the ROW ("replay a descent against your fastest
+     descent"), which was a static "replay a run against your fastest lap of the same trail": "run"
+     is the runs panel's marks-mode noun and the running sport's own name, so under a run's panel it
+     read as neither, and "trail" is the MTB word for what the rest of this page calls a segment. */
+  const rn = rowNoun || 'run';
+  { const st = document.getElementById('ghostSubtitle');
+    if (st) st.textContent = `replay a ${rn} against your fastest ${rn} of the same segment`; }
+  if (how) how.textContent = `Your ${rn} races a ghost of the fastest ${rn} on the map above. The live gap is seconds ahead of or behind the ghost at the same point along the track.`;
   // Only runs that have a same-segment peer can race (against the fastest lap of that trail).
   const comparable = runs.filter(r => fastestSameSegmentPeer(r, runs, D));
   if (!comparable.length) {
@@ -7504,8 +7613,8 @@ function setupGhostRace(runs, D, rowNoun) {
          segment" left that open. The row noun follows the segmentation mode so the count matches
          the table above; the verb follows the sport, so a runner is not told to ride. */
       const lex = sportLex(displaySport(D));
-      const rows = `${runs.length} ${rowNoun || 'run'}${runs.length === 1 ? '' : 's'}`;
-      note.innerHTML = `<span style="color:var(--text);">No ghost on this ${lexNoun(lex)}: its ${rows} are each on a different stretch of trail, so there is no second lap to race.</span>`
+      const rows = `${runs.length} ${rn}${runs.length === 1 ? '' : 's'}`;
+      note.innerHTML = `<span style="color:var(--text);">No ghost on this ${lexNoun(lex)}: its ${rows} are each on a different stretch of ground, so there is no second lap to race.</span>`
         + `<br>${capitalize(lex.ctaVerb)} one stretch twice in one recording and the faster lap becomes the ghost.`;
     }
     return;
@@ -8372,7 +8481,7 @@ function renderCrashSection(D) {
     if (c.anchorSource === 'gps' && c.stopped) {
       lede = `You <strong>stopped moving</strong> at ${fmtClock(c.anchor - ride.start)}, and tapped Crash `
         + `${c.reportDelayS < 60 ? Math.round(c.reportDelayS) + ' s' : fmtDuration(c.reportDelayS)} later. `
-        + `Everything below describes the ${CRASH_RUNIN_S} s of riding before that stop, not the tap.`;
+        + `Everything below describes the ${CRASH_RUNIN_S} s of ${pageLex().gerund} before that stop, not the tap.`;
     } else if (c.anchorSource === 'gps') {
       lede = `You were <strong>still rolling</strong> when you tapped, so there is no stop to anchor to and `
         + `the tap time is the best available moment. Everything below describes the ${CRASH_RUNIN_S} s before it.`;
@@ -8422,7 +8531,7 @@ function renderCrashSection(D) {
        own numbers changed meaning partway through, which the rider cannot see any other way. */
     const ms = c.mountShift;
     const mount = c.mountShifted
-      ? `<div class="crash-mount"><strong>Your phone moved in the crash.</strong> Its riding pose sits `
+      ? `<div class="crash-mount"><strong>Your phone moved in the crash.</strong> Its ${pageLex().gerund} pose sits `
         + `${Math.round(ms.deg)}&deg; differently after this than before it, so the body-frame calibration the `
         + `analysis is built on no longer matches how the phone is being carried. Lean angles and turn sides `
         + `after ${fmtClock(c.anchor - ride.start)} are measured against a stale reference and should not be trusted; `
@@ -8435,14 +8544,14 @@ function renderCrashSection(D) {
 
     return `<div class="crash-card">
       <h3>Crash you marked${crashes.length > 1 ? ' #' + (i + 1) : ''}
-        <span class="crash-when">${fmtClock(c.anchor - ride.start)} into the ride${c.lat != null ? ' · marked on the map' : ''}</span></h3>
+        <span class="crash-when">${fmtClock(c.anchor - ride.start)} into the ${lexNoun(pageLex())}${c.lat != null ? ' · marked on the map' : ''}</span></h3>
       <p class="crash-lede">${lede}</p>
       <ul class="crash-facts">${facts.map(f => `<li>${f}${f.startsWith('Inside turn') || f.startsWith('Just out of turn') ? replay : ''}</li>`).join('')}</ul>
       ${mount}
       <div class="crash-caveat"><strong>How to read this.</strong> The Crash chip is a tap, not a detection —
         there is no crash detector here, so this describes a moment you reported and nothing else. Timing is
         anchored to the last GPS-confirmed movement before the tap, which at 1 Hz is good to a second or two.
-        Lean is the phone's gravity-roll, so it is your torso, not the bike. And this is <em>one</em> corner
+        Lean is the phone's gravity-roll, so it is your torso${isMtbFamily(_lastRender && _lastRender.D && _lastRender.D.sport) ? ', not the bike' : ''}. And this is <em>one</em> corner
         against your own averages: it says what was different about it, not what caused the crash.</div>
     </div>`;
   }).join('');
@@ -8876,7 +8985,8 @@ function formSegmentSeries(D, run) {
     const wrist = (D.sensors.wrist || []).filter(r => r.t >= w0 - 0.5 && r.t <= w1 + 0.5 && r.roll != null);
     if (wrist.length >= 10) {
       const wT = wrist.map(r => r.t);
-      const wRollG = g.map(tq => formInterp(wT, formUnwrapDeg(wrist.map(r => r.roll * 180 / Math.PI)), tq));
+      const wRoll = formUnwrapDeg(wrist.map(r => r.roll * 180 / Math.PI));
+      const wRollG = g.map(tq => formInterp(wT, wRoll, tq));
       const wMed = median(wRollG);
       S.wristRoll = wRollG.map(v => Math.max(-90, Math.min(90, v - wMed)));
       S.wristRange = Math.max(...S.wristRoll) - Math.min(...S.wristRoll);
@@ -8934,7 +9044,7 @@ function formGhostContext(D, run) {
     const { deltas, countA, countF } = pbpDeltasFromTurns(runTurnsFromD(run, D), runTurnsFromD(peer, D));
     const deltasByN = {};
     if (countA === countF) {
-      for (const d of (deltas || [])) if (d.rideN != null && isFinite(d.dApex)) deltasByN[d.rideN] = d.dApex;
+      for (const d of (deltas || [])) if (d.usable && d.rideN != null && isFinite(d.dApex)) deltasByN[d.rideN] = d.dApex;
     }
     /* This lap's turn windows, for the live per-corner tile and the map dots.
        est carries the certainty grammar: non-FIT apex speeds are GPS estimates. */
@@ -9104,14 +9214,17 @@ function formFrame() {
      by the measured lean. A degree-ticked protractor, the current-lean needle, and a faint ghost
      needle at the turn's peak lean make "how committed, right now" the hero. ---- */
   const W = 360, H = 300, cx = 180, ground = 252;
-  const lc = Math.max(-58, Math.min(58, lean));
-  const pk = Math.max(0, Math.min(58, S.peakLean || 0));
+  /* Turn channels are corner-relative; the rear view needs right-positive angles.
+     Segment lean is already right-positive. Keep the metrics corner-relative. */
+  const visualSign = !seg && F.turn.direction === 'L' ? -1 : 1;
+  const lc = Math.max(-58, Math.min(58, lean * visualSign));
+  const pk = Math.max(0, Math.min(58, S.peakLean || 0)) * visualSign;
   const g = (n) => Math.round(n * 100) / 100;
   const rad = (d) => d * Math.PI / 180;
 
   /* gaze cue (AirPods head look-ahead) */
   const headOn = headRel != null;
-  const look = headOn ? Math.max(-72, Math.min(72, headRel)) : 0;
+  const look = headOn ? Math.max(-72, Math.min(72, headRel * visualSign)) : 0;
   /* "Trailing" only counts as a warning once the corner has begun; before turn-in it is the normal
      state, and painting the resting/approach frame amber read as a problem where none exists. */
   const gazeCol = !headOn ? '#5b6b7a' : (headRel >= 8 ? '#7fb069' : (headRel <= -8 && phase !== 'approach' ? '#e0a458' : '#d6dde4'));
@@ -9238,7 +9351,7 @@ function formFrame() {
   const la = rad(lc - 90), lx = cx + Math.cos(la) * pr, ly = ground + Math.sin(la) * pr;
   const sweep = lc >= 0 ? 1 : 0;
   const arc = Math.abs(lc) < 0.5 ? '' : `<path d="M ${cx} ${vy} A ${pr} ${pr} 0 0 ${sweep} ${g(lx)} ${g(ly)}" fill="none" stroke="${phaseCol}" stroke-width="2.5" opacity="0.85"/>`;
-  const ghost = pk < 0.5 ? '' : needle(pk, pr + 3, '#6b7a86', 2, 0.55);
+  const ghost = Math.abs(pk) < 0.5 ? '' : needle(pk, pr + 3, '#6b7a86', 2, 0.55);
   const protractor = ticks + ghost + arc + needle(lc, pr, '#e0a458', 3, 0.9);
 
   /* Side letter: segment lean is signed right-positive, but turn lean is corner-ward positive, so
@@ -9362,7 +9475,7 @@ function formFrame() {
        ratio is meaningful only in [0,100]. */
     const buildPct = Math.max(0, Math.min(100, S.peakLean ? Math.round(Math.max(0, lean) / Math.max(1, S.peakLean) * 100) : 0));
     cards += `<div class="form-metric"><div class="fm-label">Commitment</div><div class="fm-value">${buildPct}<span class="fm-unit">%</span></div><div class="fm-sub">of your peak ${dir} lean, right now</div></div>`;
-    const chip = S.headStatus === 'noisy' ? 'Lean only · AirPods gaze too noisy this turn' : 'Lean only · no AirPods on this ride';
+    const chip = S.headStatus === 'noisy' ? 'Lean only · AirPods gaze too noisy this turn' : `Lean only · no AirPods on this ${lexNoun(sportLex(displaySport(F.D)))}`;
     cards += `<div class="form-metric"><div class="fm-label">Gaze</div><div class="fm-value" style="font-size:13px;color:var(--text-muted);font-weight:500;line-height:1.4;">${chip}</div></div>`;
   }
   if (S.wristRoll) {
@@ -9375,10 +9488,15 @@ function formFrame() {
   if (barInto != null) {
     const sep = barInto - lean;
     const mag = Math.abs(sep).toFixed(0);
-    const who = sep > 3 ? 'bike over body' : (sep < -3 ? 'body over bike' : 'about even');
-    cards += `<div class="form-metric"><div class="fm-label">Bike vs body<span class="form-badge">Watch · rough</span></div>`
+    /* The wrist stands in for the BARS on a bike, so the tile is bike-vs-body there. On a ski day it
+       is still the wrist against the torso -- a pole hand -- and calling that "bike" would be
+       inventing the sport's equipment; it is named for what was measured instead. */
+    const onBike = isMtbFamily(F.D && F.D.sport);
+    const gear = onBike ? 'bike' : 'hands';
+    const who = sep > 3 ? `${gear} over body` : (sep < -3 ? `body over ${gear}` : 'about even');
+    cards += `<div class="form-metric"><div class="fm-label">${capitalize(gear)} vs body<span class="form-badge">Watch · rough</span></div>`
       + `<div class="fm-value ${sep > 3 ? 'into' : ''}">${mag}<span class="fm-unit">° ${who}</span></div>`
-      + `<div class="fm-sub">bars vs torso lean, right now</div></div>`;
+      + `<div class="fm-sub">${onBike ? 'bars' : 'wrist'} vs torso lean, right now</div></div>`;
   }
   /* Sides: your median peak lean left vs right, flagging the weaker side. The current turn's side is
      highlighted so you can read this turn against your other-side norm.
@@ -9398,11 +9516,12 @@ function formFrame() {
        468,914 rows, more than a 60 fps frame budget on its own. renderAll resolved it once; the
        fallback keeps the answer identical on any path that did not. */
     const sidesBad = sidesUnreliableFor(F.D);
+    const fNoun = lexNoun(sportLex(displaySport(F.D)));
     const weaker = sidesBad
-      ? 'which side is which is unreliable on this ride'
+      ? `which side is which is unreliable on this ${fNoun}`
       : (Math.abs(S.medLeanL - S.medLeanR) < 3 ? 'balanced' : (S.medLeanL < S.medLeanR ? 'left leans less' : 'right leans less'));
     const hl = (on) => on ? 'color:#e0a458;' : '';
-    const scope = S.leanScope === 'segment' ? 'this segment' : 'whole ride';
+    const scope = S.leanScope === 'segment' ? 'this segment' : `whole ${fNoun}`;
     cards += `<div class="form-metric"><div class="fm-label">Sides · median lean</div><div class="fm-value" style="font-size:18px;"><span style="${hl(here==='L')}">${S.medLeanL.toFixed(0)}°L</span> · <span style="${hl(here==='R')}">${S.medLeanR.toFixed(0)}°R</span></div><div class="fm-sub">${weaker} · ${scope}</div></div>`;
   }
   cards += ghostCornerTile;
@@ -10122,8 +10241,9 @@ function computeBestEfforts(loc, ride, distances) {
    lazily on first call. */
 
 const DB_NAME = 'loam-library';
-const DB_VERSION = 5;  // v4: 'sources' store (FIT bytes for re-openable GPS rides); v5: savedAt index on 'sources' so it can be oldest-first evicted like analyses/coaching
-const ANALYSIS_CACHE_VERSION = 16;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank)
+const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
+// v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
+const ANALYSIS_CACHE_VERSION = 17;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -10153,6 +10273,12 @@ function openLibrary() {
       if (!db.objectStoreNames.contains('analyses')) {
         const a = db.createObjectStore('analyses', { keyPath: 'hash' });
         a.createIndex('savedAt', 'savedAt', { unique: false });
+      }
+      // IndexedDB backfills this index for existing records without rewriting their payloads.
+      // Pre-v9 entries have no bytes and remain governed by the count cap, as before.
+      const analyses = e.target.transaction.objectStore('analyses');
+      if (!analyses.indexNames.contains('bytes')) {
+        analyses.createIndex('bytes', 'bytes', { unique: false });
       }
       if (!db.objectStoreNames.contains('coaching')) {
         const c = db.createObjectStore('coaching', { keyPath: 'hash' });
@@ -10361,12 +10487,12 @@ async function evictSources(max) {
     const store = _tx(db, 'sources', 'readwrite');
     await new Promise((res, rej) => {
       let kept = 0;
-      const c = store.index('savedAt').openCursor(null, 'prev');   /* descending savedAt = newest first */
+      const c = store.index('savedAt').openKeyCursor(null, 'prev');   /* descending savedAt = newest first */
       c.onsuccess = e => {
         const cur = e.target.result;
         if (!cur) { res(); return; }
         kept += 1;
-        if (kept > max) cur.delete();
+        if (kept > max) store.delete(cur.primaryKey);
         cur.continue();
       };
       c.onerror = () => rej(c.error);
@@ -10417,6 +10543,8 @@ function rideLocalKeys(key, allKeys) {
     'loam.golfSwings.' + key,
     /* The dismissed calibration-mismatch banner. One flag per recording, no run suffix. */
     'loam_calibnotice:' + key,
+    'loam_calibsource:' + key,
+    'loam_calibchoice:' + key,
     /* The dismissed e-MTB offer. Per-recording for the same reason: a rider who was not ready to
        answer on one ride should be asked again on the next. The PREFERENCE itself is deliberately
        not here -- it is a standing answer about the rider's bike, not a fact about this recording,
@@ -10452,7 +10580,10 @@ async function getCachedAnalysis(hash) {
   try {
     const db = await openLibrary();
     const rec = await _req(_tx(db, 'analyses', 'readonly').get(hash));
-    if (rec && rec.cacheVersion === ANALYSIS_CACHE_VERSION) return rec;
+    if (rec && rec.cacheVersion === ANALYSIS_CACHE_VERSION) {
+      rec.data = unpackRenderCache(rec.data);
+      return rec;
+    }
   } catch (e) { console.warn('analysis cache read failed:', e); }
   return null;
 }
@@ -10589,12 +10720,83 @@ function estimateRenderBytes(data) {
   n += len(data.profile) * 64;
   return n;
 }
+/* Lossless storage codec. Float64 buffers keep every sample and IEEE-754 value while avoiding
+   per-row object/key overhead in IndexedDB. Renderers still receive their original arrays.
+   Unexpected row shapes stay as objects, so adding a field cannot silently discard it. */
+const CACHE_NUMERIC_ROWS = {
+  gravity: ['t', 'x', 'y', 'z'], wrist: ['t', 'roll'], headphone: ['t', 'yaw'],
+  baro: ['t', 'relativeAltitude'], heartRate: ['t', 'bpm'],
+};
+const CACHE_NUMERIC_SERIES = ['t', 'yawSeg', 'rollSmooth'];
+function packRenderCache(data) {
+  const out = { ...data };
+  if (data.sensors) {
+    out.sensors = { ...data.sensors };
+    for (const [channel, fields] of Object.entries(CACHE_NUMERIC_ROWS)) {
+      const rows = data.sensors[channel];
+      if (!Array.isArray(rows) || !rows.length) continue;
+      const values = new Float64Array(rows.length * fields.length);
+      let valid = true, i = 0;
+      for (const row of rows) {
+        if (!row || Object.keys(row).length !== fields.length) { valid = false; break; }
+        for (const field of fields) {
+          if (typeof row[field] !== 'number') { valid = false; break; }
+          values[i++] = row[field];
+        }
+        if (!valid) break;
+      }
+      if (valid) out.sensors[channel] = values;
+    }
+  }
+  for (const field of CACHE_NUMERIC_SERIES) {
+    const values = data[field];
+    if (Array.isArray(values) && values.length && values.every(v => typeof v === 'number') && !values.includes(undefined)) {
+      out[field] = Float64Array.from(values);
+    }
+  }
+  return out;
+}
+function unpackRenderCache(data) {
+  const out = { ...data };
+  if (data.sensors) {
+    out.sensors = { ...data.sensors };
+    for (const [channel, fields] of Object.entries(CACHE_NUMERIC_ROWS)) {
+      const values = data.sensors[channel];
+      if (!(values instanceof Float64Array)) continue;
+      if (values.length % fields.length) throw new Error('Invalid packed sensor channel');
+      const rows = new Array(values.length / fields.length);
+      for (let r = 0, i = 0; r < rows.length; r++) {
+        const row = {};
+        for (const field of fields) row[field] = values[i++];
+        rows[r] = row;
+      }
+      out.sensors[channel] = rows;
+    }
+  }
+  for (const field of CACHE_NUMERIC_SERIES) {
+    if (data[field] instanceof Float64Array) out[field] = Array.from(data[field]);
+  }
+  return out;
+}
+function estimateStoredRenderBytes(data) {
+  // The existing conservative estimator counts the channels still stored as objects.
+  let bytes = estimateRenderBytes(data);
+  for (const field of Object.keys(CACHE_NUMERIC_ROWS)) {
+    const values = data.sensors && data.sensors[field];
+    if (values instanceof Float64Array) bytes += values.byteLength + 256;
+  }
+  for (const field of CACHE_NUMERIC_SERIES) {
+    if (data[field] instanceof Float64Array) bytes += data[field].byteLength + 256;
+  }
+  return bytes;
+}
+
 async function putCachedAnalysis(hash, sport, rawData) {
   if (!hash) return;
   /* Projected HERE rather than at the seven call sites, so no sport can ship a render whose cached
      copy drops a channel its own view reads -- which is the bug this replaced. */
-  const data = cacheableRender(rawData);
-  const bytes = estimateRenderBytes(data);
+  const data = packRenderCache(cacheableRender(rawData));
+  const bytes = estimateStoredRenderBytes(data);
   if (bytes > ANALYSIS_CACHE_ENTRY_MAX_BYTES) {
     /* Too big to cache without risking the quota for everything else; the ride still re-opens by
        re-dropping the file. Not a warning: this is the designed fallback, not a failure. */
@@ -10620,32 +10822,40 @@ async function putCachedAnalysis(hash, sport, rawData) {
     console.warn('analysis cache write failed:', e);
   }
 }
-/* Evict oldest-first until the store satisfies BOTH bounds: at most `max` entries AND at most
-   ANALYSIS_CACHE_TOTAL_MAX_BYTES total. Walks newest-first keeping a running count and byte total,
-   then deletes everything past the point either budget is exceeded. Records saved before v9 carry no
-   `bytes`; treat those as zero so the count cap still governs them. */
+/* Evict oldest-first within the count and byte budgets. Only INDEX KEYS cross into JS:
+   reading cur.value used to deserialize every cached render (hundreds of MB) after each save,
+   holding a readwrite transaction that also blocked the next session's cache lookup.
+   Read byte sizes from their index, then keep the existing savedAt/primary-key ordering so
+   ties and legacy records without bytes behave exactly as before. */
 async function evictAnalyses(max) {
   try {
     const db = await openLibrary();
     const store = _tx(db, 'analyses', 'readwrite');
-    /* Delete DURING the cursor walk with cur.delete(), not after awaiting a keys array. An IndexedDB
-       transaction auto-commits once iteration settles with no pending request against it, so collecting
-       keys in a Promise and deleting in the await continuation runs the deletes after the tx may have
-       gone inactive: on WebKit (this analyzer's own in-app WKWebView) that throws TransactionInactiveError,
-       the bounds are never enforced, and the store grows unchecked (also defeating the quota-retry in
-       putCachedAnalysis). Deleting inline keeps every request inside the live transaction. */
     await new Promise((res, rej) => {
-      let kept = 0, keptBytes = 0;
-      const c = store.index('savedAt').openCursor(null, 'prev');  /* descending savedAt = newest first */
-      c.onsuccess = e => {
+      // Resolve on COMMIT, including deletes, so quota retry cannot race an unfinished eviction.
+      store.transaction.oncomplete = () => res();
+      store.transaction.onabort = () => rej(store.transaction.error || new Error('analysis eviction aborted'));
+      store.transaction.onerror = () => rej(store.transaction.error);
+      const sizes = new Map();
+      const sizesRequest = store.index('bytes').openKeyCursor();
+      sizesRequest.onsuccess = e => {
         const cur = e.target.result;
-        if (!cur) { res(); return; }
-        const rec = cur.value || {};
-        kept += 1; keptBytes += (rec.bytes || 0);
-        if (kept > max || keptBytes > ANALYSIS_CACHE_TOTAL_MAX_BYTES) cur.delete();
-        cur.continue();
+        if (cur) {
+          sizes.set(cur.primaryKey, cur.key);
+          cur.continue();
+          return;
+        }
+        // Start the next request INSIDE the success handler to keep WebKit's transaction active.
+        let kept = 0, keptBytes = 0;
+        const orderRequest = store.index('savedAt').openKeyCursor(null, 'prev');
+        orderRequest.onsuccess = e => {
+          const entry = e.target.result;
+          if (!entry) return;
+          kept += 1; keptBytes += sizes.get(entry.primaryKey) || 0;
+          if (kept > max || keptBytes > ANALYSIS_CACHE_TOTAL_MAX_BYTES) store.delete(entry.primaryKey);
+          entry.continue();
+        };
       };
-      c.onerror = () => rej(c.error);
     });
   } catch (e) { console.warn('analysis cache evict failed:', e); }
 }
@@ -10677,19 +10887,19 @@ async function evictCoaching(max) {
   try {
     const db = await openLibrary();
     const store = _tx(db, 'coaching', 'readwrite');
-    /* Delete DURING the cursor walk with cur.delete(), not after awaiting a collected keys array. An
+    /* Delete DURING the key cursor walk, not after awaiting a collected keys array. An
        IndexedDB transaction auto-commits once iteration settles with no pending request, so deleting in
        the await continuation runs after the tx may have gone inactive: on WebKit (this analyzer's own
        in-app WKWebView) that throws TransactionInactiveError, the bound is never enforced, and the
        coaching store grows unchecked against the shared origin quota. Same fix as evictAnalyses. */
     await new Promise((res, rej) => {
       let kept = 0;
-      const c = store.index('savedAt').openCursor(null, 'prev');   /* descending savedAt = newest first */
+      const c = store.index('savedAt').openKeyCursor(null, 'prev');   /* descending savedAt = newest first */
       c.onsuccess = e => {
         const cur = e.target.result;
         if (!cur) { res(); return; }
         kept += 1;
-        if (kept > max) cur.delete();
+        if (kept > max) store.delete(cur.primaryKey);
         cur.continue();
       };
       c.onerror = () => rej(c.error);
@@ -11587,7 +11797,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   setupCropUI(cropKeyF, cropCtxF, cropF);
   const sensors = cropF ? cropSensors(sensorsFull, cropF) : sensorsFull;
   if (sensors.location.length < 30)
-    throw new Error('This FIT has no usable GPS track, so it cannot be analyzed on its own. Attach it to a ride recording instead.');
+    throw new Error('This FIT has no usable GPS track, so it cannot be analyzed on its own. Attach it to a phone recording instead.');
   onProgress('detecting active window');
   const ride = detectRidingWindow(sensors.location);
   if (ride.start == null || ride.end == null) throw new Error('Could not detect a moving window in GPS data');
@@ -17329,6 +17539,7 @@ const LoamTraining = (function () {
    *   trendPct          recent hours against prior hours, null when there is no prior volume
    *   activeWeeks       complete weeks with at least one session, over the whole window
    *   activeRecentWeeks the same over the last PLAN_LONGEST_WEEKS complete weeks (the plan's gate)
+   *   currentWeek       what has already been recorded in the partial current week
    *   longest*          over the last PLAN_LONGEST_WEEKS complete weeks PLUS the partial week (a big
    *                     session yesterday is exactly the evidence a plan wants)
    *   bySport           per family over the whole window, with the mean speed over sessions that
@@ -17343,7 +17554,17 @@ const LoamTraining = (function () {
     const trendPct = (recent && prior && prior.hoursPerWeek > 0)
       ? Math.round((recent.hoursPerWeek / prior.hoursPerWeek - 1) * 100) : null;
     const activeWeeks = complete.filter(w => w.sessions > 0).length;
-    const activeRecentWeeks = complete.slice(-PLAN_LONGEST_WEEKS).filter(w => w.sessions > 0).length;
+    const recentComplete = complete.slice(-PLAN_LONGEST_WEEKS);
+    const activeRecentWeeks = recentComplete.filter(w => w.sessions > 0).length;
+    const partial = all.find(w => w.partial) || null;
+    const currentWeek = partial ? {
+      weekStart: partial.weekStart,
+      sessions: partial.sessions,
+      timedSessions: partial.timedSessions,
+      hours: +(partial.durationS / 3600).toFixed(2),
+      distanceM: partial.distanceM,
+      climbM: partial.climbM,
+    } : null;
 
     const windowWeeks = all.slice(-(PLAN_LONGEST_WEEKS + 1));
     const windowStartMs = windowWeeks.length ? new Date(windowWeeks[0].weekStart + 'T00:00:00').getTime() : Infinity;
@@ -17354,12 +17575,19 @@ const LoamTraining = (function () {
     for (const s of (sessions || [])) {
       if (!s || !Number.isFinite(s.date) || s.date < allStartMs || s.date > now.getTime()) continue;
       const f = s.family || 'other';
-      const b = bySport[f] || (bySport[f] = { sessions: 0, durationS: 0, distanceM: 0, climbM: 0, pairedDistanceM: 0, pairedDurationS: 0 });
+      const b = bySport[f] || (bySport[f] = { sessions: 0, durationS: 0, distanceM: 0, climbM: 0,
+        pairedDistanceM: 0, pairedDurationS: 0, speedSamples: 0 });
       b.sessions++;
       if (s.durationS != null) b.durationS += s.durationS;
       if (s.distanceM != null) b.distanceM += s.distanceM;
       if (s.climbM != null) b.climbM += s.climbM;
-      if (s.durationS > 0 && s.distanceM != null) { b.pairedDistanceM += s.distanceM; b.pairedDurationS += s.durationS; }
+      /* Zero distance means the session had no usable route/distance measurement (an indoor or
+         GPS-less workout is the common case), not that the athlete spent its whole duration moving
+         at 0 m/s. Keep that duration in training volume above, but do not let it collapse the pace
+         used to scale an event. */
+      if (s.durationS > 0 && s.distanceM > 0) {
+        b.pairedDistanceM += s.distanceM; b.pairedDurationS += s.durationS; b.speedSamples++;
+      }
     }
     for (const f of Object.keys(bySport)) {
       const b = bySport[f];
@@ -17370,6 +17598,8 @@ const LoamTraining = (function () {
         distanceM: Math.round(b.distanceM),
         climbM: Math.round(b.climbM),
         speedMps: b.pairedDurationS > 0 ? +(b.pairedDistanceM / b.pairedDurationS).toFixed(3) : null,
+        speedSamples: b.speedSamples,
+        activeRecentWeeks: recentComplete.filter(w => w.bySport[f] && w.bySport[f].sessions > 0).length,
         longest: planLongestBy(fam, 'durationS'),
         longestDistance: planLongestBy(fam, 'distanceM'),
         longestClimb: planLongestBy(fam, 'climbM'),
@@ -17381,6 +17611,7 @@ const LoamTraining = (function () {
       weeksCounted: complete.length,
       activeWeeks,
       activeRecentWeeks,
+      currentWeek,
       recent,
       prior,
       trendPct,
@@ -17430,7 +17661,9 @@ const LoamTraining = (function () {
    * weeks available before the taper, the verdict is `short` and the plan ramps as far as the rate
    * allows and reports where it gets to. It never compresses the ramp to make a date work. A goal
    * whose date has passed is `past`; an athlete with fewer than two active weeks in the last eight has
-   * `no-history`, because a plan built from one session is a guess wearing a table.
+   * `no-history`, because a plan built from one session is a guess wearing a table. An event also
+   * needs that evidence in its own sport family and at least one real recorded distance; cycling
+   * volume cannot silently become a marathon baseline.
    *
    * NOTHING HERE IS ABOUT TECHNIQUE, AND NOTHING MAY BECOME SO. The coach prompt forbids feature-
    * specific instruction (jumps, drops, a named corner) for the reason the crash and jump entries in
@@ -17455,10 +17688,6 @@ const LoamTraining = (function () {
   /* The long session as a share of the week's hours: the weekly target is the long-session target
      divided by this, and a growing long session is capped by it. */
   const PLAN_LONG_MAX_SHARE = 0.5;
-  /* The floor for the long-session start when the athlete has nothing recent to start from, as a
-     fraction of the long-session target: from 30% to 80% of an event at 10% a week is ten build
-     weeks, which is a season rather than a fantasy. */
-  const PLAN_LONG_START_FRACTION = 0.3;
   /* The most weeks a plan is written for. A goal further out than half a year gets its first
      26 weeks scaffolded and a note saying so. */
   const PLAN_MAX_WEEKS = 26;
@@ -17540,11 +17769,13 @@ const LoamTraining = (function () {
   /*
    * The scaffold.
    *
-   *   goal, today, weeksToGo, verdict          'past' | 'no-history' | 'on-track' | 'reachable' | 'short'
+   *   goal, today, weeksToGo, verdict          'past' | 'no-history' | 'no-sport-history' |
+   *                                            'on-track' | 'reachable' | 'short'
    *   start   { hoursPerWeek, sessionsPerWeek, sessionHours, longH, longM, longClimbM }
    *   target  { hoursPerWeek, longUnit, longH, longM, eventH, speedMps, climbM }
    *   weeksNeeded, buildWeeksAvailable, reached { hoursPerWeek, longH, longM }
-   *   weeks   [{ n, weekStart, kind, hours, sessions, longH, longM }]   kind: build | hold | recovery | taper | event
+   *   weeks   [{ n, weekStart, kind, hours, sessions, longH, longM }]   kind: current | build |
+   *                                                                          hold | recovery | taper | event
    *   truncated                                 true when the goal is further out than PLAN_MAX_WEEKS
    *
    * The long session is ramped in HOURS when the athlete's history gives a speed for the goal's sport
@@ -17561,10 +17792,15 @@ const LoamTraining = (function () {
     /* weeksToGo counts WEEKS, so a goal on Monday of this week reads 0 on Sunday -- the same as one on
        Sunday -- and was planned for. The day key decides past; both are yyyy-mm-dd. */
     if (weeksToGo < 0 || String(goal.date) < todayKey) return { ...base, verdict: 'past' };
+    const isEvent = goal.type === 'event';
     const recent = summary && summary.recent;
     if (!summary || !recent || !(summary.activeRecentWeeks >= PLAN_MIN_ACTIVE_WEEKS)) return { ...base, verdict: 'no-history' };
+    const fam = (summary.bySport && goal.sport) ? summary.bySport[goal.sport] : null;
+    if (isEvent && (!fam || !(fam.activeRecentWeeks >= PLAN_MIN_ACTIVE_WEEKS)
+        || !(fam.longestDistance && fam.longestDistance.distanceM > 0))) {
+      return { ...base, verdict: 'no-sport-history' };
+    }
 
-    const isEvent = goal.type === 'event';
     const ramp = 1 + PLAN_RAMP_MAX_PCT / 100;
     const eps = 1e-9;
     const startH = Math.max(PLAN_MIN_START_HOURS, recent.hoursPerWeek || 0);
@@ -17574,7 +17810,6 @@ const LoamTraining = (function () {
     const sessionH = (timedPerWeek > 0 && recent.hoursPerWeek > 0)
       ? Math.max(PLAN_MIN_SESSION_HOURS, recent.hoursPerWeek / timedPerWeek)
       : PLAN_DEFAULT_SESSION_HOURS;
-    const fam = (summary.bySport && goal.sport) ? summary.bySport[goal.sport] : null;
     const famLongest = fam && fam.longest ? fam.longest : null;
     const famLongestDist = fam && fam.longestDistance ? fam.longestDistance : null;
     const famLongestClimb = fam && fam.longestClimb ? fam.longestClimb : null;
@@ -17586,16 +17821,16 @@ const LoamTraining = (function () {
         eventH = goal.distanceM / speedMps / 3600;
         longTarget = eventH * PLAN_EVENT_LONG_FRACTION;
         const doneH = (famLongest && famLongest.durationS) ? famLongest.durationS / 3600 : 0;
-        /* The floor is itself capped at half the STARTING week: a first plan from a one-hour week must
-           not open with a long ride longer than the week. What the athlete has already done is never
-           cut, whichever side of that cap it sits. */
-        longStart = Math.max(doneH, Math.min(longTarget * PLAN_LONG_START_FRACTION, startH * PLAN_LONG_MAX_SHARE));
+        /* Start on evidence, not on a fraction invented from the goal. The old 30%-of-event floor
+           could turn a 20-minute longest run into a much longer first week while the screen still
+           claimed a 10% ramp. A small baseline may make the goal short; that is the honest verdict. */
+        longStart = doneH;
         targetH = Math.max(startH, longTarget / PLAN_LONG_MAX_SHARE);
       } else {
         longUnit = 'm';
         longTarget = goal.distanceM * PLAN_EVENT_LONG_FRACTION;
         const doneM = (famLongestDist && famLongestDist.distanceM) ? famLongestDist.distanceM : 0;
-        longStart = Math.max(doneM, longTarget * PLAN_LONG_START_FRACTION);
+        longStart = doneM;
         targetH = startH;
       }
     } else {
@@ -17630,11 +17865,18 @@ const LoamTraining = (function () {
     }
 
     const taper = isEvent ? Math.min(PLAN_TAPER_WEEKS, weeksToGo) : 0;
-    const buildWeeksAvailable = weeksToGo - taper;
+    const startsPartial = ((today.getDay() + 6) % 7) > 0; // Tuesday-Sunday: Monday is a full week.
+    const taperStartIndex = weeksToGo - taper;
+    /* A partly elapsed current week is useful context, not a full build opportunity. Weekly-hours
+       goals include their deadline week; event goals reserve the event and taper weeks. */
+    const buildWeeksAvailable = isEvent
+      ? Math.max(0, taperStartIndex - (startsPartial ? 1 : 0))
+      : Math.max(0, weeksToGo + 1 - (startsPartial ? 1 : 0));
     const monday = planWeekStart(today);
     const lastIndex = Math.min(weeksToGo, PLAN_MAX_WEEKS - 1);
     const weeks = [];
     let lastBuildH = startH, lastBuildL = longStart, peakH = startH, peakL = longStart;
+    let fullWeekN = 0;
     for (let i = 0; i <= lastIndex; i++) {
       const weekStart = planDayKey(planAddDays(monday, 7 * i));
       let kind, hours, long;
@@ -17642,12 +17884,17 @@ const LoamTraining = (function () {
         kind = 'event';
         hours = eventH;
         long = longUnit === 'h' ? eventH : goal.distanceM;
-      } else if (isEvent && i >= buildWeeksAvailable) {
+      } else if (isEvent && i >= taperStartIndex) {
         kind = 'taper';
         const f = (i === weeksToGo - 1) ? PLAN_TAPER_LAST_FRACTION : PLAN_TAPER_FIRST_FRACTION;
         hours = peakH * f;
         long = longTarget != null ? peakL * f : null;
-      } else if ((i + 1) % PLAN_RECOVERY_EVERY === 0 && !(!isEvent && i === weeksToGo)) {
+      } else if (startsPartial && i === 0) {
+        /* Show what remains of this week, but do not pretend its elapsed days are a build step. */
+        kind = 'current';
+        hours = startH;
+        long = longTarget != null ? longStart : null;
+      } else if ((++fullWeekN) % PLAN_RECOVERY_EVERY === 0) {
         kind = 'recovery';
         hours = lastBuildH * PLAN_RECOVERY_FRACTION;
         long = longTarget != null ? lastBuildL * PLAN_RECOVERY_FRACTION : null;
@@ -17661,6 +17908,11 @@ const LoamTraining = (function () {
         if (long != null) peakL = Math.max(peakL, long);
       }
       if (!isEvent && hours != null) long = hours * PLAN_LONG_MAX_SHARE;
+      const partial = startsPartial && i === 0 && kind !== 'event';
+      const completedHours = partial && summary.currentWeek ? summary.currentWeek.hours : null;
+      const completedSessions = partial && summary.currentWeek ? summary.currentWeek.sessions : null;
+      const rowHours = completedHours != null ? Math.max(hours, completedHours) : hours;
+      const rowSessions = kind === 'event' ? null : planClampSessions(rowHours == null ? null : rowHours / sessionH);
       const longH = (kind === 'event') ? eventH : (longUnit === 'h' ? long : null);
       const longM = (kind === 'event') ? goal.distanceM
         : (longUnit === 'h' ? (speedMps && long != null ? long * 3600 * speedMps : null) : long);
@@ -17668,10 +17920,17 @@ const LoamTraining = (function () {
         n: i + 1,
         weekStart,
         kind,
-        hours: planRound2(hours),
-        sessions: kind === 'event' ? null : planClampSessions(hours == null ? null : hours / sessionH),
+        hours: planRound2(rowHours),
+        sessions: completedSessions == null ? rowSessions : Math.max(rowSessions, completedSessions),
         longH: planRound2(longH),
         longM: planRoundM(longM),
+        ...(partial ? {
+          partial: true,
+          completedHours: planRound2(completedHours || 0),
+          hoursRemaining: planRound2(Math.max(0, hours - (completedHours || 0))),
+          completedSessions: completedSessions || 0,
+          sessionsRemaining: (completedHours || 0) >= hours ? 0 : Math.max(0, rowSessions - (completedSessions || 0)),
+        } : {}),
       });
     }
 
@@ -17696,6 +17955,7 @@ const LoamTraining = (function () {
         longM: longUnit === 'h' ? planRoundM(toM(longTarget)) : planRoundM(longTarget),
         eventH: planRound2(eventH),
         speedMps,
+        speedSamples: fam ? (fam.speedSamples || 0) : 0,
         climbM: isEvent ? (goal.climbM == null ? null : goal.climbM) : null,
       },
       weeksNeeded,
@@ -17738,6 +17998,7 @@ const LoamTraining = (function () {
     const v = plan && plan.verdict;
     if (v === 'past') return 'The goal date has passed; there is no plan to write, only a next goal to set.';
     if (v === 'no-history') return 'Fewer than two active weeks in the last eight, so there is no history to build a plan on; say so and ask the athlete to record or import a few sessions first.';
+    if (v === 'no-sport-history') return 'There is not enough recent training in the goal sport to build an event plan. Ask the athlete to record at least two active weeks in that sport, including a session with distance, rather than borrowing a baseline from another sport.';
     if (v === 'on-track') return 'The athlete already trains at or above what this goal asks; the plan holds volume, keeps the long session, and tapers for an event.';
     if (v === 'reachable') return 'The safe ramp reaches the target before the taper; the scaffold shows the way.';
     if (v === 'short') return 'The safe ramp does NOT reach the target by the date. Say so plainly, show where it does get to, and offer the honest options: move the date, lower the target, or accept arriving under-prepared. Never compress the ramp to make the date work.';
@@ -17773,6 +18034,8 @@ const LoamTraining = (function () {
         ...u.dist('distance', b.distanceM),
         ...u.elev('climb', b.climbM),
         ...u.speed('avg_speed', b.speedMps),
+        speed_samples: b.speedSamples,
+        active_weeks_last_8: b.activeRecentWeeks,
         longest_session: session(b.longest),
       };
     }
@@ -17810,6 +18073,14 @@ const LoamTraining = (function () {
         active_weeks: summary.activeWeeks,
         recent_4wk: means(summary.recent),
         prior_4wk: means(summary.prior),
+        current_week: summary.currentWeek ? {
+          week_start: summary.currentWeek.weekStart,
+          sessions: summary.currentWeek.sessions,
+          timed_sessions: summary.currentWeek.timedSessions,
+          hours: summary.currentWeek.hours,
+          ...u.dist('distance', summary.currentWeek.distanceM),
+          ...u.elev('climb', summary.currentWeek.climbM),
+        } : null,
         hours_trend_pct: summary.trendPct,
         longest_recent_session: session(summary.longest),
         by_sport: bySport,
@@ -17836,6 +18107,7 @@ const LoamTraining = (function () {
           ...u.dist('long_session', p.target.longM),
           event_hours_estimate: p.target.eventH,
           ...u.speed('assumed_speed', p.target.speedMps),
+          speed_samples: p.target.speedSamples,
           ...u.elev('event_climb', p.target.climbM),
         },
         weeks_needed_at_safe_ramp: p.weeksNeeded,
@@ -17853,6 +18125,13 @@ const LoamTraining = (function () {
           sessions: w.sessions,
           long_session_hours: w.longH,
           ...u.dist('long_session', w.longM),
+          ...(w.partial ? {
+            partial: true,
+            hours_completed: w.completedHours,
+            hours_remaining: w.hoursRemaining,
+            sessions_completed: w.completedSessions,
+            sessions_remaining: w.sessionsRemaining,
+          } : {}),
         })),
       } : null,
       data_caveats: caveats,
@@ -17882,6 +18161,7 @@ const LoamTraining = (function () {
 
 The scaffold is load-bearing:
 - Its weekly hours and long session are CEILINGS for each week. Write sessions that add up to them, never above them. A recovery week is a recovery week; a taper week is a taper week; an event week is the event plus rest.
+- A week marked partial has already started. Schedule only its remaining hours and sessions on or after as_of; never assign a session to a day that has passed. A current week is context, not a build step.
 - It was built by fixed rules named in data_caveats (a safe ramp, recovery weeks, a taper). Do not re-derive a faster ramp, and do not promise the goal is reachable when verdict says it is not.
 - The verdict and verdict_note are the plan's headline. If the verdict is "short", say so first and offer the honest options (move the date, lower the target, or arrive under-prepared and say what that costs); never compress the ramp to make the date work.
 
@@ -17905,7 +18185,7 @@ Format your FIRST reply as compact markdown:
 For follow-up questions, answer briefly and conversationally, and keep any edit inside the scaffold's ceilings. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training toward their goal. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
 
-  return { PLAN_HISTORY_WEEKS, PLAN_RECENT_WEEKS, PLAN_LONGEST_WEEKS, planDayKey, planWeekStart, planWeekKey, planAddDays, planEpochMs, planSportFamily, planSessions, planWeeks, planHistory, PLAN_RAMP_MAX_PCT, PLAN_RECOVERY_EVERY, PLAN_RECOVERY_FRACTION, PLAN_TAPER_WEEKS, PLAN_TAPER_FIRST_FRACTION, PLAN_TAPER_LAST_FRACTION, PLAN_EVENT_LONG_FRACTION, PLAN_LONG_MAX_SHARE, PLAN_LONG_START_FRACTION, PLAN_MAX_WEEKS, PLAN_MIN_ACTIVE_WEEKS, PLAN_MIN_START_HOURS, PLAN_MIN_SESSION_HOURS, PLAN_DEFAULT_SESSION_HOURS, PLAN_MIN_SESSIONS_PER_WEEK, PLAN_MAX_SESSIONS_PER_WEEK, PLAN_GOAL_TYPES, PLAN_GOAL_SPORTS, normalizeGoal, planWeeksToGo, buildPlan, trainingDigest, trainingAnalyzePrompt, trainingChips, trainingInputPlaceholder, trainingCoachPrompt };
+  return { PLAN_HISTORY_WEEKS, PLAN_RECENT_WEEKS, PLAN_LONGEST_WEEKS, planDayKey, planWeekStart, planWeekKey, planAddDays, planEpochMs, planSportFamily, planSessions, planWeeks, planHistory, PLAN_RAMP_MAX_PCT, PLAN_RECOVERY_EVERY, PLAN_RECOVERY_FRACTION, PLAN_TAPER_WEEKS, PLAN_TAPER_FIRST_FRACTION, PLAN_TAPER_LAST_FRACTION, PLAN_EVENT_LONG_FRACTION, PLAN_LONG_MAX_SHARE, PLAN_MAX_WEEKS, PLAN_MIN_ACTIVE_WEEKS, PLAN_MIN_START_HOURS, PLAN_MIN_SESSION_HOURS, PLAN_DEFAULT_SESSION_HOURS, PLAN_MIN_SESSIONS_PER_WEEK, PLAN_MAX_SESSIONS_PER_WEEK, PLAN_GOAL_TYPES, PLAN_GOAL_SPORTS, normalizeGoal, planWeeksToGo, buildPlan, trainingDigest, trainingAnalyzePrompt, trainingChips, trainingInputPlaceholder, trainingCoachPrompt };
 })();
 
 
@@ -18162,9 +18442,11 @@ function analysisKeyParts(contentHash, fallbackName) {
        `mtb-emtb` browser scenario rather than by reasoning, which is what that scenario is for.
        Only meaningful on an auto-detected ride, since a declared sport ignores the preference. */
     const emtbSuffix = (prefersEmtbRides() && (!declaredSportKey || declaredSportKey === 'auto')) ? ':emtb=1' : '';
+  const calibrationSource = borrowedCalibration(cropKey);
+  const sourceSuffix = calibrationSource ? ':calibration=' + encodeURIComponent(JSON.stringify(calibrationSource)) : '';
   const cacheKey = contentHash && (contentHash + (calibStrategy === 'quietest' ? '' : ':' + calibStrategy)
-    + sportSuffix + poolSuffix + cropSuffix + emtbSuffix);
-  return { calibStrategy, declaredSportKey, cropKey, storedCrop, cacheKey };
+    + sportSuffix + poolSuffix + cropSuffix + emtbSuffix + sourceSuffix);
+  return { calibStrategy, calibrationSource, declaredSportKey, cropKey, storedCrop, cacheKey };
 }
 
 /* ---------- Reopening a session: the key without the bytes ----------
@@ -18368,7 +18650,7 @@ async function analyze(files) {
        derive different keys for one recording -- which would be a permanent silent MISS rather than
        a visible fault. Remembering the hash against the recording's identity is what lets the NEXT
        open skip both the fetch and the hash. */
-    const { calibStrategy, cropKey, storedCrop, cacheKey: derivedCacheKey } =
+    const { calibStrategy, calibrationSource, cropKey, storedCrop, cacheKey: derivedCacheKey } =
       analysisKeyParts(contentHash, sensorFile && sensorFile.name);
     if (contentHash) contentKeyRemember(recordingIdentity(), contentHash);
     /* The recording's IDENTITY, hoisted out of the cache decision, because those are two different
@@ -18958,11 +19240,14 @@ async function analyze(files) {
       throw new Error(`${sportLex(sport).activity} analysis reads turns and lean from the body frame, so it needs the gravity and gyroscope channels; this recording has neither.`);
 
     onProgress('finding calibration window');
-    const calibWin = findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy);
+    const calibWin = calibrationSource
+      ? { ...calibrationSource.window, strategy: 'borrowed', sourceName: calibrationSource.name, sourceKey: calibrationSource.key }
+      : findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy);
     if (!calibWin) throw new Error('Could not find a still calibration window');
 
     onProgress('computing body-frame rotation');
-    const { R } = calibrationRotation(sensors.gravity, calibWin.start, calibWin.end);
+    const R = calibrationSource ? calibrationSource.R
+      : calibrationRotation(sensors.gravity, calibWin.start, calibWin.end).R;
     /* Flag a calibration captured in a different pose than the ride (classic: calibrate with the
        phone in a pocket, then move it to a backpack before riding). Surfaced as a notice in renderAll. */
     if (calibWin.strategy === 'riding') {
@@ -18981,7 +19266,9 @@ async function analyze(files) {
       const mid = (ride.start + ride.end) / 2;
       calibWin.ridingPoseDriftDeg = gravityPoseMismatch(sensors.gravity, ride.start, mid, mid, ride.end);
     } else {
-      calibWin.poseMismatchDeg = gravityPoseMismatch(sensors.gravity, calibWin.start, calibWin.end, ride.start, ride.end);
+      calibWin.poseMismatchDeg = calibrationSource
+        ? (poseMismatchAxes(sensors.gravity, R, ride.start, ride.end) || {}).totalDeg
+        : gravityPoseMismatch(sensors.gravity, calibWin.start, calibWin.end, ride.start, ride.end);
       /* The fore-aft / lateral split of that same angle. Only the lateral half predicts damage to the
          turn-side reads (see poseMismatchAxes), so it is what renderCalibNotice gates on and what the
          geek-stats dump prints; the total is kept because other surfaces already store it. */
@@ -19174,9 +19461,11 @@ async function analyze(files) {
     // so no FIT speed or jumps reached the analysis. Say so rather than implying FIT was used.
     const fitIgnored = fitFile && phoneStartFitSec == null;
     if (fitIgnored) console.warn('FIT provided but ignored: sensor filename has no parseable UTC timestamp, cannot sync.');
+    /* "Ski loaded" for a declared ski day; byte-identical "Ride loaded" for MTB and e-MTB. */
+    const loadedWord = `${sportLex(sport).activity} loaded`;
     setStatus(
-      fitIgnored ? 'Ride loaded (sensors only; FIT skipped, filename has no timestamp)'
-        : (fitFile ? 'Ride loaded (sensors + FIT)' : 'Ride loaded (sensors only)'),
+      fitIgnored ? `${loadedWord} (sensors only; FIT skipped, filename has no timestamp)`
+        : (fitFile ? `${loadedWord} (sensors + FIT)` : `${loadedWord} (sensors only)`),
       true);
   } catch (e) {
     console.error(e);
@@ -19763,7 +20052,7 @@ function renderCrossTurnRead(hostId, subject, reference, onCorner, noTurnsBySpor
     if (noTurnsBySport) { host.innerHTML = ''; host.classList.add('hidden'); return; }
     /* Honest empty state for a sport that CAN carry turns. The backfill only works for a ride the
        body-frame path will re-analyse; a GPS-only import has no IMU to re-read and never gains any. */
-    host.innerHTML = `<div class="dim" style="font-size:12px;">No corner-by-corner read: it needs two selected laps that both stored their turns. Rides saved before per-descent turns existed carry none, and re-opening such a ride once backfills it; a GPS-only import carries none and cannot be backfilled.</div>`;
+    host.innerHTML = `<div class="dim" style="font-size:12px;">No corner-by-corner read: it needs two selected laps that both stored their turns. Sessions saved before per-descent turns existed carry none, and re-opening such a session once backfills it; a GPS-only import carries none and cannot be backfilled.</div>`;
     host.classList.remove('hidden');
     return;
   }
@@ -19909,12 +20198,16 @@ function renderSegmentPRCard(hostId, pr, previous, members, labels) {
   } else if (read.verdict === 'short-window') {
     head = `Fastest time here &mdash; but not a personal best`;
     sub = `${fmtDuration(pr.duration)} is your quickest clock on this segment, and it covered ${pct(read.distFrac)} less ground than ${prevLabel} `
-      + `(${U.dist(pr.distance)} vs ${U.dist(previous.distance)}) at a slower pace over the trail it did cover. `
+      + `(${U.dist(pr.distance)} vs ${U.dist(previous.distance)}) at a slower pace over the ground it did cover. `
       + `The shorter time is the shorter window, so it is not counted as a record.`;
   } else if (read.verdict === 'pr-thin') {
+    /* "One more lap" rather than "ride it once more": this card serves the segment leaderboard for
+       every sport, and the members' sports can disagree (a segment covered on foot and on a bike),
+       so the sentence is written without a sport verb at all instead of guessing one. */
+    const more = PR_MIN_LAPS - read.laps;
     head = `Your fastest time here`;
     sub = `${fmtDuration(pr.duration)}, ${margin} up on ${prevLabel}. That is ${lapWord} on this segment, so it is a fastest-of-${read.laps} `
-      + `rather than a record &mdash; ride it ${PR_MIN_LAPS - read.laps === 1 ? 'once more' : `${PR_MIN_LAPS - read.laps} more times`} and it becomes one.`;
+      + `rather than a record &mdash; ${more === 1 ? 'one more lap' : `${more} more laps`} and it becomes one.`;
   } else {
     head = `Personal best on this segment`;
     sub = `${fmtDuration(pr.duration)}, ${margin} faster than ${prevLabel}${labels && labels.priorDay ? ', your best before today' : ''}, over ${lapWord} here.`;
@@ -19953,15 +20246,15 @@ function renderSegmentPRCard(hostId, pr, previous, members, labels) {
   const caveats = [];
   if (read.verdict === 'tied') { /* nothing to qualify */ }
   else if (read.standing === 'flattered')
-    caveats.push(`${prevLabel} launched from a near stop at the start gate, so part of this margin is that lap's handicap rather than this lap's riding.`);
+    caveats.push(`${prevLabel} launched from a near stop at the start gate, so part of this margin is that lap's handicap rather than anything this lap did better.`);
   else if (read.standing === 'understated')
     caveats.push(`This lap launched from a near stop at the start gate, so the margin under-states it.`);
   /* The ground comparison, on a claim that still stands. Both arms carry the tie guard: chaining the
      second off the first would let a tied-but-shorter lap through the gap. */
   if (read.verdict !== 'tied' && read.distNote === 'longer')
-    caveats.push(`This lap covered ${pct(read.distFrac)} more ground than ${prevLabel} (${U.dist(pr.distance)} vs ${U.dist(previous.distance)}): either more trail between the same gates, or one of the two windows did not clip to them.`);
+    caveats.push(`This lap covered ${pct(read.distFrac)} more ground than ${prevLabel} (${U.dist(pr.distance)} vs ${U.dist(previous.distance)}): either more ground between the same gates, or one of the two windows did not clip to them.`);
   else if (read.verdict !== 'tied' && read.distNote === 'shorter' && read.verdict !== 'short-window')
-    caveats.push(`This lap covered ${pct(read.distFrac)} less ground than ${prevLabel} (${U.dist(pr.distance)} vs ${U.dist(previous.distance)}), though it was quicker per unit of trail as well as on the clock.`);
+    caveats.push(`This lap covered ${pct(read.distFrac)} less ground than ${prevLabel} (${U.dist(pr.distance)} vs ${U.dist(previous.distance)}), though it was quicker per unit of distance as well as on the clock.`);
 
   const trophy = read.verdict === 'pr' ? '🏆 ' : '';
   /* Only a standing claim is drawn in the segment green. A withdrawn one (a tie, or a short window)
@@ -20369,7 +20662,7 @@ function renderCrossRide({ perRide, clusters }) {
         if (noTurnsBySport) { turnEl.innerHTML = ''; turnEl.classList.add('hidden'); }
         else {
           turnEl.classList.remove('hidden');
-          turnEl.innerHTML = `<div style="padding:24px; color:var(--text-muted); font-size:12px;">Apex speed by corner needs two selected laps that stored their turns. Rides saved before per-descent turns existed carry none.</div>`;
+          turnEl.innerHTML = `<div style="padding:24px; color:var(--text-muted); font-size:12px;">Apex speed by corner needs two selected laps that stored their turns. Sessions saved before per-descent turns existed carry none.</div>`;
         }
       }
 
@@ -20669,14 +20962,16 @@ function progLeanNoteText(dated) {
   if (!el) return;
   const { withheld, unchecked } = progLeanWithheld(dated);
   const bits = [];
+  /* "Sessions": the Progress page trends the whole library, and a lean gap is stored for ski days as
+     well as rides, so the count takes the neutral noun. */
   if (withheld) {
-    bits.push(`${withheld} ride${withheld > 1 ? 's are' : ' is'} missing from this line on purpose: `
-      + 'the phone sat twisted sideways relative to how it rode, which mixes the bike\'s roll into the '
+    bits.push(`${withheld} session${withheld > 1 ? 's are' : ' is'} missing from this line on purpose: `
+      + 'the phone sat twisted sideways relative to how it was carried, which mixes roll into the '
       + 'turn signal and can invent a left/right difference, so no side comparison is made for '
-      + (withheld > 1 ? 'those rides' : 'that ride') + '.');
+      + (withheld > 1 ? 'those sessions' : 'that session') + '.');
   }
   if (unchecked) {
-    bits.push(`${unchecked} ride${unchecked > 1 ? 's were' : ' was'} saved before that check existed `
+    bits.push(`${unchecked} session${unchecked > 1 ? 's were' : ' was'} saved before that check existed `
       + 'and cannot be re-examined, so ' + (unchecked > 1 ? 'they are' : 'it is') + ' plotted as saved.');
   }
   el.textContent = bits.join(' ');
@@ -20836,7 +21131,7 @@ async function renderProgress() {
   const line = (id, y, title, ytitle, color) => {
     const el = document.getElementById(id);
     if (!el) return;
-    if (!y.some(v => v != null)) { el.innerHTML = `<div style="padding:20px; color:var(--text-muted); font-size:12px;">No data yet for: ${title}. It fills in as you analyze more rides.</div>`; return; }
+    if (!y.some(v => v != null)) { el.innerHTML = `<div style="padding:20px; color:var(--text-muted); font-size:12px;">No data yet for: ${title}. It fills in as you analyze more sessions.</div>`; return; }
     loamPlot(id, [{ x, y, type: 'scatter', mode: 'lines+markers', line: { color, width: 2 }, marker: { color, size: 6 }, connectgaps: true }], {
       paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
       title: { text: title, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
@@ -20865,7 +21160,7 @@ async function renderProgressTrails() {
   if (!el) return;
   let tags = [], rides = [];
   try { [tags, rides] = await Promise.all([listTaggedSegments(), listRides()]); } catch (e) {}
-  if (!tags.length) { el.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">No tagged segments yet. Tag a descent (from a ride\'s Runs panel) to track a trail\'s times over time.</p>'; return; }
+  if (!tags.length) { el.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">No tagged segments yet. Tag a descent (from a session\'s Runs panel) to track a segment\'s times over time.</p>'; return; }
   const rows = tags.map(t => {
     const prog = tagProgression(t, rides);
     let progCell = '<span style="color:var(--text-muted);">-</span>';
@@ -20885,7 +21180,11 @@ async function renderProgressTrails() {
   el.innerHTML = `<div style="overflow-x:auto;"><table>
     <thead><tr><th>Trail</th><th>Laps</th><th>Best</th><th>Progress</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
-  el.querySelectorAll('.prog-lead').forEach(b => { b.onclick = () => renderSegmentLeaderboard(+b.dataset.id); });
+  /* Unlike the Library modal, Progress is a page in its own right. Carry that origin into the
+     shared comparison surface so its Back button can return here instead of disappearing. */
+  el.querySelectorAll('.prog-lead').forEach(b => {
+    b.onclick = () => renderSegmentLeaderboard(+b.dataset.id, { returnTo: 'progress' });
+  });
 }
 /* ---------- Training plan (Progress page) ----------
    A goal, set against what the athlete has actually recorded, turned into a week-by-week scaffold
@@ -20922,7 +21221,7 @@ function planSportWord(family) {
     : family === 'ski' ? loamT('Ski') : family === 'swim' ? loamT('Swim') : loamT('Any sport');
 }
 function planKindWord(kind) {
-  return kind === 'build' ? loamT('build') : kind === 'hold' ? loamT('hold') : kind === 'recovery' ? loamT('recovery')
+  return kind === 'current' ? loamT('current') : kind === 'build' ? loamT('build') : kind === 'hold' ? loamT('hold') : kind === 'recovery' ? loamT('recovery')
     : kind === 'taper' ? loamT('taper') : kind === 'event' ? loamT('event') : kind;
 }
 function planDateText(dayKey) {
@@ -20957,9 +21256,9 @@ function trainingGoalFormHtml(raw, error) {
     <label>${loamT('Goal')}<select id="planGoalType">${opt('event', loamT('An event'), type)}${opt('weekly-hours', loamT('Weekly hours'), type)}</select></label>
     <label>${loamT('Sport')}<select id="planGoalSport">${opt('bike', loamT('Bike'), g.sport || 'bike')}${opt('foot', loamT('On foot'), g.sport || 'bike')}${opt('ski', loamT('Ski'), g.sport || 'bike')}${opt('swim', loamT('Swim'), g.sport || 'bike')}</select></label>
     <label>${loamT('Date')}<input type="date" id="planGoalDate" value="${escapeHtml(g.date || '')}"></label>
-    <label class="plan-event-only">${loamT('Distance ({unit})', { unit: metric ? 'km' : 'mi' })}<input type="number" inputmode="decimal" min="0" step="0.1" id="planGoalDistance" value="${distShown}"></label>
+    <label class="plan-event-only">${loamT('Distance ({unit})', { unit: metric ? 'km' : 'mi' })}<input type="number" inputmode="decimal" min="0.1" step="0.1" id="planGoalDistance" value="${distShown}"></label>
     <label class="plan-event-only">${loamT('Climb ({unit}, optional)', { unit: metric ? 'm' : 'ft' })}<input type="number" inputmode="numeric" min="0" step="1" id="planGoalClimb" value="${climbShown}"></label>
-    <label class="plan-hours-only">${loamT('Hours per week')}<input type="number" inputmode="decimal" min="0" step="0.5" id="planGoalHours" value="${g.hoursPerWeek != null ? g.hoursPerWeek : ''}"></label>
+    <label class="plan-hours-only">${loamT('Hours per week')}<input type="number" inputmode="decimal" min="0.5" step="0.5" id="planGoalHours" value="${g.hoursPerWeek != null ? g.hoursPerWeek : ''}"></label>
     <label>${loamT('Name (optional)')}<input type="text" id="planGoalLabel" maxlength="80" value="${escapeHtml(g.label || '')}"></label>
     <div class="plan-actions">
       <button type="button" class="plan-btn" id="planGoalSave">${loamT('Save goal')}</button>
@@ -21025,8 +21324,9 @@ function trainingVerdictHtml(st) {
   let body;
   if (p.verdict === 'past') body = badge('dim', loamT('Past')) + loamT('The goal date has passed. Set a new one.');
   else if (p.verdict === 'no-history') body = badge('dim', loamT('Not yet')) + loamT('Not enough recorded training to build a plan on: it needs at least two active weeks in the last eight. Record or import a few sessions and come back.');
+  else if (p.verdict === 'no-sport-history') body = badge('dim', loamT('Not yet')) + loamT('Not enough recent {sport} training to build this event plan: record at least two active weeks in that sport, including a session with distance. Other sports still count as training, but they cannot set this event\'s starting point.', { sport: planSportWord(st.goal.sport).toLowerCase() });
   else if (p.verdict === 'on-track') body = badge('ok', loamT('On track')) + loamT('You already train at or above what this goal asks ({start} a week). Hold that, keep the long session, and ease off before the day.', { start: H(p.start.hoursPerWeek) });
-  else if (p.verdict === 'reachable') body = badge('ok', loamT('Reachable')) + loamT('From {start} to {target} a week at a safe rate takes {needed} weeks; you have {available} build weeks before {what}.', {
+  else if (p.verdict === 'reachable') body = badge('ok', loamT('Reachable')) + loamT('From {start} to {target} a week at a safe rate takes {needed} weeks; you have {available} full weeks before {what}.', {
     start: H(p.start.hoursPerWeek), target: H(p.target.hoursPerWeek), needed: p.weeksNeeded, available: p.buildWeeksAvailable,
     what: isEvent ? loamT('the taper') : loamT('the date') });
   else if (p.verdict === 'short') body = badge('short', loamT('Not at a safe rate')) + loamT('This asks for {target} a week, and a safe ramp reaches {reached} by then. Move the date, lower the target, or plan to arrive under-prepared.', {
@@ -21034,8 +21334,8 @@ function trainingVerdictHtml(st) {
   else body = badge('dim', '?') + loamT('Check the goal.');
   const extra = [];
   if (isEvent && p.target && p.target.eventH != null) {
-    extra.push(loamT('The event is about {hours} at your recent average speed ({speed}); your longest recent session was {longest}.', {
-      hours: H(p.target.eventH), speed: U.speed(p.target.speedMps),
+    extra.push(loamT('For planning, {distance} at your recorded average speed ({speed}) is {hours}; this is not a finish-time prediction. It uses {samples} sessions with both distance and time. Your longest recent session was {longest}.', {
+      distance: U.dist(st.goal.distanceM), hours: H(p.target.eventH), speed: U.speed(p.target.speedMps), samples: p.target.speedSamples,
       longest: p.start.longH != null ? `${H(p.start.longH)}${p.start.longM != null ? ` · ${U.dist(p.start.longM)}` : ''}` : '—' }));
   } else if (isEvent && p.target && p.target.longUnit === 'm') {
     extra.push(loamT('No recorded session in this sport carries both a distance and a time, so the long session is planned in distance and the weekly hours hold.'));
@@ -21050,10 +21350,15 @@ function trainingWeeksTable(st) {
     const long = w.kind === 'event'
       ? U.dist(w.longM)
       : [w.longH != null ? planHoursText(w.longH * 3600) : null, w.longM != null ? U.dist(w.longM) : null].filter(Boolean).join(' · ');
+    const hours = w.partial
+      ? loamT('{remaining} left · {total} ceiling', { remaining: planHoursText(w.hoursRemaining * 3600), total: planHoursText(w.hours * 3600) })
+      : (w.kind === 'event' ? (w.hours != null ? '~' + planHoursText(w.hours * 3600) : '—') : planHoursText(w.hours * 3600));
+    const sessions = w.partial
+      ? loamT('{remaining} left · {total} ceiling', { remaining: w.sessionsRemaining, total: w.sessions })
+      : (w.sessions == null ? '—' : w.sessions);
     return `<tr class="plan-${w.kind}">
-      <td>${w.n}</td><td>${planDateText(w.weekStart)}</td><td>${planKindWord(w.kind)}</td>
-      <td>${w.kind === 'event' ? (w.hours != null ? '~' + planHoursText(w.hours * 3600) : '—') : planHoursText(w.hours * 3600)}</td>
-      <td>${w.sessions == null ? '—' : w.sessions}</td><td>${long || '—'}</td></tr>`;
+      <td data-label="${escapeHtml(loamT('Week'))}">${w.n}</td><td data-label="${escapeHtml(loamT('Starts'))}">${planDateText(w.weekStart)}</td><td data-label="${escapeHtml(loamT('Kind'))}">${planKindWord(w.kind)}</td>
+      <td data-label="${escapeHtml(loamT('Hours'))}">${hours}</td><td data-label="${escapeHtml(loamT('Sessions'))}">${sessions}</td><td data-label="${escapeHtml(loamT('Long session'))}">${long || '—'}</td></tr>`;
   }).join('');
   return `<div style="overflow-x:auto;"><table class="plan-weeks">
     <thead><tr><th>${loamT('Week')}</th><th>${loamT('Starts')}</th><th>${loamT('Kind')}</th><th>${loamT('Hours')}</th><th>${loamT('Sessions')}</th><th>${loamT('Long session')}</th></tr></thead>
@@ -21104,7 +21409,7 @@ async function renderTrainingPlan(rides, opts = {}) {
   }
   const caveat = betaCaveat(
     loamT('every number here is a coaching convention applied to your own recorded sessions, not a measurement of you: at most 10% more per build week, a recovery week every fourth week, a two-week taper, the long session at about 80% of the event and at most half the week. Training done outside Loam is invisible here. Not medical advice.'),
-    loamT('The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages. An event\'s duration is its distance at your recent average speed over every recorded session in that sport, which mixes terrain, stops and easy days, so it scales the long session and predicts nothing. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.'));
+    loamT('The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages and shown as remaining work rather than a full build week. An event\'s planning duration is its distance at your recorded average speed over sessions in that sport with positive distance and time; it mixes terrain, stops and easy days, so it scales the long session and is not a finish-time prediction. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.'));
   /* A borrowed coach panel lives INSIDE this host, and rewriting the host's innerHTML would detach
      it from the document -- not hide it, remove it, so every later render on this page would find no
      #coachSection at all. Park it at home for the rewrite and bring it back into the new host, with
@@ -24303,7 +24608,7 @@ function skiReadsHtml({ descents, nearMiss, downS, upS, legs, ups, sampleS, R, h
     const rate = median(ups.map(l => l.meanRateMps));
     const still = ups.filter(l => l.motion === 'still').length;
     const tilt = median(ups.map(l => l.tiltSpreadDeg));
-    li(T('<strong>The ride up rose at {rate} and the phone read still on {still} of {n} rides</strong>{tilt}. A chairlift is quiet and level; a conveyor is ridden standing and reads busier. The rate says how fast the lift climbs, not how long you queued for it.', {
+    li(T('<strong>The ride up rose at {rate} and the phone read still on {still} of {n} ascents</strong>{tilt}. A chairlift is quiet and level; on a conveyor you stand, so the phone reads more motion. The rate says how fast the lift climbs, not how long you queued for it.', {
       rate: rate == null ? '—' : rate.toFixed(2) + ' m/s', still, n: ups.length,
       tilt: tilt != null ? T(', its pose wandering {deg}&deg;', { deg: Math.round(tilt) }) : '' }));
   }
@@ -25869,7 +26174,8 @@ function renderRunDistanceReads(D) {
   /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
      grade adjustment and the GAP column can never disagree about the hill. */
   const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
-  renderRunPacing(runPacing(splits, alts), unitLabel);
+  renderRunPacing(runPacing(splits, alts), unitLabel,
+    stridePaceFactors(splits, (D.sensors && D.sensors.pedometer) || []));
 }
 
 function renderAllRunning(D) {
@@ -25922,6 +26228,8 @@ function renderAllRunning(D) {
   renderRunsPanel(D);
   if (D.running.mount === 'hand') {
     show('runMountNotice');
+    /* "on your next walk": this notice serves the walk too, and its markup says "run". */
+    { const nn = document.getElementById('runMountNextNoun'); if (nn) nn.textContent = sportNoun(D.sport); }
     /* A hand-carried phone is precisely the case the wrist series exists for, so when it was
        preferred this notice must not go on implying the cadence beside it came from the phone it is
        warning about. */
@@ -26015,7 +26323,7 @@ function renderAllGps(D) {
     const dropped = D.fitLapsDropped || 0;
     renderRunLaps(laps, laps.length
       ? `${laps.length} laps from your ${device}` + (pressed ? `, ${pressed} of them pressed by hand (shaded)` : '')
-        + `. These are the ${device}'s own numbers, not recomputed here, so they match what Garmin shows.`
+        + `. These are the ${device}'s own numbers, not recomputed here, so they match what your ${device} shows.`
         + (dropped ? ` ${dropped} more ${dropped === 1 ? 'lap fell' : 'laps fell'} outside the trimmed window and ${dropped === 1 ? 'is' : 'are'} not shown.` : '')
       : '', { foot }); }
   if (foot) {
@@ -26095,8 +26403,10 @@ function renderGpsUpsell(D) {
      lean is bike-only; a run/hike just gets the heart-rate add. */
   const cta = document.getElementById('gpsUpsellCta');
   if (cta) {
+    /* "Next run:" / "Next walk:" -- the foot branch opened with the literal "Next ride:" until
+       2026-09-12, over the cards it had just been taught not to pitch turns and jumps to a runner. */
     cta.innerHTML = foot
-      ? `Next ride: start <strong>Loam Capture</strong> on your phone (an armband or pocket is fine), head out as usual, then attach this FIT to the session. Add your Apple Watch for heart rate too. Everything above lights up on the same outing.`
+      ? `Next ${sportNoun(sport)}: start <strong>Loam Capture</strong> on your phone (an armband or pocket is fine), head out as usual, then attach this FIT to the session. Add your Apple Watch for heart rate too. Everything above lights up on the same outing.`
       : `Next ride: stow the phone in your pack, start <strong>Loam Capture</strong> from your Apple Watch, and hold still for the first ~20s so it calibrates in your riding pose. Then ride as usual and attach this FIT to the session. The watch also adds heart rate and handlebar lean. Everything above lights up on the same ride.`;
   }
   show('gpsUpsellSection');
@@ -26444,6 +26754,7 @@ async function compareWithPastLaps(descent, opts = {}) {
      does this). The comparison itself opens at the TOP: it is a different page, and without this it
      inherited whatever scroll the ride page was at, which on a phone was the bottom of a page the
      rider had never seen, with the Back button somewhere above (owner report, 2026-09-12). */
+  _crossReturnView = 'ride';
   _crossReturnScroll = window.scrollY;
   hide('results'); show('crossResults');
   window.scrollTo(0, 0);
@@ -26451,6 +26762,7 @@ async function compareWithPastLaps(descent, opts = {}) {
      native Done button otherwise drops all the way out to the Sessions list). The multi-file drop
      path leaves this bar hidden because there is no single ride to return to. */
   { const b = document.getElementById('crossBackBar'); if (b) b.classList.remove('hidden'); }
+  { const b = document.getElementById('crossBackBtn'); if (b) b.innerHTML = '&larr; Back to ride'; }
   renderCrossRide({ perRide, clusters: [cluster] });
   /* The alert above names what the RIDER should go do next, so it speaks in this recording's sport.
      This line describes the SET now on screen, so it reads the members' own sports -- the same
@@ -26970,7 +27282,7 @@ function tagProgression(tag, rides) {
 /* Open a cross-ride leaderboard for a tagged segment straight from the Library (no current ride
    needed): every lap you have on that exact trail, ranked fastest-first, with the lap-aligned charts
    below. This is the segment moat made first-class, the run-vs-run payoff of tagging. */
-async function renderSegmentLeaderboard(tagId) {
+async function renderSegmentLeaderboard(tagId, opts = {}) {
   await dedupeRides();
   const [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]);
   const tag = allTags.find(t => t.id === tagId);
@@ -26996,8 +27308,13 @@ async function renderSegmentLeaderboard(tagId) {
   const perRide = members.map(m => ({ file: m.file, descents: [m] }));
   const cluster = { members, centroidLatStart: lat0, centroidLonStart: lon0, centroidLatEnd: lat1, centroidLonEnd: lon1 };
   closeLibraryModal();
-  /* Opened from the Library, not a single ride, so no "Back to ride" / "Back to comparison" target. */
-  { const b = document.getElementById('crossBackBar'); if (b) b.classList.add('hidden'); }
+  /* Progress is a full page, so remember both it and the reader's place on it. The Library is a
+     modal over the dropzone and deliberately keeps the old no-Back behavior: closing the modal is
+     already the transition away from it, and there is no useful page underneath to restore. */
+  _crossReturnView = opts.returnTo === 'progress' ? 'progress' : null;
+  _crossReturnScroll = _crossReturnView ? window.scrollY : null;
+  { const b = document.getElementById('crossBackBar'); if (b) b.classList.toggle('hidden', !_crossReturnView); }
+  { const b = document.getElementById('crossBackBtn'); if (b && _crossReturnView === 'progress') b.innerHTML = '&larr; Back to progress'; }
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   hide('results'); hide('dropzone'); hide('progressResults'); show('crossResults');
   renderCrossRide({ perRide, clusters: [cluster] });
@@ -27230,6 +27547,102 @@ function setLoamCalibStrategy(s) {
   try { localStorage.setItem('loam_calib', CALIB_STRATEGIES.includes(s) ? s : 'preride'); }
   catch (e) { /* private mode / quota */ }
 }
+/* ---------- Cross-ride calibration snapshots ----------
+   An explicit, per-recording choice. Copy the source at selection time: re-saving or deleting the
+   donor must not silently rotate a ride that already used it. Existing mismatch and mount-shift
+   gates still judge the target. This checks storage integrity, not that two mounts really match. */
+function validCalibrationSource(p) {
+  if (!p || p.version !== 1 || typeof p.key !== 'string' || !p.key || typeof p.name !== 'string'
+      || !p.window || !['preride', 'quietest'].includes(p.window.strategy)
+      || ![p.window.start, p.window.end, p.window.noise].every(Number.isFinite)
+      || p.window.end <= p.window.start || p.window.noise < 0
+      || !Array.isArray(p.R) || p.R.length !== 3
+      || !p.R.every(row => Array.isArray(row) && row.length === 3 && row.every(Number.isFinite))) return false;
+  const R = p.R;
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+    const dot = R[i].reduce((v, x, k) => v + x * R[j][k], 0);
+    if (Math.abs(dot - (i === j ? 1 : 0)) > 1e-6) return false;
+  }
+  const det = R[0][0]*(R[1][1]*R[2][2]-R[1][2]*R[2][1])
+    - R[0][1]*(R[1][0]*R[2][2]-R[1][2]*R[2][0])
+    + R[0][2]*(R[1][0]*R[2][1]-R[1][1]*R[2][0]);
+  return Math.abs(det - 1) < 1e-6;
+}
+function borrowedCalibration(key) {
+  if (!key) return null;
+  try {
+    const p = JSON.parse(localStorage.getItem('loam_calibchoice:' + key) || 'null');
+    return validCalibrationSource(p) && p.key !== key ? p : null;
+  } catch (e) { return null; }
+}
+function storeBorrowedCalibration(key, p) {
+  if (!key || (p && (!validCalibrationSource(p) || p.key === key))) return false;
+  try {
+    if (p) localStorage.setItem('loam_calibchoice:' + key, JSON.stringify(p));
+    else localStorage.removeItem('loam_calibchoice:' + key);
+    return true;
+  } catch (e) {
+    loamToast(loamT('Could not save the calibration choice. Local storage is unavailable or full.'));
+    return false;
+  }
+}
+function savedCalibrationSources() {
+  const out = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key.startsWith('loam_calibsource:')) continue;
+      try {
+        const p = JSON.parse(localStorage.getItem(key));
+        if (validCalibrationSource(p)) out.push(p);
+      } catch (e) { /* ignore a damaged entry, not the remaining sources */ }
+    }
+  } catch (e) { /* unavailable storage */ }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+function setupBorrowedCalibration(D) {
+  const save = document.getElementById('saveCalibrationBtn');
+  const sel = document.getElementById('borrowCalibrationSel');
+  if (!save || !sel) return;
+  const key = _currentRunKey;
+  const win = D.calibWin;
+  const source = { version: 1, key, name: String(D.title || key || ''), R: D.R,
+    window: win && { start: win.start, end: win.end, noise: win.noise, strategy: win.strategy } };
+  save.textContent = loamT('Save still calibration for another ride');
+  save.disabled = !validCalibrationSource(source);
+  save.onclick = () => {
+    if (!validCalibrationSource(source)) return;
+    try {
+      localStorage.setItem('loam_calibsource:' + key, JSON.stringify(source));
+      loamToast(loamT('Still calibration saved. Open the other recording to use it.'));
+    } catch (e) { loamToast(loamT('Could not save the calibration choice. Local storage is unavailable or full.')); }
+  };
+  document.getElementById('borrowCalibrationLabel').textContent = loamT('Calibration from another ride (beta)');
+  document.getElementById('borrowCalibrationNote').textContent = loamT(
+    'Use only with the same phone in the same mount and orientation. A moved phone needs its own calibration.');
+  sel.replaceChildren(new Option(loamT('Use this recording'), ''));
+  const chosen = borrowedCalibration(key);
+  const sources = savedCalibrationSources().filter(p => p.key !== key);
+  // A target keeps the exact snapshot it used even after the source is removed or replaced.
+  if (chosen) {
+    const i = sources.findIndex(p => p.key === chosen.key);
+    if (i >= 0) sources[i] = chosen; else sources.push(chosen);
+  }
+  for (const p of sources) sel.add(new Option(p.name + ' · ' + p.window.start.toFixed(1) + '–' + p.window.end.toFixed(1) + 's', p.key));
+  // The displayed selection describes the rendered frame, even when reopening an older cache URL.
+  sel.value = win && win.strategy === 'borrowed' ? win.sourceKey : '';
+  sel.disabled = !_lastSensorFile;
+  if (!_lastSensorFile) document.getElementById('borrowCalibrationNote').textContent += ' ' + loamT('Reopen the recording file to change calibration.');
+  sel.onchange = () => {
+    const p = sel.value ? sources.find(p => p.key === sel.value) : null;
+    if (storeBorrowedCalibration(key, p)) {
+      localStorage.removeItem('loam_calibnotice:' + key);
+      if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+    }
+  };
+}
+/* ---------- End cross-ride calibration snapshots ---------- */
+
 /* Rider settings for road power analysis: FTP (W) and weight (kg), persisted locally. FTP is an
    optional override of the head unit's stored value; weight unlocks W/kg. Both stored as numbers or
    omitted. Kept minimal; the era-correct ftpHistory in the spec is a later (library) concern. */
@@ -27271,6 +27684,17 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  'This calibration came from {source}. Check that the phone used the same mount and orientation.':
+    'Denne kalibreringen kom fra {source}. Kontroller at telefonen hadde samme feste og retning.',
+  'Recompute calibration from this recording instead.': 'Beregn kalibreringen på nytt fra dette opptaket i stedet.',
+  'Save still calibration for another ride': 'Lagre stillestående kalibrering for en annen tur',
+  'Calibration from another ride (beta)': 'Kalibrering fra en annen tur (beta)',
+  'Use this recording': 'Bruk dette opptaket',
+  'Use only with the same phone in the same mount and orientation. A moved phone needs its own calibration.': 'Bruk bare med samme telefon i samme feste og retning. En telefon som er flyttet, trenger egen kalibrering.',
+  'Still calibration saved. Open the other recording to use it.': 'Stillestående kalibrering lagret. Åpne det andre opptaket for å bruke den.',
+  'Could not save the calibration choice. Local storage is unavailable or full.': 'Kunne ikke lagre kalibreringsvalget. Lokal lagring er utilgjengelig eller full.',
+  'Reopen the recording file to change calibration.': 'Åpne opptaksfilen på nytt for å endre kalibreringen.',
+
   /* --- Indoor ski (renderSkiIndoor) ------------------------------------------------------------
      First analyzer surface translated, because it is the one shipping to a Norwegian reader right
      now. The three caveats are translated in FULL: this is an ungraded detector, so the warning is
@@ -27464,7 +27888,7 @@ const LOAM_NB = {
     '<span class="ski-dim">{n} kantskifter falt utenfor alle medregnede nedkjøringer.</span> Å gå til heisen, sidetrinn og småflytting i kø vrir alle på en telefon; de telles her så det kan ses at tallene for nedkjøringene utelater dem.',
   '<span class="ski-dim">1 edge change fell outside any counted run.</span> Walking to the lift, sidestepping and shuffling in a queue all turn a phone; they are counted here so the run figures can be seen to exclude them.':
     '<span class="ski-dim">1 kantskifte falt utenfor alle medregnede nedkjøringer.</span> Å gå til heisen, sidetrinn og småflytting i kø vrir alle på en telefon; de telles her så det kan ses at tallene for nedkjøringene utelater dem.',
-  '<strong>The ride up rose at {rate} and the phone read still on {still} of {n} rides</strong>{tilt}. A chairlift is quiet and level; a conveyor is ridden standing and reads busier. The rate says how fast the lift climbs, not how long you queued for it.':
+  '<strong>The ride up rose at {rate} and the phone read still on {still} of {n} ascents</strong>{tilt}. A chairlift is quiet and level; on a conveyor you stand, so the phone reads more motion. The rate says how fast the lift climbs, not how long you queued for it.':
     '<strong>Turen opp steg i {rate} og telefonen leste stille på {still} av {n} turer</strong>{tilt}. En stolheis er rolig og plan; et transportbånd kjøres stående og leses som mer urolig. Raten sier hvor fort heisen stiger, ikke hvor lenge du sto i kø til den.',
   ', its pose wandering {deg}&deg;': ', med stillingen vandrende {deg}&deg;',
   '<strong>Sideways load through the runs sat at {g} g (90th percentile)</strong>{up}. That is the turn\'s own force on the body, gravity added back to the accelerometer. How big it gets depends on speed and radius, neither of which was measured, so this is a description of the day and not a level to aim at.':
@@ -27564,6 +27988,7 @@ const LOAM_NB = {
   'On foot': 'Til fots',
   'Swim': 'Svømming',
   'Any sport': 'Alle idretter',
+  'current': 'denne uka',
   'build': 'oppbygging',
   'hold': 'vedlikehold',
   'recovery': 'restitusjon',
@@ -27596,16 +28021,22 @@ const LOAM_NB = {
   'The goal date has passed. Set a new one.': 'Måldatoen er passert. Sett et nytt mål.',
   'Not enough recorded training to build a plan on: it needs at least two active weeks in the last eight. Record or import a few sessions and come back.':
     'Ikke nok registrert trening til å bygge en plan på: den trenger minst to aktive uker av de siste åtte. Ta opp eller importer noen økter og kom tilbake.',
+  'Not enough recent {sport} training to build this event plan: record at least two active weeks in that sport, including a session with distance. Other sports still count as training, but they cannot set this event\'s starting point.':
+    'Ikke nok nylig trening med {sport} til å bygge denne arrangementsplanen: registrer minst to aktive uker i den idretten, inkludert en økt med distanse. Andre idretter teller fortsatt som trening, men de kan ikke sette startpunktet for dette arrangementet.',
   'You already train at or above what this goal asks ({start} a week). Hold that, keep the long session, and ease off before the day.':
     'Du trener allerede like mye som eller mer enn dette målet krever ({start} i uka). Hold det, behold den lange økta, og trapp ned før dagen.',
   'From {start} to {target} a week at a safe rate takes {needed} weeks; you have {available} build weeks before {what}.':
     'Fra {start} til {target} i uka i et trygt tempo tar {needed} uker; du har {available} oppbyggingsuker før {what}.',
+  'From {start} to {target} a week at a safe rate takes {needed} weeks; you have {available} full weeks before {what}.':
+    'Fra {start} til {target} i uka i et trygt tempo tar {needed} uker; du har {available} hele uker før {what}.',
   'the taper': 'nedtrappingen',
   'the date': 'datoen',
   'This asks for {target} a week, and a safe ramp reaches {reached} by then. Move the date, lower the target, or plan to arrive under-prepared.':
     'Dette krever {target} i uka, og en trygg opptrapping når {reached} innen da. Flytt datoen, senk målet, eller planlegg for å stille mindre forberedt.',
   'The event is about {hours} at your recent average speed ({speed}); your longest recent session was {longest}.':
     'Arrangementet tar omtrent {hours} i din nylige snittfart ({speed}); din lengste økt i det siste var {longest}.',
+  'For planning, {distance} at your recorded average speed ({speed}) is {hours}; this is not a finish-time prediction. It uses {samples} sessions with both distance and time. Your longest recent session was {longest}.':
+    'Til planlegging tilsvarer {distance} i din registrerte snittfart ({speed}) {hours}; dette er ikke et anslag på sluttiden. Det bruker {samples} økter med både distanse og tid. Din lengste økt i det siste var {longest}.',
   'No recorded session in this sport carries both a distance and a time, so the long session is planned in distance and the weekly hours hold.':
     'Ingen registrert økt i denne idretten har både distanse og tid, så den lange økta planlegges i distanse og timene per uke holdes.',
   'The goal is more than 26 weeks out; the first 26 are scaffolded.': 'Målet er mer enn 26 uker fram i tid; de første 26 er satt opp.',
@@ -27615,6 +28046,7 @@ const LOAM_NB = {
   'Hours': 'Timer',
   'Sessions': 'Økter',
   'Long session': 'Lang økt',
+  '{remaining} left · {total} ceiling': '{remaining} igjen · tak på {total}',
   'hours a week, last 4': 'timer i uka, siste 4',
   'sessions a week, last 4': 'økter i uka, siste 4',
   'distance a week, last 4': 'distanse i uka, siste 4',
@@ -27631,6 +28063,8 @@ const LOAM_NB = {
     'hvert tall her er en trenerkonvensjon brukt på dine egne registrerte økter, ikke en måling av deg: høyst 10 % mer per oppbyggingsuke, en restitusjonsuke hver fjerde uke, to ukers nedtrapping, den lange økta på omtrent 80 % av arrangementet og høyst halve uka. Trening gjort utenfor Loam er usynlig her. Ikke medisinske råd.',
   'The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages. An event\'s duration is its distance at your recent average speed over every recorded session in that sport, which mixes terrain, stops and easy days, so it scales the long session and predicts nothing. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.':
     'Ukestallene er summer av tiden i bevegelse og distansen hver økt lagret da den ble analysert, delt inn i uker som starter på mandag i din lokale kalender; inneværende uke holdes utenfor gjennomsnittene. Varigheten av et arrangement er distansen i din nylige snittfart over alle registrerte økter i den idretten, som blander terreng, stopp og rolige dager, så den skalerer den lange økta og spår ingenting. Reglene er de vanlig underviste, og ingen av dem er validert på en Loam-utøver; det som ville gi noen av dem et eget tall, er en sesong med planer satt opp mot øktene som ble registrert etterpå. Styrkeøkter har ingen klokke i historikken sin, så de telles som økter og legger ikke til timer.',
+  'The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages and shown as remaining work rather than a full build week. An event\'s planning duration is its distance at your recorded average speed over sessions in that sport with positive distance and time; it mixes terrain, stops and easy days, so it scales the long session and is not a finish-time prediction. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.':
+    'Ukestallene er summer av tiden i bevegelse og distansen hver økt lagret da den ble analysert, delt inn i uker som starter på mandag i din lokale kalender; inneværende uke holdes utenfor gjennomsnittene og vises som gjenstående arbeid i stedet for en hel oppbyggingsuke. Planleggingsvarigheten for et arrangement er distansen i din registrerte snittfart over økter i den idretten med positiv distanse og tid; den blander terreng, stopp og rolige dager, så den skalerer den lange økta og er ikke et anslag på sluttiden. Reglene er de vanlig underviste, og ingen av dem er validert på en Loam-utøver; det som ville gi noen av dem et eget tall, er en sesong med planer satt opp mot øktene som ble registrert etterpå. Styrkeøkter har ingen klokke i historikken sin, så de telles som økter og legger ikke til timer.',
 };
 
 /* The reader's language as a two-letter code for the copy table. Falls back to 'en', which selects
@@ -28378,7 +28812,9 @@ function renderRunTimeline(D) {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin,
-    xaxis: { title: { text: 'time in run', font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start) },
+    /* "time in walk" / "time in ride": this axis serves the walk and the GPS-only bike import as well
+       as the run, and it said "time in run" over all three. */
+    xaxis: { title: { text: `time in ${sportNoun(displaySport(D))}`, font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start) },
     /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
     yaxis: footSport
       ? { title: { text: `pace (${U.metric() ? 'min/km' : 'min/mi'})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' }, autorange: 'reversed' }
@@ -28734,6 +29170,7 @@ function recordingQuality(D) {
        pose is a mean over riding, so it carries trail pitch and any net cornering bias, which is
        exactly why that strategy is beta. Its own line, saying what it is. */
     const riding = calib.strategy === 'riding';
+    const borrowed = calib.strategy === 'borrowed';
     const lat = axes && Number.isFinite(axes.lateralDeg) ? Math.abs(axes.lateralDeg) : null;
     facts.push({
       id: 'calibration',
@@ -28742,6 +29179,8 @@ function recordingQuality(D) {
         ? 'Calibrated from a still moment before you started'
         : riding
         ? 'Calibrated from the ride itself, not from a still moment'
+        : borrowed
+        ? 'Calibrated from another ride: ' + calib.sourceName
         : 'No still moment before the activity, so calibration came from elsewhere in the recording',
       weakens: preride ? null : 'Lean angles, and which way a turn went',
       detail: preride
@@ -28752,6 +29191,8 @@ function recordingQuality(D) {
           + 'riding position while you are standing still. It is beta: a riding pose is an average over '
           + 'the whole ride, so it carries the trail\u2019s average pitch and any net cornering bias, and '
           + 'nothing here can check it against a known-good frame.'
+        : borrowed
+        ? 'You chose a still calibration saved from another ride. It only applies if the same phone stayed in the same mount and orientation. Pose-mismatch and mount-shift checks still apply.'
         : 'The still-window search found nothing quiet enough before the activity and fell back to the '
           + 'quietest window anywhere in the file, which can be after you finished. Standing still for '
           + '20+ seconds in the final mount before you set off is the whole fix, and the Record screen '
@@ -29516,6 +29957,129 @@ function runPacing(splits, alts) {
   };
 }
 
+/* ===== Why the pace changed: cadence, or stride? =========================================
+   Ported from analyzer/sports/running/stride.js and pinned to it by that module's drift guard.
+   Speed is exactly cadence x stride, so a pacing verdict can be attributed to one factor or the
+   other -- but ONLY with counted steps. With the old estimate (steps = cadence x time) stride was
+   speed/cadence, so the two factors were algebraically the same number and stride would have
+   absorbed 100% of every pace change by construction. Hence the refusal below rather than a
+   fallback. See the module header for the full argument. */
+
+/** Below this, the pedometer did not report often enough inside a split to trust its step count. */
+const STRIDE_MIN_UPDATES = 3;
+/** Fraction of the log-speed change below which a factor is "held" rather than moved. */
+const STRIDE_HELD_SHARE = 0.25;
+/** Log-speed change below which there is no change to attribute at all. */
+const STRIDE_FLAT_LN = 0.005;
+
+function strideMovingOf(s) {
+  return s.movingSeconds != null ? s.movingSeconds : s.seconds;
+}
+function strideMean(xs) {
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+}
+/** Steps counted inside one window; positive deltas only, so a merged file's seam costs one interval. */
+function strideStepsIn(pedRows, tStart, tEnd) {
+  const rows = (pedRows || []).filter(
+    (r) => r && Number.isFinite(r.steps) && r.t >= tStart && r.t <= tEnd,
+  );
+  if (rows.length < STRIDE_MIN_UPDATES) return null;
+  let steps = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const d = rows[i].steps - rows[i - 1].steps;
+    if (d > 0) steps += d;
+  }
+  if (!(steps > 0)) return null;
+  return { steps, updates: rows.length };
+}
+/** Per-split cadence and stride from counted steps; the two multiply back to the split speed exactly. */
+function strideSplitFactors(splits, pedRows) {
+  const out = [];
+  for (const s of splits || []) {
+    if (s.partial) continue;
+    const seconds = strideMovingOf(s);
+    if (!(seconds > 0) || !(s.meters > 0)) continue;
+    const counted = strideStepsIn(pedRows, s.tStart, s.tEnd);
+    if (!counted) continue;
+    out.push({
+      index: s.index,
+      steps: counted.steps,
+      meters: s.meters,
+      movingSeconds: seconds,
+      cadenceSpm: counted.steps / (seconds / 60),
+      strideM: s.meters / counted.steps,
+      speedMps: s.meters / seconds,
+    });
+  }
+  return out;
+}
+/** Attribute the first-half-to-second-half speed change to cadence and stride. Halved as runPacing halves. */
+function stridePaceFactors(splits, pedRows) {
+  const full = (splits || []).filter((s) => !s.partial && strideMovingOf(s) > 0 && s.meters > 0);
+  const fullSplits = full.length;
+  if (fullSplits < 4) return { driver: null, reason: 'too-short', fullSplits };
+  const half = Math.floor(fullSplits / 2);
+  const firstRows = strideSplitFactors(full.slice(0, half), pedRows);
+  const lastRows = strideSplitFactors(full.slice(fullSplits - half), pedRows);
+  const rows = firstRows.concat(lastRows);
+  if (firstRows.length !== half || lastRows.length !== half) {
+    return { driver: null, reason: 'MISSING_STEPS', fullSplits, withSteps: rows.length };
+  }
+
+  // Aggregate measured totals: multiplying separate means need not recover half speed.
+  const totals = (rs) => rs.reduce((a, r) => ({
+    steps: a.steps + r.steps, meters: a.meters + r.meters,
+    seconds: a.seconds + r.movingSeconds,
+  }), { steps: 0, meters: 0, seconds: 0 });
+  const first = totals(firstRows), last = totals(lastRows);
+  const cadFirst = first.steps / (first.seconds / 60);
+  const cadLast = last.steps / (last.seconds / 60);
+  const strideFirst = first.meters / first.steps;
+  const strideLast = last.meters / last.steps;
+
+  /* Logs, so the two shares add to exactly 1 and no weighting is being chosen behind the scenes. */
+  const lnCad = Math.log(cadLast / cadFirst);
+  const lnStride = Math.log(strideLast / strideFirst);
+  const lnSpeed = lnCad + lnStride;
+
+  if (Math.abs(lnSpeed) < STRIDE_FLAT_LN) {
+    return {
+      driver: null, reason: 'flat', fullSplits, withSteps: rows.length,
+      cadenceFirstSpm: cadFirst, cadenceLastSpm: cadLast,
+      strideFirstM: strideFirst, strideLastM: strideLast,
+    };
+  }
+
+  const cadenceShare = lnCad / lnSpeed;
+  const strideShare = lnStride / lnSpeed;
+  /* Whichever factor carries most of the change names the driver; when both moved the same way and
+     neither dominates, say so rather than picking the larger by a hair. */
+  const driver = cadenceShare >= 1 - STRIDE_HELD_SHARE ? 'cadence'
+    : strideShare >= 1 - STRIDE_HELD_SHARE ? 'stride'
+      : 'both';
+
+  return {
+    driver,
+    reason: null,
+    fullSplits,
+    withSteps: rows.length,
+    halfSize: half,
+    slower: lnSpeed < 0,
+    cadenceFirstSpm: cadFirst,
+    cadenceLastSpm: cadLast,
+    cadenceDeltaSpm: cadLast - cadFirst,
+    cadenceShare,
+    strideFirstM: strideFirst,
+    strideLastM: strideLast,
+    strideDeltaM: strideLast - strideFirst,
+    strideShare,
+    /* True when a factor moved the OPPOSITE way to the overall change, i.e. it partly compensated.
+       Worth surfacing: "you held pace by lifting cadence while your stride shortened" is a different
+       run from "both dropped together". */
+    compensating: Math.sign(lnCad) !== Math.sign(lnStride),
+  };
+}
+
 function renderRunSegments(segments, opts) {
   if (!segments.length) { hide('runSegmentsSection'); return; }
   show('runSegmentsSection');
@@ -29665,7 +30229,7 @@ function pedCadenceAgreement(fftSpm, ped) {
    three or four splits, which supports "you faded 24 s/mi", not a decimal place. Withheld cases say
    nothing at all rather than hedging, except the terrain one, which is worth naming because the
    runner can see the hills on the chart and would otherwise wonder why there is no verdict. */
-function renderRunPacing(pacing, unitLabel) {
+function renderRunPacing(pacing, unitLabel, factors) {
   const el = document.getElementById('runPacing');
   if (!el) return;
   const secs = (v) => {
@@ -29707,8 +30271,35 @@ function renderRunPacing(pacing, unitLabel) {
   const note = pacing.gradeAdjusted
     ? `${halves} ${unitLabel}s, on grade-adjusted pace so the hills do not decide it (Minetti model, as used by the Climbs panel's GAP column).${dominant}`
     : `${halves} ${unitLabel}s, on raw pace: this recording carried no altitude, so the comparison is NOT corrected for terrain and a hilly route will skew it.`;
-  el.innerHTML = `${lead}<span class="rp-note">${note}</span>`;
+  el.innerHTML = `${lead}${whyClause(factors, pacing)}<span class="rp-note">${note}</span>`;
   el.classList.remove('hidden');
+}
+
+/* The mechanism behind the verdict above: which of the two factors of speed actually moved.
+   Deliberately reports the CHANGE and the split of it, never the absolute cadence, because this
+   cadence divides by the split's own moving clock (so the identity with the printed pace closes)
+   while the Cadence tile is a windowed median that never divides by a moving-time figure at all.
+   Printing the two side by side would invite a comparison they do not support. */
+function whyClause(f, pacing) {
+  if (!f || !f.driver || !pacing || !pacing.verdict) return '';
+  const spm = Math.abs(f.cadenceDeltaSpm);
+  const strideCm = Math.abs(f.strideDeltaM) * 100;
+  const dir = f.slower ? 'lost' : 'gained';
+  const cadWord = f.cadenceDeltaSpm > 0 ? 'rose' : 'dropped';
+  const strWord = f.strideDeltaM > 0 ? 'lengthened' : 'shortened';
+  let body;
+  if (f.driver === 'cadence') {
+    body = `Turnover did it: cadence ${cadWord} ${spm.toFixed(0)} spm between the halves while your stride held.`;
+  } else if (f.driver === 'stride') {
+    body = `Stride length did it: it ${strWord} by ${strideCm.toFixed(0)} cm between the halves while your cadence held.`;
+  } else if (f.compensating) {
+    /* The interesting case: the two pulled against each other, so the pace verdict alone hides
+       that anything changed at all. */
+    body = `Underneath that, the two factors pulled against each other: cadence ${cadWord} ${spm.toFixed(0)} spm while your stride ${strWord} ${strideCm.toFixed(0)} cm.`;
+  } else {
+    body = `It came from both: about ${Math.round(Math.abs(f.cadenceShare) * 100)}% turnover and ${Math.round(Math.abs(f.strideShare) * 100)}% stride length.`;
+  }
+  return ` <span class="rp-why">${body}</span>`;
 }
 
 /*
@@ -31197,8 +31788,8 @@ ${domain}
 
 Rules:
 - Ground every claim in the numbers provided. Never invent metrics that are not in the data.
-- If a "history" array is present (recent prior sessions, newest first), use it for trend: call out what is improving or regressing versus those sessions instead of treating this ride in isolation. Do not invent history that is not there.
-- If a "health_context" block is present, it is the athlete's own Apple Health vitals, in up to two DATED blocks: "asOfSession" is their state on the day of this recording, and "current" is their state today. Each carries an asOf day, a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, and a basis line naming the measurements used. Use asOfSession to interpret how this session went (they rode it in that state) and current to frame what to do next; when current is absent the session is today and asOfSession serves both. Keep them straight: if the recording is not from today, never narrate asOfSession in the present tense or attribute today's readiness to that session, and when asOfSession is missing say the ride day's recovery state is unknown rather than substituting today's. Low readiness or HRV below baseline biases next-session advice toward easy volume and recovery; high supports pushing. Cite the real numbers, respect the basis (say so when there was no reading yet on that block's day), and never invent vitals.
+- If a "history" array is present (recent prior sessions, newest first), use it for trend: call out what is improving or regressing versus those sessions instead of treating this session in isolation. Do not invent history that is not there.
+- If a "health_context" block is present, it is the athlete's own Apple Health vitals, in up to two DATED blocks: "asOfSession" is their state on the day of this recording, and "current" is their state today. Each carries an asOf day, a readiness score (0-100, green/amber/red) built from HRV vs their 60-day personal baseline, resting heart rate vs baseline, and 7-day vs 28-day training load, and a basis line naming the measurements used. Use asOfSession to interpret how this session went (they did it in that state) and current to frame what to do next; when current is absent the session is today and asOfSession serves both. Keep them straight: if the recording is not from today, never narrate asOfSession in the present tense or attribute today's readiness to that session, and when asOfSession is missing say that day's recovery state is unknown rather than substituting today's. Low readiness or HRV below baseline biases next-session advice toward easy volume and recovery; high supports pushing. Cite the real numbers, respect the basis (say so when there was no reading yet on that block's day), and never invent vitals.
 - Respect the data_caveats. If data is sparse or a mount/source is uncertain, say so and hedge rather than overclaiming.
 - ${units}
 - The athlete is at ${level} level — pitch depth and vocabulary accordingly.
@@ -32037,7 +32628,7 @@ function renderTruncNotice(D) {
       + `${fmtDuration(t.trackS)} session: the last ${fmtDuration(t.lostS)} is not in this sensor `
       + `file, though your GPS track and this session's own saved length both still have it. `
       + `Distance, climb and time are short by that much, and any segment or descent in the missing `
-      + `stretch is simply absent -- so a trail you have tagged may not be recognized here. The full `
+      + `stretch is simply absent -- so a segment you have tagged may not be recognized here. The full `
       + `recording may still be on the phone that made it.`;
   }
   sec.classList.remove('hidden');
@@ -32301,10 +32892,11 @@ function calibTryButton(strategy, label, sub) {
 function mountShiftSentence(D) {
   const ms = D && D.calibWin && D.calibWin.mountShift;
   if (!ms || !isFinite(ms.deg)) return '';
-  return ` Your phone also seems to have moved about ${Math.round(ms.deg)}° partway through the ride,`
+  const noun = lexNoun(sportLex(displaySport(D)));
+  return ` Your phone also seems to have moved about ${Math.round(ms.deg)}° partway through the ${noun},`
     + ` around ${fmtClock(ms.t)}. Lean angles and turn sides on one side of that point are measured`
     + ` against a body frame that fits the other side, so trust the two stretches separately rather`
-    + ` than the ride as a whole. Which stretch is the good one depends on when the phone was`
+    + ` than the ${noun} as a whole. Which stretch is the good one depends on when the phone was`
     + ` calibrated, and the recording cannot tell you that.`;
 }
 
@@ -32337,11 +32929,19 @@ function renderCalibNotice(D) {
      says the calibration does not match the ride, the shift says the ride does not match ITSELF. A
      shift-only ride under the mismatch heading would be telling the rider something untrue about
      their calibration. */
+  /* Every sport word in this notice comes from the recording's own lexicon: it fires on 46% of
+     recordings (CLAUDE.md, the corpus audit), skiing goes through this exact path, and "your riding
+     pose" / "during the ride" / "the bike's roll" were all the MTB literal. MTB and e-MTB read
+     byte-identically; the one MTB-only physical claim (a bike's roll) is kept for the sports that
+     have one and stated as plain roll for the rest. */
+  const lx = sportLex(displaySport(D));
+  const noun = lexNoun(lx), doing = lx.gerund;
+  const rolls = isMtbFamily(D.sport) ? 'the bike\'s roll' : 'roll';
   const head = document.getElementById('mtbCalibNoticeHead');
   if (head) {
     head.textContent = mismatched
-      ? 'Calibration pose may not match your riding pose.'
-      : 'Your phone moved during the ride.';
+      ? `Calibration pose may not match your ${doing} pose.`
+      : `Your phone moved during the ${noun}.`;
   }
   if (!mismatched) {
     if (calibNoticeHidden()) { sec.classList.add('hidden'); return; }
@@ -32372,14 +32972,14 @@ function renderCalibNotice(D) {
       ? ` Your phone sat about ${Math.round(lateral)}° twisted sideways relative to how it rode, so`
         + ` turn sides and the left/right lean split are the numbers to distrust.`
       : ` Your phone seems to have sat about ${Math.round(deg)}° differently during calibration than`
-        + ` while riding, which is far enough out to cost turns.`;
+        + ` while ${doing}, which is far enough out to cost turns.`;
     const why = sideways
       ? (foreAft != null && foreAft >= 5
           ? `It also sat ${Math.round(foreAft)}° off fore-aft, which is normal for a body-worn phone and is not the problem. `
           : '')
-        + 'A sideways twist mixes the bike\'s roll into the turn signal. Classic case: calibrated in a'
-        + ' pocket, then moved to a backpack before rolling out.'
-      : 'Classic case: calibrated in a pocket, then moved to a backpack before rolling out.';
+        + `A sideways twist mixes ${rolls} into the turn signal. Classic case: calibrated in a`
+        + ' pocket, then moved to a backpack before setting off.'
+      : 'Classic case: calibrated in a pocket, then moved to a backpack before setting off.';
     /* Appended rather than folded in: the shift is a SECOND finding and can be true whichever of the
        two mismatch modes above fired, so it reads as another sentence rather than as a qualifier on
        either of them. Empty string when there is nothing to say. */
@@ -32395,14 +32995,18 @@ function renderCalibNotice(D) {
        phone was on a car seat or a tailgate. Stated before the strategy branches below, since it is
        the true cause whichever strategy was selected. */
     if (calibWindowPlacement(D.calibWin, D.ride) === 'post-ride') {
-      body.textContent += ' The still moment it calibrated from is AFTER your ride ended, not before it'
+      body.textContent += ` The still moment it calibrated from is AFTER your ${noun} ended, not before it`
         + ' \u2014 so the body frame came from wherever the phone was resting once you had finished, not from'
-        + ' how it sat while you rode. That happens when no quiet enough moment exists before you roll out.'
+        + ` how it sat while you were ${doing}. That happens when no quiet enough moment exists before you set off.`
         + ' Next time, mount the phone and stand still for 20+ seconds before you start moving; the Record'
         + ' screen will say "Calibration captured" once it has one.';
     }
     const already = D.calibWin.strategy === 'preride';
-    if (already && _lastSensorFile) {
+    if (D.calibWin.strategy === 'borrowed') {
+      body.textContent += ' ' + loamT('This calibration came from {source}. Check that the phone used the same mount and orientation.', { source: D.calibWin.sourceName });
+      if (_lastSensorFile) body.appendChild(calibTryButton('preride', loamT('Use this recording'),
+        loamT('Recompute calibration from this recording instead.')));
+    } else if (already && _lastSensorFile) {
       /* The reported dead end (#546): Final-mount is already on, the mismatch is still 112 deg, and
          the notice had nothing to offer but "care". Some workflows cannot produce a still moment in
          the riding pose at all -- a drone session spends every still moment with the pack off -- so
@@ -32410,29 +33014,29 @@ function renderCalibNotice(D) {
          remaining source, and on that session every riding window agreed with every other to
          10-11 deg while every still window was 35-106 deg out. */
       body.textContent += ' This analysis already uses Final-mount calibration and the mismatch persists.'
-        + ' If the phone is never in its riding position while you are standing still (a pack taken off'
-        + ' at the trailhead, or a drone session), calibrating from the ride itself is the remaining option.';
-      body.appendChild(calibTryButton('riding', 'Try Riding-pose calibration',
-        'Derives your body frame from the ride itself instead of a still window. Beta: a riding pose is an'
+        + ` If the phone is never in its ${doing} position while you are standing still (a pack taken off`
+        + ` at the trailhead, or a drone session), calibrating from the ${noun} itself is the remaining option.`;
+      body.appendChild(calibTryButton('riding', `Try ${capitalize(doing)}-pose calibration`,
+        `Derives your body frame from the ${noun} itself instead of a still window. Beta: a ${doing} pose is an`
         + ' average, so it carries trail pitch and any net cornering bias.'));
     } else if (already) {
       body.textContent += ' This analysis already uses Final-mount calibration and the mismatch persists,'
-        + ' so treat lean numbers with care. Next time, mount the phone first, then stand still for 20+ seconds before you roll out.';
+        + ' so treat lean numbers with care. Next time, mount the phone first, then stand still for 20+ seconds before you set off.';
     } else if (_lastSensorFile && loamCalibStrategy() === 'preride') {
       /* Preride is selected and THIS render was computed fresh under it, yet it fell back: no
          still pre-ride window existed. Gated on _lastSensorFile because a library/cache replay may
          have been computed under 'quietest' long ago, and diagnosing it from today's localStorage
          preference would fabricate a "no still moment" claim about an attempt that never ran. */
-      body.textContent += ' There was no still moment before the ride to calibrate from, so the quietest'
-        + ' window was used. Next time, stand still for 20+ seconds in the final mount before rolling out.';
+      body.textContent += ` There was no still moment before the ${noun} to calibrate from, so the quietest`
+        + ' window was used. Next time, stand still for 20+ seconds in the final mount before setting off.';
     } else if (_lastSensorFile) {
       /* The helper, not an inline copy: there are two of these now (Final-mount here, Riding-pose in
          the branch above), and two hand-rolled buttons would drift. The sub-text is main's, which
          names the Options popover the selector moved into on 2026-08-30. */
       body.appendChild(calibTryButton('preride', 'Try Final-mount calibration',
-        'Recalibrates from the last still moment before the ride and re-runs the analysis; you can switch back with the Calibration selector under Options in the header.'));
+        `Recalibrates from the last still moment before the ${noun} and re-runs the analysis; you can switch back with the Calibration selector under Options in the header.`));
     } else {
-      body.textContent += ' To fix it for this ride, re-open the recording file and set Calibration (under Options in the header) to "Final mount".';
+      body.textContent += ` To fix it for this ${noun}, re-open the recording file and set Calibration (under Options in the header) to "Final mount".`;
     }
     noticeFold(body, why);
   }
@@ -32599,6 +33203,18 @@ function renderAll(D) {
   { const cl = document.getElementById('calibStrategyLabel'), cs = document.getElementById('calibStrategySel');
     if (cl) cl.classList.remove('hidden');
     if (cs) cs.value = loamCalibStrategy(); }
+  /* The three controls on this path whose labels are written once in the markup and name the MTB
+     word: the calibration strategies ("last still before ride", "Riding pose") and the corner
+     ledger's chronological sort ("Ride order"). Relabelled from the lexicon on every render, so a
+     ski day sees "before ski day" / "Skiing pose" / "Ski day order" and MTB sees exactly what it did. */
+  { const lx = pageLex();
+    const opt = (sel, v) => document.querySelector(`#${sel} option[value="${v}"]`);
+    const pre = opt('calibStrategySel', 'preride'); if (pre) pre.textContent = `Final mount (last still before ${lexNoun(lx)})`;
+    const rid = opt('calibStrategySel', 'riding'); if (rid) rid.textContent = `${capitalize(lx.gerund)} pose (beta)`;
+    const cl = document.getElementById('calibStrategyLabel');
+    if (cl) cl.title = `Which window defines your body frame. Use 'Final mount' if you calibrate in one position (e.g. pocket) then move the phone before ${lx.gerund} (e.g. backpack). Use '${capitalize(lx.gerund)} pose' when the phone is never in its ${lx.gerund} position while you are standing still -- a pack taken off at the trailhead, or a drone session.`;
+    const ord = opt('ledgerSortSel', 'ride'); if (ord) ord.textContent = `${lexNoun(lx, { cap: true })} order`; }
+  setupBorrowedCalibration(D);
   show('turnSection'); show('radiusSection');
   const sub = document.getElementById('timelineSubtitle');
   if (sub) sub.textContent = 'yaw rate + speed · turns shaded · jump airtime shaded';
@@ -32718,7 +33334,7 @@ function renderStats(s, hasFit) {
     <div class="stat hero accent3">
       <div class="label">Max speed</div>
       <div class="value">${U.speed(s.maxSpeed)}</div>
-      <div class="sub">${U.metric() ? (s.maxSpeed*2.23694).toFixed(1)+' mph' : (s.maxSpeed*3.6).toFixed(1)+' km/h'} · fastest moment of the ride</div>
+      <div class="sub">${U.metric() ? (s.maxSpeed*2.23694).toFixed(1)+' mph' : (s.maxSpeed*3.6).toFixed(1)+' km/h'} · fastest moment of the ${lexNoun(pageLex())}</div>
     </div>
     <div class="stat accent">
       <div class="label">Turns</div>
@@ -32742,7 +33358,7 @@ function renderStats(s, hasFit) {
            stationary phone's wander as length, so the exclusion is doing real work on any ride with
            a stop, and a tile that silently drops hundreds of metres is the same over-claim as one
            that silently counts them. Only shown when there is enough of it to be worth a line. -->
-      <div class="sub">ride distance${s.driftDistance != null && s.driftDistance >= 50 ? ` · ${U.dist(s.driftDistance)} parked drift excluded` : ''}</div>
+      <div class="sub">distance ${pageLex().done}${s.driftDistance != null && s.driftDistance >= 50 ? ` · ${U.dist(s.driftDistance)} parked drift excluded` : ''}</div>
     </div>
     ${jumpCard}
     ${altCard}
@@ -32883,7 +33499,7 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
     });
     const m = L.marker([c.lat, c.lon], { icon, zIndexOffset: 1200 }).addTo(mapOverlay);
     m.bindTooltip(
-      `<strong>Crash you marked</strong><br>${fmtClock(c.anchor - ride.start)} into the ride`
+      `<strong>Crash you marked</strong><br>${fmtClock(c.anchor - ride.start)} into the ${lexNoun(pageLex())}`
       + (c.turn ? `<br>turn T${c.turn.n} (${c.turn.direction === 'L' ? 'left' : 'right'})` : '<br>no corner detected here')
       + (c.stopped ? `<br><span style="opacity:0.75">tapped ${Math.round(c.reportDelayS)}s later</span>` : ''),
       { direction: 'top' });
@@ -33628,7 +34244,7 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin,
-    xaxis: { title: { text: 'time in ride', font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi) },
+    xaxis: { title: { text: `time in ${lexNoun(pageLex())}`, font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi) },
     yaxis: {
       title: { text: 'yaw rate (°/s)', font: { color: '#e87b3d', size: 11 } },
       gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0',
@@ -33821,7 +34437,7 @@ function renderAirtime(D) {
     <div class="stat">
       <div class="label">Total air</div>
       <div class="value">${totalAir.toFixed(1)}<span class="unit">s</span></div>
-      <div class="sub">freefall, whole ride</div>
+      <div class="sub">freefall, whole ${lexNoun(pageLex())}</div>
     </div>
     <div class="stat">
       <div class="label">Hardest landing</div>
@@ -34119,7 +34735,7 @@ function renderCornerLedger(turns, hostId, deltasByN) {
       const wr = Math.max(6, Math.round(56 * mR / maxDeg));
       const verdict = la
         ? `gap ${la.gap_deg}° · weaker side: ${la.weaker_side} (leans less)`
-        : 'which side is which is unreliable on this ride';
+        : `which side is which is unreliable on this ${lexNoun(pageLex())}`;
       sym = `<div class="ledger-sym"><span>median lean</span>` +
         `<span class="sym-l" style="width:${wl}px;"></span><b>L ${mL}°</b>` +
         `<span>·</span><b>R ${mR}°</b><span class="sym-r" style="width:${wr}px;"></span>` +
@@ -34972,7 +35588,7 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   hide('loading'); show('results');
   renderAllRoad(D);
   const distStr = session && session.distance ? U.dist(session.distance) : '';
-  setStatus(`Road ride loaded (Garmin FIT${distStr ? ' · ' + distStr : ''})`, true);
+  setStatus(`Road ride loaded (head-unit FIT${distStr ? ' · ' + distStr : ''})`, true);
 }
 
 function renderAllRoad(D) {
@@ -35706,7 +36322,7 @@ function renderParams(s, hasFit) {
     <span>exit <strong>${TURN_PARAMS.exitRate}°/s</strong></span>
     <span>min heading <strong>${TURN_PARAMS.minHeadingChg}°</strong></span>
     <span>min duration <strong>${TURN_PARAMS.minDuration}s</strong></span>
-    <span style="margin-left:auto">calib <strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.strategy === 'riding' ? ', riding pose' : ''}${s.calibWin.ridingPoseDriftDeg != null && isFinite(s.calibWin.ridingPoseDriftDeg) ? ', drift ' + Math.round(s.calibWin.ridingPoseDriftDeg) + '°' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
+    <span style="margin-left:auto">calib ${s.calibWin.strategy === 'borrowed' ? escapeHtml(s.calibWin.sourceName) + ' · ' : ''}<strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.strategy === 'riding' ? ', riding pose' : ''}${s.calibWin.ridingPoseDriftDeg != null && isFinite(s.calibWin.ridingPoseDriftDeg) ? ', drift ' + Math.round(s.calibWin.ridingPoseDriftDeg) + '°' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
   `;
 }
 
@@ -35716,7 +36332,12 @@ function hide(id) { document.getElementById(id).classList.add('hidden'); }
 
 /* Return from the cross-ride comparison to the single ride it was opened from. The single-ride
    results were only hidden (not torn down), so showing them again restores the full analysis. */
-let _crossReturnScroll = null;   /* window.scrollY on the ride page when compareWithPastLaps left it */
+let _crossReturnScroll = null;   /* window.scrollY on the page that opened the comparison */
+let _crossReturnView = null;     /* 'ride', 'progress', or null for a Library/multi-file comparison */
+function backFromCross() {
+  if (_crossReturnView === 'progress') { backToProgressFromCross(); return; }
+  backToRideFromCross();
+}
 function backToRideFromCross() {
   const b = document.getElementById('crossBackBar');
   if (b) b.classList.add('hidden');
@@ -35727,6 +36348,20 @@ function backToRideFromCross() {
      they had just tapped. The fallback is for a bar shown by some path that did not record one. */
   if (_crossReturnScroll != null) { window.scrollTo(0, _crossReturnScroll); _crossReturnScroll = null; }
   else { const r = document.getElementById('results'); if (r) r.scrollIntoView(); }
+  _crossReturnView = null;
+}
+/* The leaderboard opened from Progress hides that page but does not tear it down, just as the ride
+   comparison hides its ride. Restore the already-rendered training plan and its exact scroll spot. */
+function backToProgressFromCross() {
+  const b = document.getElementById('crossBackBar');
+  if (b) b.classList.add('hidden');
+  hide('crossResults');
+  show('progressResults');
+  if (_crossReturnScroll != null) window.scrollTo(0, _crossReturnScroll);
+  else { const p = document.getElementById('progressResults'); if (p) p.scrollIntoView(); }
+  setStatus(loamT('Your progress'));
+  _crossReturnScroll = null;
+  _crossReturnView = null;
 }
 /* The sport the error copy should SPEAK, resolved the way `analyze()` resolves it: the on-page
    selector, which `analyze()` seeds from the host's window.LOAM_SPORT before reading it, so a manual
@@ -35783,7 +36418,7 @@ function errorGuidance(msg, sport) {
   if (/run window|accel samples/i.test(m)) return 'The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or ' + pick + '.';
   if (/accel or GPS|Missing accel/i.test(m)) return 'No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.';
   if (/too short|short/i.test(m)) return `The recording looks too short to analyze. Capture a longer ${lexNoun(lex)} (at least a minute of moving) and try again.`;
-  if (/Need a sensor file/i.test(m)) return 'Drop a Sensor Logger <strong>.zip</strong> or a Combined <strong>.csv</strong>. A <strong>.fit</strong> works as a companion, or on its own as a GPS-only ride.';
+  if (/Need a sensor file/i.test(m)) return 'Drop a Sensor Logger <strong>.zip</strong> or a Combined <strong>.csv</strong>. A <strong>.fit</strong> works as a companion, or on its own as a GPS-only session.';
   if (/no usable GPS track/i.test(m)) return 'This FIT carries no positioned records, so there is nothing to map or measure. Export a FIT that includes GPS, or attach this one to a phone recording.';
   /* Always leave the user with something to do, even for an unrecognized failure. */
   return 'That recording could not be analyzed. ' + (inApp ? 'Change the activity from the session\'s menu on the Sessions tab' : 'Try a different file, switch the Sport above') + ', or re-record with Location and Motion enabled.';
@@ -35830,6 +36465,13 @@ function setStatus(text, live) {
 }
 
 let pendingFiles = [];
+/* The noun for a file that has not been analyzed yet: the picked sport's, or "session" on Auto-detect.
+   Deliberately not normalizeSport('auto'), whose catch-all answers "ride". */
+function pendingNoun() {
+  const sel = document.getElementById('sportOverride');
+  const picked = sel && sel.value && sel.value !== 'auto' ? sel.value : null;
+  return picked ? sportNoun(picked) : 'session';
+}
 function renderPendingFiles() {
   const div = document.getElementById('pendingFiles');
   div.innerHTML = '';
@@ -35851,7 +36493,12 @@ function renderPendingFiles() {
   }
   const btn = document.createElement('button');
   btn.className = 'go-btn';
-  btn.textContent = multi ? `Compare ${sensors.length} rides` : 'Analyze ride';
+  /* The button names what the Sport picker beside it says the file IS -- "Analyze run" once the
+     athlete has picked Running -- and the neutral "session" while it is on Auto-detect, when nothing
+     has been analyzed yet and the noun would be a guess (normalizeSport's catch-all would make that
+     guess "ride", which is how this read "Analyze ride" over a swim). A multi-file drop is always
+     "sessions": the files can be different sports and are saved as 'unknown'. */
+  btn.textContent = multi ? `Compare ${sensors.length} sessions` : `Analyze ${pendingNoun()}`;
   btn.onclick = () => analyze(pendingFiles);
   div.appendChild(btn);
 
@@ -35861,7 +36508,7 @@ function renderPendingFiles() {
   if (multi) {
     const sep = document.createElement('div');
     sep.className = 'pending-sep';
-    sep.innerHTML = `<div class="sep-label">or analyze one ride on its own:</div>`;
+    sep.innerHTML = `<div class="sep-label">or analyze one session on its own:</div>`;
     for (const f of sensors) {
       const b = document.createElement('button');
       b.className = 'sep-btn';
@@ -35905,6 +36552,8 @@ function resetToDropzone() {
   if (fileInput) fileInput.value = '';
   closeRideSwitcher();
   hide('progressResults');
+  _crossReturnScroll = null;
+  _crossReturnView = null;
   _drilledFromCross = false;
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
   hide('results'); hide('crossResults'); hide('errorBox'); hide('loading');
@@ -36057,7 +36706,7 @@ let _drilledFromCross = false;
 async function drillIntoRide(fileObj) {
   if (!fileObj) return;
   _drilledFromCross = true;
-  setStatus('Opening ride');
+  setStatus('Opening session');
   try { await analyze([fileObj]); } catch (e) { console.warn('drill-in failed', e); }
   const res = document.getElementById('results');
   if (res && !res.classList.contains('hidden')) {
@@ -36098,7 +36747,7 @@ async function renderRideSwitcher() {
   let rides = [];
   try { rides = await listRides(); } catch (e) {}
   rides = rides.sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || '')).slice(0, 20);
-  if (!rides.length) { list.innerHTML = '<div class="rs-dim" style="padding:10px;">No saved rides yet.</div>'; return; }
+  if (!rides.length) { list.innerHTML = '<div class="rs-dim" style="padding:10px;">No saved sessions yet.</div>'; return; }
   const cachedByRide = new Map();
   const sourceByRide = new Map();
   await Promise.all(rides.map(async r => {
@@ -36114,7 +36763,7 @@ async function renderRideSwitcher() {
     const current = r.dedupKey && r.dedupKey === _currentRunKey;
     const meta = [r.sport, dur, when].filter(Boolean).join(' · ');
     return `<button type="button" class="rs-item${current ? ' current' : ''}" data-id="${r.id}" ${openable ? '' : 'data-locked="1"'}>
-      <span class="rs-name">${escapeHtml(label || r.filename || 'Ride')}</span>
+      <span class="rs-name">${escapeHtml(label || r.filename || lexNoun(sportsLex([r.sport]), { cap: true }))}</span>
       <span class="rs-meta">${escapeHtml(meta)}</span>
       ${openable ? '' : '<span class="rs-dim">drop file to view</span>'}
     </button>`;
@@ -36150,7 +36799,7 @@ async function renderRecentRides() {
     /* Stored source bytes (FIT rides) make a row openable even with no cached render. */
     try { const s = await getRideSource(r.dedupKey); if (s) sourceByRide.set(r.id, s); } catch (e) {}
   }));
-  host.innerHTML = `<div class="recent-head">Recent rides</div>` + rides.map(r => {
+  host.innerHTML = `<div class="recent-head">Recent sessions</div>` + rides.map(r => {
     const when = r.savedAt ? new Date(r.savedAt).toLocaleDateString() : '';
     const dur = r.duration ? fmtDuration(r.duration) : '';
     const meta = [r.sport, dur, when].filter(Boolean).join(' · ');
@@ -36246,6 +36895,9 @@ function loamSwimDisplayUnit() {
     });
   }
   if (sportSel) sportSel.addEventListener('change', syncPool);
+  /* The Analyze button names the picked sport (pendingNoun), so a pick made AFTER the drop has to
+     relabel it; a no-op with nothing queued. */
+  if (sportSel) sportSel.addEventListener('change', () => { if (pendingFiles.length) renderPendingFiles(); });
   syncPool();
 
   /* The same pick, made from inside the Swim view (see swimCapturedNote). Delegated on the document
@@ -36376,6 +37028,7 @@ const calibStrategySel = document.getElementById('calibStrategySel');
 if (calibStrategySel) {
   calibStrategySel.value = loamCalibStrategy();
   calibStrategySel.addEventListener('change', () => {
+    if (!storeBorrowedCalibration(_currentRunKey, null)) return;
     setLoamCalibStrategy(calibStrategySel.value);
     /* Re-run with the FIT the ride was analyzed with, if any; re-running sensor-only silently
        dropped native jumps and wheel-speed radii. */
@@ -36950,18 +37603,20 @@ async function renderLibraryContents() {
   const sports = Array.from(new Set(rides.map(r => r.sport).filter(Boolean))).sort();
   const ctrlStyle = 'background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 9px; font-family:inherit; font-size:12px;';
   if (rides.length === 0) {
-    ridesSection.innerHTML = `<h4 style="font-size:13px; color:var(--text); margin-bottom:8px;">Rides (0)</h4>
-      <p style="color:var(--text-muted); font-size:12px;">No rides saved yet. Drop a sensor file to start.</p>`;
+    /* "Sessions": the library holds every sport, so its heading, its sort control and its empty
+       states take the neutral noun (they said "Rides" over a runner's runs and a swimmer's swims). */
+    ridesSection.innerHTML = `<h4 style="font-size:13px; color:var(--text); margin-bottom:8px;">Sessions (0)</h4>
+      <p style="color:var(--text-muted); font-size:12px;">No sessions saved yet. Drop a sensor file to start.</p>`;
   } else {
     ridesSection.innerHTML = `
     <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px;">
-      <h4 style="font-size:13px; color:var(--text); margin:0; margin-right:auto;">Rides (<span id="libRidesCount">${rides.length}</span>)</h4>
+      <h4 style="font-size:13px; color:var(--text); margin:0; margin-right:auto;">Sessions (<span id="libRidesCount">${rides.length}</span>)</h4>
       <input id="libSearch" type="search" placeholder="Search file…" style="${ctrlStyle} min-width:130px;">
       <select id="libSportFilter" style="${ctrlStyle}" title="Filter by sport">
         <option value="all">All sports</option>
         ${sports.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
       </select>
-      <select id="libSort" style="${ctrlStyle}" title="Sort rides">
+      <select id="libSort" style="${ctrlStyle}" title="Sort sessions">
         <option value="date">Newest first</option>
         <option value="recorded">Recorded date</option>
         <option value="distance">Distance</option>
@@ -36996,7 +37651,7 @@ async function renderLibraryContents() {
       const host = document.getElementById('libRidesTableHost');
       const countEl = document.getElementById('libRidesCount');
       if (countEl) countEl.textContent = (list.length === rides.length) ? rides.length : `${list.length} of ${rides.length}`;
-      if (!list.length) { host.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">No rides match.</p>'; return; }
+      if (!list.length) { host.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">No sessions match.</p>'; return; }
       host.innerHTML = `
         <table>
           <thead><tr><th>File</th><th>Sport</th><th>Duration</th><th>Descents</th><th>Tagged</th><th>Saved</th><th></th></tr></thead>
@@ -37118,7 +37773,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '69eba0abf · 2026-09-13';
+const LOAM_BUILD = '898dd439c · 2026-09-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
