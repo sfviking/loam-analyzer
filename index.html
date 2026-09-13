@@ -2403,6 +2403,7 @@
       Jumps
       <span class="subtitle">hang + takeoff from Levo/Specialized FIT · landing measured by phone or wrist</span>
     </div>
+    <button id="jumpStatsShare" class="lift-sig-save" style="margin-bottom:12px" hidden>Share jump stats</button>
     <div class="panel stats-panel jump-summary" id="jumpSummary"></div>
     <div id="jumpLapsCard" class="hidden"></div>
     <details class="panel jumps-details" id="jumpsDetails">
@@ -28344,7 +28345,9 @@ function renderRunTimeline(D) {
       });
     }
   }
-  /* Annotation vertical lines. */
+  /* Annotation marks: a dotted line each, a label on the lane above the plot (thinned to what fits,
+     see thinTimelineLabels), and a marker at the top of the line that carries the text into the
+     hover box -- so a mark whose label did not fit still names itself on a tap or hover. */
   const annotations = (D.sensors.annotations || []).filter(a => a.t >= ride.start && a.t <= ride.end);
   for (const a of annotations) {
     shapes.push({
@@ -28353,45 +28356,45 @@ function renderRunTimeline(D) {
       line: { color: '#d4a574', width: 1, dash: 'dot' },
     });
   }
-  const annotationLabels = annotations.map(a => ({
-    x: a.t - ride.start, y: 1.04, yref: 'paper', xref: 'x',
-    text: a.text.length > 28 ? a.text.slice(0, 26) + '…' : a.text,
-    showarrow: false,
-    font: { family: 'JetBrains Mono', size: 9, color: '#d4a574' },
-    bgcolor: 'rgba(20,23,27,0.85)', borderpad: 3,
-  }));
+  const margin = { l: 56, r: 56, t: 32, b: 50 };
+  const markFont = { family: 'JetBrains Mono', size: 9, color: '#d4a574' };
+  const markLabels = annotations.map(a => {
+    const text = a.text.length > 28 ? a.text.slice(0, 26) + '…' : a.text;
+    return { x: a.t - ride.start, text, widthPx: tlLabelWidthPx(text, markFont.size, markFont.family, 3) };
+  });
+  const markAnnos = (lo, hi) => thinTimelineLabels(markLabels, lo, hi, tlPlotWidthPx('timelineChart', margin))
+    .map(l => ({ ...tlLaneAnno(0), x: l.x, text: l.text, font: markFont, bgcolor: 'rgba(20,23,27,0.85)', borderpad: 3 }));
+  if (annotations.length) {
+    /* On its own hidden axis, pinned to [0, 1], so the markers sit at the top edge whatever the pace
+       and altitude ranges do and never move either of them. */
+    traces.push({
+      x: annotations.map(a => a.t - ride.start), y: annotations.map(() => 0.98), yaxis: 'y3',
+      type: 'scatter', mode: 'markers', marker: { symbol: 'triangle-down', size: 8, color: '#d4a574' },
+      text: annotations.map(a => a.text), hovertemplate: '%{text}<extra></extra>',
+      name: 'Marks', showlegend: false,
+    });
+  }
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    margin: { l: 56, r: 56, t: 32, b: 50 },
+    margin,
     xaxis: { title: { text: 'time in run', font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start) },
     /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
     yaxis: footSport
       ? { title: { text: `pace (${U.metric() ? 'min/km' : 'min/mi'})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' }, autorange: 'reversed' }
       : { title: { text: `speed (${U.speedUnit()})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' } },
     yaxis2: { title: { text: `Δ alt (${U.smallUnit()})`, font: { color: '#d4a574', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#d4a574' } },
-    showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
-    shapes, annotations: annotationLabels, hovermode: 'x unified'
+    ...(annotations.length ? { yaxis3: { overlaying: 'y', visible: false, range: [0, 1], fixedrange: true } } : {}),
+    showlegend: true, legend: timelineLegend(TL_RUN_HEIGHT_PX, margin, 1),
+    shapes, annotations: markAnnos(0, ride.end - ride.start), hovermode: 'x unified'
   };
   /* The timeline host is shared with the (taller) MTB ride timeline; pin this view's height. */
-  document.getElementById('timelineChart').style.height = '320px';
+  document.getElementById('timelineChart').style.height = TL_RUN_HEIGHT_PX + 'px';
   loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
-    /* Re-tick on zoom/pan so the m:ss labels follow the visible range (see loamTimeTicks). The guard
-       stops the relayout issued here from re-triggering the handler. */
-    const chart = document.getElementById('timelineChart');
-    if (!chart || !chart.on) return;
-    let busy = false;
-    const retick = (lo, hi) => {
-      if (busy) return;
-      busy = true;
+    /* Re-lay the mark labels and the m:ss ticks on zoom, pan and resize (see loamTimeTicks). */
+    wireTimelineRelayout(document.getElementById('timelineChart'), 0, ride.end - ride.start, (lo, hi) => {
       const tk = loamTimeTicks(lo, hi);
-      Plotly.relayout(chart, { 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext })
-        .then(() => { busy = false; }).catch(() => { busy = false; });
-    };
-    chart.on('plotly_relayout', (ev) => {
-      if (ev['xaxis.autorange']) retick(0, ride.end - ride.start);
-      else if (ev['xaxis.range[0]'] != null) retick(ev['xaxis.range[0]'], ev['xaxis.range[1]']);
-      else if (ev['xaxis.range']) retick(ev['xaxis.range'][0], ev['xaxis.range'][1]);
+      return { annotations: markAnnos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
     });
   }).catch(() => {});
   linkTimelineToMap(D.sensors.location, ride);
@@ -32991,6 +32994,139 @@ function loamTimeTicks(lo, hi) {
   return { tickvals, ticktext };
 }
 
+/* ---------- The label lane above a timeline plot ----------
+   Both timelines (the ride's, renderTimeline, and the run's, renderRunTimeline) label things along
+   the top edge of the plot -- turn numbers, a crash's CRASH, the run's annotation marks -- and both
+   draw a horizontal legend up there too. Until 2026-09-12 the labels sat at a paper fraction above
+   the plot (y: 1.03 / 1.04, anchored 'auto', which for a paper y above one half hangs the box
+   DOWNWARD, into the plot) and the legend at y: 1.12 top-anchored, and Plotly then pushed the plot
+   down to fit the legend and never the labels. Measured on an iPhone 13 (owner screenshot, "Hard
+   to read"): the label boxes straddled the plot's top edge, sat on the legend's bottom row, and the
+   run's three "Segment Start" marks a few minutes apart were drawn on top of each other
+   ("Segment Star Se Segment Start"). At a desktop width the same code read fine, which is why every
+   look at it had.
+
+   The layout is now in PIXELS from the plot's top edge up: a lane of TL_LANE_ROW_PX per row directly
+   above the plot, each label anchored 'bottom' at y: 1 with a pixel yshift so it can never dip into
+   the plot, and the legend anchored 'bottom' ABOVE the lane (timelineLegend). Plotly expands the top
+   margin to fit whatever the legend needs, one row or two, so the lane survives any width; the
+   lane's height has to be handed to Plotly as a fraction of a plot height it has not finished
+   deciding, so it is stated against the SMALLEST plot the legend can leave (two rows plus Plotly's
+   own padding, TL_LEGEND_ALLOW_PX) and lands at or above the asked-for pixels rather than below.
+   Measured, not reasoned: the E2E's phone-width timeline check reads the rendered boxes back and
+   asserts none overlaps another, the legend, or the plot.
+
+   Labels along one row are THINNED by their rendered width (thinTimelineLabels): keep the earliest,
+   drop any later one whose box would touch it, and re-thin on every zoom, pan and resize so the
+   rider always sees as many as fit -- the turn-number rule (a fixed 24px between numbers), made to
+   work for text of any length. A label marked `pinned` (a crash's "tap") is never dropped; its
+   neighbours are thinned around it instead. The run timeline gives every mark a hover marker as
+   well, so a mark whose label did not fit still names itself on a tap. */
+const TL_LANE_ROW_PX = 18;      // one row of the lane: a 9-11px mono label in its box is 17px tall
+const TL_LANE_PAD_PX = 6;       // above the last row, so the legend's box never touches a label
+const TL_LEGEND_ALLOW_PX = 60;  // the most a legend costs the plot: two rows of items plus padding
+const TL_LABEL_GAP_PX = 8;      // clear space required between two neighbouring labels on a row
+const TL_RIDE_HEIGHT_PX = 400;  // the ride timeline host; was 380 before the lane took its 20px
+const TL_RUN_HEIGHT_PX = 340;   // the run timeline host; was 320 for the same reason
+
+/* The legend of a timeline whose lane holds `rows` rows of labels: horizontal, bottom-anchored just
+   above the lane. `hostPx` is the chart host's height and `margin` the layout's own margins, from
+   which the plot height Plotly starts from is known; see the block comment above for why the lane
+   is stated against the smallest plot the legend can leave. */
+function timelineLegend(hostPx, margin, rows) {
+  const h0 = Math.max(60, hostPx - margin.t - margin.b - TL_LEGEND_ALLOW_PX);
+  const lanePx = rows * TL_LANE_ROW_PX + TL_LANE_PAD_PX;
+  return { x: 0, y: 1 + lanePx / h0, yanchor: 'bottom', orientation: 'h', font: { size: 10 } };
+}
+
+/* The position half of a lane label on row `row` (0 is the row touching the plot). Spread into the
+   annotation and give it x, text and font. */
+function tlLaneAnno(row) {
+  return { y: 1, yref: 'paper', xref: 'x', yanchor: 'bottom', yshift: 2 + row * TL_LANE_ROW_PX, showarrow: false };
+}
+
+/* Rendered width of a label box, in px: the text measured in the font the chart draws it in, plus
+   the box padding either side. A canvas measures in the same font the SVG text resolves to, so the
+   thinning sees the width the reader sees; without one it falls back to a monospace estimate that
+   runs slightly wide, which thins a little more than needed rather than less. */
+let _tlMeasureCtx = null;
+function tlLabelWidthPx(text, fontPx, family, padPx) {
+  let w = null;
+  try {
+    if (!_tlMeasureCtx) _tlMeasureCtx = document.createElement('canvas').getContext('2d');
+    if (_tlMeasureCtx) {
+      _tlMeasureCtx.font = `${fontPx}px "${family}", monospace`;
+      w = _tlMeasureCtx.measureText(String(text)).width;
+    }
+  } catch (e) { w = null; }
+  if (!(w > 0)) w = String(text).length * fontPx * 0.62;
+  return w + 2 * (padPx || 0);
+}
+
+/* The plot area's width, in px: the one Plotly has laid out when there is one, else the host minus
+   the layout's margins (the first thinning runs before the first plot). */
+function tlPlotWidthPx(hostId, margin) {
+  const gd = document.getElementById(hostId);
+  const sz = gd && gd._fullLayout && gd._fullLayout._size;
+  if (sz && sz.w > 0) return sz.w;
+  const w = gd ? gd.clientWidth : 0;
+  return w > 120 ? w - margin.l - margin.r : 600;
+}
+
+/* Which labels on one row fit the visible range [xLo, xHi] of a plot `plotWidthPx` wide, in x order.
+   `labels` are [{ x, widthPx, pinned }] with x in the axis's data units, each box centred on its x.
+   Greedy left to right: a label is kept when its box clears the last kept box, and every pinned box,
+   by TL_LABEL_GAP_PX; pinned labels are always kept. */
+function thinTimelineLabels(labels, xLo, xHi, plotWidthPx) {
+  const scale = Math.max(1, plotWidthPx) / Math.max(1e-6, xHi - xLo);
+  const box = (l) => { const c = (l.x - xLo) * scale, half = (l.widthPx || 0) / 2; return [c - half, c + half]; };
+  const clear = (a, b) => a[0] >= b[1] + TL_LABEL_GAP_PX || a[1] + TL_LABEL_GAP_PX <= b[0];
+  const inView = labels.filter(l => l.x >= xLo && l.x <= xHi).sort((a, b) => a.x - b.x);
+  const pinnedBoxes = inView.filter(l => l.pinned).map(box);
+  const out = [];
+  let last = null;
+  for (const l of inView) {
+    if (l.pinned) { out.push(l); continue; }
+    const b = box(l);
+    if (last && !clear(b, last)) continue;
+    if (pinnedBoxes.some(p => !clear(b, p))) continue;
+    out.push(l); last = b;
+  }
+  return out;
+}
+
+/* The visible x-range after a relayout event: from the event's own keys when it carries the range (a
+   zoom, a pan, a reset), else from the axis itself -- which is all a RESIZE carries, and a rotation
+   from portrait to landscape more than doubles the width the labels have to fit in. */
+function timelineVisibleRange(chart, ev, fullLo, fullHi) {
+  if (ev && ev['xaxis.autorange']) return [fullLo, fullHi];
+  if (ev && ev['xaxis.range[0]'] != null) return [+ev['xaxis.range[0]'], +ev['xaxis.range[1]']];
+  if (ev && ev['xaxis.range']) return [+ev['xaxis.range'][0], +ev['xaxis.range'][1]];
+  const xa = chart && chart._fullLayout && chart._fullLayout.xaxis;
+  if (xa && xa.range && isFinite(xa.range[0]) && isFinite(xa.range[1])) return [+xa.range[0], +xa.range[1]];
+  return [fullLo, fullHi];
+}
+
+/* After a timeline is plotted: lay its labels out once more with the width the plot actually got,
+   and again on every relayout (zoom, pan, reset, resize). `patchFor(lo, hi)` returns the relayout
+   patch for a visible range -- the thinned annotations and the m:ss ticks -- and the `busy` guard
+   keeps the relayout issued here from re-entering the handler through the event it emits. */
+function wireTimelineRelayout(chart, fullLo, fullHi, patchFor) {
+  if (!chart || !chart.on) return;
+  let busy = false;
+  const apply = (lo, hi) => {
+    if (busy) return;
+    busy = true;
+    Plotly.relayout(chart, patchFor(lo, hi)).then(() => { busy = false; }).catch(() => { busy = false; });
+  };
+  apply(fullLo, fullHi);
+  chart.on('plotly_relayout', (ev) => {
+    if (busy) return;
+    const [lo, hi] = timelineVisibleRange(chart, ev, fullLo, fullHi);
+    apply(lo, hi);
+  });
+}
+
 function renderMap(loc, turns, ride, ridingJumps, crashes) {
   _linkCursor = null; _linkPinned = false;
   setMapLegend('turns');
@@ -33430,28 +33566,34 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
     }
   }
 
-  /* Turn-number labels along the top collide into an unreadable smear when turns are dense (a tech
-     section packs many turns into a few seconds). Thin them to a minimum on-screen spacing for the
-     current x-range, and re-thin on zoom/pan, so you always see as many numbers as actually fit. */
-  const turnLabels = turns.map(T => ({ x: (T.tStart + T.tEnd) / 2 - ride.start, n: T.n }))
-                          .sort((a, b) => a.x - b.x);
-  const jumpAnnos = [];
-  if (ridingJumps) {
-    for (let i = 0; i < ridingJumps.length; i++) {
-      const J = ridingJumps[i];
-      jumpAnnos.push({
-        x: J.t_phone - ride.start - (J.hang || 0) / 2, y: -0.06, yref: 'paper', xref: 'x',
-        text: `J${i + 1}`, showarrow: false, font: { family: 'JetBrains Mono', size: 11, color: '#d4a574' }
-      });
-    }
-  }
+  /* Labels along the lane above the plot -- turn numbers on its first row, a crash's CRASH on the
+     second so it never fights the number of the corner it happened in -- and jump labels along the
+     bottom edge, each at the foot of its own shaded airtime. Every row is thinned to what fits the
+     visible range (thinTimelineLabels; a tech section packs many turns into a few seconds, and the
+     numbers used to collide into an unreadable smear), and re-thinned on every zoom, pan and resize,
+     so you always see as many as actually fit. */
+  const margin = { l: 56, r: 56, t: 32, b: 50 };
+  const numFont = { family: 'JetBrains Mono', size: 11, color: '#475569' };
+  const turnLabels = turns.map(T => {
+    const text = String(T.n);
+    return { x: (T.tStart + T.tEnd) / 2 - ride.start, text, widthPx: tlLabelWidthPx(text, numFont.size, numFont.family, 0) };
+  });
+  const jumpFont = { family: 'JetBrains Mono', size: 11, color: '#d4a574' };
+  const jumpLabels = (ridingJumps || []).map((J, i) => {
+    const text = `J${i + 1}`;
+    return { x: J.t_phone - ride.start - (J.hang || 0) / 2, text, widthPx: tlLabelWidthPx(text, jumpFont.size, jumpFont.family, 0) };
+  });
 
   /* Crash marks. TWO lines per crash, because the distinction between them is the whole point: a
      solid red line at the anchor (the last moment the rider was moving, which is the event) and a
      faint dotted one at the tap. Drawn together they show the get-up gap the card describes, and a
      rider who remembers the crash being earlier than the solid line can see immediately that the
-     anchor is what to argue with. The label rides on the anchor. */
+     anchor is what to argue with. The label rides on the anchor. Neither label is ever thinned away:
+     a turn number lost to crowding costs nothing, the one marker the rider is looking for costs the
+     feature -- so "tap" is PINNED on the numbers' row and the numbers thin around it, and CRASH has
+     the row above to itself. */
   const crashAnnos = [];
+  const tapFont = { family: 'JetBrains Mono', size: 9, color: '#c14e2e' };
   for (const c of (crashes || [])) {
     const xA = c.anchor - ride.start;
     shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xA, x1: xA, y0: 0, y1: 1,
@@ -33460,11 +33602,10 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
       const xT = c.t - ride.start;
       shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xT, x1: xT, y0: 0, y1: 1,
         line: { color: '#c14e2e', width: 1, dash: 'dot' } });
-      crashAnnos.push({ x: xT, y: 1.03, yref: 'paper', xref: 'x', text: 'tap', showarrow: false,
-        font: { family: 'JetBrains Mono', size: 9, color: '#c14e2e' }, opacity: 0.75 });
+      turnLabels.push({ x: xT, text: 'tap', tap: true, pinned: true, widthPx: tlLabelWidthPx('tap', tapFont.size, tapFont.family, 0) });
     }
     crashAnnos.push({
-      x: xA, y: 1.09, yref: 'paper', xref: 'x', text: 'CRASH', showarrow: false,
+      ...tlLaneAnno(1), x: xA, text: 'CRASH',
       font: { family: 'JetBrains Mono', size: 10, color: '#ffffff' },
       bgcolor: '#c14e2e', borderpad: 3,
     });
@@ -33473,28 +33614,20 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
   for (const x of tSub) { if (x < fullLo) fullLo = x; if (x > fullHi) fullHi = x; }
   for (const x of tSpGps) { if (x < fullLo) fullLo = x; if (x > fullHi) fullHi = x; }
   if (!isFinite(fullLo)) { fullLo = 0; fullHi = (ride.end - ride.start) || 1; }
-  const turnAnno = (lab) => ({ x: lab.x, y: 1.03, yref: 'paper', xref: 'x', text: String(lab.n),
-    showarrow: false, font: { family: 'JetBrains Mono', size: 11, color: '#475569' } });
-  function thinnedAnnotations(xLo, xHi) {
-    const el = document.getElementById('timelineChart');
-    const w = (el && el.clientWidth > 120) ? el.clientWidth - 112 : 600;   /* minus l/r margins */
-    const minGapData = (24 / Math.max(1, w)) * Math.max(1e-6, xHi - xLo);   /* ~24px between numbers */
-    const out = []; let lastX = -Infinity;
-    for (const lab of turnLabels) {
-      if (lab.x < xLo || lab.x > xHi) continue;
-      if (lab.x - lastX < minGapData) continue;
-      out.push(turnAnno(lab)); lastX = lab.x;
-    }
-    /* Crash labels are never thinned away: a turn number lost to crowding costs nothing, the one
-       marker the rider is looking for costs the feature. */
-    return out.concat(jumpAnnos, crashAnnos);
-  }
-  const annotations = thinnedAnnotations(fullLo, fullHi);
+  const laneAnnos = (lo, hi) => {
+    const w = tlPlotWidthPx('timelineChart', margin);
+    const top = thinTimelineLabels(turnLabels, lo, hi, w).map(l => (l.tap
+      ? { ...tlLaneAnno(0), x: l.x, text: l.text, font: tapFont, opacity: 0.75 }
+      : { ...tlLaneAnno(0), x: l.x, text: l.text, font: numFont }));
+    const bottom = thinTimelineLabels(jumpLabels, lo, hi, w).map(l => ({
+      x: l.x, y: 0, yref: 'paper', xref: 'x', yanchor: 'bottom', yshift: 3, text: l.text, showarrow: false, font: jumpFont }));
+    return top.concat(bottom, crashAnnos);
+  };
 
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    margin: { l: 56, r: 56, t: 32, b: 50 },
+    margin,
     xaxis: { title: { text: 'time in ride', font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi) },
     yaxis: {
       title: { text: 'yaw rate (°/s)', font: { color: '#e87b3d', size: 11 } },
@@ -33506,32 +33639,89 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
       overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)',
       tickfont: { color: '#6da7c4' }
     },
-    showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
-    shapes, annotations, hovermode: 'x unified'
+    showlegend: true, legend: timelineLegend(TL_RIDE_HEIGHT_PX, margin, crashAnnos.length ? 2 : 1),
+    shapes, annotations: laneAnnos(fullLo, fullHi), hovermode: 'x unified'
   };
   /* The timeline host is shared with the (shorter) running timeline; pin this view's height. */
-  document.getElementById('timelineChart').style.height = '380px';
+  document.getElementById('timelineChart').style.height = TL_RIDE_HEIGHT_PX + 'px';
   loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
-    const chart = document.getElementById('timelineChart');
-    if (!chart || !chart.on) return;
-    /* Re-thin once with the real plotted width, then on every zoom/pan. A guard stops the relayout
-       we issue from re-triggering this handler. */
-    let busy = false;
-    const reThin = (lo, hi) => {
-      if (busy) return;
-      busy = true;
+    /* Re-lay the labels with the width the plot actually got, then on every zoom, pan and resize. */
+    wireTimelineRelayout(document.getElementById('timelineChart'), fullLo, fullHi, (lo, hi) => {
       const tk = loamTimeTicks(lo, hi);
-      Plotly.relayout(chart, { annotations: thinnedAnnotations(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext })
-        .then(() => { busy = false; }).catch(() => { busy = false; });
-    };
-    reThin(fullLo, fullHi);
-    chart.on('plotly_relayout', (ev) => {
-      if (ev['xaxis.autorange']) reThin(fullLo, fullHi);
-      else if (ev['xaxis.range[0]'] != null) reThin(ev['xaxis.range[0]'], ev['xaxis.range[1]']);
-      else if (ev['xaxis.range']) reThin(ev['xaxis.range'][0], ev['xaxis.range'][1]);
+      return { annotations: laneAnnos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
     });
   });
   linkTimelineToMap(loc, ride);
+}
+
+/* One model for the on-screen summary and its exported image. */
+function jumpStatsModel(D) {
+  const all = D.ridingJumps || [];
+  const n = all.length;
+  if (!n) return null;
+  const withHang = all.filter(j => j.hang != null);
+  let totalAir = 0, maxHang = 0, maxSpeed = null;
+  for (const j of withHang) { totalAir += j.hang; if (j.hang > maxHang) maxHang = j.hang; }
+  for (const j of all) {
+    if (j.speed_mps != null && (maxSpeed == null || j.speed_mps > maxSpeed)) maxSpeed = j.speed_mps;
+  }
+  const top = topJumps(all, 3);
+  const longest = top[0] || null;
+  const maxDist = longest && longest.dist != null ? longest.dist : null;
+  const heroMs = maxHang ? Math.round(maxHang * 1000) : null;
+  const avgMs = withHang.length ? Math.round(totalAir / withHang.length * 1000) : null;
+  const nBig = bigJumpCount(all);
+  /* How many rows can actually show a landing. The phone cushions impacts the bar-locked wrist
+     feels, and the freefall detector favours precision, so a partial match is the normal case and
+     the card says so rather than letting a reader assume every jump was corroborated. */
+  const nLanded = all.filter(j => j.landingG != null).length;
+  return { n, totalAir, maxSpeed, top, longest, maxDist, heroMs, avgMs, nBig, nLanded };
+}
+
+/* Draw directly to canvas so sharing also works offline in WKWebView. No DOM screenshot,
+   remote fonts or map tiles are needed, and coordinates never enter the exported card. */
+function shareJumpStats(D) {
+  try {
+    const m = jumpStatsModel(D);
+    if (!m) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 1080; canvas.height = 1200;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#10170f'; ctx.fillRect(0, 0, 1080, 1200);
+    const text = (value, x, y, size = 28, color = '#f1f5f0') => {
+      ctx.fillStyle = color; ctx.font = `600 ${size}px sans-serif`;
+      ctx.fillText(String(value), x, y, 960);
+    };
+    text('LOAM', 60, 85, 40, '#e0a458');
+    text('JUMP STATS', 60, 140, 26, '#afbaa7');
+    const when = D.recordedAt ? new Date(D.recordedAt) : parseUTCFromFilename(D.title || '');
+    if (when && !isNaN(when)) text(when.toLocaleDateString(), 60, 184, 24, '#afbaa7');
+    text(m.maxDist != null ? 'LONGEST JUMP' : 'BIGGEST AIR', 60, 260, 26, '#afbaa7');
+    text(m.maxDist != null ? U.small(m.maxDist) : `${m.heroMs ?? '—'} ms`, 60, 360, 86, '#e0a458');
+    if (m.maxDist != null) text(`${U.speed(m.longest.speed_mps)} takeoff × ${Math.round(m.longest.hang * 1000)} ms hang`, 60, 411, 28);
+    text(`${m.n} jump${m.n === 1 ? '' : 's'}${m.nBig ? ` · ${m.nBig} over ${U.small(JUMP_BIG_M)}` : ''}`, 60, 474, 32);
+    const stats = [
+      ['TOTAL AIRTIME', `${m.totalAir.toFixed(1)} s`],
+      ['TOP TAKEOFF', m.maxSpeed != null ? U.speed(m.maxSpeed) : '—'],
+      ['BIGGEST AIR', `${m.heroMs ?? '—'} ms`],
+      ['AVERAGE HANG', `${m.avgMs ?? '—'} ms`],
+    ];
+    stats.forEach(([label, value], i) => {
+      const x = 60 + (i % 2) * 500, y = 550 + Math.floor(i / 2) * 135;
+      text(label, x, y, 23, '#afbaa7'); text(value, x, y + 56, 43);
+    });
+    if (m.maxDist != null && m.top.length > 1) {
+      text(`TOP ${m.top.length}`, 60, 820, 24, '#afbaa7');
+      m.top.forEach((j, i) => text(`${i + 1}. ${U.small(j.dist)} · ${U.speed(j.speed_mps)} × ${Math.round(j.hang * 1000)} ms${j.landingG != null ? ` · landed ${j.landingG.toFixed(1)} g` : ''}`, 60, 863 + i * 43, 27));
+    }
+    text(`${m.nLanded} of ${m.n} with a measured landing`, 60, 1010, 24, '#afbaa7');
+    const caveat = m.maxDist != null
+      ? ["Distance estimates takeoff speed × hang time on level ground.", 'It is not a measured landing point.']
+      : ['Hang time only; jump distance is unavailable.'];
+    caveat.forEach((line, i) => text(line, 60, 1065 + i * 36, 25, '#afbaa7'));
+    text('Analyzed with Loam', 60, 1160, 24, '#e0a458');
+    return loamShareImage(canvas.toDataURL('image/png'), loamCardFilename('jumps', when), 'My jump stats, analyzed with Loam.');
+  } catch (e) { console.warn('jump stats export failed', e); loamCardShareFailed(); }
 }
 
 /* Headline strip above the jumps table: the ride's LONGEST jump as the hero, shown as the
@@ -33547,27 +33737,13 @@ function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, cra
 function renderJumpSummary(D) {
   const el = document.getElementById('jumpSummary');
   if (!el) return;
-  const all = D.ridingJumps || [];
-  const n = all.length;
-  if (!n) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  const m = jumpStatsModel(D);
+  const share = document.getElementById('jumpStatsShare');
+  if (share) { share.hidden = !m; share.onclick = m ? () => shareJumpStats(D) : null; }
+  if (!m) { el.innerHTML = ''; el.style.display = 'none'; return; }
   el.style.display = '';
-  const withHang = all.filter(j => j.hang != null);
-  let totalAir = 0, maxHang = 0, maxSpeed = null;
-  for (const j of withHang) { totalAir += j.hang; if (j.hang > maxHang) maxHang = j.hang; }
-  for (const j of all) {
-    if (j.speed_mps != null && (maxSpeed == null || j.speed_mps > maxSpeed)) maxSpeed = j.speed_mps;
-  }
-  const top = topJumps(all, 3);
-  const longest = top[0] || null;
-  const maxDist = longest && longest.dist != null ? longest.dist : null;
-  const heroMs = maxHang ? Math.round(maxHang * 1000) : null;
-  const avgMs = withHang.length ? Math.round(totalAir / withHang.length * 1000) : null;
+  const { n, totalAir, maxSpeed, top, longest, maxDist, heroMs, avgMs, nBig, nLanded } = m;
   const dup = D.jumpDupsRemoved ? ` · ${D.jumpDupsRemoved} duplicate${D.jumpDupsRemoved > 1 ? 's' : ''} merged` : '';
-  const nBig = bigJumpCount(all);
-  /* How many rows can actually show a landing. The phone cushions impacts the bar-locked wrist
-     feels, and the freefall detector favours precision, so a partial match is the normal case and
-     the card says so rather than letting a reader assume every jump was corroborated. */
-  const nLanded = all.filter(j => j.landingG != null).length;
   const heroBlock = maxDist != null
     ? `<div class="lbl">Longest jump</div>
        <div class="big">${U.small(maxDist)}</div>
@@ -36942,7 +37118,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'b89d69981 · 2026-09-13';
+const LOAM_BUILD = '69eba0abf · 2026-09-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
