@@ -20646,21 +20646,44 @@ function renderCrossRide({ perRide, clusters }) {
       const chartRef = selectedMembers.has(ref) ? ref : (selected[0] || null);
       const note = selected.length < members.length ? ` · ${selected.length} of ${members.length} selected` : '';
 
-      /* Speed-vs-distance overlay. Speed and distance follow the Units toggle at the trace only
-         (distSeries stays meters for the DTW/painted-map math downstream). */
+      /* Foot comparisons use pace, with faster values higher on the chart. Keep the
+         stored speed/distance series unchanged for DTW and the gain/loss map. */
+      const paceComparison = sportCarriesNoTurns(members);
+      const paceDistance = U.metric() ? 1000 : 1609.34;
+      const paceUnit = U.metric() ? 'min/km' : 'min/mi';
+      const paceSeconds = speed => Number.isFinite(speed) && speed > 0 ? paceDistance / speed : null;
+      const formatPace = seconds => {
+        const rounded = Math.round(seconds);
+        return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
+      };
       const speedTraces = selected.map(m => ({
-        x: m.distSeries.map(v => U.smallNum(v)), y: m.locInWin.map(r => U.speedNum(r.speed)),
+        x: m.distSeries.map(v => U.smallNum(v)), y: m.locInWin.map(r => paceComparison ? paceSeconds(r.speed) : U.speedNum(r.speed)),
+        ...(paceComparison ? {
+          text: m.locInWin.map(r => paceSeconds(r.speed) == null ? '' : formatPace(paceSeconds(r.speed))),
+          hovertemplate: `%{text} ${paceUnit}<extra>%{fullData.name}</extra>`,
+        } : {}),
         type: 'scatter', mode: 'lines',
         line: { color: m.color, width: 2 },
         name: m.tag,
       }));
+      const paceValues = paceComparison ? speedTraces.flatMap(t => t.y).filter(v => v != null) : [];
+      const paceTicks = [];
+      if (paceValues.length) {
+        const low = paceValues.reduce((a, b) => Math.min(a, b));
+        const high = paceValues.reduce((a, b) => Math.max(a, b));
+        const step = Math.max(30, Math.ceil((high - low) / 180) * 30);
+        for (let tick = Math.floor(low / step) * step; tick <= high + step; tick += step) paceTicks.push(tick);
+      }
       loamPlot(`crossSpeedChart_${ci}`, speedTraces, {
         paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
         font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-        title: { text: 'Speed vs distance into descent' + note, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
+        title: { text: (paceComparison ? 'Pace vs distance into segment' : 'Speed vs distance into descent') + note, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
         margin: { l: 48, r: 14, t: 32, b: 64 },
         xaxis: { title: { text: `distance (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
-        yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
+        yaxis: paceComparison ? {
+          title: { text: `pace (${paceUnit})`, font: { size: 11 } }, gridcolor: '#e2e8f0',
+          autorange: 'reversed', tickmode: 'array', tickvals: paceTicks, ticktext: paceTicks.map(formatPace),
+        } : { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
         legend: { x: 0, y: -0.32, orientation: 'h', font: { size: 10 } },
         hovermode: 'x unified',
       }, PLOT_CFG);
@@ -38107,7 +38130,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '3a81d51d7 · 2026-09-13';
+const LOAM_BUILD = '4adf0b07f · 2026-09-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
