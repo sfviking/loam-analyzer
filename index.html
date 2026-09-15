@@ -974,25 +974,31 @@
     #runsTable .descent-row-actions button { display: block; margin: 3px 0 3px auto; }
   }
   @media (max-width: 700px) {
-    .section-nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .section-nav { flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; padding: 6px 0; margin-bottom: 16px; }
+    .section-nav .nav-label { display: none; }
     .section-nav::-webkit-scrollbar { display: none; }
-    .section-nav button { flex: 0 0 auto; }
+    .section-nav button { flex: 0 0 auto; min-height: 44px; padding: 8px 12px; font-size: 12px; }
     /* The replay toolbar (play, scrubber, speed, kit) overflowed a 390px phone and cut its last
        control off at the right edge; the scrubber takes a line of its own below the buttons. */
     .ghost-controls { flex-wrap: wrap; row-gap: 8px; }
     .ghost-controls input[type=range] { flex: 1 1 100%; min-width: 0; order: 9; }
     #runsTable, #runsTable tbody { display: block; }
     #runsTable thead { display: none; }
-    #runsTable tbody tr { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px 8px; padding: 13px 14px 15px; border-bottom: 1px solid var(--border); }
+    /* Two readable metric columns; the title and editing controls share a separate header. */
+    #runsTable tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; padding: 12px 16px 16px; border-bottom: 1px solid var(--border); }
     #runsTable tbody tr:last-child { border-bottom: 0; }
     #runsTable tbody td { display: block; padding: 0 !important; text-align: left !important; border-bottom: 0; }
     #runsTable td.run-num { display: none; }
-    #runsTable td.run-name { grid-column: 1 / -1; font-family: 'IBM Plex Sans', sans-serif; font-size: 15px; font-weight: 600; line-height: 1.35; }
-    #runsTable td.run-name::before { content: attr(data-n) ' · '; color: var(--text-muted); font-weight: 400; }
-    #runsTable td[data-l]::before { content: attr(data-l); display: block; font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); font-weight: 400; margin-bottom: 1px; }
-    #runsTable td.descent-row-actions { grid-column: 1 / -1; }
+    #runsTable td.run-name { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; min-width: 0; padding-bottom: 10px !important; border-bottom: 1px solid var(--border); font-family: 'IBM Plex Sans', sans-serif; font-size: 16px; font-weight: 600; line-height: 1.35; }
+    #runsTable .run-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    #runsTable .run-rename, #runsTable .run-skip { flex: 0 0 44px; height: 44px; padding: 0; border: 1px solid var(--border); border-radius: 10px; font-size: 16px; color: var(--text-dim); opacity: 1; }
+    #runsTable td[data-l] { min-width: 0; font-size: 15px; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; }
+    #runsTable td[data-l="Drop"] { grid-column: 1 / -1; }
+    #runsTable td.run-name::before { content: none; }
+    #runsTable td[data-l]::before { content: attr(data-l); display: block; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); font-weight: 400; margin-bottom: 4px; }
+    #runsTable td.descent-row-actions { grid-column: 1 / -1; padding-top: 12px !important; border-top: 1px solid var(--border); white-space: normal; }
     #runsTable td.descent-row-actions:empty { display: none; }
-    #runsTable .descent-row-actions button { display: inline-block; padding: 7px 14px; font-size: 12px; margin: 2px 8px 0 0; }
+    #runsTable .descent-row-actions button { display: inline-block; min-height: 44px; padding: 8px 14px; font-size: 12px; margin: 2px 8px 0 0; }
   }
   .stats-panel { padding: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 24px 20px; align-content: start; }
   /* Raw-metrics caption: the activity + data caveat, hoisted out of the key/value dump so the
@@ -6361,6 +6367,61 @@ function drawRunsEmpty(mode) {
   nav();
 }
 
+/* Best five-second GPS speed for the run cards (m/s; format as pace at the UI).
+   Kept in sync with the standalone analyzer by the browser-source test.
+   Refuse missing data rather than joining across a pause, dropout or rejected spike. */
+function bestFiveSecondSpeed(rows, pausedSpans = []) {
+  const windowS = 5, maxGapS = 2, maxFootSpeed = 12;
+  const valid = r => r && Number.isFinite(r.t) && Number.isFinite(r.speed)
+    && r.speed >= 0 && r.speed <= maxFootSpeed;
+  let before = -1, before2 = -1, after = 0, after2 = 0;
+  const clean = rows.map(r => {
+    if (!valid(r)) return null;
+    // Compare readings a second apart, not adjacent CSV rows: the native resampler may
+    // repeat one GPS reading hundreds of times. A one-second GPS spike is still one spike.
+    while (before + 1 < rows.length && rows[before + 1].t <= r.t - 1) before++;
+    while (before2 + 1 < rows.length && rows[before2 + 1].t <= r.t - 2) before2++;
+    while (after < rows.length && rows[after].t < r.t + 1) after++;
+    while (after2 < rows.length && rows[after2].t < r.t + 2) after2++;
+    let a = rows[before], b = rows[after];
+    // At a segment boundary there is evidence on only one side. Require two readings
+    // there rather than letting the first or last fix bypass the spike guard entirely.
+    if (!a) { a = rows[after]; b = rows[after2]; }
+    else if (!b) { a = rows[before2]; b = rows[before]; }
+    if (valid(a) && valid(b) && a.t < b.t
+        && Math.abs(r.t - a.t) <= maxGapS && Math.abs(b.t - r.t) <= maxGapS) {
+      const baseline = Math.max(a.speed, b.speed);
+      // The absolute margin preserves normal acceleration near rest; the relative
+      // margin scales at speed. The ceiling matches the running-distance guard.
+      if (r.speed > baseline + Math.max(2, baseline * 0.5)) return null;
+    }
+    return r;
+  });
+  let best = null, block = [], area = [], left = 0;
+  for (const r of clean) {
+    const prev = block[block.length - 1];
+    if (!r || (prev && (r.t <= prev.t || r.t - prev.t > maxGapS
+        || pausedSpans.some(p => p.start < r.t && p.end > prev.t)))) {
+      block = []; area = []; left = 0;
+    }
+    if (!r || pausedSpans.some(p => p.start <= r.t && r.t < p.end)) continue;
+    const a = block[block.length - 1];
+    area.push(a ? area[area.length - 1] + (a.speed + r.speed) * (r.t - a.t) / 2 : 0);
+    block.push(r);
+    const start = r.t - windowS;
+    if (start < block[0].t) continue;
+    while (left + 1 < block.length && block[left + 1].t <= start) left++;
+    const lo = block[left], hi = block[left + 1], dt = start - lo.t;
+    // Integrate speed in time, interpolating the exact window boundary. Averaging samples
+    // would give densely sampled seconds more influence than sparsely sampled seconds.
+    const startArea = area[left] + lo.speed * dt
+      + (hi.speed - lo.speed) / (hi.t - lo.t) * dt * dt / 2;
+    const avg = (area[area.length - 1] - startArea) / windowS;
+    if (avg > 0 && (best == null || avg > best)) best = avg;
+  }
+  return best;
+}
+
 function drawRuns() {
   const D = _runsD; if (!D) return;
   /* The runs panel is now the single home for per-segment interaction, so the tag/compare actions
@@ -6381,6 +6442,14 @@ function drawRuns() {
   /* Every word below that names the SPORT comes from here. The row noun above names the MODE. */
   const lex = sportLex(displaySport(D));
   const showTurns = hasBodyFrameTurns(D.sport);
+  const displaySportNorm = normalizeSport(displaySport(D));
+  const footSport = !showTurns && (displaySportNorm === 'run' || displaySportNorm === 'walk');
+  const topLabel = footSport ? 'Best 5s pace' : 'Top';
+  const avgLabel = footSport ? 'Pace' : 'Avg';
+  const topSpeeds = runs.map(r => footSport
+    ? bestFiveSecondSpeed(D.sensors.location.filter(p => p.t >= r.tStart && p.t <= r.tEnd),
+        (D.ride && D.ride.pausedSpans) || [])
+    : r.metrics.maxSpeed);
   const sub = document.getElementById('runsSubtitle');
   if (sub) {
     let s = `${runs.length} ${nounSingular}${runs.length > 1 ? 's' : ''}`;
@@ -6435,7 +6504,7 @@ function drawRuns() {
     } else { cta.innerHTML = ''; cta.classList.add('hidden'); }
   }
   const bestTime = Math.min(...runs.map(r => r.metrics.duration));
-  const bestTop = Math.max(...runs.map(r => r.metrics.maxSpeed));
+  const bestTop = Math.max(...topSpeeds.filter(v => v != null));
   const hi = 'style="color:#7fb069;font-weight:600;"';
   /* Turns / L·R / Radius come from body-frame turn detection, which only exists for MTB. On running
      and GPS-only rides those columns are always 0/0/— (dead), so swap in an Avg-speed column and
@@ -6444,15 +6513,13 @@ function drawRuns() {
      for it, and gating these three columns on the MTB family alone swapped in Avg speed and left a
      skier's corners visible everywhere except the table that opens them (`showTurns`, above). */
   const thead = document.querySelector('#runsTable thead');
-  const displaySportNorm = normalizeSport(displaySport(D));
-  const showPace = !showTurns && (displaySportNorm === 'run' || displaySportNorm === 'walk');
   /* The name column's header follows the same mode noun the title, the subtitle and the rows use, so
      the table cannot read "Run" over rows called "Descent 4" under a heading called "Descents". */
   const nounCap = capitalize(nounSingular);
   if (thead) thead.innerHTML = showTurns
     ? `<tr><th>#</th><th>${nounCap}</th><th>Time</th><th>Dist</th><th>Top</th><th>Turns</th><th>L/R</th><th title="Median apex radius">Radius</th><th>Drop</th><th></th></tr>`
-    : `<tr><th>#</th><th>${nounCap}</th><th>Time</th><th>Dist</th><th>Top</th><th>${showPace ? 'Pace' : 'Avg'}</th><th>Drop</th><th></th></tr>`;
-  document.querySelector('#runsTable tbody').innerHTML = runs.map(r => {
+    : `<tr><th>#</th><th>${nounCap}</th><th>Time</th><th>Dist</th><th>${topLabel}</th><th>${avgLabel}</th><th>Drop</th><th></th></tr>`;
+  document.querySelector('#runsTable tbody').innerHTML = runs.map((r, index) => {
     const m = r.metrics;
     const label = runLabel(r.tStart) || r.label;
     /* Library actions per run, when it is backed by a descent: tag/retag and compare past laps,
@@ -6504,18 +6571,18 @@ function drawRuns() {
     const metricCells = showTurns
       ? `<td data-l="Turns">${m.nTurns}</td><td data-l="L/R">${m.leftTurns}/${m.rightTurns}</td>
          <td data-l="Radius">${m.medianRadius != null ? U.small(m.medianRadius) : '—'}</td>`
-      : `<td data-l="${showPace ? 'Pace' : 'Avg'}">${showPace ? U.pace(m.avgSpeed) : U.speed(m.avgSpeed)}</td>`;
+      : `<td data-l="${avgLabel}">${footSport ? U.pace(m.avgSpeed) : U.speed(m.avgSpeed)}</td>`;
     /* A row drills into the dedicated segment page (focused map + corner ledger) when it is an MTB run
        with body-frame turns, matching the onclick below; those get a disclosure chevron so the "tap for
        more" is visible on touch, where there is no pointer cursor. */
     const opensSeg = showTurns && (D.turns || []).some(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
-    /* The classes + data-n/data-l attributes drive the phone card reflow (max-width 700px CSS):
-       data-n prefixes the name with the run number, data-l becomes each metric tile's label. */
+    /* The run-title wrapper keeps long names clear of the phone editing controls;
+       data-l supplies the metric labels when the table reflows into cards. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
-      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}>${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}<button type="button" class="run-rename" data-idx="${r.n - 1}" title="Rename this ${nounSingular}" aria-label="Rename ${nounSingular} ${r.n}">✎</button>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
+      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}><span class="run-title">${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}</span><button type="button" class="run-rename" data-idx="${r.n - 1}" title="Rename this ${nounSingular}" aria-label="Rename ${nounSingular} ${r.n}">✎</button>${skipToggle}${opensSeg ? '<span class="run-open" title="Open this run\'s corners" aria-hidden="true">›</span>' : ''}</td>
       <td data-l="Time" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist">${U.dist(m.distance)}</td>
-      <td data-l="Top" ${m.maxSpeed === bestTop ? hi : ''}>${U.speed(m.maxSpeed)}</td>
+      <td data-l="${topLabel}" ${topSpeeds[index] != null && topSpeeds[index] === bestTop ? hi : ''}>${footSport ? U.pace(topSpeeds[index]) : U.speed(topSpeeds[index])}</td>
       ${metricCells}
       <td data-l="Drop">${m.drop != null ? U.elev(m.drop) : '—'}</td>
       <td class="descent-row-actions">${actions}</td></tr>`;
@@ -9680,15 +9747,25 @@ function drawRunsOverlay(runs, D) {
   const palette = ['#7fb069', '#e0a458', '#5b8fb0', '#c45d5d', '#9b7fb0', '#56a3a6', '#b0905b', '#7a8b99'];
   /* Speed and distance follow the Units toggle (they used to hardcode mph and meters). */
   const smooth = loamSmooth();
+  const showPace = ['run', 'walk'].includes(normalizeSport(displaySport(D)));
+  const paceUnit = U.metric() ? 'min/km' : 'min/mi';
+  // Below 0.5 m/s, near-stationary GPS drift makes reciprocal pace unstable.
+  // Mask it only in the pace display; distance still integrates the original speed.
+  const minPaceSpeed = 0.5;
+  const paceDistance = U.metric() ? 1000 : 1609.34;
+  const formatPace = seconds => {
+    const rounded = Math.round(seconds);
+    return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
+  };
   const traces = runs.map((r, i) => {
     /* Drop CoreLocation's -1 "speed unknown" sentinel, not just null. It was reaching the chart as a
        real reading, and the damage was not only the visible dip below zero: this x axis INTEGRATES
        speed into distance, so a negative sample runs the distance backwards and drags that stretch
        of the trace leftward over ground it already covered. Filtering the row removes both. */
-    const loc = D.sensors.location.filter(x => x.t >= r.tStart && x.t <= r.tEnd && x.speed != null && x.speed >= 0);
+    const loc = D.sensors.location.filter(x => x.t >= r.tStart && x.t <= r.tEnd && Number.isFinite(x.speed) && x.speed >= 0);
     if (loc.length < 2) return null;
-    let d = 0; const xs = [0], ys = [U.speedNum(loc[0].speed)];
-    for (let k = 1; k < loc.length; k++) { d += ((loc[k].speed + loc[k - 1].speed) / 2) * (loc[k].t - loc[k - 1].t); xs.push(U.smallNum(d)); ys.push(U.speedNum(loc[k].speed)); }
+    let d = 0; const xs = [0], ys = [loc[0].speed];
+    for (let k = 1; k < loc.length; k++) { d += ((loc[k].speed + loc[k - 1].speed) / 2) * (loc[k].t - loc[k - 1].t); xs.push(U.smallNum(d)); ys.push(loc[k].speed); }
     /* Raw 1 Hz Doppler speed is a hairball: two laps overlaid read as one band of noise and the
        comparison the chart exists for is unreadable. Median-smooth each lap so the shape can be
        compared, using the same rolling median and the same shared `smooth` preference as the running
@@ -9698,23 +9775,62 @@ function drawRunsOverlay(runs, D) {
 
        The window scales with the trace so it means roughly the same thing on a 90-second MTB lap as
        on a 40-minute run lap: a fixed 15 would flatten real features out of the short one. */
-    let y = ys;
+    let y = showPace ? ys.map(v => v >= minPaceSpeed ? v : null) : ys;
     if (smooth && ys.length >= 10) {
       const win = Math.max(5, Math.min(21, Math.round(ys.length / 20) | 1));
-      y = rollingMedianMasked(ys, win);
+      y = rollingMedianMasked(y, win);
     }
-    return { x: xs, y, type: 'scatter', mode: 'lines', line: { color: palette[i % palette.length], width: smooth ? 2 : 1.5 }, name: `${r.n}. ${r.label}`.slice(0, 26) };
+    // Preserve near-stop gaps even when the median has moving neighbours.
+    y = y.map((speed, k) => showPace
+      ? (ys[k] >= minPaceSpeed && speed >= minPaceSpeed ? paceDistance / speed : null)
+      : U.speedNum(speed));
+    return { x: xs, y, ...(showPace ? {
+      text: y.map(v => v == null ? '' : formatPace(v)),
+      hovertemplate: `%{text} ${paceUnit}<extra>%{fullData.name}</extra>`,
+    } : {}), connectgaps: false, type: 'scatter', mode: 'lines', line: { color: palette[i % palette.length], width: smooth ? 2 : 1.5 }, name: `${r.n}. ${r.label}`.slice(0, 26) };
   }).filter(Boolean);
   /* Same rule as the DTW chart below: with nothing to draw, Plotly would still render an axes frame
      inside a bordered 300px box, which reads as a chart that failed rather than one with no data. */
   if (!traces.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
-  loamPlot(el, traces, {
+  const paceValues = showPace ? traces.flatMap(t => t.y).filter(Number.isFinite) : [];
+  const paceTicks = [];
+  if (paceValues.length) {
+    const low = paceValues.reduce((a, b) => Math.min(a, b));
+    const high = paceValues.reduce((a, b) => Math.max(a, b));
+    const step = Math.max(30, Math.ceil((high - low) / 180) * 30);
+    for (let tick = Math.floor(low / step) * step; tick <= high + step; tick += step) paceTicks.push(tick);
+  }
+  // Draw only bounded gaps, using their measured endpoints. Keep these separate
+  // from the pace samples so hover never presents an interpolated value as measured.
+  const connectors = [];
+  if (showPace) traces.forEach((trace, i) => {
+    trace.legendgroup = `run-pace-${i}`;
+    const x = [], y = [];
+    let previous = -1;
+    trace.y.forEach((value, k) => {
+      if (!Number.isFinite(value)) return;
+      if (previous >= 0 && k > previous + 1) {
+        x.push(trace.x[previous], trace.x[k], null);
+        y.push(trace.y[previous], value, null);
+      }
+      previous = k;
+    });
+    if (x.length) connectors.push({
+      x, y, type: 'scatter', mode: 'lines', connectgaps: false,
+      line: { color: trace.line.color, width: trace.line.width, dash: 'dash' },
+      legendgroup: trace.legendgroup, showlegend: false, hoverinfo: 'skip',
+    });
+  });
+  loamPlot(el, [...traces, ...connectors], {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    title: { text: 'Speed vs distance into run (overlay to compare)', font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
-    margin: { l: 48, r: 14, t: 32, b: 62 },
+    title: { text: `${showPace ? 'Pace' : 'Speed'} vs distance into run (overlay to compare)${connectors.length ? '<br><sup>Dashed = gap in measured pace</sup>' : ''}`, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
+    margin: { l: 48, r: 14, t: connectors.length ? 48 : 32, b: 62 },
     xaxis: { title: { text: `distance (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
+    yaxis: showPace ? {
+      title: { text: `pace (${paceUnit})`, font: { size: 11 } }, gridcolor: '#e2e8f0',
+      autorange: 'reversed', tickmode: 'array', tickvals: paceTicks, ticktext: paceTicks.map(formatPace),
+    } : { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
     legend: { x: 0, y: -0.3, orientation: 'h', font: { size: 9 } }, hovermode: 'x unified',
   }, PLOT_CFG);
 }
@@ -38173,7 +38289,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '582ea40f8 · 2026-09-14';
+const LOAM_BUILD = 'b02d44298 · 2026-09-14';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
