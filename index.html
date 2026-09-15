@@ -1511,6 +1511,19 @@
   .session-overview { padding: 22px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; }
   .session-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
   .session-heading h1 { font:600 clamp(22px, 3vw, 32px)/1.2 'Bricolage Grotesque',sans-serif; text-transform:none; overflow-wrap:anywhere; margin:0 0 8px; }
+  /* One visual noun at the top of every report. Kept as inline SVG rather than emoji so the same
+     activity has the same silhouette in Safari, Chrome and the embedded WKWebView. The surrounding
+     heading already names the activity, so the icon is deliberately decorative and hidden from
+     assistive technology. */
+  .activity-title { display:inline-flex; align-items:center; gap:12px; min-width:0; }
+  .activity-title > span:last-child { min-width:0; overflow-wrap:anywhere; }
+  .activity-icon { width:42px; height:42px; flex:0 0 42px; display:inline-flex; align-items:center;
+    justify-content:center; color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+    border-radius:12px; background:color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+  .activity-icon svg { width:26px; height:26px; display:block; }
+  .section-title .activity-title { gap:9px; }
+  .section-title .activity-icon { width:34px; height:34px; flex-basis:34px; border-radius:10px; }
+  .section-title .activity-icon svg { width:22px; height:22px; }
   .session-heading p { color:var(--text-dim); font-size:14px; margin:0; }
   .session-facts { display:flex; gap:32px; flex-wrap:wrap; margin-top:20px; }
   .session-facts strong { display:block; font-size:26px; font-variant-numeric:tabular-nums; }
@@ -3770,7 +3783,7 @@ function imuRateWarning(hz) {
 }
 
 /* ========== Calibration & rotation ========== */
-function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strategy) {
+function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strategy, locationRows) {
   const fs = 100, winSec = 20, winN = winSec * fs;
   /* 'riding': define the body frame from the RIDING window itself rather than from any still window
      before it (user report #546, a drone session: "I sometimes think the form replay shows that I'm
@@ -3807,13 +3820,67 @@ function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strat
                noise: Math.sqrt(Math.max(0, ss / n - mean * mean)), strategy: 'riding' };
     }
   }
+  let still = null;
   if (accelRows.length < winN * 1.5) {
     // Recording too short for 20s window; try 10s
     const winNshort = 10 * fs;
     if (accelRows.length < winNshort * 1.5) return null;
-    return findCalibWithWindow(gravityRows, accelRows, rideStart, rideEnd, winNshort, fs, strategy);
+    still = findCalibWithWindow(gravityRows, accelRows, rideStart, rideEnd, winNshort, fs, strategy);
+  } else {
+    still = findCalibWithWindow(gravityRows, accelRows, rideStart, rideEnd, winN, fs, strategy);
   }
-  return findCalibWithWindow(gravityRows, accelRows, rideStart, rideEnd, winN, fs, strategy);
+  if (still) return still;
+  return findMidrideCalibrationWindow(gravityRows, accelRows, locationRows, rideStart, rideEnd);
+}
+
+/*
+ * Last-resort calibration for a recording whose ride detector spans almost the entire file, leaving
+ * no legal pre/post-ride window. This is deliberately stricter than the primary still search: the
+ * full 8 seconds must be contiguous and inside the ride, accelerometer sigma must satisfy the native
+ * capture stillness bar, GPS must independently say the rider stayed stopped, and the resulting
+ * body's lateral/total pose must agree with the mean riding pose. The 8s floor and these gates recover
+ * the reported 2026-09-15 recording at 39:06 without admitting its quieter but sideways rest stops.
+ */
+function findMidrideCalibrationWindow(gravityRows, accelRows, locationRows, rideStart, rideEnd) {
+  if (!Array.isArray(locationRows) || !locationRows.length
+      || !Number.isFinite(rideStart) || !Number.isFinite(rideEnd)) return null;
+  const fs = 100, winSec = 8, winN = winSec * fs;
+  const maxSigma = 0.20;       // CalibrationStillness.maxSigma in the native capture app.
+  const maxGpsSpeed = 0.30;    // Stationary GPS jitter, well below the 1 m/s walking threshold.
+  const maxLateralDeg = 12;    // CALIB_POSE_LATERAL_DEG, which protects turn-side attribution.
+  const maxTotalDeg = 40;      // CALIB_POSE_TOTAL_DEG backstop for a grossly different mount pose.
+  if (accelRows.length <= winN) return null;
+
+  let chosen = null;
+  for (let i = 0; i + winN < accelRows.length; i += fs) {
+    const t0 = accelRows[i].t, t1 = accelRows[i + winN].t;
+    if (!Number.isFinite(t0) || !Number.isFinite(t1)
+        || t0 < rideStart || t1 > rideEnd || Math.abs((t1 - t0) - winSec) > 0.25) continue;
+
+    let sum = 0, sumSq = 0;
+    for (let j = i; j < i + winN; j++) {
+      const m = Math.hypot(accelRows[j].x, accelRows[j].y, accelRows[j].z);
+      sum += m; sumSq += m * m;
+    }
+    const mean = sum / winN;
+    const std = Math.sqrt(Math.max(0, sumSq / winN - mean * mean));
+    if (std > maxSigma) continue;
+
+    const gps = locationRows.filter(r => Number.isFinite(r.t) && Number.isFinite(r.speed)
+      && r.t >= t0 && r.t <= t1);
+    if (gps.length < 4 || gps[0].t > t0 + 2 || gps[gps.length - 1].t < t1 - 2
+        || gps.some(r => r.speed < 0 || r.speed > maxGpsSpeed)) continue;
+
+    try {
+      const { R } = calibrationRotation(gravityRows, t0, t1);
+      const axes = poseMismatchAxes(gravityRows, R, rideStart, rideEnd);
+      if (!axes || Math.abs(axes.lateralDeg) >= maxLateralDeg || axes.totalDeg >= maxTotalDeg) continue;
+    } catch (_) {
+      continue;
+    }
+    if (!chosen || std < chosen.noise) chosen = { start: t0, end: t1, noise: std, strategy: 'midride' };
+  }
+  return chosen;
 }
 function findCalibWithWindow(gravityRows, accelRows, rideStart, rideEnd, winN, fs, strategy) {
   const accMag = accelRows.map(r => Math.hypot(r.x, r.y, r.z));
@@ -4645,6 +4712,35 @@ function lexNoun(lex, { plural = false, cap = false } = {}) {
 }
 function sportNoun(sport, opts) { return lexNoun(sportLex(sport), opts); }
 function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+/* A small, dependency-free activity mark for the report mastheads. These deliberately follow the
+   same canonical vocabulary as SPORT_LEX: aliases are normalized once, including that lexicon's
+   existing generic-ride fallback for an unknown outdoor activity. The title beside each mark carries
+   the accessible name, so the SVG is decorative (screen readers hear "Run", not "Run, running icon"). */
+function activityIcon(sport) {
+  const kind = normalizeSport(sport);
+  const common = 'fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"';
+  let body = '';
+  if (kind === 'mtb' || kind === 'emtb' || kind === 'road' || kind === 'ride') {
+    body = `<circle cx="5.5" cy="18.5" r="3.5"/><circle cx="18.5" cy="18.5" r="3.5"/>
+      <path d="M5.5 18.5l4.3-7h4.1l4.6 7m-8.7-7 4.1 7H5.5m3.2-10h4.1m1.1 3 1.7-3h2.5"/>`;
+    if (kind === 'emtb') body += '<path class="activity-icon-bolt" d="m13.2 10.5-2.4 4h2.2l-1.1 3.1 3.2-4.6h-2.2l1.3-2.5"/>';
+  } else if (kind === 'run') {
+    body = `<circle cx="13.5" cy="4.2" r="2.1"/><path d="m11.6 8.1 3.2 2.6 3.3.8M14.7 10.7l-3.2 4.1-4.2 1.4m4.2-1.4 3 2.4 2.5 3.7m-5.5-6.1-2.2 5.1"/>`;
+  } else if (kind === 'walk') {
+    body = `<circle cx="12" cy="4.2" r="2.1"/><path d="m11.7 8.1-1 5.5 3 2.7 1.7 4.7m-4.7-7.4-3 3.1M11.5 9l3 3 2.5.4m-6.3 1.2L8.9 21"/>`;
+  } else if (kind === 'lift') {
+    body = `<path d="M3 9v6m3-8v10m3-7v4h6v-4m0-3v10m3-8v6M3 12h3m12 0h3"/>`;
+  } else if (kind === 'golf') {
+    body = `<path d="M8 3v17m0-16 8 2.6L8 9.2M4 20h8"/><circle cx="18.5" cy="18.5" r="1.5"/>`;
+  } else if (kind === 'swim') {
+    body = `<circle cx="15.8" cy="7" r="2.1"/><path d="M3 12c2.2-2 4.2-2 6.2 0s4 2 6 0 4-2 5.8-.2M3 16c2.2-2 4.2-2 6.2 0s4 2 6 0 4-2 5.8-.2m-12.3-4 3.1-4 3.8 2.1"/>`;
+  } else if (kind === 'ski') {
+    body = `<circle cx="14.7" cy="4.2" r="2"/><path d="m12.8 8.1-2.9 4.4 4.1 2.3 3.3 4.1M10 12.5l-4.1 1.2m6.9-5.6 3 3 3.7.4M3 19.5l7.1 1.1m2.2-.3 8.7 1.2M7.2 9l-2.7 10"/>`;
+  } else {
+    body = '<path d="M4 12h3l2-5 4 10 2-5h5"/>';
+  }
+  return `<span class="activity-icon" data-sport="${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" ${common} focusable="false">${body}</svg></span>`;
+}
 /* The lexicon for the recording ON SCREEN. The descents-and-turns render path (renderAll and the
    helpers under it: the stat tiles, the timeline axis, the segment page, the corner ledger, the form
    replay's tiles, the calibration and crash notices) hands its functions slices of D rather than D
@@ -19464,7 +19560,7 @@ async function analyze(files) {
     onProgress('finding calibration window');
     const calibWin = calibrationSource
       ? { ...calibrationSource.window, strategy: 'borrowed', sourceName: calibrationSource.name, sourceKey: calibrationSource.key }
-      : findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy);
+      : findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy, sensors.location);
     if (!calibWin) throw new Error('Could not find a still calibration window');
 
     onProgress('computing body-frame rotation');
@@ -23708,7 +23804,7 @@ function golfMasthead(D, s) {
   const sub = [clubStr, dateStr, mins].filter(Boolean).join(' · ');
   return `<div class="gr-mast">
     <div>
-      <h2>Range session</h2>
+      <h2 class="activity-title">${activityIcon('golf')}<span>Range session</span></h2>
       <div class="sub">${escapeHtml(sub)}</div>
     </div>
     <div class="side">
@@ -24093,7 +24189,7 @@ function renderGolf(D) {
   const g = D.golf || {}, s = D.summary || {}, con = g.consistency || {};
   const el = document.getElementById('golfResults');
   if (!g.nSwings) {
-    el.innerHTML = `<div class="section-title">${loamT('Range')} <span class="beta-badge">BETA</span></div>`
+    el.innerHTML = `<div class="section-title"><span class="activity-title">${activityIcon('golf')}<span>${loamT('Range')}</span></span> <span class="beta-badge">BETA</span></div>`
       + `<div class="strength-scope">${loamT('No swings detected in this recording. Golf needs Apple Watch wrist motion (the watch on your lead wrist) and a few full swings; practice waggles and putts are intentionally not counted.')}</div>`
       + golfTipsSection();
     return;
@@ -24222,7 +24318,7 @@ function renderStrength(D) {
      state that points at the fix instead. */
   if (!sets.length) {
     document.getElementById('strengthResults').innerHTML = `
-      <div class="section-title">Lift <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+      <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>Lift</span></span> <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
       <div class="panel" style="padding:24px;text-align:center">
         <div class="s-big">No sets detected</div>
         <div class="strength-scope" style="margin-top:10px">This recording was tagged as a lift, but no sets were found. Tap <strong>Start set</strong> at the top of each working set when you record (the analyzer segments sets from those taps), otherwise the motion was too quiet or short to auto-segment. Reps count from wrist vertical travel, so wear the watch for the fullest read.</div>
@@ -24335,7 +24431,7 @@ function renderStrength(D) {
   const readCards = liftCoachRead(Dc).map(c => `<div class="lc-card"><div class="lc-head">${escapeHtml(c.head)}</div><div class="lc-body">${escapeHtml(c.body)}</div></div>`).join('');
 
   document.getElementById('strengthResults').innerHTML = `
-    <div class="section-title">Lift <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+    <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>Lift</span></span> <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
     ${leadNote(
       `Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`,
       `Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.`,
@@ -24742,7 +24838,7 @@ function renderSkiIndoor(D) {
   ].filter(Boolean).join(' ');
 
   el.innerHTML = `
-    <div class="section-title">${T('Indoor ski')} <span class="beta-badge">${T('EXPERIMENTAL')}</span></div>
+    <div class="section-title"><span class="activity-title">${activityIcon('ski')}<span>${T('Indoor ski')}</span></span> <span class="beta-badge">${T('EXPERIMENTAL')}</span></div>
     ${leadNote(
       /* One string per paragraph: a translator cannot be handed half a sentence, and the English
          source string IS the lookup key, so it has to be the whole thing. */
@@ -25423,7 +25519,7 @@ function renderSwim(D) {
     : swimOpenWaterSection(R, unit);
 
   el.innerHTML = `
-    <div class="section-title">Swim <span class="beta-badge">BETA</span></div>
+    <div class="section-title"><span class="activity-title">${activityIcon('swim')}<span>Swim</span></span> <span class="beta-badge">BETA</span></div>
     ${/* Main's wording wins on the captured branch and this branch only reshapes it. The lead this
           branch first wrote said the counts were "roughly half what your watch reports", which is the
           exact error main had just corrected: the factor is STROKE-DEPENDENT (freestyle and backstroke
@@ -29605,6 +29701,7 @@ function recordingQuality(D) {
   const axes = (D && D.poseAxes) || null;
   if (calib) {
     const preride = calib.strategy === 'preride';
+    const midride = calib.strategy === 'midride';
     /* `riding` is a third state, not a failure. The rider ASKED for the body frame to come from the
        ride itself -- it is what the Riding-pose strategy does -- so reporting it as "no still moment
        was found" would be describing a deliberate choice as a fault. It is not `ok` either: a riding
@@ -29615,18 +29712,24 @@ function recordingQuality(D) {
     const lat = axes && Number.isFinite(axes.lateralDeg) ? Math.abs(axes.lateralDeg) : null;
     facts.push({
       id: 'calibration',
-      level: preride ? 'ok' : 'thin',
+      level: preride || midride ? 'ok' : 'thin',
       headline: preride
         ? 'Calibrated from a still moment before you started'
+        : midride
+        ? 'Calibrated from a stationary pause during the activity'
         : riding
         ? 'Calibrated from the ride itself, not from a still moment'
         : borrowed
         ? 'Calibrated from another ride: ' + calib.sourceName
         : 'No still moment before the activity, so calibration came from elsewhere in the recording',
-      weakens: preride ? null : 'Lean angles, and which way a turn went',
+      weakens: preride || midride ? null : 'Lean angles, and which way a turn went',
       detail: preride
         ? 'The body frame comes from the pose the phone was actually in when you set off, which is what '
           + 'lean and turn sides are measured against.'
+        : midride
+        ? 'No full calibration window existed outside the activity, so the body frame uses an 8-second '
+          + 'pause confirmed independently by accelerometer stillness, near-zero GPS speed, and agreement '
+          + 'with the phone’s riding orientation.'
         : riding
         ? 'You chose Riding-pose calibration, which is the right answer when the phone is never in its '
           + 'riding position while you are standing still. It is beta: a riding pose is an average over '
@@ -34298,7 +34401,7 @@ function renderSessionOverview(D, sport) {
   const unreliable = sidesUnreliableFor(D);
   const shifted = !!(D.calibWin && D.calibWin.mountShift);
   const tile = (value, label) => `<div><strong>${escapeHtml(value)}</strong><span>${escapeHtml(loamT(label))}</span></div>`;
-  host.innerHTML = `<div class="session-heading"><div><h1 tabindex="-1">${escapeHtml(title)}</h1>
+  host.innerHTML = `<div class="session-heading"><div><h1 class="activity-title" tabindex="-1">${activityIcon(sport)}<span>${escapeHtml(title)}</span></h1>
       <p>${escapeHtml([D.eBike ? 'e-MTB' : sessionSportLabel(sport), when].filter(Boolean).join(' · '))}</p></div>
       <button type="button" class="session-share">${loamT('Share card')}</button></div>
     <div class="session-facts">${Number.isFinite(distance) ? tile(U.dist(distance), 'Distance') : ''}
@@ -36820,7 +36923,7 @@ function renderParams(s, hasFit) {
     <span>exit <strong>${TURN_PARAMS.exitRate}°/s</strong></span>
     <span>min heading <strong>${TURN_PARAMS.minHeadingChg}°</strong></span>
     <span>min duration <strong>${TURN_PARAMS.minDuration}s</strong></span>
-    <span style="margin-left:auto">calib ${s.calibWin.strategy === 'borrowed' ? escapeHtml(s.calibWin.sourceName) + ' · ' : ''}<strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.strategy === 'riding' ? ', riding pose' : ''}${s.calibWin.ridingPoseDriftDeg != null && isFinite(s.calibWin.ridingPoseDriftDeg) ? ', drift ' + Math.round(s.calibWin.ridingPoseDriftDeg) + '°' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
+    <span style="margin-left:auto">calib ${s.calibWin.strategy === 'borrowed' ? escapeHtml(s.calibWin.sourceName) + ' · ' : ''}<strong>${s.calibWin.start.toFixed(1)}–${s.calibWin.end.toFixed(1)}s</strong> (σ=${s.calibWin.noise.toFixed(3)} m/s²${s.calibWin.strategy === 'preride' ? ', pre-ride' : ''}${s.calibWin.strategy === 'midride' ? ', stationary pause' : ''}${s.calibWin.strategy === 'riding' ? ', riding pose' : ''}${s.calibWin.ridingPoseDriftDeg != null && isFinite(s.calibWin.ridingPoseDriftDeg) ? ', drift ' + Math.round(s.calibWin.ridingPoseDriftDeg) + '°' : ''}${s.calibWin.poseLateralDeg != null && isFinite(s.calibWin.poseLateralDeg) ? ', pose Δ ' + Math.round(Math.abs(s.calibWin.poseForeAftDeg)) + '° fore-aft / ' + Math.round(Math.abs(s.calibWin.poseLateralDeg)) + '° lateral' : (s.calibWin.poseMismatchDeg != null && isFinite(s.calibWin.poseMismatchDeg) ? ', pose Δ' + Math.round(s.calibWin.poseMismatchDeg) + '°' : '')})</span>
   `;
 }
 
@@ -38296,7 +38399,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '80bcd953b · 2026-09-14';
+const LOAM_BUILD = '7d214ad7a · 2026-09-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
