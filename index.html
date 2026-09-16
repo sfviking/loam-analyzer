@@ -667,7 +667,10 @@
   #results.focus-mode #geekStatsSection,
   #results.focus-mode #runCadenceSection,
   #results.focus-mode #runOscSection,
-  #results.focus-mode #runSegmentsSection,
+  /* #runSegmentsSection is NOT here any more: it folds itself shut instead (2026-09-16), and a
+     folded heading costs one line while staying openable, where the Focused view's display:none
+     took it away entirely and the only way back was a toggle that reveals every other detail
+     section with it. */
   /* Keep the "Cadence vs motor power" scatter (the e-MTB pedaling read), but collapse its per-climb
      breakdown table and the raw FIT power/cadence/HR trace: both are climb/telemetry detail. */
   #results.focus-mode #cadPowerClimbs,
@@ -2681,38 +2684,48 @@
     <div id="recordingQualityBody"></div>
   </section>
 
+  <!-- The two per-segment tables are FOLDED SHUT by default (see renderRunClimbs). They are the
+       widest things on a foot activity's page -- ten columns each, a row per climb -- and the owner's
+       2026-09-16 report is that on a phone they are in the way of everything else while being of
+       little use on a run. Folded rather than deleted or focus-hidden: the heading stays on the page
+       as one line, so the reader can see the count and open it, which is what "gjemmes og legges et
+       annet sted for de som måtte være spesielt interesserte" asks for. -->
   <section id="runClimbsSection" class="hidden">
-    <div class="section-title">
-      Climbs
-      <span class="subtitle"><span id="runClimbCountLabel">0</span> climbs · grade &gt; 3% sustained for 20s+ · GAP = grade-adjusted pace</span>
-    </div>
-    <div class="panel">
-      <div style="overflow-x:auto;">
-        <table id="runClimbsTable">
-          <thead><tr>
-            <th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>VAM</th><th>Pace</th><th>GAP</th><th>Cadence</th><th class="climb-hr-col">HR</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
+    <details class="fold" data-fold="runclimbs" id="runClimbsFold">
+      <summary class="section-title">
+        Climbs
+        <span class="subtitle"><span id="runClimbCountLabel">0</span> climbs · grade &gt; 3% sustained for 20s+ · GAP = grade-adjusted pace</span><span class="fold-chev"></span>
+      </summary>
+      <div class="panel">
+        <div style="overflow-x:auto;">
+          <table id="runClimbsTable">
+            <thead><tr>
+              <th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>VAM</th><th>Pace</th><th>GAP</th><th>Cadence</th><th class="climb-hr-col">HR</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </details>
   </section>
 
   <section id="runSegmentsSection" class="hidden">
-    <div class="section-title">
-      Climb / descent segments
-      <span class="subtitle"><span id="runSegCountLabel">0</span> segments · grade &gt; 3% sustained for 20s+</span>
-    </div>
-    <div class="panel">
-      <div style="overflow-x:auto;">
-        <table id="runSegmentsTable">
-          <thead><tr>
-            <th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Cadence</th><th>Osc</th><th>Pace</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
+    <details class="fold" data-fold="runsegments" id="runSegmentsFold">
+      <summary class="section-title">
+        Climb / descent segments
+        <span class="subtitle"><span id="runSegCountLabel">0</span> segments · grade &gt; 3% sustained for 20s+</span><span class="fold-chev"></span>
+      </summary>
+      <div class="panel">
+        <div style="overflow-x:auto;">
+          <table id="runSegmentsTable">
+            <thead><tr>
+              <th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Cadence</th><th>Osc</th><th>Pace</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </details>
   </section>
 
   <section id="runCompareSection" class="hidden">
@@ -19746,7 +19759,15 @@ async function analyze(files) {
     }
 
     onProgress('computing summary');
-    const summary = computeSummary(sensors.location, sensors.baro, ride, turns, calibWin, ridingJumps);
+    /* Keep the grade segments the summary already needs so the incline card can render and cache
+       them without running the terrain detector again. Lift-marked, because the steepest-incline
+       tile reads `kind` and this path serves the two sports that ride lifts: a bike-park shuttle and
+       a ski day both climb straighter and steeper than anything the athlete pedalled, so an unmarked
+       gondola wins that tile outright (measured on a synthetic lift-served day: 24.4% against the
+       rider's own 7.9% climb). Same call, same detector, same inputs as the GPS-only path's. */
+    const gradeSegments = markLiftSegments(
+      detectGradeSegments(sensors.baro, sensors.location, ride), sensors.location);
+    const summary = computeSummary(sensors.location, sensors.baro, ride, turns, calibWin, ridingJumps, gradeSegments);
 
     onProgress('saving to library');
     const saved = await saveRideToLibrary({
@@ -19762,7 +19783,7 @@ async function analyze(files) {
     hide('loading'); show('results');
     const mtbRender = {
       sensors, t, yawSeg, rollSmooth, R,
-      ride, turns, summary, calibWin, sport, imuRateHz, fitRepair, emtbReason,
+      ride, turns, summary, gradeSegments, calibWin, sport, imuRateHz, fitRepair, emtbReason,
       fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
@@ -19987,8 +20008,8 @@ function bigJumpCount(jumps) {
    counted rather than over a second copy of this rule (see coachDigestD). Returns the flag too,
    because "no descent found, so this is every turn" is a different statement from "these are the
    descent turns" and the summary reports which. */
-function descentScopedTurns(loc, baro, ride, turns) {
-  const descentSegs = detectGradeSegments(baro, loc, ride).filter(s => s.dir === 'down');
+function descentScopedTurns(loc, baro, ride, turns, gradeSegments) {
+  const descentSegs = (gradeSegments || detectGradeSegments(baro, loc, ride)).filter(s => s.dir === 'down');
   if (!descentSegs.length) return { turns: turns || [], scoped: false };
   const onDescent = (t) => descentSegs.some(s => t >= s.tStart && t <= s.tEnd);
   return { turns: (turns || []).filter(T => onDescent(T.tPeak)), scoped: true };
@@ -20033,7 +20054,7 @@ function mtbSpeedCorroborates(a, b, impliedMps) {
   return impliedMps <= Math.max(reported, 0.01) * MTB_TELEPORT_RATIO;
 }
 
-function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
+function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps, gradeSegments) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
@@ -20119,7 +20140,7 @@ function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps) {
     const alts = inRide.map(r => r.altitude).filter(v => v != null);
     if (alts.length) altDrop = Math.max(...alts) - Math.min(...alts);
   }
-  const { turns: descentTurns, scoped: turnsScopedToDescents } = descentScopedTurns(loc, baro, ride, turns);
+  const { turns: descentTurns, scoped: turnsScopedToDescents } = descentScopedTurns(loc, baro, ride, turns, gradeSegments);
   const radii = descentTurns.map(T => T.radius).filter(r => !isNaN(r));
   const medianRadius = radii.length ? median(radii) : null;
   const rightTurns = descentTurns.filter(T => T.direction === 'R').length;
@@ -26138,6 +26159,18 @@ function foldSection(key, title, subtitle, bodyHtml, defaultOpen) {
       ${bodyHtml}
     </details>`;
 }
+/* The same remembered state for a fold whose markup is STATIC rather than built by foldSection. The
+   delegated listener below saves both kinds, so the two only have to agree on the `data-fold` key. */
+function syncFold(id, defaultOpen) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  let open = defaultOpen;
+  try {
+    const v = localStorage.getItem('loam_fold_' + el.dataset.fold);
+    if (v != null) open = v === 'open';
+  } catch (e) { /* private mode: fall back to the default */ }
+  el.open = !!open;
+}
 /* One delegated listener for every foldable section, present and future. `toggle` does NOT bubble,
    so this listens in the CAPTURE phase; a normal bubbling listener here would silently never fire. */
 document.addEventListener('toggle', (e) => {
@@ -26646,8 +26679,8 @@ function renderAllRunning(D) {
       ct.options[0].text = 'Auto-detect (' + ((D.running && D.running._detectedMount) || '?') + ')'; } }
   /* Walking reuses this whole render; only labels, cadence framing, and the coach change. */
   const sport = D.sport === 'walking' ? 'walking' : 'running';
-  const sub = document.getElementById('timelineSubtitle');
-  if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded' + (sport === 'running' && D.gait && D.gait.breaks && D.gait.breaks.length ? ' · walk breaks hatched' : '') + ' · annotations marked';
+  /* The timeline's subtitle is written by renderRunTimeline, which is the only place that knows
+     which channels the recording carried and therefore which rows it drew. */
   renderGuessedSportNotice(D);
   renderSampleRateNotice(D);
   renderTruncNotice(D);
@@ -26662,7 +26695,8 @@ function renderAllRunning(D) {
     cadence: pedCad,
     agreement: pedCadenceAgreement(D.summary && D.summary.cadMedian, pedCad),
   };
-  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo, sport);
+  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo, sport,
+    D.running && D.running.segments);
   /* Walking gets the highlights card too (coach parity); the empty-guard hides it if no bullets. */
   renderCoachHighlights(D, sport);
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
@@ -26712,10 +26746,10 @@ function renderAllGps(D) {
   const foot = sport === 'run' || sport === 'walk';
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
   { const ct = document.getElementById('carryLabel'); if (ct) ct.classList.add('hidden'); }
-  const sub = document.getElementById('timelineSubtitle');
-  if (sub) sub.textContent = 'speed + altitude · climb/descent segments shaded';
+  /* The timeline's subtitle is written by renderRunTimeline: it knows which channels this file
+     carried, where this line used to promise altitude to a FIT that recorded none. */
   renderRideSignature(D, sport);
-  renderGpsStats(D.summary, sport);
+  renderGpsStats(D.summary, sport, D.segments);
   /* Coach highlights parity: GPS rides get the card too, from a GPS-safe producer (empty-guard hides
      it if the summary yields no bullets). */
   renderCoachHighlights(D, 'gps');
@@ -26893,7 +26927,7 @@ function renderRoadUpsell(D) {
   show('roadUpsellSection');
 }
 
-function renderGpsStats(s, sport) {
+function renderGpsStats(s, sport, segments) {
   const mmss = (sec) => durTileHTML(sec);
   const foot = sport === 'run' || sport === 'walk';
   const hasLifts = s.liftCount > 0;
@@ -26952,6 +26986,8 @@ function renderGpsStats(s, sport) {
       <div class="value">${s.nDownhills}</div>
       <div class="sub">${s.maxDescentDrop ? `biggest ${U.elev(s.maxDescentDrop)} drop` : 'sustained grade'}${s.vamPedaled ? ` · VAM ${Math.round(s.vamPedaled)} m/h` : ''}</div>
     </div>
+    ${steepestInclineTile(segments, foot)}
+    ${steepestDescentTile(segments, foot)}
   `;
 }
 
@@ -28353,6 +28389,28 @@ const LOAM_NB = {
   'Gravity added back to the accelerometer gives the force the body carries: 1.0 g standing, more in a turn. The sideways part is the turn\'s own load. The lift and the walk to it sit near zero; a carved turn does not. Single-sample peaks reach several g on chatter and landings and are not turns, so the 90th percentile is what is drawn.':
     'Tyngdekraften lagt tilbake til akselerometeret gir kraften kroppen bærer: 1,0 g stående, mer i en sving. Sidedelen er svingens egen belastning. Heisen og turen bort til den ligger nær null; en skåret sving gjør det ikke. Enkelttopper når flere g på skjelving og landinger og er ikke svinger, så 90-persentilen er det som tegnes.',
   'Heart rate': 'Puls',
+
+  /* --- The activity timeline's channels (renderRunTimeline) ------------------------------------
+     One row per channel as of 2026-09-16, so the whole sentence that names them is written here and
+     is translated here with it. The trace names carry their unit as {u} rather than being baked in,
+     because the unit follows the reader's own Units setting and is not a word to translate. */
+  'pace': 'tempo',
+  'speed': 'fart',
+  'altitude': 'høyde',
+  'heart rate': 'puls',
+  'pace ({u})': 'tempo ({u})',
+  'speed ({u})': 'fart ({u})',
+  'Δ alt ({u})': 'Δ høyde ({u})',
+  'heart rate (bpm)': 'puls (slag/min)',
+  'Pace ({u})': 'Tempo ({u})',
+  'Pace (median)': 'Tempo (median)',
+  'Speed ({u})': 'Fart ({u})',
+  'Δ altitude ({u})': 'Δ høyde ({u})',
+  'Heart rate (bpm)': 'Puls (slag/min)',
+  ', one row each': ', én rad hver',
+  'climb/descent segments shaded': 'stignings- og nedkjøringssegmenter er skyggelagt',
+  'walk breaks hatched': 'gåpauser er skravert',
+  'annotations marked': 'merknader er markert',
   'from the watch, with the legs shaded': 'fra klokken, med etappene skravert',
   'Blue where a run was counted, grey on the ride up. The lift is where the heart rate comes down; how far it comes down before the next run is the recovery the day allowed.':
     'Blått der en nedkjøring ble medregnet, grått på vei opp. Heisen er der pulsen går ned; hvor langt den går ned før neste nedkjøring er restitusjonen dagen ga rom for.',
@@ -28597,7 +28655,269 @@ const LOAM_NB = {
   'Range': 'Drivingrange',
   'The weekly totals are sums of the moving time and distance each session stored when it was analyzed, bucketed into Monday-start weeks in your local calendar; the current week is left out of the averages and shown as remaining work rather than a full build week. An event\'s planning duration is its distance at your recorded average speed over sessions in that sport with positive distance and time; it mixes terrain, stops and easy days, so it scales the long session and is not a finish-time prediction. The rules are the widely taught ones and none has been validated on a Loam athlete; what would earn any of them a number of its own is a season of plans set against the sessions recorded afterwards. Lift sessions carry no clock in their history, so they count as sessions and add no hours.':
     'Ukestallene er summer av tiden i bevegelse og distansen hver økt lagret da den ble analysert, delt inn i uker som starter på mandag i din lokale kalender; inneværende uke holdes utenfor gjennomsnittene og vises som gjenstående arbeid i stedet for en hel oppbyggingsuke. Planleggingsvarigheten for et arrangement er distansen i din registrerte snittfart over økter i den idretten med positiv distanse og tid; den blander terreng, stopp og rolige dager, så den skalerer den lange økta og er ikke et anslag på sluttiden. Reglene er de vanlig underviste, og ingen av dem er validert på en Loam-utøver; det som ville gi noen av dem et eget tall, er en sesong med planer satt opp mot øktene som ble registrert etterpå. Styrkeøkter har ingen klokke i historikken sin, så de telles som økter og legger ikke til timer.',
+
+  /* --- Results-page chrome and the highlights card ------------------------------------------------
+     Owner screenshot, 2026-09-16: a fully translated run analysis sitting under an English
+     "Run highlights / OBSERVATION / Focused view / Options / Jump to" chrome. Everything here is
+     either static markup (reached by localizeStaticChrome) or a hero-card sentence, and none of it
+     had ever passed through loamT. Entries identical in both languages ('Standard', 'Full',
+     'Radius', and nine of the twelve month abbreviations) are deliberately absent, per the rule
+     above: a miss falls back to the English source, which is the same text. */
+  'Focused view': 'Fokusert visning',
+  '· the essentials': '· det viktigste',
+  '· every chart & table': '· alle grafer og tabeller',
+  '· {n} hidden': '· {n} skjult',
+  'Options': 'Valg',
+  'Map size, basemap, units and calibration': 'Kartstørrelse, bakgrunnskart, enheter og kalibrering',
+  'Back to comparison': 'Tilbake til sammenligningen',
+  'Return to the cross-session comparison': 'Gå tilbake til sammenligningen på tvers av økter',
+  'Switch session': 'Bytt økt',
+  'Switch to another recent session without leaving this view': 'Bytt til en annen nylig økt uten å forlate denne visningen',
+  'Analyze another': 'Analyser en annen',
+  'Analyze a different session': 'Analyser en annen økt',
+  'Attach FIT': 'Legg ved FIT',
+  'Attach a Specialized/Garmin FIT to this ride for jumps + wheel speed': 'Legg ved en FIT-fil fra Specialized/Garmin på denne turen for hopp og hjulfart',
+  'Map': 'Kart',
+  'Compact': 'Kompakt',
+  'Large': 'Stor',
+  'Basemap': 'Bakgrunnskart',
+  'Minimal': 'Minimalt',
+  'Streets': 'Gater',
+  'Satellite': 'Satellitt',
+  'Topo': 'Topografisk',
+  'Units': 'Enheter',
+  'Imperial (mi · mph · ft)': 'Imperiske (mi · mph · ft)',
+  'Metric (km · km/h · m)': 'Metriske (km · km/t · m)',
+  'Calibration': 'Kalibrering',
+  'Final mount (last still before ride)': 'Endelig feste (siste stillestand før turen)',
+  'Quietest still window': 'Roligste stillestående vindu',
+  'Riding pose (beta)': 'Kjørestilling (beta)',
+  'Carrying the phone': 'Slik bæres telefonen',
+  'Auto-detect': 'Oppdag automatisk',
+  'In hand': 'I hånden',
+  'Pocket': 'Lomme',
+  'Armband': 'Armbånd',
+  'Waist': 'Rundt livet',
+  'Chest': 'På brystet',
+  'Hide': 'Skjul',
+
+  /* The crop bar above every result. */
+  'Analyzing the whole recording ({total})': 'Analyserer hele opptaket ({total})',
+  'Trim…': 'Beskjær…',
+  'Adjust…': 'Juster…',
+  'Trimmed to <strong>{from}&ndash;{to}</strong>': 'Beskåret til <strong>{from}&ndash;{to}</strong>',
+  ' of {total} &middot; {out} left out': ' av {total} &middot; {out} utelatt',
+
+  /* The jump-to nav. The chip labels are the section list in buildSectionNav, translated at the chip
+     so that list stays the plain coverage claim its own comment describes. 'Runs' is the neutral
+     'Etapper' rather than 'Nedkjoringer': the row noun follows the segmentation mode, and a flat
+     running segment is not a descent. */
+  'Jump to': 'Hopp til',
+  '+{n} more': '+{n} til',
+  'Show every chart and table (turns Focused view off)': 'Vis alle grafer og tabeller (slår av fokusert visning)',
+  'Summary': 'Sammendrag',
+  'Crash': 'Velt',
+  'Timeline': 'Tidslinje',
+  'Runs': 'Etapper',
+  'Compare laps': 'Sammenlign runder',
+  'Jumps': 'Hopp',
+  'Airtime': 'Svevetid',
+  'Turns': 'Svinger',
+  'Form replay': 'Teknikkavspilling',
+  'Motor off': 'Motor av',
+  'Cadence · power': 'Kadens · effekt',
+  'Bike data': 'Sykkeldata',
+  'Cadence': 'Kadens',
+  'Oscillation': 'Svingning',
+  'Splits': 'Mellomtider',
+  'Laps': 'Runder',
+  'HR zones': 'Pulssoner',
+  'HR drift': 'Pulsdrift',
+  'Climbs': 'Stigninger',
+  'Segments': 'Segmenter',
+  'Measured from': 'Målt fra',
+  'Speed': 'Fart',
+  'Descents': 'Nedkjøringer',
+  'Descent history': 'Nedkjøringshistorikk',
+  'Power curve': 'Effektkurve',
+  'Unlock more': 'Lås opp mer',
+  'Raw': 'Rådata',
+  'Coach': 'Trener',
+
+  /* The session card's and the share poster's date. Only the three month abbreviations that differ
+     are listed; the ORDER is a key of its own, because a Norwegian reader writes the day first. */
+  'MAY': 'MAI',
+  'OCT': 'OKT',
+  'DEC': 'DES',
+  '{mon} {day}, {year}': '{day}. {mon} {year}',
+
+  /* The highlights card. The heading is one whole sentence per lexicon noun, because Norwegian
+     cannot take the English shape ("Loping hoydepunkter" is not Norwegian). */
+  'Ride highlights': 'Høydepunkter fra turen',
+  'Run highlights': 'Høydepunkter fra løpeturen',
+  'Walk highlights': 'Høydepunkter fra gåturen',
+  'Ski highlights': 'Høydepunkter fra skidagen',
+  'Swim highlights': 'Høydepunkter fra svømmeturen',
+  'Lift highlights': 'Høydepunkter fra styrkeøkten',
+  'Range highlights': 'Høydepunkter fra rangeøkten',
+  'Session highlights': 'Høydepunkter fra økten',
+  'OBSERVATION': 'OBSERVASJON',
+  'Ask the AI coach for the why and the drill': 'Spør AI-treneren om hvorfor og hvilken øvelse',
+
+  /* runningHighlights. */
+  '<strong>{spm} spm</strong> median cadence over {dist}.': '<strong>{spm} spm</strong> i median kadens over {dist}.',
+  '<strong>{spm} spm</strong> median cadence.': '<strong>{spm} spm</strong> i median kadens.',
+  ' (VAM {vam} {unit}/h)': ' (VAM {vam} {unit}/t)',
+  '<strong>{n} climbs</strong>, biggest {gain} at {grade}%{vam}.': '<strong>{n} stigninger</strong>, den største {gain} på {grade} %{vam}.',
+  '<strong>{n} climb</strong>, biggest {gain} at {grade}%{vam}.': '<strong>{n} stigning</strong>, den største {gain} på {grade} %{vam}.',
+  'Vertical oscillation up to <strong style="color:var(--text-muted);">~{cm} cm</strong> (hand-carry upper bound, arm swing inflates it).':
+    'Vertikal svingning opptil <strong style="color:var(--text-muted);">~{cm} cm</strong> (øvre grense ved bæring i hånden, armsvingen blåser den opp).',
+  'Vertical oscillation about <strong>{cm} cm</strong> (head-bob proxy for hip motion).':
+    'Vertikal svingning omtrent <strong>{cm} cm</strong> (hodebevegelsen brukt som mål på hoftebevegelsen).',
+  '{gain} climbed, {loss} descended.': '{gain} opp, {loss} ned.',
+  '{gain} climbed.': '{gain} opp.',
+
+  /* mtbHighlights. The side words are their own keys because Norwegian compounds them. */
+  'You commit <strong>{gap}&deg; less lean</strong> in left-hand turns ({weak}&deg; vs {strong}&deg; right), your less-committed side.':
+    'Du legger <strong>{gap}&deg; mindre krengning</strong> i venstresvinger ({weak}&deg; mot {strong}&deg; til høyre), din svakere side.',
+  'You commit <strong>{gap}&deg; less lean</strong> in right-hand turns ({weak}&deg; vs {strong}&deg; left), your less-committed side.':
+    'Du legger <strong>{gap}&deg; mindre krengning</strong> i høyresvinger ({weak}&deg; mot {strong}&deg; til venstre), din svakere side.',
+  'Most of your scrubbing was in left-handers.': 'Mesteparten av bremsingen din var i venstresvinger.',
+  'Most of your scrubbing was in right-handers.': 'Mesteparten av bremsingen din var i høyresvinger.',
+  'left, ': 'venstre, ',
+  'right, ': 'høyre, ',
+  'Hardest braking was turn <strong>T{turn}</strong> ({side}{scrubbed} {unit} scrubbed).':
+    'Hardest bremsing var i sving <strong>T{turn}</strong> ({side}{scrubbed} {unit} tapt fart).',
+  'You lugged below 60 rpm on <strong>{pct}%</strong> of your loaded climbing, the motor was carrying you. Spin lighter to save the legs.':
+    'Du tråkket under 60 o/min på <strong>{pct} %</strong> av den belastede klatringen, og motoren bar deg. Tråkk lettere og spar beina.',
+  '<strong>{n} turn</strong>{sides}, estimated median apex radius {radius}.': '<strong>{n} sving</strong>{sides}, estimert median apexradius {radius}.',
+  '<strong>{n} turns</strong>{sides}, estimated median apex radius {radius}.': '<strong>{n} svinger</strong>{sides}, estimert median apexradius {radius}.',
+  'One turn detected. This recording cannot establish a pattern across turns.': 'Én sving registrert. Dette opptaket kan ikke fastslå et mønster på tvers av svinger.',
+  ', landed {g} g': ', landet på {g} g',
+  ', {big} of {total} over {bar}': ', {big} av {total} over {bar}',
+  'Longest jump <strong>{dist}</strong> ({speed} takeoff &times; {hang} ms hang{landed}){more}.':
+    'Lengste hopp <strong>{dist}</strong> ({speed} i utsprang &times; {hang} ms i lufta{landed}){more}.',
+  '<strong>{n} jump</strong>, biggest air {air}s.': '<strong>{n} hopp</strong>, lengst i lufta {air} s.',
+  '<strong>{n} jumps</strong>, biggest air {air}s.': '<strong>{n} hopp</strong>, lengst i lufta {air} s.',
+
+  /* gpsHighlights. */
+  '<strong>{dist}</strong> walked at {pace} pace.': '<strong>{dist}</strong> gått i {pace}.',
+  '<strong>{dist}</strong> covered at {pace} pace.': '<strong>{dist}</strong> tilbakelagt i {pace}.',
+  '<strong>{dist}</strong> walked.': '<strong>{dist}</strong> gått.',
+  '<strong>{dist}</strong> covered.': '<strong>{dist}</strong> tilbakelagt.',
+  'Fastest sustained stretch <strong>{pace}</strong> (best 30 s).': 'Raskeste sammenhengende strekk <strong>{pace}</strong> (beste 30 s).',
+  '<strong>{dist}</strong> ridden, top speed {speed}.': '<strong>{dist}</strong> syklet, toppfart {speed}.',
+  ', biggest {drop} drop': ', største fall {drop}',
+  ' &middot; VAM {vam} m/h': ' &middot; VAM {vam} m/t',
+  '<strong>{n} descents</strong>{drop}{vam}.': '<strong>{n} nedkjøringer</strong>{drop}{vam}.',
+  '<strong>{n} descent</strong>{drop}{vam}.': '<strong>{n} nedkjøring</strong>{drop}{vam}.',
+  '{n} lifts carried you {gain} of climbing.': '{n} heiser tok deg {gain} opp.',
+  '{n} lift carried you {gain} of climbing.': '{n} heis tok deg {gain} opp.',
+
+  /* roadHighlights. */
+  '<strong>New power bests today</strong> at {list} (vs your saved rides)': '<strong>Nye effektrekorder i dag</strong> på {list} (mot de lagrede turene dine)',
+  '<strong>New power best today</strong> at {list} (vs your saved rides)': '<strong>Ny effektrekord i dag</strong> på {list} (mot de lagrede turene dine)',
+  '<strong>Descent PR</strong> on descent {index} — fastest of your {count} attempts on it':
+    '<strong>Personlig rekord</strong> på nedkjøring {index} — raskest av dine {count} forsøk på den',
+  'Descent {index}: {off}s off your best of {count} attempts — the ghost shows where':
+    'Nedkjøring {index}: {off} s bak din beste av {count} forsøk — spøkelset viser hvor',
+  'Biggest climb: <strong>{mins} min at {grade}%</strong>, {watts} W (VAM {vam})':
+    'Største stigning: <strong>{mins} min på {grade} %</strong>, {watts} W (VAM {vam})',
+  'Climb {index} started too hot: power faded <strong>{pct}%</strong> from first to last third':
+    'Stigning {index} startet for hardt: effekten falt <strong>{pct} %</strong> fra første til siste tredjedel',
+  ' at {if} IF': ' på {if} IF',
+  '(surgy: matches burned)': '(rykkete: fyrstikker brent)',
+  '(steady pacing)': '(jevn fordeling)',
+  'Ride effort: <strong>NP {np} W</strong>{if} · VI {vi} {read}': 'Innsats på turen: <strong>NP {np} W</strong>{if} · VI {vi} {read}',
+  ', drifting {pts} pts late in the ride (one-sided fatigue?)': ', med {pts} poeng drift sent i turen (ensidig tretthet?)',
+  ', held steady all ride': ', stabil hele turen',
+  'L/R balance <strong>{left}/{right}</strong>{drift}': 'V/H-balanse <strong>{left}/{right}</strong>{drift}',
+  'Descent {group} ridden <strong>{n}x</strong> ({times}) — ask the coach what changed between laps':
+    'Nedkjøring {group} kjørt <strong>{n}x</strong> ({times}) — spør treneren hva som endret seg mellom rundene',
 };
+
+/* ---------- Static chrome ----------
+   The results-controls row and the Options popover behind it are written in the markup once and are
+   never re-rendered per sport, so nothing in them ever passes through a render function that could
+   call loamT. That is how a Norwegian reader ended up with a fully translated analysis sitting under
+   an English "Focused view / Options / Jump to" chrome (owner screenshot, 2026-09-16). One
+   idempotent pass at startup reaches them.
+
+   Two properties are deliberate. Every key is a LITERAL here, so the same sweep that audits loamT
+   call sites reads these too. And a label's leading TEXT NODE is replaced rather than its
+   textContent, because these labels wrap their own control ("<label>Map <select>...</select>"), and
+   assigning textContent would delete the select. */
+function localizeStaticChrome() {
+  const text = (sel, srcText) => {
+    const el = document.querySelector(sel);
+    const out = loamT(srcText);
+    if (!el || out === srcText) return;
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3 && n.textContent.indexOf(srcText) >= 0) {
+        n.textContent = n.textContent.replace(srcText, out);
+        return;
+      }
+    }
+  };
+  const title = (sel, srcText) => {
+    const el = document.querySelector(sel);
+    if (el) el.title = loamT(srcText);
+  };
+  const opt = (sel, value, srcText) => {
+    const o = document.querySelector(sel + ' option[value="' + value + '"]');
+    if (o) o.textContent = loamT(srcText);
+  };
+  /* The label is found by walking UP from its select rather than by `label:has(#id)`: :has() is not
+     in every WKWebView this page still opens in, and a selector that silently matches nothing would
+     leave one English word in an otherwise translated popover -- the exact failure being fixed. */
+  const selectLabel = (sel, srcText) => {
+    const el = document.querySelector(sel);
+    const lab = el && el.closest('label');
+    const out = loamT(srcText);
+    if (!lab || out === srcText) return;
+    for (const n of lab.childNodes) {
+      if (n.nodeType === 3 && n.textContent.indexOf(srcText) >= 0) {
+        n.textContent = n.textContent.replace(srcText, out);
+        return;
+      }
+    }
+  };
+  text('#backToCompareBtn', 'Back to comparison');
+  title('#backToCompareBtn', 'Return to the cross-session comparison');
+  text('.focus-toggle', 'Focused view');
+  text('#switchRideBtn', 'Switch session');
+  title('#switchRideBtn', 'Switch to another recent session without leaving this view');
+  text('#analyzeAnotherBtn', 'Analyze another');
+  title('#analyzeAnotherBtn', 'Analyze a different session');
+  text('#attachFitBtn', 'Attach FIT');
+  title('#attachFitBtn', 'Attach a Specialized/Garmin FIT to this ride for jumps + wheel speed');
+  text('#displayPrefsBtn', 'Options');
+  title('#displayPrefsBtn', 'Map size, basemap, units and calibration');
+  selectLabel('#mapHeightSel', 'Map');
+  opt('#mapHeightSel', 'sm', 'Compact');
+  opt('#mapHeightSel', 'md', 'Standard');
+  opt('#mapHeightSel', 'lg', 'Large');
+  opt('#mapHeightSel', 'xl', 'Full');
+  selectLabel('#basemapSel', 'Basemap');
+  opt('#basemapSel', 'minimal', 'Minimal');
+  opt('#basemapSel', 'streets', 'Streets');
+  opt('#basemapSel', 'satellite', 'Satellite');
+  opt('#basemapSel', 'topo', 'Topo');
+  selectLabel('#unitsToggle', 'Units');
+  opt('#unitsToggle', 'imperial', 'Imperial (mi · mph · ft)');
+  opt('#unitsToggle', 'metric', 'Metric (km · km/h · m)');
+  text('label[for="calibStrategySel"]', 'Calibration');
+  opt('#calibStrategySel', 'preride', 'Final mount (last still before ride)');
+  opt('#calibStrategySel', 'quietest', 'Quietest still window');
+  opt('#calibStrategySel', 'riding', 'Riding pose (beta)');
+  text('#carryLabel', 'Carrying the phone');
+  opt('#carryToggle', '', 'Auto-detect');
+  opt('#carryToggle', 'hand', 'In hand');
+  opt('#carryToggle', 'pocket', 'Pocket');
+  opt('#carryToggle', 'armband', 'Armband');
+  opt('#carryToggle', 'waist', 'Waist');
+  opt('#carryToggle', 'chest', 'Chest');
+}
 
 /* The reader's language as a two-letter code for the copy table. Falls back to 'en', which selects
    no table and therefore the English source string. */
@@ -29032,7 +29352,76 @@ function renderGeekStats(D, sport) {
   show('geekStatsSection');
 }
 
-function renderRunStats(s, detection, mount, ped, sport) {
+/* Pick the sustained downhill with the most-negative average grade. Grade-segment detection has
+   already applied the duration and grade gates, so this is a summary over accepted descents rather
+   than a new detector. The three activity paths use two field names (`gradeAvg` and `avgGrade`) and
+   two speed names (`speedAvg` and `avgSpeed`); normalize those here so the headline means the same
+   thing for a phone run, a GPS-only ride, and a road FIT. */
+function steepestDescentStat(segments) {
+  let best = null;
+  for (const s of (segments || [])) {
+    if (!s || (s.dir != null && s.dir !== 'down')) continue;
+    const gradePct = Number.isFinite(s.gradeAvg) ? s.gradeAvg : s.avgGrade;
+    if (!Number.isFinite(gradePct) || gradePct >= 0) continue;
+    const duration = Number.isFinite(s.duration) ? s.duration
+      : (Number.isFinite(s.tStart) && Number.isFinite(s.tEnd) ? s.tEnd - s.tStart : null);
+    const distance = Number.isFinite(s.distance) ? s.distance : null;
+    const avgSpeed = Number.isFinite(s.speedAvg) ? s.speedAvg
+      : Number.isFinite(s.avgSpeed) ? s.avgSpeed
+      : (distance != null && duration > 0 ? distance / duration : null);
+    const candidate = { gradePct, avgSpeed, distance, duration };
+    if (!best || gradePct < best.gradePct
+        || (gradePct === best.gradePct && (distance || 0) > (best.distance || 0))) best = candidate;
+  }
+  return best;
+}
+
+function steepestDescentTile(segments, pace) {
+  const d = steepestDescentStat(segments);
+  if (!d) return '';
+  const movement = d.avgSpeed > 0 ? (pace ? U.pace(d.avgSpeed) : U.speed(d.avgSpeed)) : '—';
+  const distance = d.distance > 0 ? ` · ${U.dist(d.distance)}` : '';
+  return `<div class="stat accent4">
+    <div class="label">Steepest descent</div>
+    <div class="value">${d.gradePct.toFixed(1)}<span class="unit">%</span></div>
+    <div class="sub">${movement} avg${distance}</div>
+  </div>`;
+}
+
+/* Uphill companion to steepestDescentStat. Positive grades win in the opposite direction; ties use
+   the longer segment for the same stable and more-useful read. */
+function steepestInclineStat(segments) {
+  let best = null;
+  for (const s of (segments || [])) {
+    if (!s || (s.dir != null && s.dir !== 'up') || s.kind === 'lift') continue;
+    const gradePct = Number.isFinite(s.gradeAvg) ? s.gradeAvg : s.avgGrade;
+    if (!Number.isFinite(gradePct) || gradePct <= 0) continue;
+    const duration = Number.isFinite(s.duration) ? s.duration
+      : (Number.isFinite(s.tStart) && Number.isFinite(s.tEnd) ? s.tEnd - s.tStart : null);
+    const distance = Number.isFinite(s.distance) ? s.distance : null;
+    const avgSpeed = Number.isFinite(s.speedAvg) ? s.speedAvg
+      : Number.isFinite(s.avgSpeed) ? s.avgSpeed
+      : (distance != null && duration > 0 ? distance / duration : null);
+    const candidate = { gradePct, avgSpeed, distance, duration };
+    if (!best || gradePct > best.gradePct
+        || (gradePct === best.gradePct && (distance || 0) > (best.distance || 0))) best = candidate;
+  }
+  return best;
+}
+
+function steepestInclineTile(segments, pace) {
+  const d = steepestInclineStat(segments);
+  if (!d) return '';
+  const movement = d.avgSpeed > 0 ? (pace ? U.pace(d.avgSpeed) : U.speed(d.avgSpeed)) : '—';
+  const distance = d.distance > 0 ? ` · ${U.dist(d.distance)}` : '';
+  return `<div class="stat accent">
+    <div class="label">Steepest incline</div>
+    <div class="value">+${d.gradePct.toFixed(1)}<span class="unit">%</span></div>
+    <div class="sub">${movement} avg${distance}</div>
+  </div>`;
+}
+
+function renderRunStats(s, detection, mount, ped, sport, segments) {
   const fmt = (v, unit, d=1) => v == null ? '—' : `<span class="value">${v.toFixed(d)}<span class="unit">${unit}</span></span>`;
   /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
      Mark the number itself (~, muted) instead of relying only on the caption below. */
@@ -29149,6 +29538,8 @@ function renderRunStats(s, detection, mount, ped, sport) {
       <div class="value">${U.elev(s.altGain)}<span class="unit"> ↑</span></div>
       <div class="sub">${U.elev(s.altLoss)} ↓ · ${s.nDownhills} desc / ${s.nUphills} climb</div>
     </div>
+    ${steepestInclineTile(segments, true)}
+    ${steepestDescentTile(segments, true)}
   `;
 }
 
@@ -29261,6 +29652,21 @@ function renderRunTimeline(D) {
   const sport = normalizeSport(D.gpsSport || D.sport || '');
   const footSport = sport === 'run' || sport === 'walk';
   const traces = [];
+  /* ON FOOT, ONE CHANNEL PER ROW, sharing one x axis -- the way Strava stacks an activity, and the
+     answer to the 2026-09-16 report ("grafene ... blir veldig knotete og små på telefonen").
+     Pace and altitude used to share ONE plot on a dual axis: two units, two tick colours and two
+     lines crossing each other inside the ~210px of plot TL_RUN_HEIGHT_PX leaves, which at 390px is
+     where "knotete og små" comes from. Splitting them is only an improvement if the rows do not
+     each become half as tall, so each row is given its own PIXELS (TL_FOOT_*) and the host grows
+     to fit them; the chart gets longer, never thinner.
+     `chans` is that stack, top to bottom, and it is also what the single-plot path lists -- the two
+     paths differ in the LAYOUT they build from it, not in the traces. The bike path (a GPS-only
+     FIT, footSport false) keeps the overlaid altitude axis it has always had: it draws one channel
+     and a dotted altitude line, and was never the crowded case.
+     Heart rate joins as a third row when the recording carries it. It is the channel a runner reads
+     pace against ("why did that split cost so much") and this page had it nowhere over time -- the
+     splits table has a column, the zones panel has totals, and neither answers "when". */
+  const chans = [];
   if (footSport) {
     /* Pace = time per distance. It blows up as speed approaches zero, so below the 1.0 m/s moving gate
        (the same gate the cadence/oscillation windows use) the point is dropped to a gap rather than a
@@ -29271,19 +29677,27 @@ function renderRunTimeline(D) {
     const paceY = loc.map(r => paceMin(r.speed));
     traces.push({ x: t, y: paceY, type: 'scatter', mode: 'lines',
       line: { color: '#6da7c4', width: smooth ? 1 : 1.5 }, opacity: smooth ? 0.4 : 1,
-      name: `Pace (${U.metric() ? 'min/km' : 'min/mi'})`, yaxis: 'y', connectgaps: false,
+      name: loamT('Pace ({u})', { u: U.metric() ? 'min/km' : 'min/mi' }), yaxis: 'y', connectgaps: false,
       text: paceY.map(fmtPace), hovertemplate: '%{text}<extra></extra>', hoverinfo: smooth ? 'skip' : 'all' });
     if (smooth) {
       const sm = rollingMedianMasked(paceY, 15);
       traces.push({ x: t, y: sm, type: 'scatter', mode: 'lines', line: { color: '#4a86a6', width: 2.5 },
-        name: 'Pace (median)', yaxis: 'y', connectgaps: false,
+        name: loamT('Pace (median)'), yaxis: 'y', connectgaps: false,
         text: sm.map(fmtPace), hovertemplate: '%{text}<extra></extra>' });
     }
+    chans.push({ axis: 'y', label: loamT('pace'), color: '#6da7c4', reversed: true,
+      title: loamT('pace ({u})', { u: U.metric() ? 'min/km' : 'min/mi' }) });
   } else {
     /* Speed and altitude follow the Units toggle (they used to hardcode mph and meters). */
     const speedY = loc.map(r => U.speedNum(r.speed));
-    traces.push({ x: t, y: speedY, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.5 }, name: `Speed (${U.speedUnit()})`, yaxis: 'y' });
+    traces.push({ x: t, y: speedY, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.5 },
+      name: loamT('Speed ({u})', { u: U.speedUnit() }), yaxis: 'y' });
+    chans.push({ axis: 'y', label: loamT('speed'), title: loamT('speed ({u})', { u: U.speedUnit() }), color: '#6da7c4' });
   }
+  /* Altitude. On its own row it is a profile and is drawn as one (filled, solid); overlaid on the
+     bike's single plot it stays the faint dotted line it has always been, because there it is a
+     second quantity crossing the first and has to read as the background one. */
+  const altRow = footSport && !!(D.sensors.baro && D.sensors.baro.length);
   if (D.sensors.baro && D.sensors.baro.length) {
     const inB = D.sensors.baro.filter(r => r.t >= ride.start && r.t <= ride.end);
     const altRel = inB.map(r => r.relativeAltitude);
@@ -29291,10 +29705,36 @@ function renderRunTimeline(D) {
     traces.push({
       x: inB.map(r => r.t - ride.start),
       y: altRel.map(a => U.smallNum(a - baseAlt)),
-      type: 'scatter', mode: 'lines', line: { color: '#d4a574', width: 1.2, dash: 'dot' },
-      name: `Δ altitude (${U.smallUnit()})`, yaxis: 'y2'
+      type: 'scatter', mode: 'lines',
+      line: { color: '#d4a574', width: altRow ? 1.4 : 1.2, ...(altRow ? {} : { dash: 'dot' }) },
+      ...(altRow ? { fill: 'tozeroy', fillcolor: 'rgba(160,111,36,0.26)' } : {}),
+      name: loamT('Δ altitude ({u})', { u: U.smallUnit() }), yaxis: 'y2'
     });
+    chans.push({ axis: 'y2', label: loamT('altitude'), title: loamT('Δ alt ({u})', { u: U.smallUnit() }), color: '#d4a574' });
   }
+  /* Heart rate, foot only and only when the watch actually recorded it -- a row of nothing claims a
+     channel the recording does not have. It is the watch's own beats, not an estimate from here. */
+  const hrRows = footSport ? ((D.sensors.heartRate || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.bpm != null)) : [];
+  if (hrRows.length > 1) {
+    const hrAxis = 'y' + (chans.length + 1);
+    traces.push({
+      x: hrRows.map(r => r.t - ride.start), y: hrRows.map(r => r.bpm),
+      type: 'scatter', mode: 'lines', line: { color: '#c54b3c', width: 1.4 },
+      name: loamT('Heart rate (bpm)'), yaxis: hrAxis, connectgaps: false,
+    });
+    chans.push({ axis: hrAxis, label: loamT('heart rate'), title: loamT('heart rate (bpm)'), color: '#c54b3c' });
+  }
+  /* Stacked only when there is more than one channel to stack: a run with no barometer and no watch
+     is one pace line, which is exactly the plot it already was. */
+  const stacked = footSport && chans.length > 1;
+  /* The subtitle names the rows that were actually drawn, and is written HERE rather than by the two
+     callers, because they cannot know which channels the recording carried -- the old fixed
+     "speed + altitude" said altitude on a run with no barometer and said speed on a run reading
+     pace. It is appended to below, once the marks are known. */
+  const subtitleEl = document.getElementById('timelineSubtitle');
+  let subtitle = chans.map(c => c.label).join(stacked ? ' · ' : ' + ')
+    + (stacked ? loamT(', one row each') : '') + ' · ' + loamT('climb/descent segments shaded');
+  if (D.sport !== 'walking' && D.gait && D.gait.breaks && D.gait.breaks.length) subtitle += ' · ' + loamT('walk breaks hatched');
   const shapes = D.running.segments.map(s => ({
     type: 'rect', xref: 'x', yref: 'paper',
     x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
@@ -29323,7 +29763,11 @@ function renderRunTimeline(D) {
       line: { color: '#d4a574', width: 1, dash: 'dot' },
     });
   }
-  const margin = { l: 56, r: 56, t: 32, b: 50 };
+  if (annotations.length) subtitle += ' · ' + loamT('annotations marked');
+  if (subtitleEl) subtitleEl.textContent = subtitle;
+  /* Nothing sits in the right margin once the altitude axis has a row of its own, so the stacked
+     layout gives those pixels back to the plot -- on a 390px phone they are 9% of its width. */
+  const margin = { l: 56, r: stacked ? 20 : 56, t: 32, b: 50 };
   const markFont = { family: 'JetBrains Mono', size: 9, color: '#d4a574' };
   const markLabels = annotations.map(a => {
     const text = a.text.length > 28 ? a.text.slice(0, 26) + '…' : a.text;
@@ -29331,34 +29775,71 @@ function renderRunTimeline(D) {
   });
   const markAnnos = (lo, hi) => thinTimelineLabels(markLabels, lo, hi, tlPlotWidthPx('timelineChart', margin))
     .map(l => ({ ...tlLaneAnno(0), x: l.x, text: l.text, font: markFont, bgcolor: 'rgba(20,23,27,0.85)', borderpad: 3 }));
-  if (annotations.length) {
-    /* On its own hidden axis, pinned to [0, 1], so the markers sit at the top edge whatever the pace
-       and altitude ranges do and never move either of them. */
+  /* The hidden axis (or axes) the mark markers sit on, pinned to [0, 1] so they hold the top edge
+     whatever the channels' ranges do and never move any of them. Ids continue past the channels'. */
+  const markAxes = annotations.length
+    ? (stacked ? chans.map((c, i) => 'y' + (chans.length + i + 1)) : ['y' + (chans.length + 1)])
+    : [];
+  markAxes.forEach((id, i) => {
+    /* ONE PER ROW, because a hover names a mark only on the subplot it is drawn on, and the whole
+       point of these markers is that a mark whose LABEL was thinned away can still be tapped. With
+       a single trace on the top row, a tap on the elevation or heart-rate row -- where the dotted
+       line is just as visible -- would have named nothing. Only the top row draws the triangle; the
+       rest are hover targets on a line that is already there, so the stack does not grow a row of
+       decorations it cannot explain. */
     traces.push({
-      x: annotations.map(a => a.t - ride.start), y: annotations.map(() => 0.98), yaxis: 'y3',
-      type: 'scatter', mode: 'markers', marker: { symbol: 'triangle-down', size: 8, color: '#d4a574' },
+      x: annotations.map(a => a.t - ride.start), y: annotations.map(() => (i === 0 ? 0.98 : 0.5)), yaxis: id,
+      type: 'scatter', mode: 'markers',
+      marker: i === 0 ? { symbol: 'triangle-down', size: 8, color: '#d4a574' }
+                      : { symbol: 'triangle-down', size: 10, color: 'rgba(0,0,0,0)' },
       text: annotations.map(a => a.text), hovertemplate: '%{text}<extra></extra>',
       name: 'Marks', showlegend: false,
     });
-  }
+  });
+  /* Row geometry, in PIXELS: the pace row leads because it is the read the others support, and the
+     gap is what leaves each lower row space for its own axis title. The host is then sized to fit
+     them, so adding a channel makes the chart longer rather than making every row shorter. */
+  const rowsPx = chans.map((c, i) => (i === 0 ? TL_FOOT_LEAD_PX : TL_FOOT_ROW_PX));
+  const spanPx = rowsPx.reduce((a, b) => a + b, 0) + (chans.length - 1) * TL_FOOT_GAP_PX;
+  const hostPx = stacked ? spanPx + margin.t + margin.b + TL_LEGEND_ALLOW_PX : TL_RUN_HEIGHT_PX;
+  let domTop = 1;
+  const domains = rowsPx.map((px) => {
+    const h = px / spanPx, d = [Math.max(0, domTop - h), domTop];
+    domTop -= h + TL_FOOT_GAP_PX / spanPx;
+    return d;
+  });
+  const axisKey = (id) => 'yaxis' + id.slice(1);
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin,
     /* "time in walk" / "time in ride": this axis serves the walk and the GPS-only bike import as well
        as the run, and it said "time in run" over all three. */
-    xaxis: { title: { text: `time in ${sportNoun(displaySport(D))}`, font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start) },
-    /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
-    yaxis: footSport
-      ? { title: { text: `pace (${U.metric() ? 'min/km' : 'min/mi'})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' }, autorange: 'reversed' }
-      : { title: { text: `speed (${U.speedUnit()})`, font: { color: '#6da7c4', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#6da7c4' } },
-    yaxis2: { title: { text: `Δ alt (${U.smallUnit()})`, font: { color: '#d4a574', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#d4a574' } },
-    ...(annotations.length ? { yaxis3: { overlaying: 'y', visible: false, range: [0, 1], fixedrange: true } } : {}),
-    showlegend: true, legend: timelineLegend(TL_RUN_HEIGHT_PX, margin, 1),
+    xaxis: { title: { text: `time in ${sportNoun(displaySport(D))}`, font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start),
+      /* Anchored to the BOTTOM row, so the one x axis is drawn under the stack rather than under the
+         first row, and its cursor spikes across every row -- the synced read that makes a stack of
+         channels one picture instead of three charts. */
+      ...(stacked ? { anchor: chans[chans.length - 1].axis, showspikes: true, spikemode: 'across',
+                      spikesnap: 'cursor', spikethickness: 1, spikedash: 'dot', spikecolor: '#94a3b8' } : {}) },
+    showlegend: true, legend: timelineLegend(hostPx, margin, 1),
     shapes, annotations: markAnnos(0, ride.end - ride.start), hovermode: 'x unified'
   };
+  /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
+  chans.forEach((c, i) => {
+    layout[axisKey(c.axis)] = {
+      title: { text: c.title, font: { color: c.color, size: 11 } },
+      gridcolor: '#e2e8f0', tickfont: { color: c.color },
+      ...(c.reversed ? { autorange: 'reversed' } : {}),
+      ...(stacked ? { domain: domains[i] }
+        /* The single-plot path is unchanged: altitude overlays the first axis on the right. */
+        : i > 0 ? { overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)' } : {}),
+    };
+  });
+  markAxes.forEach((id, i) => {
+    layout[axisKey(id)] = { overlaying: stacked ? chans[i].axis : 'y', visible: false, range: [0, 1], fixedrange: true };
+  });
   /* The timeline host is shared with the (taller) MTB ride timeline; pin this view's height. */
-  document.getElementById('timelineChart').style.height = TL_RUN_HEIGHT_PX + 'px';
+  document.getElementById('timelineChart').style.height = hostPx + 'px';
   loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
     /* Re-lay the mark labels and the m:ss ticks on zoom, pan and resize (see loamTimeTicks). */
     wireTimelineRelayout(document.getElementById('timelineChart'), 0, ride.end - ride.start, (lo, hi) => {
@@ -30632,6 +31113,7 @@ function stridePaceFactors(splits, pedRows) {
 function renderRunSegments(segments, opts) {
   if (!segments.length) { hide('runSegmentsSection'); return; }
   show('runSegmentsSection');
+  syncFold('runSegmentsFold', false);
   /* Cadence / Osc / Pace need the phone IMU (running path). GPS-only rides have none, so those three
      columns would be all dashes; swap them for one Avg-speed column and rebuild the header to match. */
   const motion = !opts || opts.motionColumns !== false;
@@ -31028,6 +31510,9 @@ function renderRunLaps(laps, note, { foot = true } = {}) {
 function renderRunClimbs(climbs) {
   if (!climbs || !climbs.length) { hide('runClimbsSection'); return; }
   show('runClimbsSection');
+  /* Shut unless this reader has opened it before. The heading, with its count, is the whole of what
+     the page spends on it by default; see the markup for why it is not simply dropped. */
+  syncFold('runClimbsFold', false);
   const tbody = document.querySelector('#runClimbsTable tbody');
   if (!tbody) return;
   const fmtT = (sec) => { const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -31275,7 +31760,12 @@ function mtbHighlights(D) {
     const strong = la.weaker_side === 'left' ? 'right' : 'left';
     const weakV = la.weaker_side === 'left' ? la.left_median_deg : la.right_median_deg;
     const strongV = la.weaker_side === 'left' ? la.right_median_deg : la.left_median_deg;
-    cands.push(`You commit <strong>${la.gap_deg}&deg; less lean</strong> in ${la.weaker_side}-hand turns (${weakV}&deg; vs ${strongV}&deg; ${strong}), your less-committed side.`);
+    /* The two side words are separate keys rather than folded into the sentence, because Norwegian
+       compounds them ("venstresvinger") and the comparison tail names the other side on its own. */
+    cands.push(loamT(la.weaker_side === 'left'
+      ? 'You commit <strong>{gap}&deg; less lean</strong> in left-hand turns ({weak}&deg; vs {strong}&deg; right), your less-committed side.'
+      : 'You commit <strong>{gap}&deg; less lean</strong> in right-hand turns ({weak}&deg; vs {strong}&deg; left), your less-committed side.',
+      { gap: la.gap_deg, weak: weakV, strong: strongV }));
   }
   if (mech && mech.braking && mech.braking.worst.length) {
     const w = mech.braking.worst[0];
@@ -31284,21 +31774,27 @@ function mtbHighlights(D) {
        ONE corner rather than aggregating a side, which is the same line turnMechanics itself draws. */
     const sk = mech.braking.by_direction;
     let dirNote = '';
-    if (sk && sk.L >= 2 * Math.max(1, sk.R)) dirNote = ' Most of your scrubbing was in left-handers.';
-    else if (sk && sk.R >= 2 * Math.max(1, sk.L)) dirNote = ' Most of your scrubbing was in right-handers.';
+    if (sk && sk.L >= 2 * Math.max(1, sk.R)) dirNote = ' ' + loamT('Most of your scrubbing was in left-handers.');
+    else if (sk && sk.R >= 2 * Math.max(1, sk.L)) dirNote = ' ' + loamT('Most of your scrubbing was in right-handers.');
     /* turnMechanics already reported this in the active units (the key names which). */
     const scrubbed = U.metric() ? w.scrubbed_kmh : w.scrubbed_mph;
-    cands.push(`Hardest braking was turn <strong>T${w.turn}</strong> (${sidesUnreliableFor(D) ? '' : (w.direction === 'L' ? 'left, ' : 'right, ')}${scrubbed.toFixed(1)} ${U.speedUnit()} scrubbed).${dirNote}`);
+    const side = sidesUnreliableFor(D) ? '' : (w.direction === 'L' ? loamT('left, ') : loamT('right, '));
+    cands.push(loamT('Hardest braking was turn <strong>T{turn}</strong> ({side}{scrubbed} {unit} scrubbed).',
+      { turn: w.turn, side, scrubbed: scrubbed.toFixed(1), unit: U.speedUnit() }) + dirNote);
   }
   if (D.fitInRide && D.fitInRide.length) {
     const cp = cadPowerStats(D.fitInRide);
-    if (cp && cp.lugPct != null && cp.lugPct >= 25) cands.push(`You lugged below 60 rpm on <strong>${cp.lugPct}%</strong> of your loaded climbing, the motor was carrying you. Spin lighter to save the legs.`);
+    if (cp && cp.lugPct != null && cp.lugPct >= 25) cands.push(loamT('You lugged below 60 rpm on <strong>{pct}%</strong> of your loaded climbing, the motor was carrying you. Spin lighter to save the legs.', { pct: cp.lugPct }));
   }
   if (s.nTurns) {
+    /* R / L stay as they are: they label the census the turn table prints, and this file's rule is
+       that a surface enumerating corners keeps the analyzer's own notation. */
     const sides = sidesUnreliableFor(D) ? '' : ` (${s.rightTurns}R / ${s.leftTurns}L)`;
-    cands.push(`<strong>${s.nTurns} ${s.nTurns === 1 ? 'turn' : 'turns'}</strong>${sides}, estimated median apex radius ${U.small(s.medianRadius)}.`);
+    cands.push(loamT(s.nTurns === 1 ? '<strong>{n} turn</strong>{sides}, estimated median apex radius {radius}.'
+                                    : '<strong>{n} turns</strong>{sides}, estimated median apex radius {radius}.',
+                     { n: s.nTurns, sides, radius: U.small(s.medianRadius) }));
   }
-  if (s.nTurns === 1) cands.unshift('One turn detected. This recording cannot establish a pattern across turns.');
+  if (s.nTurns === 1) cands.unshift(loamT('One turn detected. This recording cannot establish a pattern across turns.'));
   /* Jumps. Scoped off the labelled-trail set rather than read from s.maxJumpDist, which is over
      every jump in the ride, for the same reason the mechanics block above is rescoped: this card
      makes a claim, and a jump logged on the road home is not the ride's headline.
@@ -31315,13 +31811,13 @@ function mtbHighlights(D) {
   const longest = topJumps(heroJumps, 1)[0] || null;
   if (longest && longest.dist != null && longest.dist >= JUMP_BIG_M) {
     const nBig = bigJumpCount(heroJumps);
-    const landed = longest.landingG != null ? `, landed ${longest.landingG.toFixed(1)} g` : '';
-    cands.splice(1, 0,
-      `Longest jump <strong>${U.small(longest.dist)}</strong> `
-      + `(${U.speed(longest.speed_mps)} takeoff &times; ${Math.round(longest.hang * 1000)} ms hang${landed})`
-      + `${nBig > 1 ? `, ${nBig} of ${heroJumps.length} over ${U.small(JUMP_BIG_M)}` : ''}.`);
+    const landed = longest.landingG != null ? loamT(', landed {g} g', { g: longest.landingG.toFixed(1) }) : '';
+    const more = nBig > 1 ? loamT(', {big} of {total} over {bar}', { big: nBig, total: heroJumps.length, bar: U.small(JUMP_BIG_M) }) : '';
+    cands.splice(1, 0, loamT('Longest jump <strong>{dist}</strong> ({speed} takeoff &times; {hang} ms hang{landed}){more}.',
+      { dist: U.small(longest.dist), speed: U.speed(longest.speed_mps), hang: Math.round(longest.hang * 1000), landed, more }));
   } else if (s.nJumps) {
-    cands.push(`<strong>${s.nJumps} jumps</strong>, biggest air ${(s.maxAirtime || 0).toFixed(2)}s.`);
+    cands.push(loamT(s.nJumps === 1 ? '<strong>{n} jump</strong>, biggest air {air}s.' : '<strong>{n} jumps</strong>, biggest air {air}s.',
+      { n: s.nJumps, air: (s.maxAirtime || 0).toFixed(2) }));
   }
   return cands.slice(0, 3);
 }
@@ -31332,10 +31828,15 @@ function runningHighlights(D) {
   const c = [];
   /* Distance and elevation follow the Units toggle (they used to hardcode km/m). Oscillation stays
      cm in both systems, the running-industry convention (Garmin/Stryd report cm to statute users). */
-  if (s.cadMedian) c.push(`<strong>${s.cadMedian.toFixed(0)} spm</strong> median cadence${s.distance ? ' over ' + U.dist(s.distance) : ''}.`);
+  if (s.cadMedian) c.push(s.distance
+    ? loamT('<strong>{spm} spm</strong> median cadence over {dist}.', { spm: s.cadMedian.toFixed(0), dist: U.dist(s.distance) })
+    : loamT('<strong>{spm} spm</strong> median cadence.', { spm: s.cadMedian.toFixed(0) }));
   if (climbs.length) {
     const big = climbs.slice().sort((a, b) => (b.gain || 0) - (a.gain || 0))[0];
-    c.push(`<strong>${climbs.length} climb${climbs.length > 1 ? 's' : ''}</strong>, biggest ${U.elev(big.gain)} at ${big.avgGrade.toFixed(0)}%${big.vam ? ` (VAM ${Math.round(U.smallNum(big.vam))} ${U.smallUnit()}/h)` : ''}.`);
+    const vam = big.vam ? loamT(' (VAM {vam} {unit}/h)', { vam: Math.round(U.smallNum(big.vam)), unit: U.smallUnit() }) : '';
+    c.push(loamT(climbs.length > 1 ? '<strong>{n} climbs</strong>, biggest {gain} at {grade}%{vam}.'
+                                   : '<strong>{n} climb</strong>, biggest {gain} at {grade}%{vam}.',
+                 { n: climbs.length, gain: U.elev(big.gain), grade: big.avgGrade.toFixed(0), vam }));
   }
   /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
      Match the stats card and params bar: prefix ~, mute the number, and caption "upper bound" instead
@@ -31343,10 +31844,12 @@ function runningHighlights(D) {
   if (s.oscMedian != null) {
     const oscHand = !!(D.running && D.running.mount === 'hand');
     c.push(oscHand
-      ? `Vertical oscillation up to <strong style="color:var(--text-muted);">~${s.oscMedian.toFixed(1)} cm</strong> (hand-carry upper bound, arm swing inflates it).`
-      : `Vertical oscillation about <strong>${s.oscMedian.toFixed(1)} cm</strong> (head-bob proxy for hip motion).`);
+      ? loamT('Vertical oscillation up to <strong style="color:var(--text-muted);">~{cm} cm</strong> (hand-carry upper bound, arm swing inflates it).', { cm: s.oscMedian.toFixed(1) })
+      : loamT('Vertical oscillation about <strong>{cm} cm</strong> (head-bob proxy for hip motion).', { cm: s.oscMedian.toFixed(1) }));
   }
-  if (s.altGain != null) c.push(`${U.elev(s.altGain)} climbed${s.altLoss != null ? ', ' + U.elev(s.altLoss) + ' descended' : ''}.`);
+  if (s.altGain != null) c.push(s.altLoss != null
+    ? loamT('{gain} climbed, {loss} descended.', { gain: U.elev(s.altGain), loss: U.elev(s.altLoss) })
+    : loamT('{gain} climbed.', { gain: U.elev(s.altGain) }));
   return c.slice(0, 3);
 }
 
@@ -31359,8 +31862,14 @@ function gpsHighlights(D) {
   const foot = D.gpsSport === 'run' || D.gpsSport === 'walk';
   const out = [];
   if (foot) {
-    if (s.distance) out.push(`<strong>${U.dist(s.distance)}</strong> ${D.gpsSport === 'walk' ? 'walked' : 'covered'}${s.avgSpeed ? ' at ' + U.pace(s.avgSpeed) + ' pace' : ''}.`);
-    if (s.altGain != null) out.push(`${U.elev(s.altGain)} climbed${s.altLoss != null ? ', ' + U.elev(s.altLoss) + ' descended' : ''}.`);
+    const walked = D.gpsSport === 'walk';
+    if (s.distance) out.push(s.avgSpeed
+      ? loamT(walked ? '<strong>{dist}</strong> walked at {pace} pace.' : '<strong>{dist}</strong> covered at {pace} pace.',
+              { dist: U.dist(s.distance), pace: U.pace(s.avgSpeed) })
+      : loamT(walked ? '<strong>{dist}</strong> walked.' : '<strong>{dist}</strong> covered.', { dist: U.dist(s.distance) }));
+    if (s.altGain != null) out.push(s.altLoss != null
+      ? loamT('{gain} climbed, {loss} descended.', { gain: U.elev(s.altGain), loss: U.elev(s.altLoss) })
+      : loamT('{gain} climbed.', { gain: U.elev(s.altGain) }));
     /* PACE, not mph, and the SUSTAINED window rather than the instantaneous max (owner report,
        2026-09-07, on a real Garmin run: "Top speed 14.3 mph (best 30 s 13.3 mph)" under a heading
        reading Run highlights). Two things were wrong with that line and only one of them was units.
@@ -31372,13 +31881,19 @@ function gpsHighlights(D) {
        measured best 400 m of 4:47/mi in the table below it. `peak30` is a sustained 30 s window and
        survives one bad fix, so it is the only one worth printing. A bike keeps both, where a real
        top speed is the point and the wheel is not wandering. */
-    if (s.peak30) out.push(`Fastest sustained stretch <strong>${U.pace(s.peak30)}</strong> (best 30 s).`);
+    if (s.peak30) out.push(loamT('Fastest sustained stretch <strong>{pace}</strong> (best 30 s).', { pace: U.pace(s.peak30) }));
   } else {
     const dist = s.riddenDistance != null ? s.riddenDistance : s.distance;
-    if (dist) out.push(`<strong>${U.dist(dist)}</strong> ridden, top speed ${U.speed(s.maxSpeed)}.`);
-    if (s.nDownhills) out.push(`<strong>${s.nDownhills} descent${s.nDownhills > 1 ? 's' : ''}</strong>${s.maxDescentDrop ? `, biggest ${U.elev(s.maxDescentDrop)} drop` : ''}${s.vamPedaled ? ` &middot; VAM ${Math.round(s.vamPedaled)} m/h` : ''}.`);
-    if (s.liftCount) out.push(`${s.liftCount} lift${s.liftCount > 1 ? 's' : ''} carried you ${U.elev(s.liftAscent)} of climbing.`);
-    else if (s.altGain != null) out.push(`${U.elev(s.altGain)} climbed, ${U.elev(s.altLoss || 0)} descended.`);
+    if (dist) out.push(loamT('<strong>{dist}</strong> ridden, top speed {speed}.', { dist: U.dist(dist), speed: U.speed(s.maxSpeed) }));
+    if (s.nDownhills) {
+      const drop = s.maxDescentDrop ? loamT(', biggest {drop} drop', { drop: U.elev(s.maxDescentDrop) }) : '';
+      const vam = s.vamPedaled ? loamT(' &middot; VAM {vam} m/h', { vam: Math.round(s.vamPedaled) }) : '';
+      out.push(loamT(s.nDownhills > 1 ? '<strong>{n} descents</strong>{drop}{vam}.' : '<strong>{n} descent</strong>{drop}{vam}.',
+                     { n: s.nDownhills, drop, vam }));
+    }
+    if (s.liftCount) out.push(loamT(s.liftCount > 1 ? '{n} lifts carried you {gain} of climbing.' : '{n} lift carried you {gain} of climbing.',
+                                    { n: s.liftCount, gain: U.elev(s.liftAscent) }));
+    else if (s.altGain != null) out.push(loamT('{gain} climbed, {loss} descended.', { gain: U.elev(s.altGain), loss: U.elev(s.altLoss || 0) }));
   }
   return out.slice(0, 3);
 }
@@ -31391,37 +31906,51 @@ function roadHighlights(D) {
   const climbs = D.climbs || [];
   /* Power PRs vs the library envelope lead the highlights when present, the fitness-arriving moment. */
   if (D.powerPRs && D.powerPRs.length) {
+    /* 's' / 'min' / 'h' are the SI symbols and stay as they are, the same rule the string catalog
+       applies to every unit on the native side. */
     const fmt = (s) => s < 60 ? s + 's' : (s < 3600 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h');
     const notable = D.powerPRs.filter(s => [5, 15, 60, 300, 1200, 3600].includes(s));
     const list = (notable.length ? notable : D.powerPRs).slice(0, 4).map(fmt).join(', ');
-    out.push(`<strong>New power best${D.powerPRs.length > 1 ? 's' : ''} today</strong> at ${list} (vs your saved rides)`);
+    out.push(loamT(D.powerPRs.length > 1 ? '<strong>New power bests today</strong> at {list} (vs your saved rides)'
+                                          : '<strong>New power best today</strong> at {list} (vs your saved rides)', { list }));
   }
   /* Same-descent ghost PRs belong with the power PRs at the top of the card. */
   { const hist = D.descentHistory || []; const pb = hist.find(h => h.isBest);
-    if (pb) out.push(`<strong>Descent PR</strong> on descent ${pb.today.index} — fastest of your ${pb.count} attempts on it`);
-    else if (hist.length) { const h = hist[0]; out.push(`Descent ${h.today.index}: ${Math.round(h.secondsOffBest)}s off your best of ${h.count} attempts — the ghost shows where`); }
+    if (pb) out.push(loamT('<strong>Descent PR</strong> on descent {index} — fastest of your {count} attempts on it', { index: pb.today.index, count: pb.count }));
+    else if (hist.length) { const h = hist[0]; out.push(loamT('Descent {index}: {off}s off your best of {count} attempts — the ghost shows where', { index: h.today.index, off: Math.round(h.secondsOffBest), count: h.count })); }
   }
   const real = climbs.filter(c => c.duration >= 120 && c.avgPower != null);
   if (real.length) {
     const big = real.reduce((a, b) => (b.gain > a.gain ? b : a));
-    out.push(`Biggest climb: <strong>${Math.round(big.duration / 60)} min at ${big.avgGrade.toFixed(1)}%</strong>, ${Math.round(big.avgPower)} W (VAM ${Math.round(big.vam)})`);
+    out.push(loamT('Biggest climb: <strong>{mins} min at {grade}%</strong>, {watts} W (VAM {vam})',
+      { mins: Math.round(big.duration / 60), grade: big.avgGrade.toFixed(1), watts: Math.round(big.avgPower), vam: Math.round(big.vam) }));
     const faded = climbs.filter(c => c.pacingFade != null && c.pacingFade <= -0.15 && c.avgPower > (m.avg || 0));
     if (faded.length) {
       const w = faded.reduce((a, b) => (b.pacingFade < a.pacingFade ? b : a));
-      out.push(`Climb ${w.index} started too hot: power faded <strong>${Math.round(Math.abs(w.pacingFade) * 100)}%</strong> from first to last third`);
+      out.push(loamT('Climb {index} started too hot: power faded <strong>{pct}%</strong> from first to last third',
+        { index: w.index, pct: Math.round(Math.abs(w.pacingFade) * 100) }));
     }
   }
-  if (m.np != null && m.vi != null) out.push(`Ride effort: <strong>NP ${Math.round(m.np)} W</strong>${m.if ? ` at ${m.if.toFixed(2)} IF` : ''} · VI ${m.vi.toFixed(2)} ${m.vi > 1.15 ? '(surgy: matches burned)' : '(steady pacing)'}`);
+  if (m.np != null && m.vi != null) {
+    const iff = m.if ? loamT(' at {if} IF', { if: m.if.toFixed(2) }) : '';
+    const read = loamT(m.vi > 1.15 ? '(surgy: matches burned)' : '(steady pacing)');
+    out.push(loamT('Ride effort: <strong>NP {np} W</strong>{if} · VI {vi} {read}', { np: Math.round(m.np), if: iff, vi: m.vi.toFixed(2), read }));
+  }
   if (D.balance) {
     const drift = D.balanceDrift;
-    out.push(`L/R balance <strong>${Math.round(D.balance.left)}/${Math.round(D.balance.right)}</strong>${drift != null ? (Math.abs(drift) >= 2 ? `, drifting ${Math.abs(drift).toFixed(1)} pts late in the ride (one-sided fatigue?)` : ', held steady all ride') : ''}`);
+    const driftNote = drift == null ? ''
+      : (Math.abs(drift) >= 2 ? loamT(', drifting {pts} pts late in the ride (one-sided fatigue?)', { pts: Math.abs(drift).toFixed(1) })
+                              : loamT(', held steady all ride'));
+    out.push(loamT('L/R balance <strong>{left}/{right}</strong>{drift}',
+      { left: Math.round(D.balance.left), right: Math.round(D.balance.right), drift: driftNote }));
   }
   const groups = D.descentGroups || [];
   if (groups.length) {
     const g = groups[0];
     const laps = g.indexes.map(ix => (D.descents || []).find(x => x.index === ix)).filter(Boolean);
     const times = laps.map(l => Math.round(l.duration));
-    out.push(`Descent ${g.group} ridden <strong>${laps.length}x</strong> (${times.map(t => Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0')).join(', ')}) — ask the coach what changed between laps`);
+    out.push(loamT('Descent {group} ridden <strong>{n}x</strong> ({times}) — ask the coach what changed between laps',
+      { group: g.group, n: laps.length, times: times.map(t => Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0')).join(', ') }));
   }
   return out.slice(0, 6);
 }
@@ -31450,10 +31979,16 @@ function renderCoachHighlights(D, sport) {
      amber rule, always in the same place. The producers put mechanics first, so
      the most coachable read leads; the rest stay as the bullet list. */
   const [lead, ...rest] = bullets;
-  card.innerHTML = `<h3>${word} highlights</h3>`
-    + `<div class="do-slot"><span class="do-badge">OBSERVATION</span><span class="do-text">${lead}</span></div>`
+  /* The heading key is COMPOSED from the lexicon noun rather than written as one literal, because
+     the English is `${word} highlights` for all eight nouns and spelling it out would be eight
+     branches of the same sentence. Norwegian cannot take the same shape -- "Løping høydepunkter" is
+     not Norwegian -- so each noun gets its own whole-sentence entry in LOAM_NB and the English is
+     byte-identical either way. The bare noun is deliberately NOT translated on its own: `Run` is
+     already an LOAM_NB key meaning a DESCENT, so a running card would have read "Nedkjøring". */
+  card.innerHTML = `<h3>${loamT(word + ' highlights')}</h3>`
+    + `<div class="do-slot"><span class="do-badge">${loamT('OBSERVATION')}</span><span class="do-text">${lead}</span></div>`
     + (rest.length ? `<ul>${rest.map(b => `<li>${b}</li>`).join('')}</ul>` : '')
-    + `<button class="ch-cta" type="button" onclick="coachFromHighlights()">Ask the AI coach for the why and the drill &rarr;</button>`;
+    + `<button class="ch-cta" type="button" onclick="coachFromHighlights()">${loamT('Ask the AI coach for the why and the drill')} &rarr;</button>`;
   sec.classList.remove('hidden');
 }
 
@@ -33608,7 +34143,7 @@ function renderCalibNotice(D) {
    current sport and would show if the toggle were off; the count feeds the nav's "+N more" chip and
    the hint beside the toggle, so the default-on toggle never removes a section without a trace. */
 const FOCUS_HIDDEN_IDS = ['radiusSection', 'geekStatsSection', 'runCadenceSection', 'runOscSection',
-                          'runSegmentsSection', 'fitDataSection'];
+                          'fitDataSection'];
 function focusHiddenSections() {
   const res = document.getElementById('results');
   if (!res || !res.classList.contains('focus-mode')) return [];
@@ -33619,7 +34154,9 @@ function updateFocusHint(n) {
   const hint = document.querySelector('.focus-toggle .focus-hint');
   const on = document.getElementById('focusToggle');
   if (!hint) return;
-  hint.textContent = (on && on.checked) ? (n ? `· ${n} hidden` : '· the essentials') : '· every chart & table';
+  hint.textContent = (on && on.checked)
+    ? (n ? loamT('· {n} hidden', { n }) : loamT('· the essentials'))
+    : loamT('· every chart & table');
 }
 function revealFocusedSections() {
   const first = focusHiddenSections()[0];
@@ -33692,6 +34229,13 @@ function revealFocusedSections() {
 
 let _navSpy = null;
 function buildSectionNav() {
+  /* Here as well as at startup, and the second call site is load-bearing rather than defensive: the
+     host sets `window.LOAM_LANG` on its own schedule, and the app's document-start injection is not
+     a guarantee the page can lean on -- a host that sets it after load would leave the startup pass
+     having run in English, which is silent and looks deliberate. The pass is idempotent (a replaced
+     label no longer contains its English source), so re-running it on every render costs a handful
+     of failed lookups and closes that ordering entirely. */
+  localizeStaticChrome();
   const nav = document.getElementById('sectionNav');
   if (!nav) return;
   const visible = (id) => {
@@ -33718,6 +34262,8 @@ function buildSectionNav() {
      the E2E asks the page itself on every scenario, so the next section to ship has to be listed
      here or declared unreachable on purpose. */
   const pos = (el) => el.getBoundingClientRect().top + window.scrollY;
+  /* Labels are written in English here and translated at the chip below, so this list stays the
+     plain coverage claim the comment above describes and `checkSectionNavCovers` keeps reading it. */
   const entries = [
     { el: visible('sessionOverview'), label: 'Summary' },
     { el: visible('crashSection'), label: 'Crash' },
@@ -33759,13 +34305,13 @@ function buildSectionNav() {
   showLandscapeTip();
   const lbl = document.createElement('span');
   lbl.className = 'nav-label';
-  lbl.textContent = 'Jump to';
+  lbl.textContent = loamT('Jump to');
   nav.appendChild(lbl);
   const chips = [];
   for (const e of entries) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.textContent = e.label;
+    btn.textContent = loamT(e.label);
     if (e.compare) btn.className = 'nav-compare';
     /* The chip's target, written down rather than only captured in the closure below, so a test can
        ask what this nav actually reaches. The list above is a CLAIM about coverage and it has been
@@ -33784,8 +34330,8 @@ function buildSectionNav() {
     const more = document.createElement('button');
     more.type = 'button';
     more.className = 'nav-more';
-    more.textContent = `+${hiddenN} more`;
-    more.title = 'Show every chart and table (turns Focused view off)';
+    more.textContent = loamT('+{n} more', { n: hiddenN });
+    more.title = loamT('Show every chart and table (turns Focused view off)');
     more.onclick = revealFocusedSections;
     nav.appendChild(more);
   }
@@ -33855,7 +34401,19 @@ function renderAll(D) {
   renderCalibNotice(D);
   renderEmtbNotice(D);
   renderRideSignature(D, rSport);
-  renderStats(D.summary, D.hasFit);
+  /* Analyses cached before incline summaries did not retain grade segments. Rebuild them once when
+     such a cache is opened, lift-marked exactly as the analysis path builds them -- a replay that
+     skipped the marking would credit a reopened bike-park day's gondola as its steepest climb while
+     a fresh analysis of the same recording did not. */
+  if (!D.gradeSegments && D.sensors && D.ride) {
+    D.gradeSegments = markLiftSegments(
+      detectGradeSegments(
+        D.sensors.baro || [],
+        D.sensors.location || [],
+        D.ride),
+      D.sensors.location || []);
+  }
+  renderStats(D.summary, D.hasFit, D.savedDescents || D.descents, D.gradeSegments);
   renderCoachHighlights(D, rSport);
   renderCrashSection(D);
   renderMap(D.sensors.location, D.turns, D.ride, D.ridingJumps, D.crashes);
@@ -33923,7 +34481,7 @@ function resetSegmentFocus(ride) {
   }
 }
 
-function renderStats(s, hasFit) {
+function renderStats(s, hasFit, descents, gradeSegments) {
   const dur = s.duration;
   /* Vertical drop follows the Units toggle like every other tile (it used to hardcode meters,
      contradicting the hero card's feet on the same screen); the other system rides in the sub. */
@@ -33980,6 +34538,8 @@ function renderStats(s, hasFit) {
     </div>
     ${jumpCard}
     ${altCard}
+    ${steepestInclineTile(gradeSegments, false)}
+    ${steepestDescentTile(descents, false)}
   `;
 }
 
@@ -34261,7 +34821,15 @@ const TL_LANE_PAD_PX = 6;       // above the last row, so the legend's box never
 const TL_LEGEND_ALLOW_PX = 60;  // the most a legend costs the plot: two rows of items plus padding
 const TL_LABEL_GAP_PX = 8;      // clear space required between two neighbouring labels on a row
 const TL_RIDE_HEIGHT_PX = 400;  // the ride timeline host; was 380 before the lane took its 20px
-const TL_RUN_HEIGHT_PX = 340;   // the run timeline host; was 320 for the same reason
+const TL_RUN_HEIGHT_PX = 340;   // the run timeline host, and still its height with one channel
+/* The foot timeline's stacked rows (see renderRunTimeline). Sized in pixels rather than as shares of
+   a fixed host, because the point of splitting the channels apart is that each one gets MORE height,
+   not a share of the same. The lead row is the pace row. A three-channel run therefore asks for
+   168 + 2*(118 + 34) = 472px of plot, against the ~210px the single dual-axis plot gave two channels
+   between the lane and the x axis. */
+const TL_FOOT_LEAD_PX = 168;    // the pace row: the read the other rows support
+const TL_FOOT_ROW_PX = 118;     // a supporting row (altitude, heart rate)
+const TL_FOOT_GAP_PX = 34;      // between rows: room for the lower row's own axis title
 
 /* The legend of a timeline whose lane holds `rows` rows of labels: horizontal, bottom-anchored just
    above the lane. `hostPx` is the chart host's height and `margin` the layout's own margins, from
@@ -34427,8 +34995,7 @@ function rsLabel(name) {
   if (m) {
     const instant = parseUTCFromFilename(s);
     if (instant) return rsDateLabel(instant);
-    const MO = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-    return `${MO[(+m[2]-1+12)%12]} ${+m[3]}, ${m[1]}`;
+    return rsDate(+m[2] - 1, +m[3], m[1]);
   }
   return pre.toUpperCase().slice(0, 26);
 }
@@ -34438,8 +35005,16 @@ function rsLabel(name) {
 function rsDateLabel(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  const MO = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  return `${MO[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  return rsDate(d.getMonth(), d.getDate(), d.getFullYear());
+}
+/* The card's own date, deliberately NOT toLocaleDateString: this is the poster's typographic date
+   (short, upper-case, no punctuation to speak of) and the sub-line under it already carries the
+   locale's numeric date, so the two must not become the same string. The month abbreviations and the
+   order are both translated -- "SEP 15, 2026" is an American ordering, and a Norwegian reader writes
+   the day first -- which is why the order is a key rather than a concatenation. */
+const RS_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+function rsDate(monthIndex, day, year) {
+  return loamT('{mon} {day}, {year}', { mon: loamT(RS_MONTHS[(monthIndex % 12 + 12) % 12]), day, year });
 }
 let _rideSig = null;   /* last-built ride card pieces (defs, chrome, terrain tiles) for PNG export */
 function openSessionDataSources() {
@@ -36645,6 +37220,8 @@ function renderRoadStats(el, D) {
     <div class="stat"><div class="label">Elevation</div><div class="value">${s.totalAscent != null ? U.elev(s.totalAscent) : '—'}<span class="unit"> ↑</span></div><div class="sub">${s.totalDescent != null ? U.elev(s.totalDescent) + ' ↓ · ' : ''}${D.climbs.length} climbs</div></div>
     <div class="stat"><div class="label">Cadence / HR</div><div class="value">${s.avgCadence != null ? s.avgCadence : '—'}<span class="unit">rpm</span></div><div class="sub">${s.avgHr != null ? s.avgHr + ' bpm avg' : ''}${revs > 0 ? ' · ' + Math.round(revs).toLocaleString() + ' strokes' : ''}</div></div>
     <div class="stat"><div class="label">L / R balance</div><div class="value">${bal}</div><div class="sub">power-weighted</div></div>
+    ${steepestInclineTile(D.segments, false)}
+    ${steepestDescentTile(D.descents, false)}
   `;
 }
 function renderRoadClimbsAndBalance(D) {
@@ -37877,14 +38454,15 @@ function renderCropBar() {
   open.classList.toggle('hidden', !_cropCtx);
   const total = _cropCtx ? _cropCtx.span.end - _cropCtx.span.start : null;
   if (_cropActive) {
-    st.innerHTML = `Trimmed to <strong>${cropRel(_cropActive.start)}&ndash;${cropRel(_cropActive.end)}</strong>`
-      + (total != null ? ` of ${fmtDuration(total)} &middot; ${fmtDuration(total - (_cropActive.end - _cropActive.start))} left out` : '');
+    st.innerHTML = loamT('Trimmed to <strong>{from}&ndash;{to}</strong>', { from: cropRel(_cropActive.start), to: cropRel(_cropActive.end) })
+      + (total != null ? loamT(' of {total} &middot; {out} left out',
+          { total: fmtDuration(total), out: fmtDuration(total - (_cropActive.end - _cropActive.start)) }) : '');
     clear.classList.remove('hidden');
-    open.textContent = 'Adjust…';
+    open.textContent = loamT('Adjust…');
   } else {
-    st.textContent = `Analyzing the whole recording (${fmtDuration(total)})`;
+    st.textContent = loamT('Analyzing the whole recording ({total})', { total: fmtDuration(total) });
     clear.classList.add('hidden');
-    open.textContent = 'Trim…';
+    open.textContent = loamT('Trim…');
   }
 }
 
@@ -38462,7 +39040,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'd2dedc0e7 · 2026-09-15';
+const LOAM_BUILD = '2b5fb59e4 · 2026-09-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
@@ -38685,6 +39263,8 @@ function setMapHeight(v) {
   applyMapHeight();
 }
 applyMapHeight();
+/* Once, at startup: the chrome above is static markup, so nothing else would ever translate it. */
+localizeStaticChrome();
 
 /* ---------- Configurable basemap (background map detail) ----------
    Satellite (real Esri World Imagery) is the default: on a trail the terrain context (actual trails,
