@@ -33629,6 +33629,67 @@ function revealFocusedSections() {
   t.dispatchEvent(new Event('change'));
   if (first) setTimeout(() => first.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
 }
+/* Keep the reading position through width changes (including phone rotation). A scrollY alone
+   points at different content after text/cards reflow. Cache the visible block before resize;
+   scroll events caused by that resize must not replace it with the newly displaced content. */
+(function preserveReadingPosition() {
+  const views = '#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults, #progressResults';
+  const blocks = '.hrz-row, .rq-row, tr, p, li, .section-title, .strength-tablenote, .strength-caveat, .chart, .panel, section';
+  let width = document.documentElement.clientWidth;
+  let anchor = null, frame = 0, until = 0;
+  const inset = () => Math.max(0, ...[...document.querySelectorAll('.section-nav, .page-back-bar')].map(el => {
+    const r = el.getBoundingClientRect();
+    return getComputedStyle(el).position === 'sticky' && r.top <= 1 && r.bottom > 0 ? r.bottom : 0;
+  }));
+  const remember = () => {
+    if (frame || document.documentElement.clientWidth !== width) return;
+    anchor = null;
+    if (window.scrollY < 1) return;
+    const line = inset() + 8;
+    // A section margin may occupy the first line; use the next visible block in that case.
+    for (const y of [line, line + 24, line + 48, line + 80]) {
+      const hit = document.elementFromPoint(width / 2, y);
+      const view = hit && hit.closest(views);
+      const el = view && hit.closest(blocks);
+      if (!el || !view.contains(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.height > 0) {
+        anchor = { el, view, fraction: Math.max(0, (line - r.top) / r.height), gap: Math.max(0, r.top - line) };
+        break;
+      }
+    }
+  };
+  const restore = () => {
+    if (!anchor || !anchor.el.isConnected || !anchor.view.getClientRects().length || !anchor.el.getClientRects().length) {
+      frame = 0; anchor = null; return;
+    }
+    const r = anchor.el.getBoundingClientRect();
+    const delta = r.top + anchor.fraction * r.height - inset() - 8 - anchor.gap;
+    if (Math.abs(delta) > 1) window.scrollTo({ top: window.scrollY + delta, behavior: 'instant' });
+    // Plotly and WebKit can finish layout after the first resize frame. Keep the same anchor
+    // briefly, but never keep pulling the reader back after they interact with the page.
+    if (performance.now() < until) frame = requestAnimationFrame(restore);
+    else { frame = 0; remember(); }
+  };
+  window.addEventListener('scroll', remember, { passive: true });
+  window.addEventListener('resize', () => {
+    const next = document.documentElement.clientWidth;
+    if (next === width) return; // Keyboard/browser chrome and synthetic chart resize events.
+    width = next;
+    if (!anchor || (window.visualViewport && window.visualViewport.scale !== 1)) { anchor = null; return; }
+    until = performance.now() + 500;
+    if (!frame) frame = requestAnimationFrame(restore);
+  });
+  const cancel = () => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0; anchor = null;
+    remember();
+  };
+  for (const event of ['touchstart', 'pointerdown', 'wheel', 'keydown']) {
+    window.addEventListener(event, cancel, { passive: true });
+  }
+})();
+
 let _navSpy = null;
 function buildSectionNav() {
   const nav = document.getElementById('sectionNav');
@@ -38401,7 +38462,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '8768cb98c · 2026-09-15';
+const LOAM_BUILD = 'd2dedc0e7 · 2026-09-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
