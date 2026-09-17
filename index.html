@@ -29394,11 +29394,16 @@ const LOAM_NB = {
   'pace ({u})': 'tempo ({u})',
   'speed ({u})': 'fart ({u})',
   'Δ alt ({u})': 'Δ høyde ({u})',
+  /* The altitude row names its source when it is not the barometer -- GPS altitude wanders where a
+     barometer does not, and the row must not pass for the better instrument. */
+  'altitude (GPS)': 'høyde (GPS)',
+  'Δ alt ({u}), GPS': 'Δ høyde ({u}), GPS',
   'heart rate (bpm)': 'puls (slag/min)',
   'Pace ({u})': 'Tempo ({u})',
   'Pace (median)': 'Tempo (median)',
   'Speed ({u})': 'Fart ({u})',
   'Δ altitude ({u})': 'Δ høyde ({u})',
+  'Δ altitude ({u}), GPS': 'Δ høyde ({u}), GPS',
   'Heart rate (bpm)': 'Puls (slag/min)',
   ', one row each': ', én rad hver',
   'climb/descent segments shaded': 'stignings- og nedkjøringssegmenter er skyggelagt',
@@ -33077,21 +33082,46 @@ function renderRunTimeline(D) {
   }
   /* Altitude. On its own row it is a profile and is drawn as one (filled, solid); overlaid on the
      bike's single plot it stays the faint dotted line it has always been, because there it is a
-     second quantity crossing the first and has to read as the background one. */
-  const altRow = footSport && !!(D.sensors.baro && D.sensors.baro.length);
-  if (D.sensors.baro && D.sensors.baro.length) {
-    const inB = D.sensors.baro.filter(r => r.t >= ride.start && r.t <= ride.end);
-    const altRel = inB.map(r => r.relativeAltitude);
-    const baseAlt = altRel.length ? altRel[0] : 0;
+     second quantity crossing the first and has to read as the background one.
+
+     THE SERIES IS `climbAltSeries`, NOT THE BAROMETER (2026-09-17), so a recording made with no
+     barometer gets a profile instead of nothing. This row used to read `D.sensors.baro` alone while
+     the climb and descent BANDS shaded across it come from `detectGradeSegments`, which falls back
+     to GPS altitude -- so on a no-baro recording the chart drew the consequence and hid the
+     evidence, and the Climbs panel above reported a gain the picture would not show. One function
+     answers "what is this recording's altitude", the same one the shading and the Climbs panel read,
+     so the picture cannot disagree with either. It is deliberately the UNSMOOTHED series those two
+     reason from: smoothing it here would be a second answer to a question the page has already
+     answered, and the rule this repo follows for the ski profile (`skiAltitudeSeries`) is that a
+     profile computed any other way is a picture that can disagree with the table under it.
+     Two smaller consequences, both in the right direction: a null barometer sample used to render
+     as a spike to the session's starting altitude (`null - baseAlt` is a number), and is now
+     dropped the way the gain read already drops it; and a bike FIT too short for `fitOnlySensors`
+     to synthesise a baro stream now draws its GPS altitude rather than nothing.
+     `altFromGps` asks `climbAltSeries` ITSELF which channel it took -- by asking it again with no
+     location rows to fall back to -- rather than restating its >10-row test here, which would be a
+     third copy of a rule that already has two by design (`detectGradeSegments` owns one and the
+     module mirrors it). GPS altitude wanders where a barometer does not, so the row names its
+     source instead of passing for the better instrument. */
+  const baroRows = D.sensors.baro || [];
+  const altPts = climbAltSeries(baroRows, D.sensors.location, ride);
+  const altFromGps = altPts.length > 0 && climbAltSeries(baroRows, [], ride).length === 0;
+  const altRow = footSport && altPts.length > 0;
+  if (altPts.length) {
+    const baseAlt = altPts[0].alt;
+    const su = U.smallUnit();
     traces.push({
-      x: inB.map(r => r.t - ride.start),
-      y: altRel.map(a => U.smallNum(a - baseAlt)),
+      x: altPts.map(a => a.t - ride.start),
+      y: altPts.map(a => U.smallNum(a.alt - baseAlt)),
       type: 'scatter', mode: 'lines',
       line: { color: '#d4a574', width: altRow ? 1.4 : 1.2, ...(altRow ? {} : { dash: 'dot' }) },
       ...(altRow ? { fill: 'tozeroy', fillcolor: 'rgba(160,111,36,0.26)' } : {}),
-      name: loamT('Δ altitude ({u})', { u: U.smallUnit() }), yaxis: 'y2'
+      name: altFromGps ? loamT('Δ altitude ({u}), GPS', { u: su }) : loamT('Δ altitude ({u})', { u: su }),
+      yaxis: 'y2'
     });
-    chans.push({ axis: 'y2', label: loamT('altitude'), title: loamT('Δ alt ({u})', { u: U.smallUnit() }), color: '#d4a574' });
+    chans.push({ axis: 'y2', color: '#d4a574',
+      label: altFromGps ? loamT('altitude (GPS)') : loamT('altitude'),
+      title: altFromGps ? loamT('Δ alt ({u}), GPS', { u: su }) : loamT('Δ alt ({u})', { u: su }) });
   }
   /* Heart rate, foot only and only when the watch actually recorded it -- a row of nothing claims a
      channel the recording does not have. It is the watch's own beats, not an estimate from here. */
@@ -42829,7 +42859,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'db3f2d84b · 2026-09-17';
+const LOAM_BUILD = 'f9d1db613 · 2026-09-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
