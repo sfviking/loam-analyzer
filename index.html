@@ -1386,6 +1386,87 @@
   .be-gain { font-size: 11.5px; color: var(--accent); }
   .be-gain.dim { color: var(--text-muted); }
   .be-foot { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
+
+  /* The row qualifiers -- "fastest", "+1:20 stopped", "partial", a partial's distance. */
+  #runSplitsTable .sp-note { font-size: 11px; }
+  /* In CSS rather than inline on the cell so the phone rule below can narrow it; an inline width
+     would win over any media query and the bar would keep a quarter of a 375px screen. */
+  /* 45% rather than the 35% it carried beside a Time column: an auto table hands the slack to the
+     columns with no width, and with Time retired that was the INDEX, which sat 323px wide holding
+     "1 fastest" and a gap. The bar is the one cell that gets better with room -- it is a comparison,
+     so more of it is more resolution. */
+  #runSplitsTable .split-bar-col { width: 45%; }
+
+  /* THE ALTITUDE SPARKLINE (owner, 2026-09-17: "how about a spark line to show the altitude instead
+     of grade"). A cell holding only an SVG has a min-content of ZERO, so the column would collapse to
+     nothing in an auto table -- `min-width` is what gives it a floor, and the `width` is what stops it
+     taking the slack the index column used to.
+     `non-scaling-stroke` is load-bearing rather than tidy: the viewBox stretches to the column
+     (`preserveAspectRatio="none"`), which without it draws one width as a fat vertical stroke and a
+     thin horizontal one. `--accent-2` rather than `--accent` because the pace bar in the next cell
+     is `--accent`, and two graphics on one row in one colour read as one measurement; both are
+     aliases, so both follow dark and the winter palette on their own. */
+  #runSplitsTable .split-alt-col { width: 13%; min-width: 58px; }
+  #runSplitsTable .sp-spark { display: block; width: 100%; height: 22px; }
+  #runSplitsTable .sp-spark polyline {
+    fill: none; stroke: var(--accent-2); stroke-width: 1.25;
+    vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round;
+  }
+  #runSplitsTable .sp-spark polygon { fill: color-mix(in srgb, var(--accent-2) 15%, transparent); stroke: none; }
+
+  /* ONE LINE PER SPLIT ON A PHONE (owner, 2026-09-17: "Include cadence and grade on run splits but
+     still fit on one line in portrait mode").
+
+     IT DID NOT FIT ON ONE LINE WITH FOUR COLUMNS EITHER, which is the part not to read past:
+     measured through this page on a five-split run at 390px, every row was 64px against the 45px one
+     line costs, because the base cell padding is 12px a side and "149 bpm" wrapped inside a 47px HR
+     cell. The new columns are not what broke this; they are what made an already-wrapping table
+     impossible to leave alone.
+
+     Three things buy the room, and NONE of them drops a number the wide table shows:
+       - the bar goes. It is the one cell carrying no figure of its own -- a redraw of the pace
+         column beside it -- so it is what the room comes out of;
+       - each unit moves from every row to its column HEADING, through `data-u`. "168" under a
+         heading reading CAD SPM says what "168 spm" did, once instead of once per row;
+       - padding and type shrink to what a table of four-character numbers needs.
+     And every cell stops wrapping, so a row that still does not fit scrolls the panel (which already
+     has `overflow-x: auto`) rather than silently becoming two lines -- which is the failure being
+     fixed, and the one that reads as normal. The row badges -- "fastest", "+1:41 stopped", a
+     partial's distance -- go to 10px and stay inline at every width, since they are the reason a row
+     is worth a second look; `sp-wide` now hides nothing but the word "partial", which the distance
+     beside it says with a number.
+
+     MEASURED AT 375px, not at 390: that is an iPhone SE 3 or a 13 mini, the narrowest iPhone iOS 17
+     runs on, and it is the bar rather than a round number. An ordinary table of splits needs 284px,
+     so 375 leaves a lot over; the worst one it can be handed -- every row carrying BOTH a badge and
+     a stop note, three-digit heart rate and cadence, two-digit indexes, a partial -- needs 339px and
+     fits with 2px to spare. Below about 340px even an ordinary table scrolls one line sideways,
+     which no supported device reaches. */
+  @media (max-width: 640px) {
+    #runSplitsTable { font-size: 11px; }
+    #runSplitsTable thead th { padding: 8px 4px; font-size: 9px; letter-spacing: 0.06em; }
+    #runSplitsTable thead th:first-child { padding-left: 8px; }
+    #runSplitsTable thead th:last-child { padding-right: 8px; }
+    #runSplitsTable tbody td { padding: 7px 4px; white-space: nowrap; }
+    #runSplitsTable tbody td:first-child { padding-left: 8px; }
+    #runSplitsTable tbody td:last-child { padding-right: 8px; }
+    /* The unit leaves the rows and joins its heading, so nothing is lost by dropping it per row. */
+    #runSplitsTable .sp-u { display: none; }
+    #runSplitsTable thead th[data-u]::after { content: ' ' attr(data-u); }
+    /* Words another cell on the same row already says with a number. */
+    #runSplitsTable .sp-wide { display: none; }
+    #runSplitsTable .sp-note { font-size: 10px; }
+    #runSplitsTable .split-alt-col { min-width: 42px; }
+    #runSplitsTable .sp-spark { height: 18px; }
+    /* The bar is the only cell carrying no number of its own, so it is what the room comes out of.
+       The CELL stays, emptied and squeezed to its own right padding, because the base rule that puts
+       a gutter on the table's right edge selects the LAST cell -- and with the bar gone that is
+       whichever metric column this recording happened to render last (grade, or cadence, or HR),
+       so hiding it outright pushed those numbers against the screen edge. An empty cell is a gutter
+       that cannot be got wrong. */
+    #runSplitsTable .split-bar-col { width: 1%; padding-left: 0; }
+    #runSplitsTable tbody .split-bar-col > div { display: none; }
+  }
   .notice-action {
     display: inline-block; margin-top: 10px;
     background: var(--accent-4); color: var(--on-accent); border: 0; cursor: pointer;
@@ -2719,9 +2800,31 @@
     <div class="panel">
       <div id="runPacing" class="run-pacing hidden"></div>
       <div style="overflow-x:auto;">
+        <!-- THERE IS NO TIME COLUMN, and that is not a cut for room (owner, 2026-09-17: "I don't
+             think we need the moving time column. What's the argument for keeping it?" -- there
+             isn't one). A FULL split covers exactly one unit, and pace re-divides that unit back
+             out, so the pace seconds ARE the time seconds: 8:33 and 8:33/mi, on every row. Checked
+             over 18,650 synthetic splits in both units, the two printed the same number every time
+             bar 25 imperial rows landing on an exact half second, where `U.pace`'s 1609.34 and the
+             splitter's 1609.344 round opposite ways -- a rounding artifact, not information. Pace
+             is the one kept because it carries its own unit, and because it is the only one of the
+             two that means anything on the PARTIAL row, where time is 1:27 and pace is 10:21/mi.
+             That remainder's duration is the only figure the column showed which pace does not, and
+             it is not shown anywhere now: it is distance times pace, derivable from the two numbers
+             already on its row, which is the same redundancy that retired the column.
+             `data-u` is the unit the phone rule moves off every row and onto this heading; see the
+             stylesheet. "Cad" rather than the Climbs table's "Cadence" because a one-word heading
+             cannot wrap, so it sets the column's minimum: measured at 375px, "CADENCE SPM" holds 57px
+             for a three-digit number, "CAD SPM" holds 33px.
+             The bar column is the phone's right-edge gutter as well as the bar, so it is never
+             dropped outright -- again, see the stylesheet. -->
         <table id="runSplitsTable">
           <thead><tr>
-            <th>#</th><th>Time</th><th>Pace</th><th class="split-hr-col">HR</th><th></th>
+            <th>#</th><th>Pace</th>
+            <th class="split-hr-col" data-u="bpm">HR</th>
+            <th class="split-cad-col" data-u="spm">Cad</th>
+            <th class="split-alt-col">Altitude</th>
+            <th class="split-bar-col"></th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -2773,43 +2876,35 @@
     <div id="recordingQualityBody"></div>
   </section>
 
-  <!-- The two per-segment tables are FOLDED SHUT by default (see renderRunClimbs). They are the
-       widest things on a foot activity's page -- ten columns each, a row per climb -- and the owner's
-       2026-09-16 report is that on a phone they are in the way of everything else while being of
-       little use on a run. Folded rather than deleted or focus-hidden: the heading stays on the page
-       as one line, so the reader can see the count and open it, which is what "gjemmes og legges et
-       annet sted for de som måtte være spesielt interesserte" asks for. -->
-  <section id="runClimbsSection" class="hidden">
-    <details class="fold" data-fold="runclimbs" id="runClimbsFold">
-      <summary class="section-title">
-        Climbs
-        <span class="subtitle"><span id="runClimbCountLabel">0</span> climbs · grade &gt; 3% sustained for 20s+ · GAP = grade-adjusted pace</span><span class="fold-chev"></span>
-      </summary>
-      <div class="panel">
-        <div style="overflow-x:auto;">
-          <table id="runClimbsTable">
-            <thead><tr>
-              <th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>VAM</th><th>Pace</th><th>GAP</th><th>Cadence</th><th class="climb-hr-col">HR</th>
-            </tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-    </details>
-  </section>
+  <!-- ONE per-segment table with a view picker, not two tables (owner, 2026-09-17: "Why do we have
+       climbs/descents and climbs section? Why not just have the combined one with a drop down to
+       filter"). Both used to come out of the SAME detectGradeSegments call and print the SAME
+       criterion in their subtitles a line apart -- "grade > 3% sustained for 20s+" -- so the page
+       told the reader twice that these were the same segments and never said why they were two
+       tables. See renderRunSegments for what the views actually differ on (columns, not rows) and
+       for why the picker is only offered when there are climbs to pick.
 
+       FOLDED SHUT by default (owner, 2026-09-16). It is the widest thing on a foot activity's page
+       -- ten columns, a row per segment -- and on a phone it was in the way of everything else while
+       being of little use on a run. Folded rather than deleted or focus-hidden: the heading stays on
+       the page as one line, so the reader can see the count and open it, which is what "gjemmes og
+       legges et annet sted for de som måtte være spesielt interesserte" asks for. -->
   <section id="runSegmentsSection" class="hidden">
     <details class="fold" data-fold="runsegments" id="runSegmentsFold">
       <summary class="section-title">
-        Climb / descent segments
-        <span class="subtitle"><span id="runSegCountLabel">0</span> segments · grade &gt; 3% sustained for 20s+</span><span class="fold-chev"></span>
+        <span id="runSegTitle">Climbs &amp; descents</span>
+        <span class="subtitle" id="runSegSubtitle"></span>
+        <select id="runSegView" class="hidden" style="margin-left:auto;">
+          <option value="climbs">Climbs</option>
+          <option value="descents">Descents</option>
+          <option value="all">All segments</option>
+        </select>
+        <span class="fold-chev"></span>
       </summary>
       <div class="panel">
         <div style="overflow-x:auto;">
           <table id="runSegmentsTable">
-            <thead><tr>
-              <th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Cadence</th><th>Osc</th><th>Pace</th>
-            </tr></thead>
+            <thead><tr></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -9982,6 +10077,33 @@ function drawRunsDtw(runs, D) {
   }, PLOT_CFG);
 }
 
+/* PACE ON A CHART, in ONE place (2026-09-17 daily review). Three pace charts -- the runs overlay,
+   the in-ride descent comparison and the cross-ride lap comparison -- each carried their own copy of
+   the reciprocal, the m:ss formatter and the tick builder, and they had already drifted apart in
+   the two ways that matter: the descent comparison divided by 60 once more than its formatter and
+   tick step expected, so its y values were MINUTES laid against ticks built in SECONDS (5.5 min/km
+   hovered as "0:06" and not one tick label landed inside the data), and the lap comparison had no
+   speed floor at all, so the 0.1 m/s a standing start interpolates to became a 4.5-hour pace that
+   set the axis for every lap on the chart. So: seconds per km or mile, always; a floor below which
+   reciprocal pace is not drawn (GPS drift near a stop, see drawRunsOverlay); ticks on whole 30 s. */
+function chartPaceSeconds(mps, minSpeed = 0.5) {
+  return Number.isFinite(mps) && mps >= minSpeed ? (U.metric() ? 1000 : 1609.34) / mps : null;
+}
+function formatChartPace(seconds) {
+  const rounded = Math.round(seconds);
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
+}
+function chartPaceTicks(values) {
+  const finite = values.filter(Number.isFinite);
+  if (!finite.length) return [];
+  const low = finite.reduce((a, b) => Math.min(a, b));
+  const high = finite.reduce((a, b) => Math.max(a, b));
+  const step = Math.max(30, Math.ceil((high - low) / 180) * 30);
+  const ticks = [];
+  for (let tick = Math.floor(low / step) * step; tick <= high + step; tick += step) ticks.push(tick);
+  return ticks;
+}
+
 /* Speed vs distance-into-run, one trace per run. Overlaying repeated runs of the
    same segment (Tanga laps, pump-track laps) shows where speed is carried or lost. */
 function drawRunsOverlay(runs, D) {
@@ -9995,11 +10117,6 @@ function drawRunsOverlay(runs, D) {
   // Below 0.5 m/s, near-stationary GPS drift makes reciprocal pace unstable.
   // Mask it only in the pace display; distance still integrates the original speed.
   const minPaceSpeed = 0.5;
-  const paceDistance = U.metric() ? 1000 : 1609.34;
-  const formatPace = seconds => {
-    const rounded = Math.round(seconds);
-    return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
-  };
   const traces = runs.map((r, i) => {
     /* Drop CoreLocation's -1 "speed unknown" sentinel, not just null. It was reaching the chart as a
        real reading, and the damage was not only the visible dip below zero: this x axis INTEGRATES
@@ -10025,10 +10142,10 @@ function drawRunsOverlay(runs, D) {
     }
     // Preserve near-stop gaps even when the median has moving neighbours.
     y = y.map((speed, k) => showPace
-      ? (ys[k] >= minPaceSpeed && speed >= minPaceSpeed ? paceDistance / speed : null)
+      ? (ys[k] >= minPaceSpeed ? chartPaceSeconds(speed, minPaceSpeed) : null)
       : U.speedNum(speed));
     return { x: xs, y, ...(showPace ? {
-      text: y.map(v => v == null ? '' : formatPace(v)),
+      text: y.map(v => v == null ? '' : formatChartPace(v)),
       hovertemplate: `%{text} ${paceUnit}<extra>%{fullData.name}</extra>`,
     } : {}), connectgaps: false, type: 'scatter', mode: 'lines', line: { color: palette[i % palette.length], width: smooth ? 2 : 1.5 }, name: `${r.n}. ${r.label}`.slice(0, 26) };
   }).filter(Boolean);
@@ -10036,14 +10153,7 @@ function drawRunsOverlay(runs, D) {
      inside a bordered 300px box, which reads as a chart that failed rather than one with no data. */
   if (!traces.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
-  const paceValues = showPace ? traces.flatMap(t => t.y).filter(Number.isFinite) : [];
-  const paceTicks = [];
-  if (paceValues.length) {
-    const low = paceValues.reduce((a, b) => Math.min(a, b));
-    const high = paceValues.reduce((a, b) => Math.max(a, b));
-    const step = Math.max(30, Math.ceil((high - low) / 180) * 30);
-    for (let tick = Math.floor(low / step) * step; tick <= high + step; tick += step) paceTicks.push(tick);
-  }
+  const paceTicks = showPace ? chartPaceTicks(traces.flatMap(t => t.y)) : [];
   // Draw only bounded gaps, using their measured endpoints. Keep these separate
   // from the pace samples so hover never presents an interpolated value as measured.
   const connectors = [];
@@ -10072,7 +10182,7 @@ function drawRunsOverlay(runs, D) {
     xaxis: { title: { text: `distance (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
     yaxis: showPace ? {
       title: { text: `pace (${paceUnit})`, font: { size: 11 } }, gridcolor: '#e2e8f0',
-      autorange: 'reversed', tickmode: 'array', tickvals: paceTicks, ticktext: paceTicks.map(formatPace),
+      autorange: 'reversed', tickmode: 'array', tickvals: paceTicks, ticktext: paceTicks.map(formatChartPace),
     } : { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
     legend: { x: 0, y: -0.3, orientation: 'h', font: { size: 9 } }, hovermode: 'x unified',
   }, PLOT_CFG);
@@ -10340,6 +10450,10 @@ const splitToRad = (d) => (d * Math.PI) / 180;
 const SPLIT_MOVING_MIN_MPS = 0.5;
 const SPLIT_MOVING_MAX_MPS = 12;
 const SPLIT_MOVING_MAX_GAP_S = 5;
+/* How confident a cadence window has to be to join a split's mean. Deliberately the SAME number the
+   per-climb table admits its windows on; see the module for why, and for why it is not the headline
+   tile's 0.15. */
+const SPLIT_CAD_MIN_CONF = 0.05;
 
 /** Great-circle metres between two fixes. Inlined so the drift guard can run this standalone. */
 function splitHop(a, b) {
@@ -10507,6 +10621,31 @@ function computeSplits(loc, ride, unitM, hr) {
     });
   }
   return splits;
+}
+
+/**
+ * Mean step rate over a split's own window, from whichever cadence series the analysis settled on.
+ *
+ * `cadSeries` is the FINAL series -- `analyzeRunning` swaps in the walk band, then the wrist, then
+ * the AirPods, before any render sees it -- so this reads whatever the page's own cadence tile and
+ * chart are reading, and the three cannot name different sensors for one run.
+ *
+ * A MEAN, matching the per-climb table, rather than the headline's median: the headline summarises a
+ * whole run, where one bad window among hundreds should not move the number, while a split holds a
+ * handful and a median over them is their middle window rather than their average.
+ *
+ * Null when no window inside the split clears `SPLIT_CAD_MIN_CONF`, which is an absence and not a
+ * standstill -- the column disappears when no split has one, exactly as the HR column already does.
+ */
+function splitCadenceSpm(split, cadSeries) {
+  if (!split) return null;
+  let sum = 0, n = 0;
+  for (const c of cadSeries || []) {
+    if (!c || c.spm == null || !(c.conf > SPLIT_CAD_MIN_CONF)) continue;
+    if (c.t < split.tStart || c.t > split.tEnd) continue;
+    sum += c.spm; n++;
+  }
+  return n ? sum / n : null;
 }
 
 /**
@@ -19594,7 +19733,9 @@ async function analyze(files) {
          Library card grid yet (a product call, deferred). */
       if (cacheKey) { putCachedAnalysis(cacheKey, sport, liftRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
       renderStrength(liftRender);
-      setStatus(`Lift loaded (${summary.nSets} sets · ${summary.nReps} reps${summary.hasBarSpeed ? ' · ' + summary.meanBarSpeedMps + ' m/s' : ''})`, true);
+      setStatus(loamT('Lift loaded ({sets} sets · {reps} reps{barSpeed})', {
+        sets: summary.nSets, reps: summary.nReps,
+        barSpeed: summary.hasBarSpeed ? ' · ' + summary.meanBarSpeedMps + ' m/s' : '' }), true);
       return;
     }
 
@@ -21018,31 +21159,22 @@ function renderCrossRide({ perRide, clusters }) {
       /* Foot comparisons use pace, with faster values higher on the chart. Keep the
          stored speed/distance series unchanged for DTW and the gain/loss map. */
       const paceComparison = sportCarriesNoTurns(members);
-      const paceDistance = U.metric() ? 1000 : 1609.34;
       const paceUnit = U.metric() ? 'min/km' : 'min/mi';
-      const paceSeconds = speed => Number.isFinite(speed) && speed > 0 ? paceDistance / speed : null;
-      const formatPace = seconds => {
-        const rounded = Math.round(seconds);
-        return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
-      };
+      /* The same 0.5 m/s floor as the runs overlay: a lap's speed here is `speedAtT` interpolated off
+         the 1 Hz series, so a standing start reads 0.1 m/s, and without the floor that one sample is a
+         pace of hours that sets the axis for every lap on the chart. */
+      const paceSeconds = speed => chartPaceSeconds(speed);
       const speedTraces = selected.map(m => ({
         x: m.distSeries.map(v => U.smallNum(v)), y: m.locInWin.map(r => paceComparison ? paceSeconds(r.speed) : U.speedNum(r.speed)),
         ...(paceComparison ? {
-          text: m.locInWin.map(r => paceSeconds(r.speed) == null ? '' : formatPace(paceSeconds(r.speed))),
+          text: m.locInWin.map(r => paceSeconds(r.speed) == null ? '' : formatChartPace(paceSeconds(r.speed))),
           hovertemplate: `%{text} ${paceUnit}<extra>%{fullData.name}</extra>`,
         } : {}),
         type: 'scatter', mode: 'lines',
         line: { color: m.color, width: 2 },
         name: m.tag,
       }));
-      const paceValues = paceComparison ? speedTraces.flatMap(t => t.y).filter(v => v != null) : [];
-      const paceTicks = [];
-      if (paceValues.length) {
-        const low = paceValues.reduce((a, b) => Math.min(a, b));
-        const high = paceValues.reduce((a, b) => Math.max(a, b));
-        const step = Math.max(30, Math.ceil((high - low) / 180) * 30);
-        for (let tick = Math.floor(low / step) * step; tick <= high + step; tick += step) paceTicks.push(tick);
-      }
+      const paceTicks = paceComparison ? chartPaceTicks(speedTraces.flatMap(t => t.y)) : [];
       loamPlot(`crossSpeedChart_${ci}`, speedTraces, {
         paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
         font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
@@ -21051,7 +21183,7 @@ function renderCrossRide({ perRide, clusters }) {
         xaxis: { title: { text: `distance (${U.smallUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
         yaxis: paceComparison ? {
           title: { text: `pace (${paceUnit})`, font: { size: 11 } }, gridcolor: '#e2e8f0',
-          autorange: 'reversed', tickmode: 'array', tickvals: paceTicks, ticktext: paceTicks.map(formatPace),
+          autorange: 'reversed', tickmode: 'array', tickvals: paceTicks, ticktext: paceTicks.map(formatChartPace),
         } : { title: { text: `speed (${U.speedUnit()})`, font: { size: 11 } }, gridcolor: '#e2e8f0' },
         legend: { x: 0, y: -0.32, orientation: 'h', font: { size: 10 } },
         hovermode: 'x unified',
@@ -21996,7 +22128,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runClimbsSection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -22231,6 +22363,11 @@ function liftWaveformSVG(sets, bx, by, bw, bh) {
    parameter and the `_liftSigChar` state behind it were left over from an earlier draft where the
    card drew an avatar; neither had selected anything for some time, and a `setLiftChar` nothing
    could call read as a picker somebody forgot to wire up rather than as a decision. */
+/* DELIBERATELY NOT TRANSLATED, and this is the one Lift-view surface that is not. The poster's
+   stencilled mono caps ('SETS', 'LIFT SIGNATURE', 'BETA · ESTIMATED') and its share caption are the
+   same design the ride, run, ski, swim, jump and golf cards carry, all of them English; translating
+   one of six would make the lift card the odd one out rather than make the set Norwegian. Its
+   siblings' turn is the change that should move it. */
 function liftSignatureSVG(D) {
   const sum = D.summary, sets = D.strength.sets, W = 800, H = 460;
   const bx = 36, by = 108, bw = W - 72, bh = H - 108 - 100;
@@ -22388,7 +22525,7 @@ function liftHistorySection(history) {
   const U = LoamStrength;
   const recs = history || [];
   const lifts = U.liftHistoryLifts(recs, 3);
-  const title = `<div class="section-title" style="margin-top:26px">Across your lifts</div>`;
+  const title = `<div class="section-title" style="margin-top:26px">${loamT('Across your lifts')}</div>`;
 
   if (!lifts.length) {
     const gap = U.liftHistoryGap(recs, 3);
@@ -22400,20 +22537,14 @@ function liftHistorySection(history) {
        loads are keyed by the recording's content hash, so opening one of them again brings back
        whatever was typed and takes the rest. Name the lift, count within it, and say which fix. */
     const wait = gap.reason === 'needLoads'
-      ? `Your ${escapeHtml(gap.best.lift)} has come up in ${gap.best.n} of your ${gap.sessions} saved
-         sessions, which is enough. What is missing is the weight, because this read is work done
-         &mdash; weight on the bar times reps &mdash; and
-         ${gap.best.nNoLoad === 1 ? 'one of those has' : `${gap.best.nNoLoad} of those have`} none typed in.
-         Fill the Weight column on ${gap.best.need} more of them and this fills in. The weights are
-         saved per recording, so opening one of those sessions again picks up where you left off.`
+      ? loamT(`Your {lift} has come up in {n} of your {sessions} saved sessions, which is enough. What is missing is the weight, because this read is work done &mdash; weight on the bar times reps &mdash; and {missing} none typed in. Fill the Weight column on {need} more of them and this fills in. The weights are saved per recording, so opening one of those sessions again picks up where you left off.`, {
+          lift: escapeHtml(liftNameLower(gap.best.lift) || gap.best.lift), n: gap.best.n, sessions: gap.sessions, need: gap.best.need,
+          missing: gap.best.nNoLoad === 1 ? loamT('one of those has') : loamT('{n} of those have', { n: gap.best.nNoLoad }) })
       : gap.reason === 'needLift'
-        ? `You have ${gap.sessions} lift sessions saved, but a lift is only compared against itself
-           (a squat and a curl share no scale), and no single lift has come up three times yet.`
-        : `${gap.sessions <= 1 ? 'This is the first one.' : `You have ${gap.sessions} so far, so ${gap.need} more to go.`}`;
+        ? loamT(`You have {sessions} lift sessions saved, but a lift is only compared against itself (a squat and a curl share no scale), and no single lift has come up three times yet.`, { sessions: gap.sessions })
+        : (gap.sessions <= 1 ? loamT('This is the first one.') : loamT('You have {sessions} so far, so {need} more to go.', { sessions: gap.sessions, need: gap.need }));
     return `${title}
-      <div class="strength-tablenote">Loam keeps each lift you analyze on this device, and once one
-        lift has come up in three sessions with the weight filled in, it shows what actually changed
-        between them: heavier bar, more reps, or neither. ${wait}</div>`;
+      <div class="strength-tablenote">${loamT('Loam keeps each lift you analyze on this device, and once one lift has come up in three sessions with the weight filled in, it shows what actually changed between them: heavier bar, more reps, or neither.')} ${wait}</div>`;
   }
 
   const lift = lifts[0];
@@ -22442,37 +22573,38 @@ function liftHistorySection(history) {
   }).join('');
 
   const others = lifts.slice(1);
-  const span = trend.spanDays != null ? ` over ${Math.round(trend.spanDays)} days` : '';
-  return `${title.replace('</div>', ` <span class="subtitle">${escapeHtml(lift)} &middot; ${trend.n} sessions${span}</span></div>`)}
+  const liftWord = escapeHtml(liftNameLower(lift) || lift);
+  const span = trend.spanDays != null ? loamT(' over {n} days', { n: Math.round(trend.spanDays) }) : '';
+  /* `read` comes from `liftHistoryRead`, drift-pinned to analyzer/sports/strength/history.js, so its
+     three sentences arrive in English and are looked up HERE -- the same rule the indoor-ski legs
+     table follows for the agitation module's motion word. Looked up BEFORE escaping, because the
+     lookup key is the module's own plain-text sentence. */
+  return `${title.replace('</div>', ` <span class="subtitle">${liftWord} &middot; ${loamT('{n} sessions', { n: trend.n })}${span}</span></div>`)}
     <div class="swim-hist-card">
-      <div class="swim-hist-h">${escapeHtml(read.label)}</div>
+      <div class="swim-hist-h">${escapeHtml(loamT(read.label))}</div>
       <div class="swim-hist-n">
-        <span>top set <b class="${cls(trend.loadPctChange)}">${arrow(trend.loadPctChange)}
+        <span>${loamT('top set')} <b class="${cls(trend.loadPctChange)}">${arrow(trend.loadPctChange)}
           ${trend.loadPctChange > 0 ? '+' : ''}${trend.loadPctChange}%</b></span>
-        <span>reps at it <b class="${cls(trend.repsPctChange)}">${arrow(trend.repsPctChange)}
+        <span>${loamT('reps at it')} <b class="${cls(trend.repsPctChange)}">${arrow(trend.repsPctChange)}
           ${trend.repsPctChange > 0 ? '+' : ''}${trend.repsPctChange}%</b></span>
-        ${trend.volumePctChange == null ? '' : `<span>total work <b class="${cls(trend.volumePctChange)}">${arrow(trend.volumePctChange)}
+        ${trend.volumePctChange == null ? '' : `<span>${loamT('total work')} <b class="${cls(trend.volumePctChange)}">${arrow(trend.volumePctChange)}
           ${trend.volumePctChange > 0 ? '+' : ''}${trend.volumePctChange}%</b></span>`}
       </div>
-      <p>${escapeHtml(read.mechanism)}</p>
-      <p class="swim-hist-a">${escapeHtml(read.action)}</p>
+      <p>${escapeHtml(loamT(read.mechanism))}</p>
+      <p class="swim-hist-a">${escapeHtml(loamT(read.action))}</p>
     </div>
     <div class="swim-tablewrap"><table class="strength-table">
-      <thead><tr><th>session</th><th>sets</th><th>top set</th><th>work</th><th>vs your median</th></tr></thead>
+      <thead><tr><th>${loamT('session')}</th><th>${loamT('sets')}</th><th>${loamT('top set')}</th><th>${loamT('work')}</th><th>${loamT('vs your median')}</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     ${leadNote(
-      `Your ${escapeHtml(lift)} sets only, because a lift is only comparable against itself.
-       ${others.length ? `You also have enough ${others.map(escapeHtml).join(' and ')} to trend; only your
-         most-lifted one is charted here.` : ''}
-       <strong>BETA, and the two halves are not equally solid:</strong> the weight is exactly what you
-       typed, the rep count is an estimate from wrist travel.`,
-      `That estimate's documented weak spot is the slow grinding rep &mdash; which is the one a heavy top
-       set produces &mdash; so a reading of "heavier, fewer reps" is both what a real strength block
-       looks like and what an under-count looks like, and nothing here can tell those apart. Correct any
-       set in the table above and this updates. No estimated one-rep max is shown: that would be a
-       formula fitted to other people, and this project does not put a number on screen it cannot stand
-       behind.`,
-      'strength-tablenote', 'What the rep count can get wrong')}`;
+      loamT('Your {lift} sets only, because a lift is only comparable against itself. {others}<strong>BETA, and the two halves are not equally solid:</strong> the weight is exactly what you typed, the rep count is an estimate from wrist travel.', {
+        lift: liftWord,
+        others: others.length
+          ? loamT('You also have enough {lifts} to trend; only your most-lifted one is charted here.',
+              { lifts: others.map((o) => escapeHtml(liftNameLower(o) || o)).join(loamT(' and ')) }) + ' '
+          : '' }),
+      loamT(`That estimate's documented weak spot is the slow grinding rep &mdash; which is the one a heavy top set produces &mdash; so a reading of "heavier, fewer reps" is both what a real strength block looks like and what an under-count looks like, and nothing here can tell those apart. Correct any set in the table above and this updates. No estimated one-rep max is shown: that would be a formula fitted to other people, and this project does not put a number on screen it cannot stand behind.`),
+      'strength-tablenote', loamT('What the rep count can get wrong'))}`;
 }
 function onLiftWeight(i, val) {
   const key = _liftD.key || '';
@@ -22513,15 +22645,37 @@ function onLiftWeight(i, val) {
  * nothing.
  *
  * Set numbers are 1-based to match `setRows` and the per-set table the lifter is looking at. */
-function liftRepSourceNote(sets) {
+/*
+ * `t` is the TRANSLATOR, injected rather than reached for, and that is what lets one set of sentence
+ * templates serve two callers with opposite requirements. The Lift view's caveat is read by a
+ * Norwegian and passes `loamT`; the coach digest's `notes` is read by a MODEL and passes nothing, so
+ * it keeps the English the coach's own language rule is written against. A `loamT` reference in the
+ * body would also break `analyzer/integration/lift-rep-source.test.js`, which rebuilds this function
+ * in a bare scope.
+ *
+ * Singular and plural are separate templates rather than one with a suffix rule, the same
+ * arrangement the indoor-ski entries use: Norwegian inflects where English does not, and "carr{ies|y}"
+ * is not a rule any other language has to share.
+ */
+function liftRepSourceNote(sets, t) {
   const list = sets || [];
+  const say = t || ((src, vars) => {
+    let out = src;
+    if (vars) for (const k of Object.keys(vars)) out = out.split('{' + k + '}').join(String(vars[k]));
+    return out;
+  });
   const nums = (src) => list.map((s, i) => (s.repSource || 'wrist') === src ? i + 1 : null).filter(n => n != null);
   const phone = nums('phone'), manual = nums('manual');
   if (!phone.length && !manual.length) return null;
-  const say = (ns) => (ns.length === 1 ? `Set ${ns[0]}` : `Sets ${ns.join(', ')}`);
   const parts = [];
-  if (phone.length) parts.push(`${say(phone)} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on ${phone.length === 1 ? 'that set' : 'those sets'} it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.`);
-  if (manual.length) parts.push(`${say(manual)} carr${manual.length === 1 ? 'ies' : 'y'} a rep count the LIFTER typed in to correct the counter. Treat ${manual.length === 1 ? 'it' : 'those'} as authoritative and never describe ${manual.length === 1 ? 'it' : 'them'} as something the watch measured.`);
+  if (phone.length) parts.push(say(phone.length === 1
+    ? 'Set {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on that set it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.'
+    : 'Sets {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on those sets it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.',
+    { sets: phone.join(', ') }));
+  if (manual.length) parts.push(say(manual.length === 1
+    ? 'Set {sets} carries a rep count the LIFTER typed in to correct the counter. Treat it as authoritative and never describe it as something the watch measured.'
+    : 'Sets {sets} carry a rep count the LIFTER typed in to correct the counter. Treat those as authoritative and never describe them as something the watch measured.',
+    { sets: manual.join(', ') }));
   return parts.join(' ');
 }
 
@@ -22686,20 +22840,24 @@ function liftGhostRead(plan, frame) {
 /* The complete path is a MODEL from the side-view skeleton; the moving dot/trail below shows where
    the replay is on that path. Naming it in the picture matters because the phone/watch do not measure
    fore-aft bar travel. */
-function liftBarGuideSVG(dmax, leanDeg, barPos, lift, tf, col) {
+/* `t` is the translator, injected rather than reached for: `spotter-cam.test.js` rebuilds this
+   function (and the two below) in a bare scope with no page globals, so a `loamT` reference here
+   would throw there. Undefined leaves the label in English, which is what that test reads. */
+function liftBarGuideSVG(dmax, leanDeg, barPos, lift, tf, col, t) {
   const pts = [];
   for (let i = 0; i <= 24; i++) pts.push(tf.T(liftSkeleton(dmax * i / 24, leanDeg, barPos, lift).bar));
   const d = 'M ' + pts.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ');
   return `<g class="lf-bar-guide"><path d="${d}" fill="none" stroke="${col}" stroke-width="1.5" stroke-opacity="0.38" stroke-dasharray="2 4"/>`
-    + `<text x="280" y="18" text-anchor="end" fill="${col}" fill-opacity="0.72" font-size="8" letter-spacing="1.1" font-family="'JetBrains Mono',monospace">MODELED BAR PATH</text></g>`;
+    + `<text x="280" y="18" text-anchor="end" fill="${col}" fill-opacity="0.72" font-size="8" letter-spacing="1.1" font-family="'JetBrains Mono',monospace">${(t || ((x) => x))('MODELED BAR PATH')}</text></g>`;
 }
 
 /* A squat target is something the lifter tapped, not a depth inferred from the animation. Draw it as
    a reference line only when that tap exists, and label it so the model never upgrades it to a claim. */
-function liftDepthTargetSVG(set, dmax, leanDeg, barPos, lift, tf) {
+function liftDepthTargetSVG(set, dmax, leanDeg, barPos, lift, tf, t) {
   if (lift !== 'squat' || !set || (set.depthTarget !== 'parallel' && set.depthTarget !== 'full')) return '';
   const y = tf.T(liftSkeleton(dmax, leanDeg, barPos, lift).bar).y;
-  const label = set.depthTarget === 'parallel' ? 'PARALLEL TARGET · TAPPED' : 'FULL TARGET · TAPPED';
+  const T = t || ((x) => x);
+  const label = set.depthTarget === 'parallel' ? T('PARALLEL TARGET · TAPPED') : T('FULL TARGET · TAPPED');
   const w = label.length * 4.9 + 10;
   return `<g class="lf-depth-target"><line x1="18" y1="${y.toFixed(1)}" x2="282" y2="${y.toFixed(1)}" stroke="#e0a458" stroke-width="1" stroke-opacity="0.55" stroke-dasharray="5 5"/>`
     + `<rect x="18" y="${(y - 14).toFixed(1)}" width="${w.toFixed(1)}" height="12" rx="3" fill="#0a0d07" fill-opacity="0.86"/>`
@@ -22713,10 +22871,10 @@ function liftDepthTargetSVG(set, dmax, leanDeg, barPos, lift, tf) {
    exactly where the ghost body stands rather than a pixel or two off it. Right-anchored, with its
    box BELOW the line, because the two lines coincide whenever rep 1 happens to be the set's median
    and their labels must not land on top of each other when they do. */
-function liftRefDepthSVG(refScale, targetDmax, leanDeg, barPos, lift, tf) {
+function liftRefDepthSVG(refScale, targetDmax, leanDeg, barPos, lift, tf, t) {
   if (!(refScale > 0)) return '';
   const y = tf.T(liftSkeleton(targetDmax * refScale, leanDeg, barPos, lift).bar).y;
-  const label = 'REP 1 DEPTH · MEASURED';
+  const label = (t || ((x) => x))('REP 1 DEPTH · MEASURED');
   const w = label.length * 4.9 + 10;
   return `<g class="lf-ref-depth"><line x1="18" y1="${y.toFixed(1)}" x2="282" y2="${y.toFixed(1)}" stroke="#8fd3ff" stroke-width="1" stroke-opacity="0.5" stroke-dasharray="2 5"/>`
     + `<rect x="${(282 - w).toFixed(1)}" y="${(y + 2).toFixed(1)}" width="${w.toFixed(1)}" height="12" rx="3" fill="#0a0d07" fill-opacity="0.86"/>`
@@ -22788,25 +22946,27 @@ function liftFormFrame(ts) {
     + liftCharDefs(c) + `</defs>`
     + `<rect width="300" height="320" rx="12" fill="url(#lfBg)"/>`
     + `<line x1="18" y1="300" x2="282" y2="300" stroke="#7fb069" stroke-opacity="0.25" stroke-width="2"/>`
-    + (() => { const mf = st.tf.T({ x: liftSkeleton(0, ln, bp, lk).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<g class="lf-midfoot"><line x1="${mf}" y1="300" x2="${mf}" y2="24" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/><text x="${(+mf + 4).toFixed(1)}" y="294" fill="#7fb069" fill-opacity="0.62" font-size="7.5" letter-spacing="0.8" font-family="'JetBrains Mono',monospace">MIDFOOT</text></g>`; })()
-    + liftDepthTargetSVG(set, targetDmax, ln, bp, lk, st.tf)
-    + liftBarGuideSVG(dmax, ln, bp, lk, st.tf, trailCol)
-    + (ghostRead ? liftRefDepthSVG(ghostRead.depthScale, targetDmax, ln, bp, lk, st.tf) : '')
+    + (() => { const mf = st.tf.T({ x: liftSkeleton(0, ln, bp, lk).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<g class="lf-midfoot"><line x1="${mf}" y1="300" x2="${mf}" y2="24" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/><text x="${(+mf + 4).toFixed(1)}" y="294" fill="#7fb069" fill-opacity="0.62" font-size="7.5" letter-spacing="0.8" font-family="'JetBrains Mono',monospace">${loamT('MIDFOOT')}</text></g>`; })()
+    + liftDepthTargetSVG(set, targetDmax, ln, bp, lk, st.tf, loamT)
+    + liftBarGuideSVG(dmax, ln, bp, lk, st.tf, trailCol, loamT)
+    + (ghostRead ? liftRefDepthSVG(ghostRead.depthScale, targetDmax, ln, bp, lk, st.tf, loamT) : '')
     + refGhost
     + ghosts
     + liftTrailSVG(st.trail, trailCol)
     + cur.markup
     + `</svg>`;
   const rc = document.getElementById('liftFormRep');
-  if (rc) rc.textContent = 'Rep ' + repNo + ' / ' + reps;
+  if (rc) rc.textContent = loamT('Rep {n} / {total}', { n: repNo, total: reps });
   const ph = document.getElementById('liftFormPhase');
-  if (ph) { ph.dataset.phase = frame.phase; ph.textContent = frame.phase; }
+  /* `frame.phase` is a wire token from the drift-pinned `liftRepFrame` and stays one on `dataset`
+     (the CSS selects on it); only the visible word is looked up. */
+  if (ph) { ph.dataset.phase = frame.phase; ph.textContent = liftPhaseWord(frame.phase); }
   /* `|| 0` is not defensive: Math.round(-0.4) is -0, which prints as "-0%". */
   const dd = document.getElementById('liftFormDepthDelta');
   if (dd) {
     const p = ghostRead && ghostRead.deltaPct != null ? (Math.round(ghostRead.deltaPct) || 0) : null;
-    dd.textContent = !ghostRead ? '' : ghostRead.isRef ? 'rep 1 · the reference'
-      : p == null ? '' : `depth ${p > 0 ? '+' : ''}${p}% vs rep 1`;
+    dd.textContent = !ghostRead ? '' : ghostRead.isRef ? loamT('rep 1 · the reference')
+      : p == null ? '' : loamT('depth {pct}% vs rep 1', { pct: (p > 0 ? '+' : '') + p });
   }
   if (st.playing) st.raf = requestAnimationFrame(liftFormFrame);
 }
@@ -22815,12 +22975,12 @@ function liftFormFrame(ts) {
    and bar speed above are still real; only the moving figure is withheld until that lift gets a pose. */
 function liftFormShowNoPose(set) {
   const stage = document.getElementById('liftFormStage');
-  const name = set.lift ? set.lift[0].toUpperCase() + set.lift.slice(1) : 'This lift';
+  const name = liftNameCap(set.lift) || loamT('This lift');
   if (stage) stage.innerHTML =
     `<div class="lf-nopose">
        <div class="lf-nopose-icon">🏋️</div>
-       <div class="lf-nopose-title">No form view for ${escapeHtml(name)} yet</div>
-       <div class="lf-nopose-sub">We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.</div>
+       <div class="lf-nopose-title">${loamT('No form view for {lift} yet', { lift: escapeHtml(name) })}</div>
+       <div class="lf-nopose-sub">${loamT('We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.')}</div>
      </div>`;
   const note = document.getElementById('liftFormNote'); if (note) note.textContent = '';
   const rc = document.getElementById('liftFormRep'); if (rc) rc.textContent = '';
@@ -22854,7 +23014,7 @@ function toggleLiftFormGhost() {
 function setLiftFormSet(i) { _liftForm.setIdx = +i; liftFormStart(); }
 function toggleLiftFormPlay() {
   _liftForm.playing = !_liftForm.playing;
-  const b = document.getElementById('liftFormPlay'); if (b) b.textContent = _liftForm.playing ? '❙❙ Pause' : '▶ Play';
+  const b = document.getElementById('liftFormPlay'); if (b) b.textContent = _liftForm.playing ? loamT('❙❙ Pause') : loamT('▶ Play');
   if (_liftForm.playing) { _liftForm.t0 = 0; _liftForm.raf = requestAnimationFrame(liftFormFrame); }
   else cancelAnimationFrame(_liftForm.raf);
 }
@@ -22867,43 +23027,50 @@ function renderLiftForm(D) {
     // High/low bar and full/parallel depth are squat concepts; a non-squat lift just names the lift.
     const isSquat = !s.lift || s.lift === 'squat';
     const detail = isSquat
-      ? `${s.lift ? 'squat · ' : ''}${s.barPosition === 'uncertain' || s.barPosition == null ? '?' : s.barPosition} bar · ${s.depthTarget || 'depth ?'}`
-      : s.lift;
-    return `<option value="${i}">Set ${i + 1} · ${detail}</option>`;
+      ? `${s.lift ? liftNameLower(s.lift) + ' · ' : ''}${s.barPosition === 'uncertain' || s.barPosition == null ? loamT('? bar') : loamT('{pos} bar', { pos: liftBarCap(s.barPosition).toLowerCase() })} · ${liftDepthCap(s.depthTarget) ? liftDepthCap(s.depthTarget).toLowerCase() : loamT('depth ?')}`
+      : liftNameLower(s.lift);
+    return `<option value="${i}">${loamT('Set {n}', { n: i + 1 })} · ${detail}</option>`;
   }).join('');
   document.getElementById('liftForm').innerHTML = `
-    <div class="lf-head"><span class="lf-title">Spotter Cam</span>
+    <div class="lf-head"><span class="lf-title">${loamT('Spotter Cam')}</span>
       <select class="lf-set" onchange="setLiftFormSet(this.value)">${setOpts}</select></div>
     <div id="liftFormStage" class="lf-stage"></div>
     <div class="lf-bar" id="liftFormControls">
-      <button id="liftFormPlay" class="lf-play" onclick="toggleLiftFormPlay()">❙❙ Pause</button>
-      <span class="lf-rep" id="liftFormRep">Rep 1 / 1</span>
-      <span class="lf-phase" id="liftFormPhase" data-phase="down">down</span>
-      <button id="liftFormGhost" class="lf-ghost" style="display:none" onclick="toggleLiftFormGhost()" title="Redraw your first rep behind the live one, at the same point in the movement">Rep 1 ghost</button>
+      <button id="liftFormPlay" class="lf-play" onclick="toggleLiftFormPlay()">${loamT('❙❙ Pause')}</button>
+      <span class="lf-rep" id="liftFormRep">${loamT('Rep {n} / {total}', { n: 1, total: 1 })}</span>
+      <span class="lf-phase" id="liftFormPhase" data-phase="down">${loamT('down')}</span>
+      <button id="liftFormGhost" class="lf-ghost" style="display:none" onclick="toggleLiftFormGhost()" title="${escapeHtml(loamT('Redraw your first rep behind the live one, at the same point in the movement'))}">${loamT('Rep 1 ghost')}</button>
       <span class="lf-delta" id="liftFormDepthDelta"></span>
       <span class="lf-chars">${chars}</span>
     </div>
-    <div class="lf-note" id="liftFormNote">Building the rep-by-rep replay…</div>`;
+    <div class="lf-note" id="liftFormNote">${loamT('Building the rep-by-rep replay…')}</div>`;
   liftFormStart();
 }
 /* Honest per-lift caption: squat, deadlift and curl have real poses (squat descent, hip hinge, elbow
    flexion); press/bench/dips/other have no dedicated pose yet, so the body is a neutral standing hold. */
 function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEnabled()) {
-  const clock = plan.cadenceMeasured ? 'Each rep follows its measured cadence.' : 'Replay timing uses the set\'s median tempo.';
-  const phases = plan.phasesMeasured ? ' Down and drive durations come from wrist motion.' : ' The down/drive split is modeled.';
-  const path = ' The side-view bar path is modeled, not measured fore-aft travel.';
-  if (set.lift === 'deadlift') return `Deadlift hip-hinge replay. ${clock}${phases}${path}`;
-  if (set.lift === 'curl') return `Curl elbow-flexion replay. ${clock}${phases}${path}`;
-  if (liftFormNoPose(set)) return `${set.lift[0].toUpperCase() + set.lift.slice(1)}: no dedicated form view yet, so this is a neutral standing hold, not the real ${set.lift} motion. Your reps and tempo are the real numbers.`;
+  /* Assembled from whole sentences joined by a space rather than from fragments carrying their own
+     leading one: a translation has to be free to reorder a clause, and an empty fragment must not
+     leave a double space behind it. Byte-identical in English either way. */
+  const join = (...bits) => bits.filter(Boolean).join(' ');
+  const clock = plan.cadenceMeasured ? loamT('Each rep follows its measured cadence.') : loamT('Replay timing uses the set\'s median tempo.');
+  const phases = plan.phasesMeasured ? loamT('Down and drive durations come from wrist motion.') : loamT('The down/drive split is modeled.');
+  const path = loamT('The side-view bar path is modeled, not measured fore-aft travel.');
+  if (set.lift === 'deadlift') return join(loamT('Deadlift hip-hinge replay.'), clock, phases, path);
+  if (set.lift === 'curl') return join(loamT('Curl elbow-flexion replay.'), clock, phases, path);
+  if (liftFormNoPose(set)) return loamT('{name}: no dedicated form view yet, so this is a neutral standing hold, not the real {lower} motion. Your reps and tempo are the real numbers.',
+    { name: liftNameCap(set.lift), lower: liftNameLower(set.lift) });
+  const target = liftDepthCap(set.depthTarget) ? liftDepthCap(set.depthTarget).toLowerCase() : null;
   const depth = plan.depthMeasured
-    ? ` Relative wrist depth is normalized to your set${set.depthTarget ? `\'s tapped ${set.depthTarget} target` : ''}.`
-    : (set.depthTarget ? ` The ${set.depthTarget} line is the target you tapped.` : ' No depth target was tapped.');
+    ? (target ? loamT('Relative wrist depth is normalized to your set\'s tapped {target} target.', { target })
+              : loamT('Relative wrist depth is normalized to your set.'))
+    : (target ? loamT('The {target} line is the target you tapped.', { target }) : loamT('No depth target was tapped.'));
   /* Naming the limit is the point: depth is the ONLY thing that differs between the two bodies, since
      the lean both of them are drawn at comes from a tap rather than a measurement. */
   const ghost = ghostOn && plan.depthMeasured && plan.reps.length > 1
-    ? ' The faint body behind you is rep 1 at the same point in the movement: only depth differs between reps, because torso lean is drawn from your taps rather than measured.'
+    ? loamT('The faint body behind you is rep 1 at the same point in the movement: only depth differs between reps, because torso lean is drawn from your taps rather than measured.')
     : '';
-  return `${clock}${phases}${depth}${ghost}${path}`;
+  return join(clock, phases, depth, ghost, path);
 }
 
 /* ---- Coach's read: a deterministic, on-device form read from the set facts (metric -> mechanism ->
@@ -22920,8 +23087,8 @@ function liftCoachRead(D) {
   if (withBs.length >= 2) {
     const first = withBs[0], last = withBs[withBs.length - 1];
     const drop = first > 0 ? (first - last) / first : 0;
-    if (drop >= 0.2) out.push({ head: 'Bar speed faded ' + Math.round(drop * 100) + '% across the session',
-      body: 'Slower concentric velocity late is fatigue, not weakness. Autoregulate: end a set when the bar slows past ~20% off your fastest rep, or drop a little load to keep every rep crisp.' });
+    if (drop >= 0.2) out.push({ head: loamT('Bar speed faded {pct}% across the session', { pct: Math.round(drop * 100) }),
+      body: loamT('Slower concentric velocity late is fatigue, not weakness. Autoregulate: end a set when the bar slows past ~20% off your fastest rep, or drop a little load to keep every rep crisp.') });
   }
   /* Depth consistency: mixing parallel and full is fine as a choice, but if the wrist ROM shrinks set
      to set at the same target, depth is quietly creeping up under fatigue. */
@@ -22929,22 +23096,25 @@ function liftCoachRead(D) {
   if (roms.length >= 3) {
     const early = roms.slice(0, Math.ceil(roms.length / 2)), late = roms.slice(-Math.floor(roms.length / 2));
     const em = early.reduce((a, b) => a + b, 0) / early.length, lm = late.reduce((a, b) => a + b, 0) / late.length;
-    if (em > 0 && (em - lm) / em >= 0.12) out.push({ head: 'Depth crept up as you fatigued',
-      body: 'Your bar range of motion shrank about ' + Math.round((em - lm) / em * 100) + '% in the later sets. Cut reps or load so the last set is as deep as the first, rather than trading depth for numbers.' });
+    if (em > 0 && (em - lm) / em >= 0.12) out.push({ head: loamT('Depth crept up as you fatigued'),
+      body: loamT('Your bar range of motion shrank about {pct}% in the later sets. Cut reps or load so the last set is as deep as the first, rather than trading depth for numbers.', { pct: Math.round((em - lm) / em * 100) }) });
   }
   /* Bar position read: low bar demands more forward lean; if the session mixes both, name the tradeoff. */
   const hb = sum.nHighBarSets || 0, lb = sum.nLowBarSets || 0;
-  if (hb && lb) out.push({ head: 'You trained both bar positions',
-    body: hb + ' high-bar and ' + lb + ' low-bar set' + (hb + lb > 1 ? 's' : '') + '. High bar keeps the torso upright (more quad, easier to stay over midfoot); low bar leans you forward for more hip and posterior chain. Keep them in separate blocks so the cue set is consistent.' });
+  /* Both counts are non-zero to reach here, so the total is always at least two and the old
+     singular branch could never render. Stated plural, which is what lets this be ONE translatable
+     sentence rather than one carrying an English plural suffix as a placeholder. */
+  if (hb && lb) out.push({ head: loamT('You trained both bar positions'),
+    body: loamT('{hb} high-bar and {lb} low-bar sets. High bar keeps the torso upright (more quad, easier to stay over midfoot); low bar leans you forward for more hip and posterior chain. Keep them in separate blocks so the cue set is consistent.', { hb, lb }) });
   /* Misses. */
   const misses = sets.reduce((n, s) => n + ((s.misses && s.misses.length) || 0), 0);
-  if (misses) out.push({ head: misses + ' missed rep' + (misses > 1 ? 's' : ''),
-    body: 'A miss is data: it marks where speed or depth broke down. If misses cluster in the last set, you found today\'s ceiling; leave 1-2 reps in reserve next time to train quality.' });
+  if (misses) out.push({ head: misses === 1 ? loamT('{n} missed rep', { n: misses }) : loamT('{n} missed reps', { n: misses }),
+    body: loamT('A miss is data: it marks where speed or depth broke down. If misses cluster in the last set, you found today\'s ceiling; leave 1-2 reps in reserve next time to train quality.') });
   /* Tempo. */
   const tempo = f(sum.medianTempoS, 1);
-  if (tempo != null && tempo < 2.0) out.push({ head: 'Quick tempo (' + tempo + 's / rep)',
-    body: 'Fast reps build power, but a controlled eccentric (2-3 s down) adds time under tension and control out of the hole. Try slowing the descent on your lighter sets.' });
-  if (!out.length) out.push({ head: 'Clean session', body: 'Consistent depth and bar speed across your sets. Add a little load or a rep next time and watch that the bar speed on the last set stays close to the first.' });
+  if (tempo != null && tempo < 2.0) out.push({ head: loamT('Quick tempo ({s}s / rep)', { s: tempo }),
+    body: loamT('Fast reps build power, but a controlled eccentric (2-3 s down) adds time under tension and control out of the hole. Try slowing the descent on your lighter sets.') });
+  if (!out.length) out.push({ head: loamT('Clean session'), body: loamT('Consistent depth and bar speed across your sets. Add a little load or a rep next time and watch that the bar speed on the last set stays close to the first.') });
   return out;
 }
 
@@ -24533,6 +24703,51 @@ function renderGolf(D) {
   renderCoachPanel(D, 'golf');
 }
 
+/* ----------------------------------------------------------------------------------------------
+   THE LIFT VIEW'S VOCABULARY, TRANSLATED AT THE RENDER SITE.
+
+   `parseSetMarks`, `analyzeStrength`, `computeStrengthSummary` and the whole of `history.js` are
+   drift-pinned to `analyzer/sports/strength/`, so every word they hand back is a bare English token
+   -- 'high', 'parallel', 'squat', 'heavier on the bar' -- and a `loamT` call inside any of those
+   bodies would throw ReferenceError in each guard that extracts it. Same arrangement the indoor-ski
+   view uses for `agitation.js`'s motion word: the module COMPUTES, this file WRITES TEXT.
+
+   A LIFT'S NAME IS ALSO A WIRE VALUE. `parseSetMarks` matches `s.lift` against the chip text the
+   capture app stamps into `annotation_text`, so only the DISPLAY is translated here and the stored
+   label never moves -- the rule this repo already states for the sport ids and the digest's field
+   names.
+
+   The keys are the CAPITALIZED CHIP NAMES ('Squat', 'High', 'Parallel'), which is what
+   `ios/Resources/Localizable.xcstrings` already keys the same words by, so one word is translated
+   once across the two halves of the app. Lowercased at the call sites that want a lowercase word,
+   which both languages survive ('Parallel' -> 'parallel', 'Parallell' -> 'parallell'). */
+function liftBarCap(p) { return p === 'high' ? loamT('High') : p === 'low' ? loamT('Low') : loamT('Uncertain'); }
+/* `liftRepFrame`'s phase tokens, named one at a time rather than looked up through the variable: a
+   key only a variable can reach is a key the copy-table sweep cannot audit. */
+function liftPhaseWord(phase) {
+  return phase === 'down' ? loamT('down') : phase === 'drive' ? loamT('drive')
+    : phase === 'lockout' ? loamT('lockout') : phase;
+}
+/* Null for an untapped set, so a caller can tell "no depth was tapped" from a depth that was. */
+function liftDepthCap(t) { return t === 'full' ? loamT('Full') : t === 'parallel' ? loamT('Parallel') : null; }
+/* An unlabelled set is analyzed as a squat and must not be PRINTED as one, so an absent lift returns
+   null rather than the default the analysis applies. `LIFT_LABELS` in
+   analyzer/sports/strength/annotations.js is the full list this mirrors; an unrecognized label falls
+   through to itself, which is right for a lift the picker gained after this table was written. */
+const LIFT_NAME_KEYS = {
+  'squat': 'Squat', 'deadlift': 'Deadlift', 'press': 'Press', 'bench': 'Bench', 'curl': 'Curl',
+  'clean': 'Clean', 'row': 'Row', 'pull-up': 'Pull-up', 'chin-up': 'Chin-up', 'dips': 'Dips',
+  'front squat': 'Front squat', 'romanian deadlift': 'Romanian deadlift', 'hip thrust': 'Hip thrust',
+  'lunge': 'Lunge', 'lateral raise': 'Lateral raise', 'triceps extension': 'Triceps extension',
+  'calf raise': 'Calf raise', 'other': 'Other',
+};
+function liftNameCap(lift) {
+  if (!lift) return null;
+  const key = LIFT_NAME_KEYS[String(lift).toLowerCase()];
+  return key ? loamT(key) : String(lift).charAt(0).toUpperCase() + String(lift).slice(1);
+}
+function liftNameLower(lift) { const n = liftNameCap(lift); return n == null ? null : n.toLowerCase(); }
+
 function renderStrength(D) {
   _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
   /* The header's Calibration selector belongs to the body-frame path and is only ever un-hidden by
@@ -24560,10 +24775,10 @@ function renderStrength(D) {
      state that points at the fix instead. */
   if (!sets.length) {
     document.getElementById('strengthResults').innerHTML = `
-      <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>Lift</span></span> <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+      <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
       <div class="panel" style="padding:24px;text-align:center">
-        <div class="s-big">No sets detected</div>
-        <div class="strength-scope" style="margin-top:10px">This recording was tagged as a lift, but no sets were found. Tap <strong>Start set</strong> at the top of each working set when you record (the analyzer segments sets from those taps), otherwise the motion was too quiet or short to auto-segment. Reps count from wrist vertical travel, so wear the watch for the fullest read.</div>
+        <div class="s-big">${loamT('No sets detected')}</div>
+        <div class="strength-scope" style="margin-top:10px">${loamT('This recording was tagged as a lift, but no sets were found. Tap <strong>Start set</strong> at the top of each working set when you record (the analyzer segments sets from those taps), otherwise the motion was too quiet or short to auto-segment. Reps count from wrist vertical travel, so wear the watch for the fullest read.')}</div>
       </div>`;
     return;
   }
@@ -24585,17 +24800,17 @@ function renderStrength(D) {
      The baseline set(s) therefore read 0 by construction, so show them as "ref" rather than a bare 0 that
      looks like "no lean," and prefix the rest with "+" to signal "this much more forward than your uprightest set". */
   const leanCell = v => v == null ? '—'
-    : v <= 0.5 ? '<span style="color:var(--text-muted, #7a808c)" title="most upright set (baseline)">ref</span>'
+    : v <= 0.5 ? `<span style="color:var(--text-muted, #7a808c)" title="${escapeHtml(loamT('most upright set (baseline)'))}">${loamT('ref')}</span>`
     : '+' + v.toFixed(0) + '°';
 
   const blocks = sets.map((s, i) => {
     const col = barColor(s.barPosition);
     const bs = barSpd(s);
     return `<div class="setblock" style="border-top:4px solid ${col}">
-      <div class="setblock-n">SET ${i + 1}${corr[i] != null ? ' <span class="setblock-edit" title="Rep count corrected by you">edited</span>' : ''}</div>
-      <div class="setblock-reps">${s.reps}<span>reps</span></div>
-      <div class="setblock-bar" style="color:${col}">${(s.barPosition === 'uncertain' || s.barPosition == null) ? '? bar' : s.barPosition + ' bar'}</div>
-      <div class="setblock-depth">${depthIcon(s.depthTarget)} ${s.depthTarget || 'depth ?'}</div>
+      <div class="setblock-n">${loamT('SET {n}', { n: i + 1 })}${corr[i] != null ? ` <span class="setblock-edit" title="${escapeHtml(loamT('Rep count corrected by you'))}">${loamT('edited')}</span>` : ''}</div>
+      <div class="setblock-reps">${s.reps}<span>${loamT('reps')}</span></div>
+      <div class="setblock-bar" style="color:${col}">${(s.barPosition === 'uncertain' || s.barPosition == null) ? loamT('? bar') : loamT('{pos} bar', { pos: liftBarCap(s.barPosition).toLowerCase() })}</div>
+      <div class="setblock-depth">${depthIcon(s.depthTarget)} ${liftDepthCap(s.depthTarget) ? liftDepthCap(s.depthTarget).toLowerCase() : loamT('depth ?')}</div>
       <div class="setblock-bs">${bs != null ? f(bs) + ' m/s' : ''}</div>
     </div>`;
   }).join('');
@@ -24607,31 +24822,31 @@ function renderStrength(D) {
     const xy = (v, i) => `${n > 1 ? (i / (n - 1)) * W : W / 2},${(H - (v / mx) * (H - 6) - 3).toFixed(1)}`;
     const pts = bsVals.map((v, i) => v != null ? xy(v, i) : null).filter(Boolean).join(' ');
     const dots = bsVals.map((v, i) => v != null ? `<circle cx="${xy(v, i).split(',')[0]}" cy="${xy(v, i).split(',')[1]}" r="1.6" fill="${HIGH}"/>` : '').join('');
-    trend = `<svg class="bs-trend" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${HIGH}" stroke-width="1.4"/>${dots}</svg><div class="bs-trend-lbl">bar speed per set (m/s) — watch for a fade</div>`;
+    trend = `<svg class="bs-trend" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${HIGH}" stroke-width="1.4"/>${dots}</svg><div class="bs-trend-lbl">${loamT('bar speed per set (m/s) — watch for a fade')}</div>`;
   }
 
   const tile = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div></div>`;
   const nFull = sets.filter(s => s.depthTarget === 'full').length;
   const nPar = sets.filter(s => s.depthTarget === 'parallel').length;
   const tiles = [
-    tile(sum.nSets, 'sets'),
-    tile(sum.nReps, 'reps'),
-    tile(sum.nHighBarSets + ' / ' + sum.nLowBarSets, 'high / low bar'),
-    tile(nFull + ' / ' + nPar, 'full / parallel'),
-    sum.hasBarSpeed ? tile(f(sum.meanBarSpeedMps), 'mean bar m/s') : tile('—', 'bar speed (watch)'),
-    tile(sum.medianTempoS != null ? f(sum.medianTempoS, 1) + 's' : '—', 'tempo / rep'),
-    tile('<span id="liftVolTile">' + (volKg > 0 ? fmtVol(volKg) : '—') + '</span>', 'volume (load × reps)'),
-    sum.hrAvg != null ? tile(sum.hrAvg + ' / ' + sum.hrMax, 'hr avg / max') : '',
+    tile(sum.nSets, loamT('sets')),
+    tile(sum.nReps, loamT('reps')),
+    tile(sum.nHighBarSets + ' / ' + sum.nLowBarSets, loamT('high / low bar')),
+    tile(nFull + ' / ' + nPar, loamT('full / parallel')),
+    sum.hasBarSpeed ? tile(f(sum.meanBarSpeedMps), loamT('mean bar m/s')) : tile('—', loamT('bar speed (watch)')),
+    tile(sum.medianTempoS != null ? f(sum.medianTempoS, 1) + 's' : '—', loamT('tempo / rep')),
+    tile('<span id="liftVolTile">' + (volKg > 0 ? fmtVol(volKg) : '—') + '</span>', loamT('volume (load × reps)')),
+    sum.hrAvg != null ? tile(sum.hrAvg + ' / ' + sum.hrMax, loamT('hr avg / max')) : '',
   ].filter(Boolean).join('');
 
   const rows = sets.map((s, i) => {
     const bs = barSpd(s);
     return `<tr>
       <td>${i + 1}</td>
-      <td><input class="rep-in${corr[i] != null ? ' rep-corr' : ''}" type="number" inputmode="numeric" min="0" step="1" value="${s.reps}" title="${corr[i] != null ? 'Corrected by you (auto counted ' + autoSets[i].reps + '). Clear the field to reset to the counter.' : 'Auto rep count. Edit to correct a miscount; clear to reset.'}" onchange="onLiftReps(${i}, this.value)"></td>
+      <td><input class="rep-in${corr[i] != null ? ' rep-corr' : ''}" type="number" inputmode="numeric" min="0" step="1" value="${s.reps}" title="${escapeHtml(corr[i] != null ? loamT('Corrected by you (auto counted {n}). Clear the field to reset to the counter.', { n: autoSets[i].reps }) : loamT('Auto rep count. Edit to correct a miscount; clear to reset.'))}" onchange="onLiftReps(${i}, this.value)"></td>
       <td><input class="wt-in" type="number" inputmode="decimal" min="0" step="any" value="${weights[i] != null ? kgToDisp(weights[i]) : ''}" placeholder="—" onchange="onLiftWeight(${i}, this.value)"></td>
-      <td style="color:${barColor(s.barPosition)};text-transform:capitalize">${s.barPosition || '—'}</td>
-      <td style="text-transform:capitalize">${s.depthTarget || '—'}</td>
+      <td style="color:${barColor(s.barPosition)};text-transform:capitalize">${s.barPosition ? liftBarCap(s.barPosition) : '—'}</td>
+      <td style="text-transform:capitalize">${liftDepthCap(s.depthTarget) || '—'}</td>
       <td>${s.tempoS != null ? f(s.tempoS, 1) + 's' : '—'}</td>
       <td>${s.romMeters != null ? (s.romMeters * 100).toFixed(0) + ' cm' : '—'}</td>
       <td>${bs != null ? f(bs) : '—'}</td>
@@ -24653,43 +24868,46 @@ function renderStrength(D) {
     const bars = cv.map((v, k) => {
       const h = Math.max(2, (v / mx) * (H - 3));
       const fr = v / mx, col = fr > 0.85 ? '#37c6b5' : fr > 0.62 ? '#e0c34a' : '#f0954f';
-      const dcm = dep[k] != null ? ', ' + (dep[k] * 100).toFixed(0) + ' cm' : '';
-      return `<rect x="${(k * bw + 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${col}"><title>rep ${k + 1}: ${f(v)} m/s${dcm}</title></rect>`;
+      const dcm = dep[k] != null ? loamT(', {cm} cm', { cm: (dep[k] * 100).toFixed(0) }) : '';
+      return `<rect x="${(k * bw + 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${col}"><title>${loamT('rep {n}: {v} m/s', { n: k + 1, v: f(v) })}${dcm}</title></rect>`;
     }).join('');
     const depStr = dep.length ? dep.map(d => (d * 100).toFixed(0)).join(' · ') + ' cm' : '';
     const tempoStr = (s.eccS != null && s.conS != null)
-      ? `<div class="rep-tempo">tempo ≈ ${f(s.eccS, 1)}s <span class="rt-ecc">down</span> · ${f(s.conS, 1)}s <span class="rt-con">up</span></div>` : '';
+      ? `<div class="rep-tempo">${loamT('tempo ≈')} ${f(s.eccS, 1)}s <span class="rt-ecc">${loamT('down')}</span> · ${f(s.conS, 1)}s <span class="rt-con">${loamT('up')}</span></div>` : '';
     return `<div class="rep-set">
-      <div class="rep-set-head">Set ${i + 1} · ${s.reps} reps${vloss >= 8 ? ` · <span class="rep-fade">${vloss}% fade</span>` : ''}</div>
+      <div class="rep-set-head">${loamT('Set {n}', { n: i + 1 })} · ${loamT('{n} reps', { n: s.reps })}${vloss >= 8 ? ` · <span class="rep-fade">${loamT('{pct}% fade', { pct: vloss })}</span>` : ''}</div>
       <svg class="rep-bars" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bars}</svg>
-      ${depStr ? `<div class="rep-depths">depth ${depStr}</div>` : ''}
+      ${depStr ? `<div class="rep-depths">${loamT('depth {list}', { list: depStr })}</div>` : ''}
       ${tempoStr}
     </div>`;
   }).filter(Boolean).join('');
 
   const hasBar = sets.some(s => s.barPosition === 'high' || s.barPosition === 'low');
-  const barArc = sets.map(s => (s.barPosition === 'uncertain' || s.barPosition == null) ? '?' : s.barPosition[0].toUpperCase()).join(' → ');
+  /* One initial per set. Taken from the TRANSLATED word so a Norwegian session reads H/L off
+     Høy/Lav rather than off the wire tokens the module stores. */
+  const barArc = sets.map(s => (s.barPosition === 'uncertain' || s.barPosition == null) ? '?' : liftBarCap(s.barPosition).charAt(0).toUpperCase()).join(' → ');
 
+  const repSourceNote = liftRepSourceNote(sets, loamT);   // null unless a set came from the phone or was corrected by hand
   const readCards = liftCoachRead(Dc).map(c => `<div class="lc-card"><div class="lc-head">${escapeHtml(c.head)}</div><div class="lc-body">${escapeHtml(c.body)}</div></div>`).join('');
 
   document.getElementById('strengthResults').innerHTML = `
-    <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>Lift</span></span> <span class="beta-badge">BETA</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+    <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
     ${leadNote(
-      `Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`,
-      `Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.`,
-      'strength-scope', 'Which lifts count, and why')}
+      loamT(`Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`),
+      loamT(`Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.`),
+      'strength-scope', loamT('Which lifts count, and why'))}
     <div id="liftSignature" class="lift-sig"></div>
     <div class="lift-sig-bar">
-      <span class="lift-sig-cap">Your session as a rep trace — teal high bar, amber low bar. Share it.</span>
-      <span class="lift-unit-toggle" title="Weight units">
+      <span class="lift-sig-cap">${loamT('Your session as a rep trace — teal high bar, amber low bar. Share it.')}</span>
+      <span class="lift-unit-toggle" title="${escapeHtml(loamT('Weight units'))}">
         <button class="${liftUnit() === 'lb' ? 'on' : ''}" onclick="setLiftUnitPref('lb')">lb</button><button class="${liftUnit() === 'kg' ? 'on' : ''}" onclick="setLiftUnitPref('kg')">kg</button>
       </span>
-      <button class="lift-sig-save" onclick="saveLiftSignature()" title="Share this card with friends">Share card</button>
+      <button class="lift-sig-save" onclick="saveLiftSignature()" title="${escapeHtml(loamT('Share this card with friends'))}">${loamT('Share card')}</button>
     </div>
     <div class="lift-form-row">
       <div id="liftForm" class="panel lift-form"></div>
       <div class="panel lift-coach">
-        <div class="lc-title">Coach's read</div>
+        <div class="lc-title">${loamT("Coach's read")}</div>
         ${readCards}
       </div>
     </div>
@@ -24698,25 +24916,38 @@ function renderStrength(D) {
         <div class="setmap-scroll"><div class="setmap" style="--nsets:${sets.length}">${blocks}${trend}</div></div>
       </div>
       <div class="panel strength-stats" style="padding:18px">
-        <div class="s-big">${sum.nReps} <span>reps</span> · ${sum.nSets} <span>sets</span></div>
-        ${hasBar ? `<div class="s-sub">${barArc} bar</div>` : ''}
+        <div class="s-big">${sum.nReps} <span>${loamT('reps')}</span> · ${sum.nSets} <span>${loamT('sets')}</span></div>
+        ${hasBar ? `<div class="s-sub">${loamT('{arc} bar', { arc: barArc })}</div>` : ''}
         <div class="stiles">${tiles}</div>
       </div>
     </div>
     <div class="panel" style="padding:6px 12px;overflow-x:auto">
       <table class="strength-table"><thead><tr>
-        <th>Set</th><th title="Auto-counted from wrist motion; edit any cell to correct a miscount">Reps <span class="th-hint">edit</span></th><th>Weight (${liftUnit()})</th><th>Bar</th><th>Depth</th><th>Tempo</th><th title="Bar range of motion">ROM</th><th>Bar m/s</th><th title="Forward torso lean relative to your most-upright set (squat). Not an absolute angle: 'ref' is the baseline set, '+N°' leans that much more forward.">Lean Δ</th><th title="Time under tension (set span)">TUT</th><th>Miss</th>
+        <th>${loamT('Set')}</th><th title="${escapeHtml(loamT('Auto-counted from wrist motion; edit any cell to correct a miscount'))}">${loamT('Reps')} <span class="th-hint">${loamT('edit')}</span></th><th>${loamT('Weight ({unit})', { unit: liftUnit() })}</th><th>${loamT('Bar')}</th><th>${loamT('Depth')}</th><th>${loamT('Tempo')}</th><th title="${escapeHtml(loamT('Bar range of motion'))}">${loamT('ROM')}</th><th>${loamT('Bar m/s')}</th><th title="${escapeHtml(loamT("Forward torso lean relative to your most-upright set (squat). Not an absolute angle: 'ref' is the baseline set, '+N°' leans that much more forward."))}">${loamT('Lean Δ')}</th><th title="${escapeHtml(loamT('Time under tension (set span)'))}">${loamT('TUT')}</th><th>${loamT('Miss')}</th>
       </tr></thead><tbody>${rows}</tbody></table>
-      <div class="strength-tablenote"><strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set (<span style="color:var(--text-muted, #7a808c)">ref</span>), not an absolute angle. Counter off? Edit a set's <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.</div>
+      <div class="strength-tablenote">${loamT('<strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set ({ref}), not an absolute angle. Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.', { ref: `<span style="color:var(--text-muted, #7a808c)">${loamT('ref')}</span>` })}</div>
     </div>
     ${repBlocks ? `<div class="panel" style="padding:14px 16px">
-      <div class="rep-detail-title">Rep by rep <span class="subtitle">bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.</span></div>
+      <div class="rep-detail-title">${loamT('Rep by rep')} <span class="subtitle">${loamT('bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.')}</span></div>
       <div class="rep-detail-grid">${repBlocks}</div>
     </div>` : ''}
     <div id="liftHistoryPanel">${liftHistorySection(liftHistory)}</div>
     ${betaCaveat(
-      `treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> ${sum.hasBarSpeed ? '' : 'Bar speed needs the watch and was not recorded. '}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.`,
-      `${liftRepSourceNote(sets) ? liftRepSourceNote(sets) + ' Everywhere else, reps' : 'Reps'}, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps. The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus two ground-truth squat sessions. It has also been run against a recording of someone standing still and not lifting at all, which it wrongly reported as sets and reps -- so it can mistake standing about for a set, and that is why this stays BETA. A lift is stationary, so there is no GPS map, turns, or jumps.`)}
+      loamT('treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> {barSpeed}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.',
+        { barSpeed: sum.hasBarSpeed ? '' : loamT('Bar speed needs the watch and was not recorded. ') }),
+      /* The instrument sentence is TWO whole keys rather than one carrying a `{source}` clause.
+         English can splice "Reps" or "... Everywhere else, reps" into the same sentence because the
+         word order does not move; Norwegian puts the verb second, so the two readings are two
+         sentences ("Reps, tempo ... kommer fra" against "Ellers kommer reps, tempo ... fra") and a
+         single key would have had to pick one and be wrong in the other branch.
+         `liftRepSourceNote` also writes the MODEL-FACING digest note and must stay English there, so
+         it takes the lookup as an argument rather than reaching for one. */
+      [repSourceNote,
+       repSourceNote
+         ? loamT('Everywhere else, reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps.')
+         : loamT('Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps.'),
+       loamT('The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus two ground-truth squat sessions. It has also been run against a recording of someone standing still and not lifting at all, which it wrongly reported as sets and reps -- so it can mistake standing about for a set, and that is why this stays BETA. A lift is stationary, so there is no GPS map, turns, or jumps.'),
+      ].filter(Boolean).join(' '))}
   `;
   renderLiftSignature(Dc);
   renderLiftForm(Dc);
@@ -26364,14 +26595,17 @@ function swimShortPoolNote(s) {
  *
  * `summaryLabel` is the disclosure's own text and should name what is inside rather than say
  * "more": a reader deciding whether to spend the tap wants to know if the answer is in there. */
-function leadNote(lead, rest, cls = 'strength-tablenote', summaryLabel = 'How to read this') {
+function leadNote(lead, rest, cls = 'strength-tablenote', summaryLabel = loamT('How to read this')) {
   return `<div class="${cls}">${lead}
     <details class="caveat-more"><summary>${summaryLabel}</summary>${rest}</details>
   </div>`;
 }
 
+/* "Beta" is the same word in both languages, so only the disclosure's label goes through the
+   lookup. The two callers that are translated (the Lift view, here) pass translated bodies; the
+   ones that are not still read English throughout, which is the fallback working as designed. */
 function betaCaveat(lead, rest) {
-  return leadNote(`<strong>Beta:</strong> ${lead}`, rest, 'strength-caveat', 'Why, and what would change it');
+  return leadNote(`<strong>Beta:</strong> ${lead}`, rest, 'strength-caveat', loamT('Why, and what would change it'));
 }
 
 function foldSection(key, title, subtitle, bodyHtml, defaultOpen) {
@@ -26876,17 +27110,22 @@ function renderRunDistanceReads(D) {
   const rows = (D.sensors && D.sensors.location) || [];
   const hrRows = (D.sensors && D.sensors.heartRate) || [];
   const splits = computeSplits(rows, D.ride, unitM, hrRows);
+  /* Hoisted above the splits render because the TABLE grades its rows from this series too, and it
+     has to be the same one the pacing verdict below is adjusted with -- see `splitGradePct`. */
+  const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
+  /* Whichever cadence series the analysis settled on (walk band, then wrist, then AirPods, then the
+     phone), so the per-split column, the tile and the chart all name one sensor. */
+  const cadSeries = (D.running && D.running.cadSeries) || [];
   /* The drift figure comes from the summary, which measured it, rather than from the gap between
      two distances. Both now exclude standing hops under the same rule, so that gap is ~0 and the
      note it used to drive would have quietly stopped appearing. */
-  renderRunSplits(splits, unitLabel, (D.summary || {}).driftDistance);
+  renderRunSplits(splits, unitLabel, (D.summary || {}).driftDistance, { alts, cadSeries });
   /* Best efforts sit under the splits table on purpose: they answer the question the table above
      raises but cannot settle ("so how fast can I run a mile"), and reading them side by side is
      what makes the difference between the two obvious. */
   renderRunBestEfforts(computeBestEfforts(rows, D.ride), splits);
   /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
      grade adjustment and the GAP column can never disagree about the hill. */
-  const alts = climbAltSeries((D.sensors && D.sensors.baro) || [], rows, D.ride);
   renderRunPacing(runPacing(splits, alts), unitLabel,
     stridePaceFactors(splits, (D.sensors && D.sensors.pedometer) || []));
 }
@@ -26971,8 +27210,7 @@ function renderAllRunning(D) {
   renderRunDecoupling(D);
   renderHrZones(D);
   renderRecordingQuality(D);
-  renderRunClimbs(D.running.climbs || []);
-  renderRunSegments(D.running.segments);
+  renderRunSegments(D.running.segments, D.running.climbs || []);
   renderRunParams(D);
   currentRide = D.ride;
   renderRunsPanel(D);
@@ -27078,11 +27316,9 @@ function renderAllGps(D) {
         + `. These are the ${device}'s own numbers, not recomputed here, so they match what your ${device} shows.`
         + (dropped ? ` ${dropped} more ${dropped === 1 ? 'lap fell' : 'laps fell'} outside the trimmed window and ${dropped === 1 ? 'is' : 'are'} not shown.` : '')
       : '', { foot }); }
-  if (foot) {
-    renderRunClimbs((D.running && D.running.climbs) || []);
-    renderRunDecoupling(D);
-  }
-  renderRunSegments(D.segments, { motionColumns: false });
+  if (foot) renderRunDecoupling(D);
+  renderRunSegments(D.segments, foot ? ((D.running && D.running.climbs) || []) : [],
+                    { motionColumns: false });
   renderGpsParams(D);
   currentRide = D.ride;
   renderRunsPanel(D);
@@ -28125,8 +28361,10 @@ function renderDescentComparison(D) {
       row('Window start', first.startT, second.startT, v => `${Math.round(v)}s`, null) +
       row('Duration', first.duration, second.duration, v => `${v.toFixed(1)}s`, 'lower') +
       row('Distance', first.distance, second.distance, v => U.dist(v), 'higher') +
-      row('Avg pace', first.avgSpeed, second.avgSpeed, v => U.pace(v), 'lower') +
-      row('Max pace', first.maxSpeed, second.maxSpeed, v => U.pace(v), 'lower') +
+      /* SPEEDS formatted as pace, so the faster descent is the HIGHER value here even though its pace
+         reads lower. 'lower' coloured the slower descent green. */
+      row('Avg pace', first.avgSpeed, second.avgSpeed, v => U.pace(v), 'higher') +
+      row('Max pace', first.maxSpeed, second.maxSpeed, v => U.pace(v), 'higher') +
       row('Avg cadence', first.avgCadence, second.avgCadence, v => v ? `${v.toFixed(0)} SPM` : '—', null);
   } else {
     tbody.innerHTML =
@@ -28159,31 +28397,16 @@ function renderDescentComparison(D) {
     }
     return out;
   }
-  const formatPace = (p) => {
-    const rounded = Math.round(p);
-    return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
-  };
-  const paceSeconds = (mps) => (mps != null && !isNaN(mps) && mps >= 1.0) ? (U.metric() ? 1000 / mps : 1609.34 / mps) / 60 : null;
-  const paceValues = footSport ? [] : null;
-  const paceTicks = [];
+  /* Seconds per km / mile, NOT minutes: see chartPaceSeconds. The 1.0 m/s floor is this chart's own. */
+  const formatPace = formatChartPace;
+  const paceSeconds = (mps) => chartPaceSeconds(mps, 1.0);
   const distAraw = distSeries(A), distBraw = distSeries(B);
   const toY = (v) => (footSport ? paceSeconds(v) : (v != null ? U.speedNum(v) : null));
   const distA = distAraw.map(U.smallNum);
   const distB = distBraw.map(U.smallNum);
   const speedA = A.speed.map(toY);
   const speedB = B.speed.map(toY);
-  if (footSport) {
-    for (const v of [...A.speed, ...B.speed]) {
-      const p = paceSeconds(v);
-      if (p != null) paceValues.push(p);
-    }
-    if (paceValues.length) {
-      const low = paceValues.reduce((a, b) => Math.min(a, b));
-      const high = paceValues.reduce((a, b) => Math.max(a, b));
-      const step = Math.max(30, Math.ceil((high - low) / 180) * 30);
-      for (let tick = Math.floor(low / step) * step; tick <= high + step; tick += step) paceTicks.push(tick);
-    }
-  }
+  const paceTicks = footSport ? chartPaceTicks([...speedA, ...speedB]) : [];
 
   const speedTraces = [
     { x: distA, y: speedA, type: 'scatter', mode: 'lines',
@@ -28654,6 +28877,258 @@ const LOAM_NB = {
     'Tyngdekraften lagt tilbake til akselerometeret gir kraften kroppen bærer: 1,0 g stående, mer i en sving. Sidedelen er svingens egen belastning. Heisen og turen bort til den ligger nær null; en skåret sving gjør det ikke. Enkelttopper når flere g på skjelving og landinger og er ikke svinger, så 90-persentilen er det som tegnes.',
   'Heart rate': 'Puls',
 
+  /* --- The Lift view (renderStrength and its panels) -----------------------------------------------
+     Every string the BETA Lift view writes, including both caveats in full: rep counts, depth, bar
+     position and bar speed are estimates, and one of them records that the detector has been run
+     against a recording of somebody standing still and called it a lift -- a Norwegian reader losing
+     that sentence would be handed the numbers as facts.
+
+     THE LIFTING VOCABULARY IS ADOPTED, NOT INVENTED. knebøy / markløft / benkpress / stangfart /
+     stangplassering / høy stang / lav stang / sett / reps are the words
+     `ios/Resources/Localizable.xcstrings` already ships for this sport, and the two halves of the
+     app must not name one thing twice. The capitalized lift and bar/depth words are keyed by the
+     CHIP NAME for the same reason, so a word is translated once across both sides.
+
+     The words the modules hand back as bare English tokens ('high', 'parallel', 'squat',
+     'heavier on the bar') are looked up at the render site: `analyzeStrength`,
+     `computeStrengthSummary`, `parseSetMarks` and `history.js` are drift-pinned and a lookup inside
+     any of their bodies would throw in every guard that extracts it.
+
+     Entries identical in both languages ('BETA', 'reps', 'Reps', 'Tempo', 'ROM', 'TUT', 'ref',
+     'tempo / rep', 'rep {n}: {v} m/s', 'Rep {n} / {total}', 'Spotter Cam', 'lockout',
+     '❙❙ Pause') are deliberately absent -- a miss falls back to the English source, which is
+     the same text. The lift NAMES are the exception: they are all listed, identical or not, so
+     `analyzer/core/i18n/analyzer-nb.test.js` can assert `LIFT_NAME_KEYS` is covered end to end
+     rather than sampled. */
+  'Lift': 'Styrke',
+  'Lift loaded ({sets} sets · {reps} reps{barSpeed})': 'Styrkeøkt lastet ({sets} sett · {reps} reps{barSpeed})',
+  'No sets detected': 'Ingen sett funnet',
+  'This recording was tagged as a lift, but no sets were found. Tap <strong>Start set</strong> at the top of each working set when you record (the analyzer segments sets from those taps), otherwise the motion was too quiet or short to auto-segment. Reps count from wrist vertical travel, so wear the watch for the fullest read.':
+    'Dette opptaket ble merket som en styrkeøkt, men ingen sett ble funnet. Trykk <strong>Start sett</strong> øverst i hvert arbeidssett når du tar opp (analysen deler økten i sett ut fra de trykkene), ellers var bevegelsen for rolig eller for kort til å deles opp automatisk. Repetisjoner telles fra hvor langt håndleddet beveger seg opp og ned, så ha på klokken for den fyldigste avlesningen.',
+
+  /* The set map. */
+  'SET {n}': 'SETT {n}',
+  'Rep count corrected by you': 'Repetisjonstall rettet av deg',
+  'edited': 'rettet',
+  '? bar': '? stang',
+  '{pos} bar': '{pos} stang',
+  'depth ?': 'dybde ?',
+  'bar speed per set (m/s) — watch for a fade': 'stangfart per sett (m/s) — se etter et fall',
+
+  /* The headline tiles. */
+  'sets': 'sett',
+  'high / low bar': 'høy / lav stang',
+  'full / parallel': 'full / parallell',
+  'mean bar m/s': 'snitt stang m/s',
+  'bar speed (watch)': 'stangfart (klokke)',
+  'volume (load × reps)': 'volum (vekt × reps)',
+  'hr avg / max': 'puls snitt / maks',
+  '{arc} bar': '{arc} stang',
+
+  /* The per-set table. `text-transform: capitalize` does nothing to a word that is already
+     capitalized, in either language. */
+  'Set': 'Sett',
+  'Auto-counted from wrist motion; edit any cell to correct a miscount': 'Telt automatisk fra håndleddsbevegelse; rediger en celle for å rette en feiltelling',
+  'edit': 'rediger',
+  'Weight ({unit})': 'Vekt ({unit})',
+  'Bar': 'Stang',
+  'Depth': 'Dybde',
+  'Bar range of motion': 'Stangens bevegelsesutslag',
+  'Bar m/s': 'Stang m/s',
+  'Lean Δ': 'Helning Δ',
+  'Forward torso lean relative to your most-upright set (squat). Not an absolute angle: \'ref\' is the baseline set, \'+N°\' leans that much more forward.':
+    'Foroverhelning i overkroppen målt mot settet der du står mest oppreist (knebøy). Ikke en absolutt vinkel: «ref» er referansesettet, «+N°» lener seg så mye lenger frem.',
+  'Time under tension (set span)': 'Tid under spenning (settets varighet)',
+  'Miss': 'Bom',
+  'most upright set (baseline)': 'settet der du står mest oppreist (referanse)',
+  'Corrected by you (auto counted {n}). Clear the field to reset to the counter.': 'Rettet av deg (telleren fant {n}). Tøm feltet for å gå tilbake til telleren.',
+  'Auto rep count. Edit to correct a miscount; clear to reset.': 'Automatisk repetisjonstall. Rediger for å rette en feiltelling; tøm feltet for å nullstille.',
+  '<strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set ({ref}), not an absolute angle. Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.':
+    '<strong>Helning Δ</strong> er relativ: foroverhelning i overkroppen mot settet der du står mest oppreist ({ref}), ikke en absolutt vinkel. Teller telleren feil? Rediger <strong>Reps</strong> for et sett for å rette det (tøm cellen for å nullstille). Lagres på denne enheten.',
+
+  /* Rep by rep. */
+  'Rep by rep': 'Repetisjon for repetisjon',
+  'bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.':
+    'stangfart per repetisjon (m/s) — turkis er raskt, oransje er tregere; et fall mot slutten er tretthet. Dybde per repetisjon står under hvert sett. Tempofordelingen (ned / opp) er omtrentlig.',
+  'Set {n}': 'Sett {n}',
+  '{pct}% fade': '{pct}% fall',
+  'depth {list}': 'dybde {list}',
+
+  /* The card bar and the Coach's read heading. */
+  'Your session as a rep trace — teal high bar, amber low bar. Share it.': 'Økten din som et repetisjonsspor — turkis for høy stang, ravgult for lav stang. Del det.',
+  'Weight units': 'Vektenheter',
+  'Share this card with friends': 'Del dette kortet med venner',
+  'Coach\'s read': 'Trenerens lesning',
+
+  /* The scope note above the card: which lifts the counter supports. */
+  'Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.':
+    'Teller <strong>knebøy</strong> og <strong>markløft</strong> pålitelig; benkpress telles for lavt og pull-ups registreres ikke. Trykk på øvelsen ved hvert sett &mdash; et sett uten merkelapp leses som knebøy.',
+  'Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.':
+    'Skulderpress telles rent, men er uprøvd, og curl alene blir støyete fordi håndleddet roterer. Knappene er Knebøy / Markløft / Press, med «Mer» for alt annet. At et sett uten merkelapp leses som knebøy betyr noe, fordi høy/lav stang og parallell/full dybde bare gir mening for knebøy.',
+  'Which lifts count, and why': 'Hvilke øvelser telles, og hvorfor',
+
+  /* The BETA caveat. */
+  'treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> {barSpeed}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.':
+    'behandle repetisjonstall, dybde, stangplassering og stangfart som anslag. <strong>Knebøy og markløft telles pålitelig; benkpress telles omtrent halvparten for lavt, og chin-ups og pull-ups telles ikke i det hele tatt.</strong> {barSpeed}Øvelsen gjenkjennes aldri automatisk: et sett uten trykk på en øvelsesknapp analyseres som knebøy.',
+  'Bar speed needs the watch and was not recorded. ': 'Stangfart krever klokken og ble ikke registrert. ',
+  'Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps.':
+    'Reps, tempo, ROM og stangfart kommer fra Apple Watch (håndleddet følger stangen); stangplassering og dybde er dine Sett- og øvelsestrykk.',
+  'Everywhere else, reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps.':
+    'Ellers kommer reps, tempo, ROM og stangfart fra Apple Watch (håndleddet følger stangen); stangplassering og dybde er dine Sett- og øvelsestrykk.',
+  'The rep counter keys on vertical wrist travel, which is what decides support per lift: squat and deadlift are checked against real sessions, overhead press counts cleanly but is unproven, standalone curls are noisier, and the wrist is the anchor on a chin-up so it never travels. Very slow near-max grinds can drop below the counting gate on any lift. High/low bar and parallel/full depth are squat-only reads, which is why an unlabeled set inherits squat. Lift analysis is validated on synthetic sessions plus two ground-truth squat sessions. It has also been run against a recording of someone standing still and not lifting at all, which it wrongly reported as sets and reps -- so it can mistake standing about for a set, and that is why this stays BETA. A lift is stationary, so there is no GPS map, turns, or jumps.':
+    'Repetisjonstelleren leser hvor langt håndleddet beveger seg opp og ned, og det er dette som avgjør hvilke øvelser som støttes: knebøy og markløft er kontrollert mot ekte økter, skulderpress telles rent men er uprøvd, curl alene blir støyete, og på en chin-up er håndleddet festepunktet, så det beveger seg aldri. Svært trege løft nær maks kan falle under tellegrensen uansett øvelse. Høy/lav stang og parallell/full dybde gir bare mening for knebøy, og derfor arver et sett uten merkelapp knebøy. Styrkeanalysen er kontrollert mot syntetiske økter pluss to knebøyøkter med fasit. Den er også kjørt mot et opptak av en som sto helt stille og ikke løftet i det hele tatt, som den feilaktig rapporterte som sett og repetisjoner -- så den kan ta det å stå og henge for et sett, og det er derfor dette forblir BETA. Et løft er stillestående, så det finnes verken GPS-kart, svinger eller hopp.',
+
+  /* The rep-source sentence, assembled by `liftRepSourceNote` from whichever of these apply.
+     Singular and plural are separate entries: Norwegian inflects where English splices a suffix. */
+  'Set {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on that set it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.':
+    'Sett {sets} hadde INGEN håndleddsbevegelse fra Apple Watch: de repetisjonene og det tempoet ble talt fra HVORDAN TELEFONEN VIPPET I LOMMEN, et grovere instrument, og de bærer verken stangens bevegelsesutslag (dybde), noen fordeling mellom ned og opp eller stangfart i det hele tatt. Der de står tomme for det settet, er det fordi kanalen aldri ble registrert, IKKE fordi løftet var grunt eller tregt -- les aldri en tom verdi der som en feil.',
+  'Sets {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on those sets it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.':
+    'Sett {sets} hadde INGEN håndleddsbevegelse fra Apple Watch: de repetisjonene og det tempoet ble talt fra HVORDAN TELEFONEN VIPPET I LOMMEN, et grovere instrument, og de bærer verken stangens bevegelsesutslag (dybde), noen fordeling mellom ned og opp eller stangfart i det hele tatt. Der de står tomme for de settene, er det fordi kanalen aldri ble registrert, IKKE fordi løftet var grunt eller tregt -- les aldri en tom verdi der som en feil.',
+  'Set {sets} carries a rep count the LIFTER typed in to correct the counter. Treat it as authoritative and never describe it as something the watch measured.':
+    'Sett {sets} har et repetisjonstall som LØFTEREN skrev inn for å rette telleren. Behandle det som fasit, og beskriv det aldri som noe klokken målte.',
+  'Sets {sets} carry a rep count the LIFTER typed in to correct the counter. Treat those as authoritative and never describe them as something the watch measured.':
+    'Sett {sets} har et repetisjonstall som LØFTEREN skrev inn for å rette telleren. Behandle dem som fasit, og beskriv dem aldri som noe klokken målte.',
+
+  /* Across your lifts: the cross-session panel and its two empty states. */
+  'Across your lifts': 'På tvers av øvelsene dine',
+  'Loam keeps each lift you analyze on this device, and once one lift has come up in three sessions with the weight filled in, it shows what actually changed between them: heavier bar, more reps, or neither.':
+    'Loam tar vare på hver øvelse du analyserer på denne enheten, og når én øvelse har dukket opp i tre økter med vekten fylt ut, viser den hva som faktisk endret seg mellom dem: tyngre stang, flere repetisjoner, eller ingen av delene.',
+  'Your {lift} has come up in {n} of your {sessions} saved sessions, which is enough. What is missing is the weight, because this read is work done &mdash; weight on the bar times reps &mdash; and {missing} none typed in. Fill the Weight column on {need} more of them and this fills in. The weights are saved per recording, so opening one of those sessions again picks up where you left off.':
+    'Øvelsen {lift} har dukket opp i {n} av dine {sessions} lagrede økter, og det er nok. Det som mangler er vekten, for denne lesningen er utført arbeid &mdash; vekt på stangen ganger repetisjoner &mdash; og {missing} ingen vekt lagt inn. Fyll ut Vekt-kolonnen på {need} til av dem, så fyller dette seg ut. Vektene lagres per opptak, så åpner du en av de øktene igjen, tar du opp tråden der du slapp.',
+  'one of those has': 'én av dem har',
+  '{n} of those have': '{n} av dem har',
+  'You have {sessions} lift sessions saved, but a lift is only compared against itself (a squat and a curl share no scale), and no single lift has come up three times yet.':
+    'Du har {sessions} styrkeøkter lagret, men en øvelse sammenlignes bare med seg selv (knebøy og curl deler ingen skala), og ingen enkelt øvelse har dukket opp tre ganger ennå.',
+  'This is the first one.': 'Dette er den første.',
+  'You have {sessions} so far, so {need} more to go.': 'Du har {sessions} så langt, så {need} igjen.',
+  ' over {n} days': ' over {n} dager',
+  '{n} sessions': '{n} økter',
+  'top set': 'tyngste sett',
+  'reps at it': 'reps på det',
+  'total work': 'totalt arbeid',
+  'session': 'økt',
+  'work': 'arbeid',
+  'vs your median': 'mot medianen din',
+  'Your {lift} sets only, because a lift is only comparable against itself. {others}<strong>BETA, and the two halves are not equally solid:</strong> the weight is exactly what you typed, the rep count is an estimate from wrist travel.':
+    'Bare {lift}-settene dine, fordi en øvelse bare kan sammenlignes med seg selv. {others}<strong>BETA, og de to halvdelene er ikke like solide:</strong> vekten er nøyaktig det du skrev inn, repetisjonstallet er et anslag fra håndleddsbevegelse.',
+  'You also have enough {lifts} to trend; only your most-lifted one is charted here.': 'Du har også nok {lifts} til å vise en trend; bare den du løfter mest er tegnet inn her.',
+  ' and ': ' og ',
+  'That estimate\'s documented weak spot is the slow grinding rep &mdash; which is the one a heavy top set produces &mdash; so a reading of "heavier, fewer reps" is both what a real strength block looks like and what an under-count looks like, and nothing here can tell those apart. Correct any set in the table above and this updates. No estimated one-rep max is shown: that would be a formula fitted to other people, and this project does not put a number on screen it cannot stand behind.':
+    'Det anslagets dokumenterte svake punkt er den trege, tunge repetisjonen &mdash; som er nettopp den et tungt toppsætt gir &mdash; så en avlesning av typen «tyngre, færre repetisjoner» er både det en ekte styrkeperiode ser ut som og det en undertelling ser ut som, og ingenting her kan skille dem. Rett et hvilket som helst sett i tabellen over, så oppdateres dette. Ingen anslag på én repetisjon maks vises: det ville være en formel tilpasset andre mennesker, og dette prosjektet setter ikke et tall på skjermen det ikke kan stå inne for.',
+  'What the rep count can get wrong': 'Hva repetisjonstellingen kan ta feil av',
+
+  /* The Coach's read cards. */
+  'Bar speed faded {pct}% across the session': 'Stangfarten falt {pct}% gjennom økten',
+  'Slower concentric velocity late is fatigue, not weakness. Autoregulate: end a set when the bar slows past ~20% off your fastest rep, or drop a little load to keep every rep crisp.':
+    'Lavere fart på vei opp sent i økten er tretthet, ikke svakhet. Autoreguler: avslutt et sett når stangen blir mer enn ~20 % tregere enn din raskeste repetisjon, eller ta av litt vekt så hver repetisjon holder seg skarp.',
+  'Depth crept up as you fatigued': 'Dybden krøp oppover etter hvert som du ble sliten',
+  'Your bar range of motion shrank about {pct}% in the later sets. Cut reps or load so the last set is as deep as the first, rather than trading depth for numbers.':
+    'Stangens bevegelsesutslag krympet omtrent {pct}% i de siste settene. Kutt repetisjoner eller vekt så det siste settet blir like dypt som det første, i stedet for å bytte dybde mot tall.',
+  'You trained both bar positions': 'Du trente begge stangplasseringene',
+  '{hb} high-bar and {lb} low-bar sets. High bar keeps the torso upright (more quad, easier to stay over midfoot); low bar leans you forward for more hip and posterior chain. Keep them in separate blocks so the cue set is consistent.':
+    '{hb} sett med høy stang og {lb} med lav stang. Høy stang holder overkroppen oppreist (mer lår, lettere å holde seg over midtfoten); lav stang lener deg fremover for mer hofte og bakside. Hold dem i hver sin periode, så teknikkfokuset blir likt.',
+  '{n} missed rep': '{n} bommet repetisjon',
+  '{n} missed reps': '{n} bommede repetisjoner',
+  'A miss is data: it marks where speed or depth broke down. If misses cluster in the last set, you found today\'s ceiling; leave 1-2 reps in reserve next time to train quality.':
+    'En bom er data: den markerer hvor farten eller dybden brøt sammen. Samler bommene seg i det siste settet, fant du taket for i dag; la 1-2 repetisjoner stå igjen neste gang for å trene kvalitet.',
+  'Quick tempo ({s}s / rep)': 'Raskt tempo ({s}s / rep)',
+  'Fast reps build power, but a controlled eccentric (2-3 s down) adds time under tension and control out of the hole. Try slowing the descent on your lighter sets.':
+    'Raske repetisjoner bygger eksplosivitet, men en kontrollert nedgang (2-3 s ned) gir mer tid under spenning og bedre kontroll ut av bunnen. Prøv å senke farten på vei ned i de lette settene.',
+  'Clean session': 'Ren økt',
+  'Consistent depth and bar speed across your sets. Add a little load or a rep next time and watch that the bar speed on the last set stays close to the first.':
+    'Jevn dybde og stangfart gjennom settene. Legg på litt vekt eller en repetisjon neste gang, og følg med på at stangfarten i det siste settet holder seg nær det første.',
+
+  /* The verdicts `liftHistoryRead` returns, translated where they are rendered because that module
+     is drift-pinned. Label, mechanism and action for each of its five kinds. */
+  'heavier on the bar': 'tyngre på stangen',
+  'Your top set has got heavier across these sessions without the reps going up with it, which is the shape a strength block is meant to make.':
+    'Det tyngste settet ditt har blitt tyngre gjennom disse øktene uten at repetisjonene følger med opp, som er formen en styrkeperiode skal ha.',
+  'Worth checking the rep count is real before reading it as intent: Loam counts reps from the wrist and its known weak spot is a slow grinding rep, which is exactly the one a heavy top set produces. Correct any set that reads short and this reading firms up.':
+    'Verdt å sjekke at repetisjonstallet er ekte før du leser det som en plan: Loam teller repetisjoner fra håndleddet, og det kjente svake punktet er den trege, tunge repetisjonen, som er nettopp den et tungt toppsætt gir. Rett et sett som leses for lavt, så står denne lesningen stødigere.',
+  'more work, heavier and more of it': 'mer arbeid, tyngre og mer av det',
+  'Load and reps have both risen across these sessions, so total work is up on both factors rather than one paying for the other.':
+    'Både vekt og repetisjoner har steget gjennom disse øktene, så det totale arbeidet er opp på begge faktorer i stedet for at den ene betaler for den andre.',
+  'The pleasant one, and the one to watch: both factors climbing at once is how a build phase runs out of road. Compare it against how the last few sessions actually felt.':
+    'Den hyggelige, og den å følge med på: at begge faktorene stiger samtidig er måten en oppbyggingsperiode går tøm for vei på. Hold det opp mot hvordan de siste øktene faktisk kjentes.',
+  'lighter, more reps': 'lettere, flere repetisjoner',
+  'The load has come down across these sessions while the reps have gone up, so you are moving less weight more times.':
+    'Vekten har gått ned gjennom disse øktene mens repetisjonene har gått opp, så du flytter mindre vekt flere ganger.',
+  'Deliberate in a deload or a hypertrophy block and worth nothing to worry about there. If it was not deliberate, the thing to look at is whether the heavy sessions were the ones you skipped.':
+    'Bevisst i en avlastningsuke eller en muskelbyggingsperiode, og ingenting å bekymre seg for der. Var det ikke bevisst, er det å se på om det var de tunge øktene du hoppet over.',
+  'less on the bar': 'mindre på stangen',
+  'Load, reps, or both have fallen across these sessions and neither has risen against it, so total work is down.':
+    'Vekt, repetisjoner eller begge har falt gjennom disse øktene, og ingen av dem har steget mot det, så det totale arbeidet er ned.',
+  'Read it against what these sessions were before reading it as strength: a deload week, a session cut short, or a set whose weight never got typed in all look like this.':
+    'Les det opp mot hva disse øktene var før du leser det som styrke: en avlastningsuke, en økt som ble kuttet kort, eller et sett der vekten aldri ble skrevet inn ser alle slik ut.',
+  'holding steady': 'holder seg jevnt',
+  'Load and reps have both stayed flat across these sessions, so the work you are doing now is the work you were doing then.':
+    'Både vekt og repetisjoner har holdt seg flate gjennom disse øktene, så arbeidet du gjør nå er arbeidet du gjorde den gang.',
+  'Exactly right for a maintenance block and exactly wrong for a progression one. Which this was is the thing to compare it against.':
+    'Helt riktig for en vedlikeholdsperiode og helt feil for en oppbyggingsperiode. Hvilken av delene dette var, er det å holde det opp mot.',
+
+  /* Spotter Cam: the picker, the controls, the stage labels and the caption under it. */
+  'Redraw your first rep behind the live one, at the same point in the movement': 'Tegn den første repetisjonen din bak den direkte, på samme punkt i bevegelsen',
+  'Rep 1 ghost': 'Skygge av rep 1',
+  '▶ Play': '▶ Spill av',
+  'Building the rep-by-rep replay…': 'Bygger avspillingen repetisjon for repetisjon …',
+  'rep 1 · the reference': 'rep 1 · referansen',
+  'depth {pct}% vs rep 1': 'dybde {pct}% mot rep 1',
+  'drive': 'opp',
+  'MIDFOOT': 'MIDTFOT',
+  'MODELED BAR PATH': 'MODELLERT STANGBANE',
+  'PARALLEL TARGET · TAPPED': 'PARALLELL-MÅL · TRYKKET INN',
+  'FULL TARGET · TAPPED': 'FULL-MÅL · TRYKKET INN',
+  'REP 1 DEPTH · MEASURED': 'DYBDE REP 1 · MÅLT',
+  'Each rep follows its measured cadence.': 'Hver repetisjon følger sin målte rytme.',
+  'Replay timing uses the set\'s median tempo.': 'Avspillingen bruker settets mediantempo.',
+  'Down and drive durations come from wrist motion.': 'Varigheten på ned og opp kommer fra håndleddsbevegelse.',
+  'The down/drive split is modeled.': 'Fordelingen mellom ned og opp er modellert.',
+  'The side-view bar path is modeled, not measured fore-aft travel.': 'Stangbanen sett fra siden er modellert, ikke målt bevegelse frem og tilbake.',
+  'Deadlift hip-hinge replay.': 'Avspilling av hoftehengslet i markløft.',
+  'Curl elbow-flexion replay.': 'Avspilling av albuebøyen i curl.',
+  'Relative wrist depth is normalized to your set\'s tapped {target} target.': 'Relativ dybde i håndleddet er normalisert mot {target}-målet du trykket inn for settet.',
+  'Relative wrist depth is normalized to your set.': 'Relativ dybde i håndleddet er normalisert mot settet ditt.',
+  'The {target} line is the target you tapped.': '{target}-linjen er målet du trykket inn.',
+  'No depth target was tapped.': 'Ingen dybdemål ble trykket inn.',
+  'The faint body behind you is rep 1 at the same point in the movement: only depth differs between reps, because torso lean is drawn from your taps rather than measured.':
+    'Den svake figuren bak deg er repetisjon 1 på samme punkt i bevegelsen: bare dybden skiller repetisjonene, fordi helningen i overkroppen tegnes fra trykkene dine og ikke måles.',
+  'This lift': 'Denne øvelsen',
+  'No form view for {lift} yet': 'Ingen teknikkvisning for {lift} ennå',
+  'We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.':
+    'Vi animerer bare øvelser vi kan vise ærlig (knebøy, markløft, curl). Repetisjonene, tempoet og stangfarten over er fortsatt ekte tall.',
+
+  /* The bar-position and depth words, keyed by the chip name the capture app stamps. */
+  'High': 'Høy',
+  'Low': 'Lav',
+  'Uncertain': 'Usikker',
+  'Full': 'Full',
+  'Parallel': 'Parallell',
+
+  /* Every lift `LIFT_NAME_KEYS` can name, listed in full (identical ones included) so the copy-table
+     guard can assert the map is covered rather than sampled. The words are the iOS string catalog's. */
+  'Squat': 'Knebøy',
+  'Deadlift': 'Markløft',
+  'Press': 'Press',
+  'Bench': 'Benkpress',
+  'Curl': 'Curl',
+  'Clean': 'Clean',
+  'Row': 'Roing',
+  'Pull-up': 'Pull-up',
+  'Chin-up': 'Chin-up',
+  'Dips': 'Dips',
+  'Front squat': 'Frontbøy',
+  'Romanian deadlift': 'Rumensk markløft',
+  'Hip thrust': 'Hip thrust',
+  'Lunge': 'Utfall',
+  'Lateral raise': 'Sidehev',
+  'Triceps extension': 'Tricepspress',
+  'Calf raise': 'Tåhev',
+  'Other': 'Annet',
+
+  /* The shared disclosure chrome `leadNote` / `betaCaveat` write around every one of the above. */
+  'How to read this': 'Slik leser du dette',
+  'Why, and what would change it': 'Hvorfor, og hva som ville endret det',
+
   /* --- The activity timeline's channels (renderRunTimeline) ------------------------------------
      One row per channel as of 2026-09-16, so the whole sentence that names them is written here and
      is translated here with it. The trace names carry their unit as {u} rather than being baked in,
@@ -28999,6 +29474,24 @@ const LOAM_NB = {
   'HR drift': 'Pulsdrift',
   'Climbs': 'Stigninger',
   'Segments': 'Segmenter',
+
+  /* The merged climbs / descents table (2026-09-17). 'Climbs' and 'Descents' above are the picker's
+     own option labels, reused rather than restated, so the chip in the jump-to nav and the option in
+     the picker cannot come to different Norwegian words for one thing. */
+  'Climbs & descents': 'Stigninger og nedkjøringer',
+  'Climb / descent segments': 'Stignings-/nedkjøringssegmenter',
+  'All segments': 'Alle segmenter',
+  '{n} climbs · grade > 3% sustained for 20s+ · GAP = grade-adjusted pace':
+    '{n} stigninger · helning > 3 % i minst 20 s · GAP = helningsjustert tempo',
+  '{n} descents · grade > 3% sustained for 20s+':
+    '{n} nedkjøringer · helning > 3 % i minst 20 s',
+  '{n} segments · grade > 3% sustained for 20s+':
+    '{n} segmenter · helning > 3 % i minst 20 s',
+  '1 climb · grade > 3% sustained for 20s+ · GAP = grade-adjusted pace':
+    '1 stigning · helning > 3 % i minst 20 s · GAP = helningsjustert tempo',
+  '1 descent · grade > 3% sustained for 20s+': '1 nedkjøring · helning > 3 % i minst 20 s',
+  '1 segment · grade > 3% sustained for 20s+': '1 segment · helning > 3 % i minst 20 s',
+  'No sustained descents on this recording.': 'Ingen vedvarende nedkjøringer i dette opptaket.',
   'Measured from': 'Målt fra',
   'Speed': 'Fart',
   'Descents': 'Nedkjøringer',
@@ -29795,7 +30288,7 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
     <div class="stat accent3">
       <div class="label">Pace</div>
       <div class="value">${U.pace(paceSpeed)}</div>
-      <div class="sub">${U.pace(paceSpeed)} moving${stopWorthNaming ? ` · ${U.pace(s.avgSpeed)} elapsed` : ''}</div>
+      <div class="sub">moving${stopWorthNaming ? ` · ${U.pace(s.avgSpeed)} elapsed` : ''}</div>
     </div>
     <div class="stat">
       <div class="label">Elev gain / loss</div>
@@ -31156,6 +31649,65 @@ function pacingAltAt(alts, t) {
   return span > 0 ? a.alt + ((b.alt - a.alt) * (t - a.t)) / span : a.alt;
 }
 
+/**
+ * The grade a split ran at: altitude gained across its own window over the ground it covered, as a
+ * percentage. Signed, so a descent is negative.
+ *
+ * ONE FUNNEL, which is why this is a function rather than three lines inside `runPacing`. The splits
+ * table prints it per row and `runPacing` corrects its verdict with it, on the same screen and from
+ * the same `climbAltSeries` -- so two copies of the arithmetic are two answers to "how steep was
+ * mile 3", which is the failure that whole read exists to avoid.
+ *
+ * NULL IS AN ABSENCE, NOT A FLAT MILE: a run with no barometer and no GPS altitude has no grade, and
+ * 0% there would be a measurement nobody made.
+ */
+function splitGradePct(split, alts) {
+  if (!split || !(split.meters > 0)) return null;
+  const a = pacingAltAt(alts, split.tStart);
+  const b = pacingAltAt(alts, split.tEnd);
+  if (a == null || b == null) return null;
+  return ((b - a) / split.meters) * 100;
+}
+
+/* How many points a split's altitude sparkline is drawn from. See the module. */
+const SPARK_SAMPLES = 24;
+
+/**
+ * The altitude profile across one split: `n` evenly spaced samples of the same series
+ * `splitGradePct` takes its two endpoints from, through the same interpolator.
+ *
+ * WHY A PROFILE AND NOT A NUMBER: grade is one average, and an average hides the shape that makes a
+ * mile hard -- a split that climbs 30 m and gives it all back grades 0.0% and is not flat. See the
+ * module for the rest, including why the samples are evenly spaced in TIME and why a series that
+ * stops mid-split draws flat rather than getting a second rule about partial coverage.
+ */
+function splitAltSamples(split, alts, n = SPARK_SAMPLES) {
+  if (!split || !(n > 1) || !alts || !alts.length) return null;
+  if (!(split.tEnd > split.tStart)) return null;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const v = pacingAltAt(alts, split.tStart + ((split.tEnd - split.tStart) * i) / (n - 1));
+    if (v == null) return null;
+    out.push(v);
+  }
+  return out;
+}
+
+/**
+ * The lowest and highest altitude in the series, which is the ONE scale every row's sparkline is
+ * drawn against. Shared rather than per row: scale each row to its own extremes and a 2 m wiggle
+ * draws the same mountain as a 60 m climb. Min and max can be EQUAL, which is a real answer.
+ */
+function altRange(alts) {
+  let min = Infinity, max = -Infinity;
+  for (const a of alts || []) {
+    if (!a || a.alt == null) continue;
+    if (a.alt < min) min = a.alt;
+    if (a.alt > max) max = a.alt;
+  }
+  return min <= max ? { min, max } : null;
+}
+
 /** The moving seconds a split should be paced on, matching what the splits table prints. */
 function pacingMovingOf(s) {
   return s.movingSeconds != null ? s.movingSeconds : s.seconds;
@@ -31181,9 +31733,7 @@ function runPacing(splits, alts) {
   const rows = full.map((s) => {
     const seconds = pacingMovingOf(s);
     const speed = s.meters / seconds;
-    const rise = pacingAltAt(alts, s.tEnd) != null && pacingAltAt(alts, s.tStart) != null
-      ? pacingAltAt(alts, s.tEnd) - pacingAltAt(alts, s.tStart) : null;
-    const gradePct = rise != null && s.meters > 0 ? (rise / s.meters) * 100 : null;
+    const gradePct = splitGradePct(s, alts);
     const gapSpeed = gradePct != null ? gradeAdjustedSpeed(speed, gradePct) : null;
     return {
       index: s.index,
@@ -31374,50 +31924,206 @@ function stridePaceFactors(splits, pedRows) {
   };
 }
 
-function renderRunSegments(segments, opts) {
-  if (!segments.length) { hide('runSegmentsSection'); return; }
+/* ONE table with a view picker, not two sections (owner, 2026-09-17: "Why do we have
+   climbs/descents and climbs section? Why not just have the combined one with a drop down to
+   filter"). Both tables came out of the SAME detectGradeSegments call and printed the SAME
+   criterion in their subtitles a line apart -- "grade > 3% sustained for 20s+" -- so the page said
+   twice that these were the same segments and never said why they were two tables.
+
+   THE VIEWS DIFFER IN COLUMNS, NOT IN A ROW FILTER, which is why a plain dropdown over one column
+   set would not have done it:
+
+     Climbs   the coaching read. Rows are `climbs` (analyzeRunningClimbs: up segments carrying at
+              least 5 m of gain, so the sub-metre GPS-wander blips that clear the grade test are
+              already gone -- a different ROW SET, not a filter). Columns carry Gain, VAM, grade-
+              adjusted pace and the cadence-fade / HR-drift deltas, none of which the other views
+              can show: VAM is vertical ASCENT rate and Gain is 0 on a descent, so an "All" table
+              carrying these columns would be three columns of dashes on half its rows.
+     Descents the same treatment for the other direction, which nothing gave before. Grade, cadence
+              and oscillation per descent are exactly what the runs table above does NOT carry.
+              Drop is deliberately not repeated here: that table is directly above this one and
+              already prints it, and repeating it is the duplication this change exists to remove.
+     All      the census -- every segment the detector found, ups and downs, no gain floor, lift
+              rows included. This is the table this section already was.
+
+   THE PICKER IS OFFERED ONLY WHEN THERE ARE CLIMBS TO PICK, i.e. on a path that computed them. A
+   GPS-only bike ride arrives here with none, gets the census with no control and the heading it
+   always had, and renders exactly what it rendered before -- its up segments carry no Gain and no
+   VAM, so a Climbs view there would be a column of dashes wearing a coaching read's name. */
+let _runSegData = null;
+
+function runSegViewGet() {
+  try {
+    const v = localStorage.getItem('loam_runsegview');
+    if (v === 'climbs' || v === 'descents' || v === 'all') return v;
+  } catch (e) { /* private mode: fall back to the default */ }
+  return null;
+}
+
+/* The view to lay out. A recording with no climbs has no picker, so it is always the census -- that
+   is what keeps a remembered "climbs" from emptying a GPS-only bike ride's table for good, with the
+   control that could undo it hidden. `sel.value` is the truth once a render has set it from the
+   remembered choice; reading the element rather than storage is what makes a change fire without a
+   re-analysis. An explicit "descents" on a recording with no descents IS honoured, and says so in
+   the table, rather than moving the picker under the reader. */
+function runSegCurrentView() {
+  const d = _runSegData;
+  if (!d || !d.climbs.length) return 'all';
+  const sel = document.getElementById('runSegView');
+  const v = (sel && sel.value) || 'climbs';
+  return (v === 'descents' || v === 'all') ? v : 'climbs';
+}
+
+function renderRunSegments(segments, climbs, opts) {
+  segments = segments || [];
+  climbs = climbs || [];
+  if (!segments.length && !climbs.length) { hide('runSegmentsSection'); return; }
   show('runSegmentsSection');
+  /* Shut unless this reader has opened it before. The heading, with its count, is the whole of what
+     the page spends on it by default; see the markup for why it is not simply dropped. */
   syncFold('runSegmentsFold', false);
-  /* Cadence / Osc / Pace need the phone IMU (running path). GPS-only rides have none, so those three
-     columns would be all dashes; swap them for one Avg-speed column and rebuild the header to match. */
-  const motion = !opts || opts.motionColumns !== false;
-  const thead = document.querySelector('#runSegmentsTable thead');
-  if (thead) thead.innerHTML = motion
-    ? `<tr><th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Cadence</th><th>Osc</th><th>Pace</th></tr>`
-    : `<tr><th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Dist</th><th>Grade</th><th>Avg speed</th></tr>`;
-  const tbody = document.querySelector('#runSegmentsTable tbody');
-  tbody.innerHTML = '';
-  segments.forEach((s, i) => {
-    const tr = document.createElement('tr');
-    const dirCls = s.dir === 'down' ? 'dir-down' : 'dir-up';
-    const dirLabel = s.kind === 'lift' ? '⇡ LIFT' : s.dir === 'down' ? '↓ DESC' : '↑ CLIMB';
-    const common = `
-      <td><strong>${i+1}</strong></td>
-      <td class="${dirCls}">${dirLabel}</td>
+  /* Cadence / Osc / Pace need a motion stream the running path has and a GPS-only ride does not, so
+     those three columns would be all dashes; the no-motion views swap them for one Avg-speed
+     column instead of dashing them. */
+  _runSegData = { segments, climbs, motion: !opts || opts.motionColumns !== false };
+  const sel = document.getElementById('runSegView');
+  if (sel) {
+    sel.classList.toggle('hidden', !climbs.length);
+    if (!sel._wired) {
+      sel._wired = true;
+      /* A click on a form control inside a <summary> toggles the <details> in some engines, so the
+         section would collapse every time the reader used the control that belongs to it. Same
+         guard, same reason, as the runs panel's mode picker. */
+      for (const type of ['click', 'mousedown', 'keydown']) {
+        sel.addEventListener(type, (e) => e.stopPropagation());
+      }
+      sel.addEventListener('change', () => {
+        try { localStorage.setItem('loam_runsegview', sel.value); } catch (e) {}
+        drawRunSegments();
+      });
+    }
+    sel.options[0].text = loamT('Climbs');
+    sel.options[1].text = loamT('Descents');
+    sel.options[2].text = loamT('All segments');
+    /* Open on the coaching read; a remembered choice wins. Set here and read back by
+       runSegCurrentView, so the picker is the one place the current view lives. */
+    const remembered = runSegViewGet();
+    sel.value = (remembered === 'descents' || remembered === 'all') ? remembered : 'climbs';
+  }
+  const title = document.getElementById('runSegTitle');
+  /* The census-only heading is the one this section always had, so a GPS-only bike ride's page does
+     not move at all; a page carrying the picker names both directions. */
+  if (title) title.textContent = climbs.length
+    ? loamT('Climbs & descents') : loamT('Climb / descent segments');
+  drawRunSegments();
+}
+
+function drawRunSegments() {
+  const d = _runSegData;
+  if (!d) return;
+  const view = runSegCurrentView();
+  const motion = d.motion;
+  const table = document.getElementById('runSegmentsTable');
+  const thead = table && table.querySelector('thead');
+  const tbody = table && table.querySelector('tbody');
+  if (!thead || !tbody) return;
+  const rows = view === 'climbs' ? d.climbs
+             : view === 'descents' ? d.segments.filter(s => s.dir === 'down')
+             : d.segments;
+
+  /* Column headers stay English, as every other table's do on this page (the runs table's own
+     `data-l` labels included). The strings the picker and the heading write are new and go through
+     loamT; making this one table's headers the only translated ones would be the odd one out. */
+  const head = view === 'climbs'
+    ? ['#', 'Time', 'Dist', 'Gain', 'Grade', 'VAM', 'Pace', 'GAP', 'Cadence']
+        .concat(d.climbs.some(c => c.avgHr != null) ? ['HR'] : [])
+    : (view === 'descents' ? ['#', 'Start', 'Dur', 'Dist', 'Grade'] : ['#', 'Dir', 'Start', 'Dur', 'Dist', 'Grade'])
+        .concat(motion ? ['Cadence', 'Osc', 'Pace'] : ['Avg speed']);
+  thead.innerHTML = '<tr>' + head.map(h => `<th>${h}</th>`).join('') + '</tr>';
+
+  const sub = document.getElementById('runSegSubtitle');
+  if (sub) {
+    /* Singular and plural are separate KEYS rather than a translated noun dropped into a translated
+       template: Norwegian inflects these differently from English and interpolating one translation
+       into another is how agreement goes wrong. Six whole sentences cost six table rows and cannot. */
+    const one = rows.length === 1;
+    sub.textContent = view === 'climbs'
+      ? (one ? loamT('1 climb · grade > 3% sustained for 20s+ · GAP = grade-adjusted pace')
+             : loamT('{n} climbs · grade > 3% sustained for 20s+ · GAP = grade-adjusted pace', { n: rows.length }))
+      : view === 'descents'
+        ? (one ? loamT('1 descent · grade > 3% sustained for 20s+')
+               : loamT('{n} descents · grade > 3% sustained for 20s+', { n: rows.length }))
+        : (one ? loamT('1 segment · grade > 3% sustained for 20s+')
+               : loamT('{n} segments · grade > 3% sustained for 20s+', { n: rows.length }));
+  }
+
+  if (!rows.length) {
+    /* An honest empty state rather than a silent switch to a view the reader did not choose: a run
+       can genuinely have climbs and no sustained descent. */
+    tbody.innerHTML = `<tr><td colspan="${head.length}" class="dim">`
+      + loamT('No sustained descents on this recording.') + '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map((r, i) => view === 'climbs'
+    ? runSegClimbRow(r, d.climbs.some(c => c.avgHr != null))
+    : runSegGradeRow(r, i, view, motion)).join('');
+}
+
+/* One row of the census / descents views: what the detector measured over the segment. */
+function runSegGradeRow(s, i, view, motion) {
+  const dirCls = s.dir === 'down' ? 'dir-down' : 'dir-up';
+  const dirLabel = s.kind === 'lift' ? '⇡ LIFT' : s.dir === 'down' ? '↓ DESC' : '↑ CLIMB';
+  let html = `<td><strong>${i + 1}</strong></td>`;
+  if (view !== 'descents') html += `<td class="${dirCls}">${dirLabel}</td>`;
+  html += `
       <td class="dim">${s.tStart.toFixed(0)}s</td>
       <td>${s.duration.toFixed(0)}s</td>
       <td>${s.distance != null ? U.dist(s.distance) : '—'}</td>
       <td><strong>${s.gradeAvg > 0 ? '+' : ''}${s.gradeAvg.toFixed(1)}%</strong></td>`;
-    if (motion) {
-      /* Pace follows the Units toggle (paceMinPerKm is stored metric; U.pace takes m/s). */
-      const paceStr = (s.paceMinPerKm == null || s.paceMinPerKm <= 0) ? '—'
-        : U.pace(1000 / (s.paceMinPerKm * 60));
-      tr.innerHTML = common
-        + `<td>${s.cadAvg ? s.cadAvg.toFixed(0)+' spm' : '—'}</td>`
-        + `<td>${s.oscAvg ? s.oscAvg.toFixed(1)+' cm' : '—'}</td>`
-        + `<td>${paceStr}</td>`;
-    } else {
-      const avg = (s.distance != null && s.duration > 0) ? s.distance / s.duration : null;
-      tr.innerHTML = common + `<td>${avg != null ? U.speed(avg) : '—'}</td>`;
-    }
-    tbody.appendChild(tr);
-  });
-  document.getElementById('runSegCountLabel').textContent = segments.length;
+  if (motion) {
+    /* Pace follows the Units toggle (paceMinPerKm is stored metric; U.pace takes m/s). */
+    const paceStr = (s.paceMinPerKm == null || s.paceMinPerKm <= 0) ? '—'
+      : U.pace(1000 / (s.paceMinPerKm * 60));
+    html += `<td>${s.cadAvg ? s.cadAvg.toFixed(0) + ' spm' : '—'}</td>`
+          + `<td>${s.oscAvg ? s.oscAvg.toFixed(1) + ' cm' : '—'}</td>`
+          + `<td>${paceStr}</td>`;
+  } else {
+    const avg = (s.distance != null && s.duration > 0) ? s.distance / s.duration : null;
+    html += `<td>${avg != null ? U.speed(avg) : '—'}</td>`;
+  }
+  return `<tr>${html}</tr>`;
 }
 
-/* The Climbs panel: one row per sustained up-segment, with the climb-specific coaching read the flat
-   segments table does not give (gain, VAM, grade-adjusted pace, and whether cadence held / heart
-   drifted through the climb). All display honors the Units toggle. */
+/* One row of the Climbs view: the climb-specific coaching read the census cannot give (gain, VAM,
+   grade-adjusted pace, and whether cadence held / heart drifted through the climb). All display
+   honors the Units toggle. */
+function runSegClimbRow(c, anyHr) {
+  const fmtT = (sec) => { const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
+  const paceStr = (mps) => (mps && mps > 0) ? U.pace(mps) : '—';
+  /* Rounded signed delta with no "-0": a tiny negative fade should read 0, not -0. */
+  const signed = (v) => { const r = Math.round(v); return (r > 0 ? '+' : '') + (r === 0 ? 0 : r); };
+  const cadFade = c.cadenceFade == null ? ''
+    : ` <span class="dim" style="font-size:11px;${Math.round(c.cadenceFade) <= -4 ? 'color:#c0392b;' : ''}">${signed(c.cadenceFade)}</span>`;
+  const cad = c.avgCadence != null ? `${c.avgCadence.toFixed(0)} spm${cadFade}` : '—';
+  const hrDrift = c.hrDrift == null ? ''
+    : ` <span class="dim" style="font-size:11px;${Math.round(c.hrDrift) >= 8 ? 'color:#c0392b;' : ''}">${signed(c.hrDrift)}</span>`;
+  const hr = c.avgHr != null ? `${c.avgHr.toFixed(0)} bpm${hrDrift}` : '—';
+  const vamStr = c.vam != null ? `${U.smallNum(c.vam).toFixed(0)} ${U.smallUnit()}/h` : '—';
+  return `<tr>
+      <td><strong>${c.index}</strong></td>
+      <td>${fmtT(c.duration)}</td>
+      <td>${c.distance != null ? U.dist(c.distance) : '—'}</td>
+      <td>${U.elev(c.gain)}</td>
+      <td class="dir-up"><strong>+${c.avgGrade.toFixed(1)}%</strong></td>
+      <td>${vamStr}</td>
+      <td>${paceStr(c.speedAvg)}</td>
+      <td>${paceStr(c.gapSpeed)}</td>
+      <td>${cad}</td>
+      ${anyHr ? `<td>${hr}</td>` : ''}
+    </tr>`;
+}
+
 /* Per-mile / per-km splits. The unit follows the athlete's own units setting, so an imperial runner
    gets miles rather than a metric table with an imperial headline above it.
 
@@ -31651,7 +32357,11 @@ function renderRunBestEfforts(efforts, splits) {
   el.classList.remove('hidden');
 }
 
-function renderRunSplits(splits, unitLabel, driftM) {
+/* `alts` is the SAME `climbAltSeries` the pacing verdict under this table grade-adjusts with, and
+   `cadSeries` the SAME final series the cadence tile and chart above it read, both passed in rather
+   than re-derived here. A per-row grade computed a second way, or a cadence read off a series the
+   page had since replaced, is the `segments[].cadAvg` bug over again: one page, two answers. */
+function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] } = {}) {
   if (!splits || !splits.length) { hide('runSplitsSection'); return; }
   show('runSplitsSection');
   const tbody = document.querySelector('#runSplitsTable tbody');
@@ -31669,6 +32379,21 @@ function renderRunSplits(splits, unitLabel, driftM) {
      reads as one that failed, when in fact no sensor was ever there. */
   const anyHr = splits.some(sp => sp.avgHr != null);
   document.querySelectorAll('#runSplitsTable .split-hr-col').forEach(th => th.classList.toggle('hidden', !anyHr));
+  /* Cadence and the altitude profile are resolved ONCE per split here rather than inside the row
+     template, so the "did anything measure this" question and the drawn value read the same array.
+     Both columns are dropped outright when nothing measured them, for the reason the HR column
+     already is: a column of dashes reads as a measurement that failed, when in fact no sensor was
+     ever there -- no watch and a pocketed phone that never found a peak, or no barometer and no GPS
+     altitude. */
+  const cads = splits.map(sp => splitCadenceSpm(sp, cadSeries));
+  const profiles = splits.map(sp => splitAltSamples(sp, alts));
+  /* ONE scale for every row; see `altRange`. Read off the whole series rather than off the profiles,
+     so a split is drawn against the run it was part of and not against the other splits. */
+  const range = altRange(alts);
+  const anyCad = cads.some(v => v != null);
+  const anyAlt = !!range && profiles.some(v => v != null);
+  document.querySelectorAll('#runSplitsTable .split-cad-col').forEach(th => th.classList.toggle('hidden', !anyCad));
+  document.querySelectorAll('#runSplitsTable .split-alt-col').forEach(th => th.classList.toggle('hidden', !anyAlt));
   const label = document.getElementById('runSplitsLabel');
   if (label) {
     const n = full.length;
@@ -31680,6 +32405,17 @@ function renderRunSplits(splits, unitLabel, driftM) {
       + (splits.length > n ? ' + a partial' : '')
       + (fastest ? ` \u00b7 fastest #${fastest}, slowest #${slowest}` : '')
       + ' \u00b7 moving time'
+      /* The sparklines are a SHAPE on a shared scale, so the scale has to be on the panel or the
+         shapes are unreadable -- a tall line means nothing until you know what the row is that tall
+         against. The RANGE and not the altitudes: a barometer reports relative altitude, so its
+         absolute numbers name no place. A range of ZERO is a real reading and not an absence (the
+         column keeps its flat lines, which is what a flat run looks like), but "0 ft of range" is a
+         clumsy way to say flat, so it says flat. */
+      + (anyAlt
+        ? (range.max > range.min
+          ? ` \u00b7 altitude on one scale, ${U.elev(range.max - range.min)} of range`
+          : ' \u00b7 altitude flat throughout')
+        : '')
       + (driftM >= 100 ? ` \u00b7 ${U.dist(driftM)} of GPS drift while stopped, excluded` : '');
   }
   /* Round to whole seconds BEFORE splitting. Rounding the remainder afterwards prints "7:60": 479.6 s
@@ -31692,7 +32428,37 @@ function renderRunSplits(splits, unitLabel, driftM) {
     const m = Math.floor(tot / 60), ss = tot - m * 60;
     return m + ':' + String(ss).padStart(2, '0');
   };
-  tbody.innerHTML = splits.map(sp => {
+  /* One split's profile as an inline SVG. `preserveAspectRatio="none"` lets the viewBox stretch to
+     whatever width the column settles at -- every row gets the same width, so the rows stay
+     comparable to each other, which is the only comparison a sparkline is for. The stroke is
+     `non-scaling-stroke` in CSS, or that stretch would draw a fat vertical line and a thin
+     horizontal one out of one width.
+     `PAD` keeps the extremes off the edges so a 1.25px stroke at the very top is not half clipped,
+     and a run with NO range at all (a track, a treadmill, a barometer that never moved) draws the
+     flat line down the middle that describes it rather than dividing by a zero span. */
+  const SPARK_W = 100, SPARK_H = 24, SPARK_PAD = 2;
+  const sparkline = (vals) => {
+    const span = range.max - range.min;
+    const pts = vals.map((v, k) => {
+      const x = (SPARK_W * k) / (vals.length - 1);
+      const y = span > 0
+        ? SPARK_H - SPARK_PAD - ((v - range.min) / span) * (SPARK_H - 2 * SPARK_PAD)
+        : SPARK_H / 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<svg class="sp-spark" viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none" aria-hidden="true">`
+      + `<polygon points="0,${SPARK_H} ${pts} ${SPARK_W},${SPARK_H}"/><polyline points="${pts}"/></svg>`;
+  };
+  /* What the shape cannot say, for a reader who hovers or uses a screen reader. NET only -- the two
+     endpoints, which is what `splitGradePct` measures and what `climbOf`/`dropOf` report. Summing
+     the samples would be a climb TOTAL, and this file already records that raw sample-to-sample
+     summation over-reads an altimeter's own answer by tens of percent. */
+  const altText = (sp, vals) => {
+    const net = vals[vals.length - 1] - vals[0];
+    return `${net >= 0 ? '+' : '\u2212'}${U.elev(Math.abs(net))} over this `
+      + (sp.partial ? `${U.dist(sp.meters)}` : unitLabel);
+  };
+  tbody.innerHTML = splits.map((sp, i) => {
     const moving = movingOf(sp);
     const mps = moving > 0 ? sp.meters / moving : null;
     /* Longer split = slower, so the bar grows with time. Full-width is the slowest split. */
@@ -31701,18 +32467,45 @@ function renderRunSplits(splits, unitLabel, driftM) {
       : sp.index === slowest ? 'var(--text-muted)' : 'var(--border)';
     const bar = sp.partial ? ''
       : `<div style="height:6px;border-radius:3px;background:${tone};width:${pct.toFixed(0)}%;min-width:8px;"></div>`;
-    const note = sp.partial ? `<span class="dim" style="font-size:11px;">${U.dist(sp.meters)}</span>` : '';
-    const mark = sp.index === fastest ? ' <span class="dim" style="font-size:11px;">fastest</span>' : '';
+    /* The remainder's DISTANCE, and deliberately NOT its duration. That duration was the last thing
+       the retired Time column showed which pace does not -- and it is derivable from the two numbers
+       already on this row, distance times pace, which is the same redundancy that retired the
+       column. Showing it wide and hiding it on a phone was tried first and is worse than either: it
+       makes the two layouts disagree about a VALUE, and the phone check duly caught it. So it is
+       shown at no width, and the only thing that still differs between the layouts is the WORD
+       "partial", which the distance beside it says with a number. */
+    const part = sp.partial
+      ? ` <span class="dim sp-note"><span class="sp-wide">partial \u00b7 </span>${U.dist(sp.meters)}</span>`
+      : '';
+    /* EVERY ROW BADGE LIVES IN THE INDEX CELL, and that is arithmetic rather than taste: a column is
+       as wide as its widest row, so badges sharing ONE column cost the MAX of them while badges
+       spread over two columns cost the SUM. Measured at 375px with "+1:41 stopped" beside the pace
+       and the partial's distance beside the index, the table wanted 415px against the 341 it had and
+       the altitude column was clipped off the screen; moved together they fit with room over.
+       It reads right too -- all three qualify the ROW ("this is the fastest one", "this one is not a
+       full mile", "on this one you stood still for 1:41"), which is what the index column names, and
+       it is where the subtitle already points ("fastest #1, slowest #4"). */
+    const mark = sp.index === fastest ? ' <span class="dim sp-note">fastest</span>' : '';
     /* Name the stop on the row once it is worth naming (10 s, a crossing rather than GPS settling),
        so a split that took noticeably longer on the clock than on the legs explains itself. */
     const stopped = sp.seconds - moving;
-    const stopNote = stopped >= 10 ? ` <span class="dim" style="font-size:11px;">+${clock(stopped)} stopped</span>` : '';
+    /* The word STAYS at every width, which it did not have to when this note sat in a Time column:
+       there "8:33 +1:20" was plainly moving plus stopped, and as a bare badge "+1:20" reads just as
+       easily as a pace delta or a place. The clarity is worth the width. */
+    const stopNote = stopped >= 10
+      ? ` <span class="dim sp-note">+${clock(stopped)} stopped</span>` : '';
+    /* The unit rides in its own span so a phone can drop it to the column HEADER (`data-u`) instead
+       of repeating it on every row -- ONE rendering, with CSS choosing where it is shown, rather
+       than two row templates that can come to disagree about the number in front of it. */
+    const unit = (u) => `<span class="sp-u"> ${u}</span>`;
+    const prof = profiles[i];
     return `<tr>
-      <td>${sp.index}${sp.partial ? ' <span class="dim" style="font-size:11px;">partial</span>' : ''}</td>
-      <td>${clock(moving)}${stopNote}</td>
-      <td>${mps ? U.pace(mps) : '\u2014'}${mark}</td>
-      ${anyHr ? `<td class="split-hr-col">${sp.avgHr != null ? sp.avgHr + ' bpm' : '\u2014'}</td>` : ''}
-      <td style="width:35%;">${bar}${note}</td>
+      <td>${sp.index}${mark}${part}${stopNote}</td>
+      <td>${mps ? U.pace(mps) : '\u2014'}</td>
+      ${anyHr ? `<td class="split-hr-col">${sp.avgHr != null ? sp.avgHr + unit('bpm') : '\u2014'}</td>` : ''}
+      ${anyCad ? `<td class="split-cad-col">${cads[i] != null ? Math.round(cads[i]) + unit('spm') : '\u2014'}</td>` : ''}
+      ${anyAlt ? `<td class="split-alt-col"${prof ? ` title="${escapeHtml(altText(sp, prof))}" aria-label="${escapeHtml(altText(sp, prof))}"` : ''}>${prof ? sparkline(prof) : '\u2014'}</td>` : ''}
+      <td class="split-bar-col">${bar}</td>
     </tr>`;
   }).join('');
 }
@@ -31771,46 +32564,6 @@ function renderRunLaps(laps, note, { foot = true } = {}) {
   sec.classList.remove('hidden');
 }
 
-function renderRunClimbs(climbs) {
-  if (!climbs || !climbs.length) { hide('runClimbsSection'); return; }
-  show('runClimbsSection');
-  /* Shut unless this reader has opened it before. The heading, with its count, is the whole of what
-     the page spends on it by default; see the markup for why it is not simply dropped. */
-  syncFold('runClimbsFold', false);
-  const tbody = document.querySelector('#runClimbsTable tbody');
-  if (!tbody) return;
-  const fmtT = (sec) => { const m = Math.floor(sec / 60), s = Math.round(sec - m * 60); return m + ':' + String(s).padStart(2, '0'); };
-  const paceStr = (mps) => (mps && mps > 0) ? U.pace(mps) : '—';
-  /* Rounded signed delta with no "-0": a tiny negative fade should read 0, not -0. */
-  const signed = (v) => { const r = Math.round(v); return (r > 0 ? '+' : '') + (r === 0 ? 0 : r); };
-  /* Drop the HR column entirely on a run with no watch, rather than a dash per climb. Same call as
-     the splits table and the Heart rate tile: nothing was measured, so nothing is claimed. */
-  const anyHr = climbs.some(c => c.avgHr != null);
-  document.querySelectorAll('#runClimbsTable .climb-hr-col').forEach(th => th.classList.toggle('hidden', !anyHr));
-  tbody.innerHTML = climbs.map(c => {
-    const cadFade = c.cadenceFade == null ? ''
-      : ` <span class="dim" style="font-size:11px;${Math.round(c.cadenceFade) <= -4 ? 'color:#c0392b;' : ''}">${signed(c.cadenceFade)}</span>`;
-    const cad = c.avgCadence != null ? `${c.avgCadence.toFixed(0)} spm${cadFade}` : '—';
-    const hrDrift = c.hrDrift == null ? ''
-      : ` <span class="dim" style="font-size:11px;${Math.round(c.hrDrift) >= 8 ? 'color:#c0392b;' : ''}">${signed(c.hrDrift)}</span>`;
-    const hr = c.avgHr != null ? `${c.avgHr.toFixed(0)} bpm${hrDrift}` : '—';
-    const vamStr = c.vam != null ? `${U.smallNum(c.vam).toFixed(0)} ${U.smallUnit()}/h` : '—';
-    return `<tr>
-      <td><strong>${c.index}</strong></td>
-      <td>${fmtT(c.duration)}</td>
-      <td>${c.distance != null ? U.dist(c.distance) : '—'}</td>
-      <td>${U.elev(c.gain)}</td>
-      <td class="dir-up"><strong>+${c.avgGrade.toFixed(1)}%</strong></td>
-      <td>${vamStr}</td>
-      <td>${paceStr(c.speedAvg)}</td>
-      <td>${paceStr(c.gapSpeed)}</td>
-      <td>${cad}</td>
-      ${anyHr ? `<td class="climb-hr-col">${hr}</td>` : ''}
-    </tr>`;
-  }).join('');
-  const label = document.getElementById('runClimbCountLabel');
-  if (label) label.textContent = climbs.length;
-}
 
 function renderRunParams(D) {
   const det = D.detection;
@@ -34549,8 +35302,8 @@ function buildSectionNav() {
     { el: visible('runLapsSection'), label: 'Laps' },
     { el: visible('hrZonesSection'), label: 'HR zones' },
     { el: visible('runDecouplingSection'), label: 'HR drift' },
-    { el: visible('runClimbsSection'), label: 'Climbs' },
-    { el: visible('runSegmentsSection'), label: 'Segments' },
+    { el: visible('runSegmentsSection'),
+      label: (_runSegData && _runSegData.climbs.length) ? 'Climbs' : 'Segments' },
     { el: visible('recordingQualitySection'), label: 'Measured from' },
     { el: visible('roadSection'), label: 'Climbs' },
     { el: visible('roadSpeedSection'), label: 'Speed' },
@@ -39304,7 +40057,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '4f218f7dc · 2026-09-17';
+const LOAM_BUILD = 'fe1398f8f · 2026-09-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
