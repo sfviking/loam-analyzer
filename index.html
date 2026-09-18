@@ -515,7 +515,8 @@
   #dashboardModal .dash-foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
     display: flex; align-items: center; gap: 12px; }
   #dashboardModal .dash-locked { font-size: 11px; color: var(--text-dim); margin-right: auto; }
-  #segTrimModal .close { float: right; background: transparent; border: 0; color: var(--text-muted);
+  #segTrimModal .close, #dashboardModal .close { float: right; background: transparent; border: 0;
+                         color: var(--text-muted);
                          font-size: 24px; cursor: pointer; line-height: 1; }
   #libraryModal h3, #whatsNewModal h3 { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600;
                      font-size: 22px; margin-bottom: 8px; }
@@ -704,8 +705,16 @@
   /* The athlete's own layout, and deliberately an ATTRIBUTE rather than a second class. `.hidden` is
      owned by the render path (`show`/`hide`, and `hideAllSections`' 44-id sweep), so a second class
      on the same element invites a collision with it; an attribute is a different namespace and greps
-     distinctly. It is also what lets `focusHiddenSections` tell the two causes apart -- see there. */
-  #results [data-layout-off] { display: none; }
+     distinctly. It is also what lets `focusHiddenSections` tell the two causes apart -- see there.
+     UNSCOPED, and the `#results ` it used to carry was a live bug rather than tidiness: the coach
+     panel is a top-level SIBLING of #results (see the render-order comment above renderCoachPanel),
+     so the descendant selector could not reach it and the chooser's Coach row was a checkbox that
+     stored a choice, kept its nav chip, and changed nothing on screen -- which this feature's own
+     header calls worse than no checkbox. Scoping it to a container is a second claim about where
+     every catalog element LIVES, and that claim was already false the day it shipped; the attribute
+     has exactly one writer (`applySectionLayout`, which iterates the catalog and never the DOM), so
+     the containment argument it needs is the writer's, not a selector's. */
+  [data-layout-off] { display: none; }
   #turnFilterTag { font-size: 11px; color: var(--accent); margin-left: auto; }
   #turnFilterTag a { cursor: pointer; text-decoration: underline; }
   /* Play-by-play turn links: the numbered chip opens that corner on its segment page (map framed on
@@ -1616,7 +1625,16 @@
   .jump-marker-wrap.jm-dot.highlight span { display: block; }
 
   .leaflet-container { background: #1a1d22; font-family: 'IBM Plex Sans', sans-serif; }
+  /* Tuned for PHOTOGRAPHY (the Satellite default) and for CARTO's near-white raster: darken it to sit
+     in a dark page, and lift contrast so trail and tree detail survives the darkening. */
   .leaflet-tile-pane { filter: brightness(0.65) contrast(1.1) hue-rotate(-10deg); }
+  /* Topo is the one basemap whose content is COLOURED LINEWORK rather than imagery, so the same
+     filter does the opposite of what it does elsewhere: contrast(1.1) sharpens OpenTopoMap's own
+     orange contours, orange roads and green woodland -- the very marks the track has to be told
+     apart from -- and hue-rotate drags them further toward the descent red. Desaturate instead, so
+     the terrain stays legible as grey relief and the track is the only saturated thing on the map.
+     This is the paper convention: a printed topo under a highlighted route is read the same way. */
+  :root[data-basemap="topo"] .leaflet-tile-pane { filter: grayscale(0.7) brightness(0.72) contrast(0.95); }
 
   .params {
     display: flex; gap: 24px; padding: 14px 20px;
@@ -1721,7 +1739,7 @@
   .pending-file .fname { overflow-wrap:anywhere; min-width:0; }
   #libraryModal { margin:0; width:100%; height:100%; max-width:none; max-height:none; border:0; color:var(--text); padding:20px; box-sizing:border-box; }
   #libraryModal .modal-body { width:min(880px,100%); max-height:90dvh; overflow-y:auto; overflow-x:hidden; box-sizing:border-box; }
-  #libraryModal .close { min-width:44px; min-height:44px; }
+  #libraryModal .close, #dashboardModal .close { min-width:44px; min-height:44px; }
   .lib-list { display:grid; gap:0; }
   .lib-session { display:flex; gap:18px; justify-content:space-between; align-items:center; padding:18px 0; border-bottom:1px solid var(--border); }
   .lib-session h4 { font-size:17px; margin:0 0 7px; overflow-wrap:anywhere; }
@@ -38242,6 +38260,13 @@ const DASHBOARD_PRESETS = {
 const DASHBOARD_CUSTOM = 'custom';
 
 /*
+ * The key of the preset that hides nothing. Every family declares one, because it is the SHIPPED
+ * state: a build with no `full` row would leave `activePreset` naming a chip the chooser does not
+ * draw, so `layout.test.js` asserts the row exists and is empty for every family.
+ */
+const DASHBOARD_FULL = 'full';
+
+/*
  * The presets offered for a family, always including one the chooser can show as selected. An
  * unmapped family falls to the generic set rather than to nothing, so the chooser is never empty.
  */
@@ -38265,6 +38290,30 @@ function layoutOff(presets, layout, family) {
   if (!name || name === DASHBOARD_CUSTOM) return custom.slice();
   const hit = presetsFor(presets, family).find((p) => p.key === name);
   return hit ? hit.off.slice() : custom.slice();
+}
+
+/*
+ * Which preset chip reads as chosen.
+ *
+ * Reading `fam.preset` alone gets the SHIPPED DEFAULT wrong, and wrong in the one state every
+ * athlete is in the first time they open the chooser: nothing is stored, so nothing is hidden, and
+ * hiding nothing IS "Everything" -- but with no `preset` key to read, the chooser lit "Custom", the
+ * one chip that means "I built this myself". So the sheet opened disagreeing with the page it
+ * describes, and tapping Everything (the layout already on screen) was the only way to make the two
+ * agree. Same bug shape as a Focused-view hint claiming to hide things on a sport whose hidden set
+ * is empty: a control describing a state it is not in.
+ *
+ * Three cases, in order. A stored preset wins, because that is a choice the athlete made by name.
+ * Otherwise an `off` list with anything in it is genuinely custom. Otherwise nothing is hidden, and
+ * the answer is `full`.
+ *
+ * Takes `presets` rather than reading the table, for the reason every function here does: a caller
+ * may ask the raw question without a preset table in hand.
+ */
+function activePreset(presets, layout, family) {
+  const fam = (layout && family && layout[family]) || null;
+  if (fam && fam.preset) return fam.preset;
+  return layoutOff(presets, layout, family).length ? DASHBOARD_CUSTOM : DASHBOARD_FULL;
 }
 
 /* The athlete's stored dashboard layout, and the one place it is written.
@@ -38323,17 +38372,27 @@ function dashboardFamilyLayout() {
 }
 function setDashboardFamilyLayout(mutate) {
   const { layout, family, fam } = dashboardFamilyLayout();
+  const before = resolveSectionLayout(SECTION_CATALOG, layout, family, DASHBOARD_PRESETS);
   const next = { sections: { off: (fam.sections && fam.sections.off) || [] } };
   if (fam.preset) next.preset = fam.preset;
   mutate(next);
   layout[family] = next;
   layout.v = DASHBOARD_LAYOUT_VERSION;
   saveDashboardLayout(layout);
-  /* Sections need no re-render: nothing recomputes, the CSS just stops hiding them. The resize is
-     what the Focused-view toggle already fires, because Plotly measures at plot time and a chart
-     revealed out of `display:none` comes back zero-wide until something tells it to look again. */
-  buildSectionNav();
-  resizeChartsSoon();
+  /* Sections need no re-render: nothing recomputes, the CSS just stops hiding them. But the two
+     calls below are the expensive ones on a phone -- `buildSectionNav` re-measures every section
+     with `getBoundingClientRect` and re-runs the whole-page string sweep, and `resizeChartsSoon`
+     fires TWO synthetic window resizes, each of which re-lays out every Plotly chart on the page --
+     so both are now gated on the page actually having changed.
+     Picking the preset that is ALREADY on screen is the common way to spend that for nothing, and
+     it is the first thing an athlete does: "Everything" is the shipped layout, so tapping it used to
+     run two full-page chart relayouts to produce a pixel-identical page.
+     The resize is narrower still, and deliberately: it exists because Plotly measures at plot time
+     and a chart revealed out of `display:none` comes back zero-wide (the same reason the
+     Focused-view toggle fires it). HIDING a section can never need it. */
+  const after = resolveSectionLayout(SECTION_CATALOG, layout, family, DASHBOARD_PRESETS);
+  if (SECTION_CATALOG.some((row) => before[row.id] !== after[row.id])) buildSectionNav();
+  if (SECTION_CATALOG.some((row) => !before[row.id] && after[row.id])) resizeChartsSoon();
   renderDashboardBody();
 }
 
@@ -38342,7 +38401,7 @@ function renderDashboardBody() {
   if (!host) return;
   const { family, fam } = dashboardFamilyLayout();
   const presets = presetsFor(DASHBOARD_PRESETS, family);
-  const active = fam.preset || DASHBOARD_CUSTOM;
+  const active = activePreset(DASHBOARD_PRESETS, { [family]: fam }, family);
   const off = new Set(layoutOff(DASHBOARD_PRESETS, { [family]: fam }, family));
   const avail = new Set(_layoutAvailable);
 
@@ -38824,21 +38883,41 @@ function renderStats(s, hasFit, descents, gradeSegments) {
    nothing at all, because a bare gap reads as a rendering fault while a dashed line reads as what it
    is -- the two ends of a stretch nobody recorded. Muted and thin, so it cannot be mistaken for
    track at a glance, and it carries the reason on hover. */
+/* Every stretch is drawn TWICE: a dark casing first, then the coloured line inside it. Without the
+   casing the track is a bare 4px stroke competing with whatever the basemap already draws, and on
+   Topo it loses -- OpenTopoMap's own linework is orange contours, orange roads and green woodland,
+   which is the same hue family as the grade colours (climb #7fb069, descent #e0573a) and close to
+   the warm end of the speed ramp too (owner report over a run at Sweeney Ridge, 2026-09-18: "Hard to
+   see path on topo map"). A casing is the cartographic answer and it is hue-independent: the dark
+   outline separates the track from the map by VALUE, so it survives a basemap change, a contour
+   crossing and a track colour that happens to match what is underneath. The same trick is already
+   used by the Form Replay map (a dark casing under a bright line) and the three segment/PR mini
+   maps, and this -- the one track a rider actually reads on a trail -- was the surface without it.
+   The comment on BASEMAPS claiming the track "keeps its white halo" over imagery was describing
+   those other maps; this one never had one.
+
+   Drawn in TWO PASSES rather than casing-then-line per stretch, because layers in a shared canvas
+   renderer paint in add order: interleaved, the next stretch's casing would paint over the previous
+   stretch's coloured line and leave a dark notch at every colour change (and a speed-coloured MTB
+   track changes colour every few points). All casings, then all lines. */
+const TRACK_WEIGHT = 4;         // the coloured line
+const TRACK_CASING_WEIGHT = 7;  // 1.5px of dark either side of it
+const TRACK_CASING_COLOR = '#0a0d07';
 function drawColoredTrack(latlngs, colorAt, target, opts) {
   const dest = target || mapInstance;
   const renderer = L.canvas({ padding: 0.4 });
   const brokenAt = (opts && opts.brokenAt) || null;
+  /* Collected first, drawn below, so the casing pass can run ahead of the colour pass. */
+  const items = [];
   let pts = [latlngs[0]], cur = colorAt(1);
-  const flush = () => { if (pts.length > 1) L.polyline(pts, { color: cur, weight: 4, opacity: 0.9, renderer }).addTo(dest); };
+  const flush = () => { if (pts.length > 1) items.push({ gap: false, pts, color: cur }); };
   for (let i = 1; i < latlngs.length; i++) {
     if (brokenAt && brokenAt(i)) {
       flush();
       /* Two fixes at the same point need no connector, and drawing one would put a layer on the map
          for every second of a pause that recorded fixes anyway (a merged file, or a fixture). */
       if (latlngs[i - 1][0] !== latlngs[i][0] || latlngs[i - 1][1] !== latlngs[i][1]) {
-        L.polyline([latlngs[i - 1], latlngs[i]], {
-          color: '#8a8f98', weight: 2, opacity: 0.6, dashArray: '4 6', className: 'track-pause-gap', renderer
-        }).addTo(dest).bindTooltip('Paused \u2014 nothing was recorded between these points');
+        items.push({ gap: true, pts: [latlngs[i - 1], latlngs[i]] });
       }
       pts = [latlngs[i]]; cur = colorAt(i);
       continue;
@@ -38848,6 +38927,26 @@ function drawColoredTrack(latlngs, colorAt, target, opts) {
     pts.push(latlngs[i]);
   }
   flush();
+  /* Pass 1: the casings. `className` is what tells them apart from track afterwards -- the E2E reads
+     the drawn layers back, and a casing counted as a stretch would make a broken track look whole. */
+  for (const it of items) {
+    if (it.gap) continue;  /* the pause hairline is deliberately faint; a casing would make it read as track */
+    L.polyline(it.pts, {
+      color: TRACK_CASING_COLOR, weight: TRACK_CASING_WEIGHT, opacity: 0.75,
+      className: 'track-casing', interactive: false, renderer,
+    }).addTo(dest);
+  }
+  /* Pass 2: the track itself, opaque now -- readability comes from the casing, so there is no longer
+     any reason to let the basemap through the line and mute its colour. */
+  for (const it of items) {
+    if (it.gap) {
+      L.polyline(it.pts, {
+        color: '#8a8f98', weight: 2, opacity: 0.6, dashArray: '4 6', className: 'track-pause-gap', renderer
+      }).addTo(dest).bindTooltip('Paused \u2014 nothing was recorded between these points');
+    } else {
+      L.polyline(it.pts, { color: it.color, weight: TRACK_WEIGHT, opacity: 1, renderer }).addTo(dest);
+    }
+  }
 }
 
 /* Nearest sample by time in a time-sorted array. Used to place a turn marker even when no GPS fix
@@ -43352,7 +43451,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'b0d17185b · 2026-09-17';
+const LOAM_BUILD = '2ae74c50a · 2026-09-18';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
@@ -43583,10 +43682,12 @@ localizeStaticChrome();
 
 /* ---------- Configurable basemap (background map detail) ----------
    Satellite (real Esri World Imagery) is the default: on a trail the terrain context (actual trails,
-   trees, features) is worth more than a clean background, and the speed-coloured track keeps its white
-   halo so it stays readable over imagery (the Form Replay map already defaults to satellite). Minimal
+   trees, features) is worth more than a clean background, and the track's dark casing (drawColoredTrack)
+   keeps it readable over imagery (the Form Replay map already defaults to satellite). Minimal
    (clean, label-free) / Streets / Topo remain in the selector. Persisted in localStorage; swapped
-   live. All sources are key-free; attribution is shown per their terms (see addBasemap). */
+   live. All sources are key-free; attribution is shown per their terms (see addBasemap).
+   Whichever is picked is also published to CSS by markBasemap, because the tile-pane filter that
+   makes imagery sit in a dark page does the wrong thing to Topo's coloured linework. */
 let baseTileLayer = null;
 const BASEMAPS = {
   minimal:   { name: 'Minimal',   url: 'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
@@ -43609,9 +43710,17 @@ function loamTileUrl(url) {
   if (typeof LOAM_EMBEDDED === 'undefined' || !LOAM_EMBEDDED || !url) return url;
   return 'loam://app/tileproxy/' + url.replace(/^https?:\/\//, '');
 }
+/* Which basemap is showing, published to CSS so the tile-pane filter can be per-basemap (see the
+   `[data-basemap="topo"]` rule). On the document element rather than on a map container because the
+   page holds SEVERAL Leaflet maps (overview, segment, Form Replay, the PR mini maps) that all read
+   this one preference, and only the overview map gets its layer swapped live by setBasemap below. */
+function markBasemap() {
+  try { document.documentElement.setAttribute('data-basemap', basemapPref()); } catch (e) {}
+}
 /* Add the selected basemap to a freshly-created Leaflet map, keeping a handle so it can be swapped. */
 function addBasemap(map) {
   const b = BASEMAPS[basemapPref()];
+  markBasemap();
   baseTileLayer = L.tileLayer(loamTileUrl(b.url), b.opts).addTo(map);
   try { map.attributionControl.setPrefix(false); } catch (e) {}
   return baseTileLayer;
@@ -43619,6 +43728,7 @@ function addBasemap(map) {
 function setBasemap(v) {
   try { localStorage.setItem('loam_basemap', v); } catch (e) {}
   const sel = document.getElementById('basemapSel'); if (sel) sel.value = v;
+  markBasemap();
   if (mapInstance) {
     if (baseTileLayer) { try { mapInstance.removeLayer(baseTileLayer); } catch (e) {} }
     const b = BASEMAPS[basemapPref()];
@@ -43626,7 +43736,7 @@ function setBasemap(v) {
     baseTileLayer.bringToBack();
   }
 }
-(function initBasemapSel() { const sel = document.getElementById('basemapSel'); if (sel) sel.value = basemapPref(); })();
+(function initBasemapSel() { const sel = document.getElementById('basemapSel'); if (sel) sel.value = basemapPref(); markBasemap(); })();
 
 /* Show the landing list of recent rides on first paint (no-op when the library is empty). */
 renderRecentRides();
