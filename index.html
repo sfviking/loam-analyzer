@@ -1457,7 +1457,7 @@
      so more of it is more resolution. */
   #runSplitsTable .split-bar-col { width: 45%; }
 
-  /* THE ALTITUDE SPARKLINE (owner, 2026-09-17: "how about a spark line to show the altitude instead
+  /* THE TOPO SPARKLINE (owner, 2026-09-17: "how about a spark line to show the altitude instead
      of grade"). A cell holding only an SVG has a min-content of ZERO, so the column would collapse to
      nothing in an auto table -- `min-width` is what gives it a floor, and the `width` is what stops it
      taking the slack the index column used to.
@@ -2903,13 +2903,20 @@
              cannot wrap, so it sets the column's minimum: measured at 375px, "CADENCE SPM" holds 57px
              for a three-digit number, "CAD SPM" holds 33px.
              The bar column is the phone's right-edge gutter as well as the bar, so it is never
-             dropped outright -- again, see the stylesheet. -->
+             dropped outright -- again, see the stylesheet.
+             "Topo" rather than "Altitude" (owner, 2026-09-18): the cell holds the SHAPE of the
+             ground and no height at all, and a heading naming a quantity invites reading one off a
+             picture that has none. The series behind it is still altitude, which is why the code
+             either side of this keeps that word.
+             `data-i18n-key` because the copy table is keyed on source text and the page ALREADY
+             translates the word "Topo" -- the map picker's basemap option, which is "Topografisk" in
+             Norwegian and would render right here, in a 42px column. See `localizeStaticText`. -->
         <table id="runSplitsTable">
           <thead><tr>
             <th>#</th><th>Pace</th>
             <th class="split-hr-col" data-u="bpm">HR</th>
             <th class="split-cad-col" data-u="spm">Cad</th>
-            <th class="split-alt-col">Altitude</th>
+            <th class="split-alt-col" data-i18n-key="Topo (splits column)">Topo</th>
             <th class="split-bar-col"></th>
           </tr></thead>
           <tbody></tbody>
@@ -30596,12 +30603,16 @@ const LOAM_NB = {
   'Climbs & balance': 'Stigninger og balanse',
   'Avg W': 'Snitt W',
   'Cad': 'Kad',
-  'Altitude': 'Høyde',
-  /* The splits panel's altitude clause. The sparklines share one scale, so the panel has to say
+  /* The splits table's topo column, reached by the heading's own `data-i18n-key` rather than by its
+     text, because the text is "Topo" and that word is already the basemap picker's ("Topografisk").
+     Norwegian borrows "topo" as written -- short for topografi, the way a route guide uses it -- so
+     this heading is the same in both languages while the map picker's stays translated. */
+  'Topo (splits column)': 'Topo',
+  /* The splits panel's topo clause. The sparklines share one scale, so the panel has to say
      what that scale is; a range of zero is a real reading and says flat rather than "0 ft". */
-  ' \u00b7 altitude on one scale, {range} of range': ' \u00b7 høyde på én skala, {range} spenn',
-  ' \u00b7 altitude flat throughout': ' \u00b7 flatt hele veien',
-  /* The altitude sparkline's title and aria-label: one sentence, because the unit sits after the
+  ' \u00b7 topo on one scale, {range} of range': ' \u00b7 topo på én skala, {range} spenn',
+  ' \u00b7 topo flat throughout': ' \u00b7 flatt hele veien',
+  /* The topo sparkline's title and aria-label: one sentence, because the unit sits after the
      noun in Norwegian and a concatenation could not move it. */
   '{net} over this {unit}': '{net} over denne {unit}',
   'Fade': 'Svikt',
@@ -32267,8 +32278,17 @@ function localizeStaticText() {
        whitespace is put back, so the markup still reads as markup. */
     const src = raw.trim().replace(/\s+/g, ' ');
     if (!src) continue;
-    const out = loamT(src);
-    if (out === src) continue;
+    /* A NODE MAY NAME ITS OWN KEY, which is the one thing keying on source text cannot do: give one
+       English word two translations. Measured case -- the splits table is headed "Topo" and the map
+       picker's basemap option is also "Topo", which is "Topografisk" in Norwegian, and a sweep by
+       text put "Topografisk" in a column whose phone minimum is 42px. `data-i18n-key` lets that
+       heading ask for its own entry while every other surface keeps the ordinary behaviour.
+       A missing entry leaves the ENGLISH on screen rather than the key, which is the same failure
+       mode an unkeyed miss already has; the nb test asserts every keyed node has one. */
+    const keyed = n.parentElement && n.parentElement.getAttribute
+      ? n.parentElement.getAttribute('data-i18n-key') : null;
+    const out = loamT(keyed || src);
+    if (out === (keyed || src)) continue;
     n.textContent = raw.slice(0, raw.indexOf(raw.trim()[0])) + out + raw.slice(raw.trimEnd().length);
   }
   /* The attributes a reader can surface: a tooltip and a placeholder are copy, and the four charts
@@ -34503,7 +34523,7 @@ function splitGradePct(split, alts) {
   return ((b - a) / split.meters) * 100;
 }
 
-/* How many points a split's altitude sparkline is drawn from. See the module. */
+/* How many points a split's topo sparkline is drawn from. See the module. */
 const SPARK_SAMPLES = 24;
 
 /**
@@ -35267,8 +35287,8 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
          clumsy way to say flat, so it says flat. */
       + (anyAlt
         ? (range.max > range.min
-          ? loamT(' \u00b7 altitude on one scale, {range} of range', { range: U.elev(range.max - range.min) })
-          : loamT(' \u00b7 altitude flat throughout'))
+          ? loamT(' \u00b7 topo on one scale, {range} of range', { range: U.elev(range.max - range.min) })
+          : loamT(' \u00b7 topo flat throughout'))
         : '')
       + (driftM >= 100 ? loamT(' \u00b7 {dist} of GPS drift while stopped, excluded', { dist: U.dist(driftM) }) : '');
   }
@@ -35339,7 +35359,7 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
        as wide as its widest row, so badges sharing ONE column cost the MAX of them while badges
        spread over two columns cost the SUM. Measured at 375px with "+1:41 stopped" beside the pace
        and the partial's distance beside the index, the table wanted 415px against the 341 it had and
-       the altitude column was clipped off the screen; moved together they fit with room over.
+       the topo column was clipped off the screen; moved together they fit with room over.
        It reads right too -- all three qualify the ROW ("this is the fastest one", "this one is not a
        full mile", "on this one you stood still for 1:41"), which is what the index column names, and
        it is where the subtitle already points ("fastest #1, slowest #4"). */
@@ -43451,7 +43471,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '2ae74c50a · 2026-09-18';
+const LOAM_BUILD = '9c31d2f1f · 2026-09-18';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
