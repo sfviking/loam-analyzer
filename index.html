@@ -469,10 +469,10 @@
   }
   #whatsNewModal .modal-body { max-width: 560px; }
   /* Segment trim modal sits above the Library modal (z 4000) so "Adjust" can open from inside it. */
-  #segTrimModal { position: fixed; inset: 0; background: rgba(10,12,15,0.85); z-index: 4100;
+  #segTrimModal, #dashboardModal { position: fixed; inset: 0; background: rgba(10,12,15,0.85); z-index: 4100;
                   display: flex; align-items: center; justify-content: center; }
-  #segTrimModal.hidden { display: none; }
-  #segTrimModal .modal-body {
+  #segTrimModal.hidden, #dashboardModal.hidden { display: none; }
+  #segTrimModal .modal-body, #dashboardModal .modal-body {
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     /* min-width:0 so the flex item honours width:92% instead of stretching to the map's min-content
        width (which pushed the modal wider than the screen). overflow-x/y set as separate longhands,
@@ -494,8 +494,27 @@
     input[type="text"], input[type="search"], input[type="number"], input[type="tel"],
     input[type="url"], input[type="email"], input[type="password"], textarea { font-size: 16px !important; }
   }
-  #segTrimModal h3 { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600;
+  #segTrimModal h3, #dashboardModal h3 { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600;
                      font-size: 20px; margin-bottom: 6px; }
+  /* The chooser. No text field anywhere in it, deliberately: the iOS auto-zoom class of bug that
+     pushed the segment modal's Save button off screen cannot reach a sheet made of buttons and
+     checkboxes. Rows are full-width labels at 44px so a thumb hits the row, not the box. */
+  #dashboardModal .dash-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
+  #dashboardModal .dash-preset {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 14px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  #dashboardModal .dash-preset[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  #dashboardModal .dash-group { font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+  #dashboardModal .dash-row { display: flex; align-items: center; gap: 10px; min-height: 44px;
+    padding: 0 4px; border-bottom: 1px solid var(--border); font-size: 14px; cursor: pointer; }
+  #dashboardModal .dash-row:last-child { border-bottom: 0; }
+  #dashboardModal .dash-row input { margin-left: auto; width: 18px; height: 18px; accent-color: var(--accent); }
+  #dashboardModal .dash-row.dash-gone { color: var(--text-dim); cursor: default; }
+  #dashboardModal .dash-gone-note { font-size: 11px; color: var(--text-dim); }
+  #dashboardModal .dash-foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; }
+  #dashboardModal .dash-locked { font-size: 11px; color: var(--text-dim); margin-right: auto; }
   #segTrimModal .close { float: right; background: transparent; border: 0; color: var(--text-muted);
                          font-size: 24px; cursor: pointer; line-height: 1; }
   #libraryModal h3, #whatsNewModal h3 { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600;
@@ -682,6 +701,11 @@
      map already answer "where did I gain or lose time", so the speed/time-lag spaghetti charts are
      detail. They reveal when Focused view is turned off. */
   #results.focus-mode .detail-chart { display: none; }
+  /* The athlete's own layout, and deliberately an ATTRIBUTE rather than a second class. `.hidden` is
+     owned by the render path (`show`/`hide`, and `hideAllSections`' 44-id sweep), so a second class
+     on the same element invites a collision with it; an attribute is a different namespace and greps
+     distinctly. It is also what lets `focusHiddenSections` tell the two causes apart -- see there. */
+  #results [data-layout-off] { display: none; }
   #turnFilterTag { font-size: 11px; color: var(--accent); margin-left: auto; }
   #turnFilterTag a { cursor: pointer; text-decoration: underline; }
   /* Play-by-play turn links: the numbered chip opens that corner on its segment page (map framed on
@@ -1779,6 +1803,18 @@
   </div>
 </dialog>
 
+<!-- The dashboard chooser. Built in JS rather than written out here, because the rows are per sport
+     (only what this recording rendered is offered) and because building it in JS puts every string
+     through loamT directly instead of through localizeStaticChrome's by-source-text pass. -->
+<div id="dashboardModal" class="hidden">
+  <div class="modal-body">
+    <button class="close" id="dashboardCloseBtn">&times;</button>
+    <h3 id="dashboardTitle">Dashboard</h3>
+    <p id="dashboardLead" style="color:var(--text-dim); font-size:12px; margin-bottom:4px;"></p>
+    <div id="dashboardBody"></div>
+  </div>
+</div>
+
 <div id="segTrimModal" class="hidden">
   <div class="modal-body">
     <button class="close" id="segTrimCloseBtn">×</button>
@@ -2495,6 +2531,10 @@
     <div class="prefs">
       <button id="displayPrefsBtn" type="button" aria-expanded="false" aria-controls="displayPrefs" title="Map size, basemap, units and calibration">&#9881; Options</button>
       <div id="displayPrefs" class="prefs-pop hidden">
+      <!-- Opens the chooser. A BUTTON rather than a control, because the popover closes on any
+           `change` event and a checklist in a 190-300px box capped to the room under the button is
+           the wrong shape for this; the button closes the popover itself. -->
+      <button type="button" id="dashboardBtn">Dashboard&hellip;</button>
         <label>Map
           <select id="mapHeightSel" onchange="setMapHeight(this.value)">
             <option value="sm">Compact</option>
@@ -29666,6 +29706,23 @@ const LOAM_NB = {
   '· every chart & table': '· alle grafer og tabeller',
   '· {n} hidden': '· {n} skjult',
   'Options': 'Valg',
+  'Dashboard': 'Dashbord',
+  'Dashboard\u2026': 'Dashbord\u2026',
+  'Pick a ready-made layout, or tick exactly what you want to see.':
+    'Velg et ferdig oppsett, eller huk av nøyaktig det du vil se.',
+  'Sections': 'Seksjoner',
+  'Custom': 'Egendefinert',
+  'Everything': 'Alt',
+  'Essentials': 'Det viktigste',
+  /* 'Corners' is NOT repeated here: the corner-read block further down already declares it, and a
+     key declared twice means the last one wins while the rest sit dead in the file. Same table, same
+     lookup, so the preset chip reads "Svinger" either way. */
+  'Racing': 'Konkurranse',
+  'Form': 'Teknikk',
+  'Power': 'Watt',
+  'not in this session': 'ikke i denne økten',
+  'Warnings and the map always stay.': 'Advarsler og kartet vises alltid.',
+  'Done': 'Ferdig',
   'Map size, basemap, units and calibration': 'Kartstørrelse, bakgrunnskart, enheter og kalibrering',
   'Back to comparison': 'Tilbake til sammenligningen',
   'Return to the cross-session comparison': 'Gå tilbake til sammenligningen på tvers av økter',
@@ -32277,6 +32334,9 @@ function localizeStaticChrome() {
   title('#attachFitBtn', 'Attach a Specialized/Garmin FIT to this ride for jumps + wheel speed');
   text('#displayPrefsBtn', 'Options');
   title('#displayPrefsBtn', 'Map size, basemap, units and calibration');
+  /* The chooser's own body is built in JS and goes through loamT directly; only this row and the
+     modal's title are static markup, so only they come through here. */
+  text('#dashboardBtn', 'Dashboard\u2026');
   selectLabel('#mapHeightSel', 'Map');
   opt('#mapHeightSel', 'sm', 'Compact');
   opt('#mapHeightSel', 'md', 'Standard');
@@ -37931,6 +37991,435 @@ function renderCalibNotice(D) {
    is not .hidden, and is not display:none (Focused view hides some via CSS). The lap comparison gets
    its own highlighted chip because it is the most-asked-for feature and otherwise lives buried inside
    the Runs panel; it points at the play-by-play (MTB) or the DTW descent comparison (running). */
+/*
+ * Which sections of the results page an athlete has chosen to see.
+ *
+ * The page ships one hard-coded answer to "what belongs on screen": `#results.focus-mode` hides five
+ * ids and every `.detail-chart`. That is a one-bit control with two problems. Its hidden set names
+ * only MTB and running sections, so on a road ride or a GPS-only FIT the toggle hides NOTHING while
+ * its hint still reads "the essentials" -- a control claiming to do something it does not. And
+ * "either the essentials or every chart and table" has no middle: a rider who wants the corner
+ * ledger but not the raw-metrics dump cannot say so.
+ *
+ * THE CATALOG IS NOT A NEW LIST. It is `buildSectionNav`'s `entries` array, lifted. That array is
+ * already the complete, English-labelled roster of every section a sport can show, and it is already
+ * kept honest by `assertSectionNavCovers`, which asks the live page on all 61 E2E scenarios. Writing
+ * a second list of the same fact is the failure this repo records for `turnSidesUnreliable` (six
+ * surfaces disagreeing about one question) and for the hand-written `PORTED_CONSTS` the derived
+ * guard replaced. One list means a new section gets a nav chip AND a layout row from one edit, and
+ * the existing coverage test protects both.
+ *
+ * A WARNING IS NOT A DATA FIELD, and that is enforced structurally rather than by care. There are
+ * two tiers:
+ *
+ *   1. `applySectionLayout` iterates THE CATALOG, never the DOM. The eight dismissable notices --
+ *      the calibration pose-mismatch banner (which fires on 46% of real recordings), the truncation
+ *      notice, the guessed-sport notice, and the rest -- have no catalog rows, because they have no
+ *      nav chips. They are not "not offered"; they are unreachable by this code. A section shipped
+ *      tomorrow without a row is likewise un-hideable, which is the safe direction here, while
+ *      `assertSectionNavCovers` fails loudly in the direction that matters for the nav.
+ *
+ *   2. `lock` on a row, read as `row.lock ? true : ...`, so NO input can turn it off -- not a
+ *      hand-edited localStorage, not a preset, not a stale layout from a later build. Four rows
+ *      carry it, each for a stated reason, and the reason is in the data rather than in a comment
+ *      somewhere else.
+ *
+ * Labels are English here and translated at the render site. This module is drift-pinned, and a
+ * pinned body is rebuilt in a fresh scope carrying only its listed callees, so a `loamT` call inside
+ * one throws ReferenceError in every guard that extracts it. Pinned functions COMPUTE; render
+ * functions WRITE TEXT.
+ */
+
+/*
+ * Every section the results flow can show, in the order `buildSectionNav` used to declare them.
+ * Order here is NOT page order -- the nav sorts by live geometry, because the road path hoists its
+ * corners under the map and the foot paths move the runs panel -- but it is a stable order for the
+ * chooser, which must not reshuffle under an athlete between two recordings.
+ *
+ * `label` is the nav chip's text and the chooser row's text, deliberately one string: a section and
+ * its checkbox coming to two different Norwegian words is the same class of bug as a leaderboard and
+ * the panel under it disagreeing about one lap.
+ */
+const SECTION_CATALOG = [
+  { id: 'sessionOverview', label: 'Summary' },
+  { id: 'crashSection', label: 'Crash',
+    lock: 'an event the rider reported, not one the analyzer detected' },
+  { id: 'overviewSection', label: 'Map',
+    lock: 'the map and the key numbers are one section (#statsPanel sits inside it), and every E2E scenario asserts it visible' },
+  { id: 'timelineSection', label: 'Timeline',
+    lock: 'every E2E scenario asserts it visible' },
+  { id: 'runsSection', label: 'Runs' },
+  { id: 'runCompareSection', label: 'Compare laps', navResolve: 'compare',
+    lock: 'one chip, two possible targets: the nav resolves the element itself, so there is no single element to switch off' },
+  { id: 'jumpsSection', label: 'Jumps' },
+  { id: 'airtimeSection', label: 'Airtime' },
+  { id: 'turnSection', label: 'Turns' },
+  { id: 'radiusSection', label: 'Radius' },
+  { id: 'formReplaySection', label: 'Form replay' },
+  { id: 'analogSection', label: 'Motor off' },
+  { id: 'cadPowerSection', label: 'Cadence · power' },
+  { id: 'fitDataSection', label: 'Bike data' },
+  { id: 'runCadenceSection', label: 'Cadence' },
+  { id: 'runOscSection', label: 'Oscillation' },
+  { id: 'runSplitsSection', label: 'Splits' },
+  { id: 'runLapsSection', label: 'Laps' },
+  { id: 'hrZonesSection', label: 'HR zones' },
+  { id: 'runDecouplingSection', label: 'HR drift' },
+  { id: 'runSegmentsSection', label: 'Segments' },
+  { id: 'recordingQualitySection', label: 'Measured from' },
+  { id: 'roadSection', label: 'Climbs' },
+  { id: 'roadSpeedSection', label: 'Speed' },
+  { id: 'roadDescentsSection', label: 'Descents' },
+  { id: 'roadDescentHistorySection', label: 'Descent history' },
+  { id: 'roadPowerCurveSection', label: 'Power curve' },
+  { id: 'roadQuadrantSection', label: 'Cadence' },
+  { id: 'roadLapsSection', label: 'Laps' },
+  { id: 'gpsUpsellSection', label: 'Unlock more' },
+  { id: 'roadUpsellSection', label: 'Unlock more' },
+  { id: 'geekStatsSection', label: 'Raw' },
+  { id: 'coachSection', label: 'Coach' },
+];
+
+/*
+ * The rows an athlete may switch off. Everything else is either locked or not in the catalog at all,
+ * and the difference matters to a reader of this code: locked rows ARE offered to the eye (they have
+ * chips, they are part of the page's roster) and simply cannot be turned off, where a notice is not
+ * part of the roster in the first place.
+ */
+function layoutableSections(catalog) {
+  return (catalog || []).filter((row) => !row.lock);
+}
+
+/*
+ * Resolve a stored layout into { sectionId: shouldShow }.
+ *
+ * Exclusions are stored, never inclusions, and the reason is forward-compatibility rather than
+ * brevity: a section shipped AFTER an athlete saved a layout must APPEAR. A feature nobody has seen
+ * cannot have been rejected, and storing inclusions would make every future section invisible to
+ * every existing custom layout, silently and forever. This is the rule
+ * `stravaAutoUploadExcludedSports` already follows on the capture side, for the same reason its own
+ * comment gives.
+ *
+ * An id in `off` that this build no longer knows is ignored rather than pruned: the resolver only
+ * consults catalog rows, and a downgrade -- or a build where a section is temporarily withheld --
+ * must not eat a choice the athlete made.
+ */
+function resolveSectionLayout(catalog, layout, family, presets) {
+  const fam = (layout && family && layout[family]) || null;
+  /* `presets` is optional so the resolver can be asked the raw question -- what did the athlete tick
+     -- without a preset table in hand. With one, a stored preset name wins over the stored list;
+     without one, only the list is read. Both paths end in the same `lock` clause, which is what
+     makes the safety property independent of which question was asked. */
+  const off = new Set(presets
+    ? layoutOff(presets, layout, family)
+    : ((fam && fam.sections && fam.sections.off) || []));
+  const out = {};
+  for (const row of catalog || []) out[row.id] = row.lock ? true : !off.has(row.id);
+  return out;
+}
+
+/*
+ * The stored-layout format version.
+ *
+ * An unrecognised version degrades to the DEFAULTS rather than to a half-understood layout, which is
+ * the posture `WatchDisplayMode.resolve(setting:sport:)` already takes on the capture side: a value
+ * this build cannot read becomes something sensible, never something blank. It matters here because
+ * the hosted page and the app's vendored copy update independently, so a layout written by a newer
+ * build really can be read by an older one.
+ */
+const DASHBOARD_LAYOUT_VERSION = 1;
+
+/*
+ * Which layout a sport uses.
+ *
+ * Keyed on the FAMILY rather than the sport, so an e-bike ride does not start from a blank dashboard
+ * because the athlete tuned theirs on the analog bike, and a walk inherits the run's. Takes an
+ * already-normalized sport (`normalizeSport`'s output) so this stays dependency-free and pinnable.
+ *
+ * The catch-all is `ride`, matching `normalizeSport`'s own, and it is the honest answer rather than a
+ * shrug: every sport that reaches this path renders the descents-and-turns flow, and a sport nobody
+ * mapped gets the generic layout instead of a private one nothing else can find.
+ */
+function dashboardFamily(normalizedSport) {
+  if (normalizedSport === 'emtb') return 'mtb';
+  if (normalizedSport === 'walk') return 'run';
+  if (normalizedSport === 'mtb' || normalizedSport === 'run' || normalizedSport === 'road'
+      || normalizedSport === 'ski') return normalizedSport;
+  return 'ride';
+}
+
+/*
+ * Validate a layout read back off disk.
+ *
+ * localStorage is a string an athlete, another tab, or a future build can have written, so nothing
+ * downstream should have to wonder whether `off` is an array. Anything unreadable comes back null,
+ * which every caller treats as "no layout" -- i.e. show everything -- because the failure this is
+ * willing to have is a dashboard that shows too much, never one that silently hides a section the
+ * athlete never chose to hide.
+ *
+ * Unknown family keys and unknown ids are KEPT, deliberately. The resolver only consults catalog
+ * rows, so they cost nothing, and pruning them here would mean a build that temporarily withholds a
+ * section permanently forgets the athlete's choice about it.
+ */
+function normalizeLayout(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (raw.v !== DASHBOARD_LAYOUT_VERSION) return null;
+  const out = { v: DASHBOARD_LAYOUT_VERSION };
+  for (const family of Object.keys(raw)) {
+    if (family === 'v') continue;
+    const fam = raw[family];
+    if (!fam || typeof fam !== 'object' || Array.isArray(fam)) continue;
+    const off = (fam.sections && Array.isArray(fam.sections.off) ? fam.sections.off : [])
+      .filter((id) => typeof id === 'string' && id);
+    const preset = typeof fam.preset === 'string' && fam.preset ? fam.preset : null;
+    if (!off.length && !preset) continue;
+    out[family] = { sections: { off } };
+    if (preset) out[family].preset = preset;
+  }
+  return Object.keys(out).length > 1 ? out : null;
+}
+
+/*
+ * The ready-made layouts, per family.
+ *
+ * A preset stores its NAME, not the id list it resolved to on the day it was picked. Same
+ * forward-compatibility rule as the exclusions themselves, one level up: a section shipped later
+ * joins whichever presets the release puts it in, so a preset user keeps getting the MAINTAINED
+ * layout rather than a snapshot frozen at the moment they chose it.
+ *
+ * `off` names what each preset HIDES. `full` hides nothing and is the shipped default, which is what
+ * makes adding this feature a no-op for anyone who never opens the chooser.
+ *
+ * These are the sections a sport can show, so a preset naming one the recording did not produce is
+ * harmless -- the resolver only consults catalog rows, and the chooser only lists what rendered.
+ * Labels are English and translated at the render site, for the reason the module header gives.
+ */
+const DASHBOARD_PRESETS = {
+  mtb: [
+    { key: 'full', label: 'Everything', off: [] },
+    { key: 'essentials', label: 'Essentials',
+      off: ['radiusSection', 'cadPowerSection', 'analogSection', 'fitDataSection',
+            'recordingQualitySection', 'gpsUpsellSection', 'geekStatsSection'] },
+    { key: 'corners', label: 'Corners',
+      off: ['jumpsSection', 'airtimeSection', 'cadPowerSection', 'analogSection', 'fitDataSection',
+            'runSplitsSection', 'recordingQualitySection', 'gpsUpsellSection', 'geekStatsSection'] },
+  ],
+  run: [
+    { key: 'full', label: 'Everything', off: [] },
+    { key: 'essentials', label: 'Essentials',
+      off: ['runOscSection', 'runSegmentsSection', 'recordingQualitySection', 'geekStatsSection'] },
+    { key: 'racing', label: 'Racing',
+      off: ['runCadenceSection', 'runOscSection', 'runSegmentsSection', 'recordingQualitySection',
+            'geekStatsSection'] },
+    { key: 'form', label: 'Form',
+      off: ['runSplitsSection', 'runLapsSection', 'recordingQualitySection', 'geekStatsSection'] },
+  ],
+  road: [
+    { key: 'full', label: 'Everything', off: [] },
+    { key: 'essentials', label: 'Essentials',
+      off: ['roadPowerCurveSection', 'roadQuadrantSection', 'roadDescentHistorySection',
+            'fitDataSection', 'roadUpsellSection', 'geekStatsSection'] },
+    { key: 'power', label: 'Power',
+      off: ['roadDescentsSection', 'roadDescentHistorySection', 'roadLapsSection',
+            'roadUpsellSection', 'geekStatsSection'] },
+  ],
+  ski: [
+    { key: 'full', label: 'Everything', off: [] },
+    { key: 'essentials', label: 'Essentials',
+      off: ['radiusSection', 'fitDataSection', 'recordingQualitySection', 'geekStatsSection'] },
+  ],
+  ride: [
+    { key: 'full', label: 'Everything', off: [] },
+    { key: 'essentials', label: 'Essentials',
+      off: ['recordingQualitySection', 'geekStatsSection'] },
+  ],
+};
+
+/*
+ * The custom layout's key. It is not in DASHBOARD_PRESETS on purpose: it names the athlete's own
+ * `sections.off` list rather than a maintained one, so a table lookup for it must MISS.
+ */
+const DASHBOARD_CUSTOM = 'custom';
+
+/*
+ * The presets offered for a family, always including one the chooser can show as selected. An
+ * unmapped family falls to the generic set rather than to nothing, so the chooser is never empty.
+ */
+function presetsFor(presets, family) {
+  return (presets && (presets[family] || presets.ride)) || [];
+}
+
+/*
+ * Which sections a stored layout actually hides.
+ *
+ * A stored preset wins over a stored `off` list, and that ordering is the whole contract: picking a
+ * preset does not erase the custom list the athlete built, so switching to a preset and back returns
+ * them to their own layout instead of to a blank one. A preset this build does not recognise falls
+ * through to the custom list, which is the same degrade-to-something-sensible posture
+ * `normalizeLayout` takes for a version it cannot read.
+ */
+function layoutOff(presets, layout, family) {
+  const fam = (layout && family && layout[family]) || null;
+  const custom = (fam && fam.sections && fam.sections.off) || [];
+  const name = fam && fam.preset;
+  if (!name || name === DASHBOARD_CUSTOM) return custom.slice();
+  const hit = presetsFor(presets, family).find((p) => p.key === name);
+  return hit ? hit.off.slice() : custom.slice();
+}
+
+/* The athlete's stored dashboard layout, and the one place it is written.
+   ONE key holding every family, not one key per family: `ride-local-keys.test.js` scans this file for
+   `'loam…' + key` and fails on any prefix `rideLocalKeys` cannot delete, and a per-family key built by
+   concatenating a variable is one rename away from tripping that scan and being "fixed" by adding a
+   false per-recording exclusion. This is a standing preference about the athlete, not a fact about a
+   recording -- the same reasoning `loam_prefers_emtb` carries -- so the family goes INSIDE the JSON.
+   Every read and write is individually wrapped, because localStorage itself throws in private mode. */
+const DASH_LS = 'loam_dash';
+function loadDashboardLayout() {
+  try { return normalizeLayout(JSON.parse(localStorage.getItem(DASH_LS) || 'null')); }
+  catch (e) { return null; }
+}
+function saveDashboardLayout(layout) {
+  try {
+    const clean = normalizeLayout(layout);
+    if (clean) localStorage.setItem(DASH_LS, JSON.stringify(clean));
+    else localStorage.removeItem(DASH_LS);
+  } catch (e) { /* private mode: the layout is this session's only */ }
+}
+/* The family whose layout applies to what is on screen. Read off the render rather than passed in,
+   because `buildSectionNav` is called from seven places and threading a sport through all of them is
+   seven chances to pass the wrong one. */
+function dashboardFamilyNow() {
+  return dashboardFamily(normalizeSport(displaySport(_lastRender && _lastRender.D)));
+}
+/* Stamp the resolved layout onto the page.
+   Iterates the CATALOG and never the DOM, which is the whole safety argument: an element with no
+   catalog row -- every dismissable notice, and anything shipped later without a row -- cannot be
+   reached from here at all. Sets AND clears on every row every time, or one sport's layout leaks
+   into the next session rendered in the same page. */
+let _layoutAvailable = [];
+function applySectionLayout() {
+  const on = resolveSectionLayout(SECTION_CATALOG, loadDashboardLayout(), dashboardFamilyNow(),
+                                  DASHBOARD_PRESETS);
+  const here = [];
+  for (const row of SECTION_CATALOG) {
+    const el = document.getElementById(row.id);
+    if (!el) continue;
+    /* What THIS recording produced, read off the page rather than declared in a per-sport table.
+       `.hidden` is the render path's own answer to "does this sport have this section", so the
+       chooser offers Jumps on a ride with a FIT and never on a run, and nobody maintains a list. */
+    if (!el.classList.contains('hidden')) here.push(row.id);
+    el.toggleAttribute('data-layout-off', on[row.id] === false);
+  }
+  _layoutAvailable = here;
+}
+
+/* Read and write one family's slice of the layout, so the four handlers below cannot each invent a
+   different shape for it. Writing always names the family currently on screen. */
+function dashboardFamilyLayout() {
+  const layout = loadDashboardLayout() || { v: DASHBOARD_LAYOUT_VERSION };
+  const family = dashboardFamilyNow();
+  return { layout, family, fam: layout[family] || { sections: { off: [] } } };
+}
+function setDashboardFamilyLayout(mutate) {
+  const { layout, family, fam } = dashboardFamilyLayout();
+  const next = { sections: { off: (fam.sections && fam.sections.off) || [] } };
+  if (fam.preset) next.preset = fam.preset;
+  mutate(next);
+  layout[family] = next;
+  layout.v = DASHBOARD_LAYOUT_VERSION;
+  saveDashboardLayout(layout);
+  /* Sections need no re-render: nothing recomputes, the CSS just stops hiding them. The resize is
+     what the Focused-view toggle already fires, because Plotly measures at plot time and a chart
+     revealed out of `display:none` comes back zero-wide until something tells it to look again. */
+  buildSectionNav();
+  resizeChartsSoon();
+  renderDashboardBody();
+}
+
+function renderDashboardBody() {
+  const host = document.getElementById('dashboardBody');
+  if (!host) return;
+  const { family, fam } = dashboardFamilyLayout();
+  const presets = presetsFor(DASHBOARD_PRESETS, family);
+  const active = fam.preset || DASHBOARD_CUSTOM;
+  const off = new Set(layoutOff(DASHBOARD_PRESETS, { [family]: fam }, family));
+  const avail = new Set(_layoutAvailable);
+
+  const lead = document.getElementById('dashboardLead');
+  if (lead) lead.textContent = loamT('Pick a ready-made layout, or tick exactly what you want to see.');
+
+  const chips = presets.map(pr =>
+    `<button type="button" class="dash-preset" data-preset="${escapeHtml(pr.key)}" ` +
+    `aria-pressed="${active === pr.key}">${escapeHtml(loamT(pr.label))}</button>`).join('')
+    + `<button type="button" class="dash-preset" data-preset="${DASHBOARD_CUSTOM}" ` +
+      `aria-pressed="${active === DASHBOARD_CUSTOM}">${escapeHtml(loamT('Custom'))}</button>`;
+
+  /* Only the rows an athlete may switch off. A locked row still HAS a chip and is part of the page's
+     roster -- it is simply not a choice -- and a notice is not in the catalog at all, so neither can
+     appear here. The count of locked rows is named in the footer rather than hidden, because a list
+     that quietly omits things reads as a list that lost them. */
+  const rows = layoutableSections(SECTION_CATALOG).map(row => {
+    const here = avail.has(row.id);
+    const on = here && !off.has(row.id);
+    return `<label class="dash-row${here ? '' : ' dash-gone'}">` +
+      `<span>${escapeHtml(loamT(row.label))}</span>` +
+      (here ? '' : `<span class="dash-gone-note">${escapeHtml(loamT('not in this session'))}</span>`) +
+      `<input type="checkbox" data-section="${escapeHtml(row.id)}" ${on ? 'checked' : ''}` +
+      `${here ? '' : ' disabled'}></label>`;
+  }).join('');
+
+  host.innerHTML = `<div class="dash-presets">${chips}</div>` +
+    `<div class="dash-group">${escapeHtml(loamT('Sections'))}</div>${rows}` +
+    `<div class="dash-foot"><span class="dash-locked">` +
+    escapeHtml(loamT('Warnings and the map always stay.')) +
+    `</span><button type="button" id="dashboardDoneBtn">${escapeHtml(loamT('Done'))}</button></div>`;
+
+  host.querySelectorAll('.dash-preset').forEach(btn => {
+    btn.onclick = () => setDashboardFamilyLayout(next => { next.preset = btn.dataset.preset; });
+  });
+  host.querySelectorAll('input[data-section]').forEach(box => {
+    box.onchange = () => {
+      /* TWO CONTROLS REACH FIVE OF THESE SECTIONS, and the athlete only used one of them. Focused
+         view hides `FOCUS_HIDDEN_IDS` by CSS whatever the layout says, so ticking "Radius" on would
+         have changed the stored layout and left the page identical -- a checkbox that does nothing,
+         which is worse than no checkbox. Asking to see a detail section IS asking for detail, so
+         turn Focused view off with it, visibly, through the toggle's own change event rather than
+         by reaching into the class: that is the one path that also rebuilds the nav and repaints
+         the hint, so the two controls cannot end up disagreeing about what is on screen. */
+      const t = document.getElementById('focusToggle');
+      if (box.checked && FOCUS_HIDDEN_IDS.includes(box.dataset.section) && t && t.checked) {
+        t.checked = false;
+        t.dispatchEvent(new Event('change'));
+      }
+      setDashboardFamilyLayout(next => {
+      /* Ticking anything makes the layout the athlete's own. The preset's list is copied into it
+         first, so "Essentials, minus the splits" is one tap rather than a rebuild from Everything. */
+      const from = new Set(off);
+      if (box.checked) from.delete(box.dataset.section); else from.add(box.dataset.section);
+      next.preset = DASHBOARD_CUSTOM;
+      next.sections = { off: [...from] };
+      });
+    };
+  });
+  const done = document.getElementById('dashboardDoneBtn');
+  if (done) done.onclick = closeDashboardModal;
+}
+
+function openDashboardModal() {
+  const m = document.getElementById('dashboardModal');
+  if (!m) return;
+  const t = document.getElementById('dashboardTitle');
+  if (t) t.textContent = loamT('Dashboard');
+  renderDashboardBody();
+  m.classList.remove('hidden');
+}
+function closeDashboardModal() {
+  const m = document.getElementById('dashboardModal');
+  if (m) m.classList.add('hidden');
+}
+
+
 /* Focused view hides a fixed set of detail sections by CSS. These are the ones that exist for the
    current sport and would show if the toggle were off; the count feeds the nav's "+N more" chip and
    the hint beside the toggle, so the default-on toggle never removes a section without a trace. */
@@ -37939,8 +38428,13 @@ const FOCUS_HIDDEN_IDS = ['radiusSection', 'geekStatsSection', 'runCadenceSectio
 function focusHiddenSections() {
   const res = document.getElementById('results');
   if (!res || !res.classList.contains('focus-mode')) return [];
+  /* `!hasAttribute('data-layout-off')` is load-bearing, not defensive. Both causes end in
+     `display: none`, so without it a section the ATHLETE switched off is counted in the "+N more"
+     chip -- and tapping that chip turns Focused view off and still does not reveal it. The chip would
+     lie and the control would be dead. Two clauses, two causes. */
   return FOCUS_HIDDEN_IDS.map(id => document.getElementById(id))
-    .filter(el => el && !el.classList.contains('hidden') && getComputedStyle(el).display === 'none');
+    .filter(el => el && !el.classList.contains('hidden') && !el.hasAttribute('data-layout-off')
+                  && getComputedStyle(el).display === 'none');
 }
 function updateFocusHint(n) {
   const hint = document.querySelector('.focus-toggle .focus-hint');
@@ -38028,6 +38522,11 @@ function buildSectionNav() {
      label no longer contains its English source), so re-running it on every render costs a handful
      of failed lookups and closes that ordering entirely. */
   localizeStaticChrome();
+  /* Before anything below reads what is visible: `visible()` and the "+N more" count both ask
+     `getComputedStyle(...).display`, so the layout has to be on the page first. This is the single
+     insertion point for every render path -- all four `renderAll*` end here, and so do the
+     Focused-view toggle, `drawRuns` and `drawRunsEmpty` -- which is why it is not wired at each. */
+  applySectionLayout();
   const nav = document.getElementById('sectionNav');
   if (!nav) return;
   const visible = (id) => {
@@ -38056,42 +38555,21 @@ function buildSectionNav() {
   const pos = (el) => el.getBoundingClientRect().top + window.scrollY;
   /* Labels are written in English here and translated at the chip below, so this list stays the
      plain coverage claim the comment above describes and `checkSectionNavCovers` keeps reading it. */
-  const entries = [
-    { el: visible('sessionOverview'), label: 'Summary' },
-    { el: visible('crashSection'), label: 'Crash' },
-    { el: visible('overviewSection'), label: 'Map' },
-    { el: visible('timelineSection'), label: 'Timeline' },
-    { el: visible('runsSection'), label: 'Runs' },
-    { el: cmpTarget, label: 'Compare laps', compare: true },
-    { el: visible('jumpsSection'), label: 'Jumps' },
-    { el: visible('airtimeSection'), label: 'Airtime' },
-    { el: visible('turnSection'), label: 'Turns' },
-    { el: visible('radiusSection'), label: 'Radius' },
-    { el: visible('formReplaySection'), label: 'Form replay' },
-    { el: visible('analogSection'), label: 'Motor off' },
-    { el: visible('cadPowerSection'), label: 'Cadence · power' },
-    { el: visible('fitDataSection'), label: 'Bike data' },
-    { el: visible('runCadenceSection'), label: 'Cadence' },
-    { el: visible('runOscSection'), label: 'Oscillation' },
-    { el: visible('runSplitsSection'), label: 'Splits' },
-    { el: visible('runLapsSection'), label: 'Laps' },
-    { el: visible('hrZonesSection'), label: 'HR zones' },
-    { el: visible('runDecouplingSection'), label: 'HR drift' },
-    { el: visible('runSegmentsSection'),
-      label: (_runSegData && _runSegData.climbs.length) ? 'Climbs' : 'Segments' },
-    { el: visible('recordingQualitySection'), label: 'Measured from' },
-    { el: visible('roadSection'), label: 'Climbs' },
-    { el: visible('roadSpeedSection'), label: 'Speed' },
-    { el: visible('roadDescentsSection'), label: 'Descents' },
-    { el: visible('roadDescentHistorySection'), label: 'Descent history' },
-    { el: visible('roadPowerCurveSection'), label: 'Power curve' },
-    { el: visible('roadQuadrantSection'), label: 'Cadence' },
-    { el: visible('roadLapsSection'), label: 'Laps' },
-    { el: visible('gpsUpsellSection'), label: 'Unlock more' },
-    { el: visible('roadUpsellSection'), label: 'Unlock more' },
-    { el: visible('geekStatsSection'), label: 'Raw' },
-    { el: visible('coachSection'), label: 'Coach' },
-  ].filter(e => e.el).sort((a, b) => pos(a.el) - pos(b.el));
+  /* Built from SECTION_CATALOG rather than from a list written here, because this array WAS that
+     list and a second copy of it is what the chooser would otherwise have to be. The catalog holds
+     the static claim (id, label, lock); the two dynamic parts stay here, where the DOM is:
+     `cmpTarget` (one chip, two possible targets) and the run-segments label, which follows what the
+     panel actually rendered. The CHOOSER prints the catalog's label instead, deliberately -- a
+     preference row that reads "Climbs" on one run and "Segments" on the next is a row nobody can
+     build a habit around. */
+  const navLabel = {
+    runSegmentsSection: (_runSegData && _runSegData.climbs.length) ? 'Climbs' : 'Segments',
+  };
+  const entries = SECTION_CATALOG.map(row => ({
+    el: row.navResolve === 'compare' ? cmpTarget : visible(row.id),
+    label: navLabel[row.id] || row.label,
+    compare: row.navResolve === 'compare',
+  })).filter(e => e.el).sort((a, b) => pos(a.el) - pos(b.el));
   nav.innerHTML = '';
   if (entries.length < 2) { updateFocusHint(0); return; }   // a single chip is not worth a nav bar
   showLandscapeTip();
@@ -42479,6 +42957,21 @@ if (focusToggle) {
     setOpen(pop.classList.contains('hidden'));
   });
   pop.addEventListener('change', () => setOpen(false));
+  /* The chooser's own entry point. A click is not a `change`, so the popover would stay open behind
+     the modal; close it explicitly. */
+  const dashBtn = document.getElementById('dashboardBtn');
+  if (dashBtn) dashBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    setOpen(false);
+    openDashboardModal();
+  });
+  const dashModal = document.getElementById('dashboardModal');
+  const dashClose = document.getElementById('dashboardCloseBtn');
+  if (dashClose) dashClose.addEventListener('click', closeDashboardModal);
+  if (dashModal) dashModal.addEventListener('click', (ev) => {
+    if (ev.target === dashModal) closeDashboardModal();   // the backdrop, not the sheet
+  });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeDashboardModal(); });
   window.addEventListener('resize', () => setOpen(false));
   document.addEventListener('click', (ev) => {
     if (!pop.classList.contains('hidden') && !pop.contains(ev.target)) setOpen(false);
@@ -42859,9 +43352,12 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'f9d1db613 · 2026-09-17';
+const LOAM_BUILD = 'b0d17185b · 2026-09-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
+    /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
+       withhold from a channel that hides one. */
+    ['Choose what the analysis page shows', 'Options > Dashboard. Pick a ready-made layout — Everything, Essentials, or one built for the sport, like Corners on a mountain bike ride and Racing or Form on a run — or tick exactly the sections you want to see. Remembered per sport, so a road ride and a trail run can look completely different; an e-bike ride inherits what you set up on the analog bike. Only what this recording actually produced is offered. Warnings and the map always stay: a caveat about how far to trust a number is not something to switch off.'],
     /* Untagged: the plan reads every sport's history and is offered on every channel. */
     ['Training plan (beta)', 'set a goal, an event with a distance and a date or a number of hours a week, and Loam sets it against what you have actually recorded: the last twelve weeks of rides, runs, walks, imports, lifts and swims. You get an honest verdict (reachable at a safe rate, already on track, or not by that date), a week-by-week scaffold with recovery weeks and a taper, and a coach button that writes the sessions into it. Every rule is a coaching convention and the page names them. In the app it is on the Stats tab under Training; on the web it leads the Progress page.'],
     /* Deliberately NOT tagged with a sport, unlike golf below. The tag exists to hide an item on a
