@@ -695,9 +695,9 @@
      took it away entirely and the only way back was a toggle that reveals every other detail
      section with it. */
   /* Keep the "Cadence vs motor power" scatter (the e-MTB pedaling read), but collapse its per-climb
-     breakdown table and the raw FIT power/cadence/HR trace: both are climb/telemetry detail. */
+     breakdown table: climb detail. (The raw FIT power/cadence/HR trace this also hid is now rows of
+     the timeline.) */
   #results.focus-mode #cadPowerClimbs,
-  #results.focus-mode #fitDataSection,
   /* ...and the secondary comparison charts: the ghost race, play-by-play and the painted gain/loss
      map already answer "where did I gain or lose time", so the speed/time-lag spaghetti charts are
      detail. They reveal when Focused view is turned off. */
@@ -819,6 +819,26 @@
        ("Runs4 runs (descents)") and the mode <select> gets squeezed off the row. */
     gap: 6px 14px; flex-wrap: wrap;
   }
+  /* ONE SHARE CONTROL, IN ONE PLACE, ON EVERY CARD THAT HAS A PICTURE TO GIVE (owner, 2026-09-20:
+     "some with the camera icon and some nothing"). A chart used to carry Plotly's own camera floating
+     over its top-right corner, the hero card a "Share card" text button, the jumps card an orange
+     "Share jump stats" pill above its title, and every card without a chart nothing at all -- four
+     answers to one question. Now: an icon button at the right end of the card's title row, the same
+     glyph and size everywhere, and no icon at all on a card that has nothing to turn into an image
+     (a table, a notice). decorateCardShares is the one writer. */
+  .card-share {
+    flex: none; margin-left: auto; align-self: center;
+    width: 40px; height: 40px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border); border-radius: 8px; background: transparent;
+    color: var(--text-dim, var(--text-muted)); cursor: pointer;
+  }
+  .card-share:hover, .card-share:focus-visible { color: var(--accent); border-color: var(--accent); }
+  .card-share svg { width: 18px; height: 18px; display: block; }
+  .section-title select ~ .card-share, .section-title .fold-chev ~ .card-share { margin-left: 0; }
+  @media (pointer: coarse) { .card-share { width: 44px; height: 44px; } }
+  /* The header button replaces the chart's own floating camera on the results page. */
+  #results .modebar-container { display: none !important; }
   .section-title .subtitle {
     font-family: 'JetBrains Mono', monospace; font-size: 10px;
     color: var(--text-muted); font-weight: 400; text-transform: uppercase; letter-spacing: 0.15em;
@@ -1300,6 +1320,9 @@
   .corner-ledger .ledger-legend .k { width: 11px; height: 7px; border-radius: 2px; display: inline-block; }
   .corner-ledger .ledger-legend .k.round { width: 9px; height: 9px; border-radius: 50%; }
   .jump-hero .big .unit { font-size: 16px; font-weight: 400; color: var(--text-dim); margin-left: 3px; }
+  /* The jump drawn to scale under the hero number (jumpArcSVG). Full width of the hero box, so the
+     arc reads as a length rather than as an icon. */
+  .jump-hero .jump-arc { flex: 1 1 100%; width: 100%; max-width: 460px; height: auto; display: block; margin-top: 6px; }
   .jump-hero .lbl { font-family: 'JetBrains Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--text-muted); }
   .jump-hero .meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-left: auto; text-align: right; }
   .jumps-details { padding: 0; margin-top: 14px; }
@@ -2707,6 +2730,7 @@
       <span class="subtitle" id="timelineSubtitle">yaw rate + speed · turns shaded · jump airtime shaded</span>
     </div>
     <div class="chart" id="timelineChart"></div>
+    <div id="timelineFootnote" class="dim hidden" style="font-size:12px; margin-top:6px;"></div>
   </section>
 
   <!-- Foldable, and OPEN by default, which is the opposite default from Climbs and Climb/descent
@@ -2801,12 +2825,91 @@
     </div>
   </section>
 
+  <section id="turnSection">
+    <div class="section-title">
+      Per-turn metrics
+      <span class="subtitle"><span id="turnCountLabel">0</span> turns detected · tap a row to see it on the map</span>
+      <span id="turnFilterTag" class="hidden"></span>
+      <select id="ledgerSortSel" title="Order of the corner ledger" style="margin-left:auto;">
+        <option value="scrub">Most scrubbed first</option>
+        <option value="ride">Ride order</option>
+      </select>
+      <label id="ledgerAllToggle" class="ledger-all-lbl hidden" title="Show every turn on the map and in the ledger, not just the ones that matter most"><input type="checkbox" id="ledgerAllChk"> all turns</label>
+    </div>
+    <div class="panel corner-ledger" id="cornerLedger"></div>
+    <details class="panel jumps-details" id="turnDetails">
+      <summary><span id="turnTableToggle">Turn-by-turn table</span></summary>
+      <div>
+        <div class="params" id="paramsBar"></div>
+        <div style="overflow-x:auto;">
+          <table id="turnTable">
+            <thead><tr>
+              <th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Peak ω</th>
+              <th>Δ Hdg</th><th id="thTurnEntry">Entry</th><th id="thTurnExit">Exit</th><th id="thTurnDv">Δv</th><th>Radius</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section id="formReplaySection" class="hidden">
+    <div class="section-title">
+      Form replay
+      <span class="subtitle">replay one critical turn (lean, gaze, hand) or a whole segment end to end</span>
+      <select id="formTurn" style="margin-left:auto;"></select>
+    </div>
+    <div class="panel" style="padding:16px;">
+      <div class="ghost-controls" style="margin-bottom:12px; margin-top:0;">
+        <button id="formPlay" class="ghost-btn">▶ Play turn</button>
+        <input id="formScrub" type="range" min="0" max="1000" value="0">
+        <select id="formSpeedSel">
+          <option value="0.25">0.25x</option>
+          <option value="0.5" selected>0.5x</option>
+          <option value="1">1x</option>
+        </select>
+        <select id="formAvatarSel" title="Rider kit">
+          <option value="kit">My kit</option>
+          <option value="classic">Classic</option>
+        </select>
+      </div>
+      <div id="formScrubPicks" class="hidden"></div>
+      <div class="form-replay-grid">
+        <div id="formReplaySvgWrap"><svg id="formReplaySvg" viewBox="0 0 360 300" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div id="formMapWrap"><div id="formMapTiles"></div><div id="formMap"></div>
+          <div id="formZoomCtrl"><button type="button" id="formZoomIn" title="Zoom in" aria-label="Zoom in">+</button><button type="button" id="formZoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button></div>
+        </div>
+      </div>
+      <div id="formMetrics" class="form-metrics"></div>
+      <!-- Asks about whatever the replay is showing: one corner, or the whole segment. The label is
+           set by formCoachSync, which also hides it on transit / "not a trail" corners and on a run
+           marked "not a trail" -- a question is a claim-making surface like any other. -->
+      <button id="formAskCoach" class="ghost-btn hidden" type="button" style="margin-top:10px;">Ask the coach about this corner &rarr;</button>
+      <div id="formNote" class="dim" style="font-size:12px; margin:8px 2px 4px;"></div>
+      <!-- The lead and the fold body each carry an id because each is ONE sentence with emphasis
+           inside it: swept text node by text node, "The <strong>Most scrubbed</strong> chips jump
+           to..." came out with its middle translated and its two ends English. localizeStaticChrome
+           replaces the whole run instead. -->
+      <div class="dim" style="font-size:12px; margin-top:6px;"><span id="formPictureLead">Left: you from behind, leaning as you leaned. Right: the same turn from above on the real map, rotated so you are always heading up. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.</span>
+        <details class="caveat-more"><summary>Every part of the picture</summary><span id="formPictureMore">On the left, the ghost needle marks this turn's peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where you are heading (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the figure on the left, while the ground stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.</span></details>
+      </div>
+    </div>
+  </section>
+
+  <section id="radiusSection">
+    <div class="section-title">
+      Turn radius distribution
+      <span class="subtitle">apex radius from r = v / ω</span>
+    </div>
+    <div class="chart" id="radiusChart" style="height:300px;"></div>
+  </section>
+
   <section id="jumpsSection" class="hidden">
     <div class="section-title">
       Jumps
       <span class="subtitle">hang + takeoff from Levo/Specialized FIT · landing measured by phone or wrist</span>
     </div>
-    <button id="jumpStatsShare" class="lift-sig-save" style="margin-bottom:12px" hidden>Share jump stats</button>
     <div class="panel stats-panel jump-summary" id="jumpSummary"></div>
     <div id="jumpLapsCard" class="hidden"></div>
     <details class="panel jumps-details" id="jumpsDetails">
@@ -2837,35 +2940,6 @@
           </tr></thead>
           <tbody></tbody>
         </table>
-      </div>
-    </details>
-  </section>
-
-  <section id="turnSection">
-    <div class="section-title">
-      Per-turn metrics
-      <span class="subtitle"><span id="turnCountLabel">0</span> turns detected · tap a row to see it on the map</span>
-      <span id="turnFilterTag" class="hidden"></span>
-      <select id="ledgerSortSel" title="Order of the corner ledger" style="margin-left:auto;">
-        <option value="scrub">Most scrubbed first</option>
-        <option value="ride">Ride order</option>
-      </select>
-      <label id="ledgerAllToggle" class="ledger-all-lbl hidden" title="Show every turn on the map and in the ledger, not just the ones that matter most"><input type="checkbox" id="ledgerAllChk"> all turns</label>
-    </div>
-    <div class="panel corner-ledger" id="cornerLedger"></div>
-    <details class="panel jumps-details" id="turnDetails">
-      <summary><span id="turnTableToggle">Turn-by-turn table</span></summary>
-      <div>
-        <div class="params" id="paramsBar"></div>
-        <div style="overflow-x:auto;">
-          <table id="turnTable">
-            <thead><tr>
-              <th>#</th><th>Dir</th><th>Start</th><th>Dur</th><th>Peak ω</th>
-              <th>Δ Hdg</th><th id="thTurnEntry">Entry</th><th id="thTurnExit">Exit</th><th id="thTurnDv">Δv</th><th>Radius</th>
-            </tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
       </div>
     </details>
   </section>
@@ -2992,8 +3066,41 @@
     </div>
   </section>
 
-  <section id="recordingQualitySection" class="hidden">
-    <div id="recordingQualityBody"></div>
+  <section id="cadPowerSection" class="hidden">
+    <div class="section-title">
+      Cadence vs motor power
+      <span class="subtitle">e-bike pedaling efficiency · each point a FIT sample, coloured by grade</span>
+    </div>
+    <div class="panel stats-panel" id="cadPowerSummary"></div>
+    <div class="chart" id="cadPowerChart" style="height:340px;"></div>
+    <div class="dim" style="font-size:12px; margin-top:8px;">Spin with the motor (cadence ~70-95 rpm) and it delivers power efficiently; grinding a low cadence under heavy assist (bottom-left of the climb cluster) lugs the motor and tires your legs. Red points are climbs, blue descents.</div>
+    <div id="cadPowerClimbs" class="hidden" style="margin-top:16px;">
+      <div class="section-title" style="font-size:15px; margin-bottom:8px;">
+        Climbs
+        <span class="subtitle">per-climb cadence, assist, and lugging (grade &gt; 3% sustained)</span>
+      </div>
+      <div class="panel" style="overflow-x:auto;">
+        <table id="cadPowerClimbsTable">
+          <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>Cadence</th><th>Assist</th><th>Lugging</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="analogSection" class="hidden">
+    <div class="section-title">
+      Motor off
+      <span class="subtitle">stretches you rode analog</span>
+    </div>
+    <div class="panel stats-panel" id="analogSummary"></div>
+    <div class="panel" style="overflow-x:auto; margin-top:12px;">
+      <table id="analogTable">
+        <thead><tr><th>#</th><th>Time</th><th>Duration</th><th>Pedaling</th><th>Dist</th><th>Gain</th><th>Cadence</th><th>Your watts</th><th>Avg HR</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="analogCaveat" class="dim" style="font-size:12px; margin-top:8px;"></div>
   </section>
 
   <!-- ONE per-segment table with a view picker, not two tables (owner, 2026-09-17: "Why do we have
@@ -3059,101 +3166,23 @@
     <div class="chart detail-chart" id="runCompareDtwChart" style="height:240px;"></div>
   </section>
 
-  <section id="radiusSection">
+  <section id="roadPowerCurveSection" class="hidden">
     <div class="section-title">
-      Turn radius distribution
-      <span class="subtitle">apex radius from r = v / ω</span>
+      Power curve
+      <span class="subtitle">best average power for every duration · your FTP and weight set the zones and W/kg</span>
     </div>
-    <div class="chart" id="radiusChart" style="height:300px;"></div>
+    <div id="roadRiderControls" style="margin-bottom:12px;"></div>
+    <div class="chart" id="roadPowerCurve" style="height:280px;"></div>
+    <div id="roadZones" style="margin-top:14px;"></div>
   </section>
 
-  <section id="formReplaySection" class="hidden">
+  <section id="roadQuadrantSection" class="hidden">
     <div class="section-title">
-      Form replay
-      <span class="subtitle">replay one critical turn (lean, gaze, hand) or a whole segment end to end</span>
-      <select id="formTurn" style="margin-left:auto;"></select>
+      Power vs cadence
+      <span class="subtitle">how you make your power · split at your median cadence and FTP</span>
     </div>
-    <div class="panel" style="padding:16px;">
-      <div class="ghost-controls" style="margin-bottom:12px; margin-top:0;">
-        <button id="formPlay" class="ghost-btn">▶ Play turn</button>
-        <input id="formScrub" type="range" min="0" max="1000" value="0">
-        <select id="formSpeedSel">
-          <option value="0.25">0.25x</option>
-          <option value="0.5" selected>0.5x</option>
-          <option value="1">1x</option>
-        </select>
-        <select id="formAvatarSel" title="Rider kit">
-          <option value="kit">My kit</option>
-          <option value="classic">Classic</option>
-        </select>
-      </div>
-      <div id="formScrubPicks" class="hidden"></div>
-      <div class="form-replay-grid">
-        <div id="formReplaySvgWrap"><svg id="formReplaySvg" viewBox="0 0 360 300" preserveAspectRatio="xMidYMid meet"></svg></div>
-        <div id="formMapWrap"><div id="formMapTiles"></div><div id="formMap"></div>
-          <div id="formZoomCtrl"><button type="button" id="formZoomIn" title="Zoom in" aria-label="Zoom in">+</button><button type="button" id="formZoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button></div>
-        </div>
-      </div>
-      <div id="formMetrics" class="form-metrics"></div>
-      <!-- Asks about whatever the replay is showing: one corner, or the whole segment. The label is
-           set by formCoachSync, which also hides it on transit / "not a trail" corners and on a run
-           marked "not a trail" -- a question is a claim-making surface like any other. -->
-      <button id="formAskCoach" class="ghost-btn hidden" type="button" style="margin-top:10px;">Ask the coach about this corner &rarr;</button>
-      <div id="formNote" class="dim" style="font-size:12px; margin:8px 2px 4px;"></div>
-      <!-- The lead and the fold body each carry an id because each is ONE sentence with emphasis
-           inside it: swept text node by text node, "The <strong>Most scrubbed</strong> chips jump
-           to..." came out with its middle translated and its two ends English. localizeStaticChrome
-           replaces the whole run instead. -->
-      <div class="dim" style="font-size:12px; margin-top:6px;"><span id="formPictureLead">Left: you from behind, leaning as you leaned. Right: the same turn from above on the real map, rotated so you are always heading up. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.</span>
-        <details class="caveat-more"><summary>Every part of the picture</summary><span id="formPictureMore">On the left, the ghost needle marks this turn's peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where you are heading (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the figure on the left, while the ground stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.</span></details>
-      </div>
-    </div>
-  </section>
-
-  <section id="analogSection" class="hidden">
-    <div class="section-title">
-      Motor off
-      <span class="subtitle">stretches you rode analog</span>
-    </div>
-    <div class="panel stats-panel" id="analogSummary"></div>
-    <div class="panel" style="overflow-x:auto; margin-top:12px;">
-      <table id="analogTable">
-        <thead><tr><th>#</th><th>Time</th><th>Duration</th><th>Pedaling</th><th>Dist</th><th>Gain</th><th>Cadence</th><th>Your watts</th><th>Avg HR</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div id="analogCaveat" class="dim" style="font-size:12px; margin-top:8px;"></div>
-  </section>
-
-  <section id="cadPowerSection" class="hidden">
-    <div class="section-title">
-      Cadence vs motor power
-      <span class="subtitle">e-bike pedaling efficiency · each point a FIT sample, coloured by grade</span>
-    </div>
-    <div class="panel stats-panel" id="cadPowerSummary"></div>
-    <div class="chart" id="cadPowerChart" style="height:340px;"></div>
-    <div class="dim" style="font-size:12px; margin-top:8px;">Spin with the motor (cadence ~70-95 rpm) and it delivers power efficiently; grinding a low cadence under heavy assist (bottom-left of the climb cluster) lugs the motor and tires your legs. Red points are climbs, blue descents.</div>
-    <div id="cadPowerClimbs" class="hidden" style="margin-top:16px;">
-      <div class="section-title" style="font-size:15px; margin-bottom:8px;">
-        Climbs
-        <span class="subtitle">per-climb cadence, assist, and lugging (grade &gt; 3% sustained)</span>
-      </div>
-      <div class="panel" style="overflow-x:auto;">
-        <table id="cadPowerClimbsTable">
-          <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Gain</th><th>Grade</th><th>Cadence</th><th>Assist</th><th>Lugging</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
-  <section id="fitDataSection" class="hidden">
-    <div class="section-title">
-      FIT bike data
-      <span class="subtitle">power · cadence · heart rate over the recorded window</span>
-    </div>
-    <div class="chart" id="fitChart" style="height:300px;"></div>
-    <div id="fitPedalCount" class="dim" style="font-size:13px; margin-top:8px;"></div>
+    <div class="chart" id="roadQuadrantChart" style="height:340px;"></div>
+    <div id="roadQuadrantShares" style="margin-top:10px;"></div>
   </section>
 
   <section id="roadSection" class="hidden">
@@ -3169,14 +3198,6 @@
       </table>
     </div>
     <div class="dim" style="font-size:12px; margin-top:8px;">VAM is vertical metres climbed per hour. Fade is last-third vs first-third power on the climb: strongly negative means you started too hard.</div>
-  </section>
-
-  <section id="roadSpeedSection" class="hidden">
-    <div class="section-title">
-      Speed &amp; elevation
-      <span class="subtitle">where the ride went fast and where it went up</span>
-    </div>
-    <div class="chart" id="roadSpeedChart" style="height:280px;"></div>
   </section>
 
   <section id="roadDescentsSection" class="hidden">
@@ -3202,25 +3223,6 @@
     <div id="roadDescentHistory"></div>
   </section>
 
-  <section id="roadPowerCurveSection" class="hidden">
-    <div class="section-title">
-      Power curve
-      <span class="subtitle">best average power for every duration · your FTP and weight set the zones and W/kg</span>
-    </div>
-    <div id="roadRiderControls" style="margin-bottom:12px;"></div>
-    <div class="chart" id="roadPowerCurve" style="height:280px;"></div>
-    <div id="roadZones" style="margin-top:14px;"></div>
-  </section>
-
-  <section id="roadQuadrantSection" class="hidden">
-    <div class="section-title">
-      Power vs cadence
-      <span class="subtitle">how you make your power · split at your median cadence and FTP</span>
-    </div>
-    <div class="chart" id="roadQuadrantChart" style="height:340px;"></div>
-    <div id="roadQuadrantShares" style="margin-top:10px;"></div>
-  </section>
-
   <section id="roadLapsSection" class="hidden">
     <div class="section-title">
       Laps
@@ -3243,6 +3245,10 @@
       <div id="roadUpsellGrid" class="upsell-grid"></div>
       <div id="roadUpsellStaticCta" class="upsell-cta">Next ride: start <strong>Loam Capture</strong> on your phone (jersey pocket is fine) with AirPods in, ride as usual, then attach this bike's FIT to the session. Add your Apple Watch for heart rate and handlebar lean. Power stays from the meter; everything above is added from motion.</div>
     </div>
+  </section>
+
+  <section id="recordingQualitySection" class="hidden">
+    <div id="recordingQualityBody"></div>
   </section>
 
   <section id="geekStatsSection" class="hidden">
@@ -12761,6 +12767,12 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
        'wrist' and 'head' rather than falling through to the phone default, because that default's
        caption claims an FFT peak on |accel| and there is no accelerometer anywhere near this. */
     running: { segments, cadSeries, cadSource: 'fit', climbs: runClimbs },
+    /* The head unit's power, cadence and heart rate for the bike timeline's rows, on the ride's own
+       clock. Deliberately NOT `fitInRide`: that name is read by the coach digest and the e-MTB
+       surfaces, and this path has never fed them -- the timeline is the only reader. */
+    timelineFit: foot || startFitSec == null ? null
+      : records.map(r => ({ t_phone: r.ts - startFitSec, speed: r.speed, power: r.power, motorPower: r.motorPower, cad: r.cad, hr: r.hr }))
+          .filter(r => r.t_phone >= ride.start && r.t_phone <= ride.end),
     fitLaps, fitLapsDropped,
     libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
     title: fitFile.name, recordedAt: fitRecordedAt,
@@ -16727,25 +16739,30 @@ function parseSwimLengthMark(text) {
   let durationS = null;
   let style = null;
   let strokesSoFar = null;
+  let wallS = null;
   for (const raw of fields.slice(1)) {
     const f = raw.trim();
     let m;
     if ((m = /^(\d+) strokes so far$/.exec(f))) strokesSoFar = Number(m[1]);
+    else if ((m = /^wall at (\d+(?:\.\d+)?) s$/.exec(f))) wallS = Number(m[1]);
     else if ((m = /^(\d+(?:\.\d+)?) s$/.exec(f))) durationS = Number(m[1]);
     else if (/^[A-Za-z]+$/.test(f)) style = f.toLowerCase();
   }
-  return { index, durationS, style, strokesSoFar };
+  return { index, durationS, style, strokesSoFar, wallS };
 }
 
 function parseSwimLengthMarks(annotations) {
   const out = [];
-  const seen = new Set();
-  for (const a of annotations || []) {
-    if (!a || !Number.isFinite(a.t)) continue;
+  let seen = new Set();
+  /* Annotations in FILE order, so a merge's seam falls between its fragments. */
+  const sorted = (annotations || []).filter((a) => a && Number.isFinite(a.t)).sort((a, b) => a.t - b.t);
+  for (const a of sorted) {
+    if (isSeamMark(a.text)) { seen = new Set(); continue; }
     const p = parseSwimLengthMark(a.text);
     if (!p || seen.has(p.index)) continue;
     seen.add(p.index);
-    out.push({ ...p, t: a.t });
+    const wall = p.wallS != null && p.wallS <= a.t ? p.wallS : a.t;
+    out.push({ ...p, t: wall });
   }
   return out.sort((a, b) => a.t - b.t);
 }
@@ -22756,12 +22773,29 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','fitDataSection','analogSection','cadPowerSection','roadSection','roadSpeedSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runCadenceSection','runOscSection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
      sport's default (the MTB "yaw rate" timeline subtitle and MTB map legend used to leak this way). */
   { const ts = document.getElementById('timelineSubtitle'); if (ts) ts.textContent = ''; }
+  /* And the athlete's Dashboard layout, for exactly the same reason one line up.
+     `applySectionLayout` sets AND clears `data-layout-off` on every catalog row every time, and its
+     own comment says that is what stops one sport's layout leaking into the next render. That was
+     true of the function and false of the page: it is reached only from `buildSectionNav`, and only
+     the four `renderAll*` paths end there. A lift, a range session, a swim and an indoor ski day
+     render their own container and never call it, so whatever the previous render stamped stayed on
+     the page -- and `[data-layout-off]` is unscoped, so it reached the coach panel, which is a
+     top-level sibling of #results precisely so those views can show it. Switching the coach off on a
+     ride and then opening a lift in the same page hid the coach on the lift, with no `.hidden` on it
+     to explain why and no way back from that screen: those views hide #results, which is where the
+     Options popover and the Dashboard button live, so the one control that could undo it is not
+     there. Reachable in the app as well as on the web: "Switch session" re-analyses in place.
+     Cleared HERE rather than re-applied per view, because clearing is the direction this feature's
+     own header calls safe -- a dashboard that shows too much, never one that silently hides a
+     section the athlete never chose to hide. The sectioned paths re-apply at the end of the same
+     synchronous render. */
+  clearSectionLayout();
 }
 
 /* ---- Lift Signature: the shareable "loam card" for a lift. No map, so the visual is the Spotter Cam
@@ -29409,6 +29443,11 @@ const LOAM_NB = {
   'Distance': 'Distanse',
   'Moving time': 'Tid i bevegelse',
   'Share card': 'Del kort',
+  'Analyzed with Loam': 'Analysert med Loam',
+  'about {n} bike lengths': 'omtrent {n} sykkellengder',
+  '{ms} ms air': '{ms} ms i luften',
+  'The longest jump drawn to scale: {d}, about {n} bike lengths': 'Det lengste hoppet tegnet i skala: {d}, omtrent {n} sykkellengder',
+  'My {title}, analyzed with Loam.': 'Min {title}, analysert med Loam.',
   'Review data sources': 'Se datakilder',
   'Lean and turn sides are uncertain.': 'Helning og svingretning er usikre.',
   'The calibration pose does not match the riding pose.': 'Kalibreringsposisjonen samsvarer ikke med posisjonen under turen.',
@@ -29866,6 +29905,25 @@ const LOAM_NB = {
   'Δ altitude ({u}), GPS': 'Δ høyde ({u}), GPS',
   'Heart rate (bpm)': 'Puls (slag/min)',
   ', one row each': ', én rad hver',
+  /* The bike timeline's rows (renderBikeTimeline, 2026-09-20): the same one-row-per-channel stack,
+     with the rows a bike carries that a run does not. */
+  'turning (°/s)': 'rotasjon (°/s)',
+  'wheel speed ({u})': 'hjulfart ({u})',
+  'elevation': 'høyde',
+  'elevation (GPS)': 'høyde (GPS)',
+  'Δ elev ({u})': 'Δ høyde ({u})',
+  'Δ elev ({u}), GPS': 'Δ høyde ({u}), GPS',
+  'power': 'effekt',
+  'cadence': 'kadens',
+  'Rider power': 'Rytterens effekt',
+  'Motor power': 'Motoreffekt',
+  'rider': 'rytter',
+  'motor': 'motor',
+  'turns shaded': 'svinger er skyggelagt',
+  'jump airtime shaded': 'lufttid i hopp er skyggelagt',
+  'descents shaded': 'nedkjøringer er skyggelagt',
+  /* The dashboard chooser's effort-only preset for a bike. */
+  'Training': 'Trening',
   'climb/descent segments shaded': 'stignings- og nedkjøringssegmenter er skyggelagt',
   'walk breaks hatched': 'gåpauser er skravert',
   'annotations marked': 'merknader er markert',
@@ -30006,6 +30064,17 @@ const LOAM_NB = {
      handed the plan as a fact. Entries identical in both languages ('BETA', '{m} min', 'Ski') are
      deliberately absent -- a miss falls back to the English source, which is the same text. */
   'Your progress': 'Din fremgang',
+  /* The theme toggle: its label, its tooltip, and the toast it raises. All three were English on a
+     Norwegian phone -- the button because nothing ever looked it up, the toast because `loamToast`
+     does not translate and the call site handed it a template literal. */
+  'Auto': 'Auto',
+  'Unsupported file type: {names}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv (or .csv.gz), and a .fit (companion or standalone).':
+    'Filtypen st\u00f8ttes ikke: {names}. Loam leser en Sensor Logger-.zip, en Loam Capture Combined-.csv (eller .csv.gz), og en .fit (som f\u00f8lgefil eller alene).',
+  'Light': 'Lys',
+  'Dark': 'M\u00f8rk',
+  'Theme: follows system by default': 'Tema: f\u00f8lger systemet som standard',
+  'Theme set to {theme}. Charts adopt it on the next render.': 'Tema satt til {theme}. Grafene f\u00f8lger etter ved neste opptegning.',
+  'Skipped unsupported: {names}': 'Hoppet over filer som ikke st\u00f8ttes: {names}',
   'Training plan': 'Treningsplan',
   'a goal, set against what you have actually recorded': 'et mål, satt opp mot det du faktisk har registrert',
   '{h} h': '{h} t',
@@ -32800,6 +32869,11 @@ function localizeStaticText() {
   }
 }
 
+/* The theme toggle's three labels, in one place because two surfaces write them: the control
+   itself (initTheme) and the sweep below, which has to repaint it for a host that sets
+   `window.LOAM_LANG` after the page has loaded. Two copies is how a control and its own sweep come
+   to disagree about one word. */
+const THEME_LABELS = { auto: 'Auto', light: 'Light', dark: 'Dark' };
 function localizeStaticChrome() {
   localizeStaticText();
   const text = (sel, srcText) => {
@@ -32817,6 +32891,11 @@ function localizeStaticChrome() {
     const el = document.querySelector(sel);
     if (el) el.title = loamT(srcText);
   };
+  /* Set rather than replaced, because this label is whichever of three words the toggle is on and
+     `text()` above can only swap a known English source. */
+  { const tb = document.getElementById('themeBtn');
+    if (tb) tb.textContent = loamT(THEME_LABELS[document.documentElement.dataset.theme || 'auto']); }
+  title('#themeBtn', 'Theme: follows system by default');
   /* For the one static sentence whose emphasis sits INSIDE it. A word-by-word table cannot translate
      a sentence whose words move, so the key carries the markup and the whole run is replaced. */
   const html = (sel, srcHtml) => {
@@ -32985,6 +33064,95 @@ function loamSaveChart(gd) {
       loamChartSaveFailed();
     }
   } catch (e) { loamChartSaveFailed(); }
+}
+
+/* The card header's share control (see .card-share). The glyph is the platform's own "share" shape
+   -- a tray with an arrow out of it -- rather than a camera, because every one of these hands the
+   picture to the share sheet (Messages, Photos, Files), which is a share and not a photograph. */
+const CARD_SHARE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11.5"/><path d="M7.8 7.7 12 3.5l4.2 4.2"/><path d="M6 11H5.5A1.5 1.5 0 0 0 4 12.5v6A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-6a1.5 1.5 0 0 0-1.5-1.5H18"/></svg>';
+/* Cards that build their own poster rather than a snapshot of their charts. */
+const CARD_SHARE_CUSTOM = {
+  jumpsSection: () => shareJumpStats(_lastRender && _lastRender.D),
+};
+function cardShareCharts(sec, visibleOnly) {
+  return [...sec.querySelectorAll('.js-plotly-plot')]
+    .filter(gd => gd._fullLayout && gd.data && gd.data.length && (!visibleOnly || gd.getClientRects().length));
+}
+function cardShareTitle(sec) {
+  const t = sec.querySelector(':scope > .section-title, :scope > details > summary.section-title');
+  if (!t) return '';
+  const c = t.cloneNode(true);
+  c.querySelectorAll('.subtitle, select, button, input, label, .fold-chev').forEach(n => n.remove());
+  return c.textContent.replace(/\s+/g, ' ').trim();
+}
+/* Every visible section of the results flow that has a picture to give gets the button, and no other.
+   Re-run on every nav rebuild, which is every render path and the Focused-view toggle, so a card whose
+   only chart Focused view hid does not keep offering to share nothing. */
+function decorateCardShares() {
+  const root = document.getElementById('results');
+  if (!root) return;
+  root.querySelectorAll('section .section-title > .card-share').forEach(b => b.remove());
+  for (const sec of root.querySelectorAll('section[id]')) {
+    if (sec.classList.contains('hidden') || !sec.getClientRects().length) continue;
+    const title = sec.querySelector(':scope > .section-title, :scope > details > summary.section-title');
+    if (!title) continue;
+    const custom = CARD_SHARE_CUSTOM[sec.id];
+    const hasChart = [...sec.querySelectorAll('.chart')].some(c => c.getClientRects().length && c.childElementCount);
+    if (!custom && !hasChart) continue;
+    const label = loamT('Share card');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'card-share';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = CARD_SHARE_SVG;
+    btn.onclick = (e) => {
+      /* Inside a fold's <summary>, a click would otherwise toggle the fold as well. */
+      e.preventDefault(); e.stopPropagation();
+      if (custom) custom(); else shareSectionCharts(sec);
+    };
+    title.appendChild(btn);
+  }
+}
+/* One picture per card: its title, then every chart it is showing, stacked, on the page's own ground.
+   A card with two charts (a descent's speed overlay over its time-lag chart) shares as one card
+   rather than as two unrelated files, which is what the per-chart camera used to produce. */
+async function shareSectionCharts(sec) {
+  try {
+    let charts = cardShareCharts(sec, true);
+    if (!charts.length) charts = cardShareCharts(sec, false);
+    if (!charts.length || !(window.Plotly && Plotly.toImage)) { loamCardShareFailed(); return; }
+    const load = (src) => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+    const imgs = [];
+    for (const gd of charts) imgs.push(await load(await Plotly.toImage(gd, { format: 'png', scale: 2 })));
+    const css = getComputedStyle(document.documentElement);
+    const bg = getComputedStyle(document.body).backgroundColor || '#10170f';
+    const ink = (css.getPropertyValue('--text') || '#e8ecdf').trim();
+    const dim = (css.getPropertyValue('--text-muted') || '#8d9684').trim();
+    const accent = (css.getPropertyValue('--accent') || '#e0a458').trim();
+    const pad = 48, W = Math.max(...imgs.map(i => i.width)) + pad * 2, head = 120, foot = 70, gap = 24;
+    const H = head + imgs.reduce((a, i) => a + i.height, 0) + gap * (imgs.length - 1) + foot;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    const title = cardShareTitle(sec);
+    const D = _lastRender && _lastRender.D;
+    const when = D ? (D.recordedAt ? new Date(D.recordedAt) : parseUTCFromFilename(D.title || '')) : null;
+    ctx.fillStyle = ink; ctx.font = `600 44px "Bricolage Grotesque", sans-serif`;
+    ctx.fillText(title, pad, 70, W - pad * 2);
+    if (when && !isNaN(when)) {
+      ctx.fillStyle = dim; ctx.font = `500 24px "IBM Plex Sans", sans-serif`;
+      ctx.fillText(when.toLocaleDateString(loamLang() === 'en' ? undefined : loamLang()), pad, 104);
+    }
+    let y = head;
+    for (const im of imgs) { ctx.drawImage(im, pad, y); y += im.height + gap; }
+    ctx.fillStyle = accent; ctx.font = `600 24px "IBM Plex Sans", sans-serif`;
+    ctx.fillText(loamT('Analyzed with Loam'), pad, H - 28);
+    const slug = String(sec.id || 'card').replace(/Section$/, '').replace(/[^A-Za-z0-9]+/g, '-').toLowerCase();
+    return loamShareImage(canvas.toDataURL('image/png'), loamCardFilename('card-' + slug, when),
+      loamT('My {title}, analyzed with Loam.', { title: title.toLowerCase() }));
+  } catch (e) { console.warn('card share failed', e); loamCardShareFailed(); }
 }
 
 /* One file per session per SPORT, so two cards can never collide on the same temp path (the iOS
@@ -33618,6 +33786,11 @@ function clearRunFocus() {
 }
 
 function renderRunTimeline(D) {
+  /* A bike FIT on the GPS-only path draws the bike stack (speed, elevation, heart rate, power,
+     cadence -- see renderBikeTimeline); everything below is the foot timeline. */
+  { const sp = normalizeSport(D.gpsSport || D.sport || '');
+    if (sp !== 'run' && sp !== 'walk') { renderBikeTimeline(D); return; } }
+  { const fn = document.getElementById('timelineFootnote'); if (fn) { fn.innerHTML = ''; fn.classList.add('hidden'); } }
   /* Speed + grade timeline with descent/climb segments shaded. */
   syncSmoothToggles();
   const smooth = loamSmooth();
@@ -34385,6 +34558,13 @@ function modCopyT(s) {
   return s;
 }
 const MOD_COPY_SHAPES = [
+  /* The dropzone's refusal, which names the files it refused. Translated HERE, like every other
+     shape in this list, because `showError` routes on the English (`errorGuidance` matches
+     /Unsupported file type/i) and translating at the throw would take the instruction under it with
+     it. Left out, the message was English above a Norwegian instruction, which reads worse than a
+     wholly English one. */
+  [/^Unsupported file type: (.+)\. Loam reads a Sensor Logger \.zip, a Loam Capture Combined \.csv \(or \.csv\.gz\), and a \.fit \(companion or standalone\)\.$/,
+   'Unsupported file type: {names}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv (or .csv.gz), and a .fit (companion or standalone).', ['names']],
   /* The loading line's templated steps. Each carries a count, so the number lifts out rather than
      becoming a key per file, per record or per descent. */
   [/^\((\d+)\/(\d+)\) loading (.+)$/, '({i}/{n}) loading {name}', ['i', 'n', 'name']],
@@ -38584,31 +38764,29 @@ const SECTION_CATALOG = [
   { id: 'runsSection', label: 'Runs' },
   { id: 'runCompareSection', label: 'Compare laps', navResolve: 'compare',
     lock: 'one chip, two possible targets: the nav resolves the element itself, so there is no single element to switch off' },
+  { id: 'turnSection', label: 'Turns' },
+  { id: 'formReplaySection', label: 'Form replay' },
+  { id: 'radiusSection', label: 'Radius' },
   { id: 'jumpsSection', label: 'Jumps' },
   { id: 'airtimeSection', label: 'Airtime' },
-  { id: 'turnSection', label: 'Turns' },
-  { id: 'radiusSection', label: 'Radius' },
-  { id: 'formReplaySection', label: 'Form replay' },
-  { id: 'analogSection', label: 'Motor off' },
-  { id: 'cadPowerSection', label: 'Cadence · power' },
-  { id: 'fitDataSection', label: 'Bike data' },
   { id: 'runCadenceSection', label: 'Cadence' },
   { id: 'runOscSection', label: 'Oscillation' },
   { id: 'runSplitsSection', label: 'Splits' },
   { id: 'runLapsSection', label: 'Laps' },
   { id: 'hrZonesSection', label: 'HR zones' },
   { id: 'runDecouplingSection', label: 'HR drift' },
+  { id: 'cadPowerSection', label: 'Cadence · power' },
+  { id: 'analogSection', label: 'Motor off' },
   { id: 'runSegmentsSection', label: 'Segments' },
-  { id: 'recordingQualitySection', label: 'Measured from' },
-  { id: 'roadSection', label: 'Climbs' },
-  { id: 'roadSpeedSection', label: 'Speed' },
-  { id: 'roadDescentsSection', label: 'Descents' },
-  { id: 'roadDescentHistorySection', label: 'Descent history' },
   { id: 'roadPowerCurveSection', label: 'Power curve' },
   { id: 'roadQuadrantSection', label: 'Cadence' },
+  { id: 'roadSection', label: 'Climbs' },
+  { id: 'roadDescentsSection', label: 'Descents' },
+  { id: 'roadDescentHistorySection', label: 'Descent history' },
   { id: 'roadLapsSection', label: 'Laps' },
   { id: 'gpsUpsellSection', label: 'Unlock more' },
   { id: 'roadUpsellSection', label: 'Unlock more' },
+  { id: 'recordingQualitySection', label: 'Measured from' },
   { id: 'geekStatsSection', label: 'Raw' },
   { id: 'coachSection', label: 'Coach' },
 ];
@@ -38731,11 +38909,16 @@ const DASHBOARD_PRESETS = {
   mtb: [
     { key: 'full', label: 'Everything', off: [] },
     { key: 'essentials', label: 'Essentials',
-      off: ['radiusSection', 'cadPowerSection', 'analogSection', 'fitDataSection',
+      off: ['radiusSection', 'cadPowerSection', 'analogSection',
             'recordingQualitySection', 'gpsUpsellSection', 'geekStatsSection'] },
     { key: 'corners', label: 'Corners',
-      off: ['jumpsSection', 'airtimeSection', 'cadPowerSection', 'analogSection', 'fitDataSection',
+      off: ['jumpsSection', 'airtimeSection', 'hrZonesSection', 'cadPowerSection', 'analogSection',
             'runSplitsSection', 'recordingQualitySection', 'gpsUpsellSection', 'geekStatsSection'] },
+    /* The Strava-shaped read: the ride's effort -- the timeline's heart-rate and power rows, the
+       zones, cadence against the motor -- without the corner and jump reads. */
+    { key: 'training', label: 'Training',
+      off: ['turnSection', 'formReplaySection', 'radiusSection', 'jumpsSection', 'airtimeSection',
+            'recordingQualitySection', 'gpsUpsellSection', 'geekStatsSection'] },
   ],
   run: [
     { key: 'full', label: 'Everything', off: [] },
@@ -38751,7 +38934,7 @@ const DASHBOARD_PRESETS = {
     { key: 'full', label: 'Everything', off: [] },
     { key: 'essentials', label: 'Essentials',
       off: ['roadPowerCurveSection', 'roadQuadrantSection', 'roadDescentHistorySection',
-            'fitDataSection', 'roadUpsellSection', 'geekStatsSection'] },
+            'roadUpsellSection', 'geekStatsSection'] },
     { key: 'power', label: 'Power',
       off: ['roadDescentsSection', 'roadDescentHistorySection', 'roadLapsSection',
             'roadUpsellSection', 'geekStatsSection'] },
@@ -38759,7 +38942,7 @@ const DASHBOARD_PRESETS = {
   ski: [
     { key: 'full', label: 'Everything', off: [] },
     { key: 'essentials', label: 'Essentials',
-      off: ['radiusSection', 'fitDataSection', 'recordingQualitySection', 'geekStatsSection'] },
+      off: ['radiusSection', 'recordingQualitySection', 'geekStatsSection'] },
   ],
   ride: [
     { key: 'full', label: 'Everything', off: [] },
@@ -38862,6 +39045,22 @@ function dashboardFamilyNow() {
    reached from here at all. Sets AND clears on every row every time, or one sport's layout leaks
    into the next session rendered in the same page. */
 let _layoutAvailable = [];
+/* Forget the stamp. Called from `hideAllSections`, which every render path passes through, so the
+   state a view did not build cannot be the state it inherits; the sectioned views re-apply at the
+   end of the same synchronous render, through `buildSectionNav` -> `applySectionLayout`.
+   ONE ELEMENT IS REACHED THAT THE CHOOSER CANNOT BE REACHED FROM, and that is the whole bug: the
+   coach panel is a top-level sibling of #results (so the lift, range, swim and indoor-ski views can
+   show it), `[data-layout-off]` is unscoped, and those four views hide #results -- which is where
+   the Options popover and the Dashboard button live. So a coach switched off on a ride went
+   display:none on the next lift opened in the same page, with no `.hidden` on it to explain why and
+   no control on that screen to put it back. */
+function clearSectionLayout() {
+  for (const row of SECTION_CATALOG) {
+    const el = document.getElementById(row.id);
+    if (el) el.removeAttribute('data-layout-off');
+  }
+  _layoutAvailable = [];
+}
 function applySectionLayout() {
   const on = resolveSectionLayout(SECTION_CATALOG, loadDashboardLayout(), dashboardFamilyNow(),
                                   DASHBOARD_PRESETS);
@@ -38997,8 +39196,7 @@ function closeDashboardModal() {
 /* Focused view hides a fixed set of detail sections by CSS. These are the ones that exist for the
    current sport and would show if the toggle were off; the count feeds the nav's "+N more" chip and
    the hint beside the toggle, so the default-on toggle never removes a section without a trace. */
-const FOCUS_HIDDEN_IDS = ['radiusSection', 'geekStatsSection', 'runCadenceSection', 'runOscSection',
-                          'fitDataSection'];
+const FOCUS_HIDDEN_IDS = ['radiusSection', 'geekStatsSection', 'runCadenceSection', 'runOscSection'];
 function focusHiddenSections() {
   const res = document.getElementById('results');
   if (!res || !res.classList.contains('focus-mode')) return [];
@@ -39101,6 +39299,9 @@ function buildSectionNav() {
      insertion point for every render path -- all four `renderAll*` end here, and so do the
      Focused-view toggle, `drawRuns` and `drawRunsEmpty` -- which is why it is not wired at each. */
   applySectionLayout();
+  /* Deferred, and twice: several charts are plotted after the render path reaches here (a chart
+     revealed out of a fold, the ghost race), and the button keys on a chart actually being drawn. */
+  setTimeout(decorateCardShares, 0); setTimeout(decorateCardShares, 700);
   const nav = document.getElementById('sectionNav');
   if (!nav) return;
   const visible = (id) => {
@@ -39226,8 +39427,6 @@ function renderAll(D) {
     const ord = opt('ledgerSortSel', 'ride'); if (ord) ord.textContent = loamT('{Noun} order', { Noun: lexNounT(lx, { cap: true }) }); }
   setupBorrowedCalibration(D);
   show('turnSection'); show('radiusSection');
-  const sub = document.getElementById('timelineSubtitle');
-  if (sub) sub.textContent = loamT('yaw rate + speed · turns shaded · jump airtime shaded');
   /* Recomputed here rather than in the analysis path so a ride reopened from the analysis cache (or
      one analyzed before this shipped) still gets its crash cards, and so there is exactly one place
      the crash context is derived. Assigned onto D because buildDigest reads it off the same object
@@ -39263,14 +39462,17 @@ function renderAll(D) {
   renderCoachHighlights(D, rSport);
   renderCrashSection(D);
   renderMap(D.sensors.location, D.turns, D.ride, D.ridingJumps, D.crashes);
-  renderTimeline(D.t, D.yawSeg, D.sensors.location, D.turns, D.ride, D.fitInRide, D.ridingJumps, D.crashes);
+  renderBikeTimeline(D);
   renderTurnTable(D.turns);
   setupFormReplay(D);
   renderRadiusChart(D.turns);
   renderParams(D.summary, D.hasFit);
   if (D.ridingJumps && D.ridingJumps.length) { show('jumpsSection'); renderJumpSummary(D); renderJumpLaps(D); renderJumpsTable(D.ridingJumps); }
   else if (D.airtime && D.airtime.jumps && D.airtime.jumps.length) { show('airtimeSection'); renderAirtime(D); }
-  if (D.fitInRide && D.fitInRide.length) { show('fitDataSection'); renderFitChart(D.fitInRide, D.ride); renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
+  /* The FIT's channels over time are rows of the timeline now (renderBikeTimeline); what stays down
+     here are the two reads a time series cannot give -- cadence against motor power, and the
+     motor-off stretches. */
+  if (D.fitInRide && D.fitInRide.length) { renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
   currentRide = D.ride;
   renderRunsPanel(D);
   renderHrZones(D);
@@ -39936,7 +40138,7 @@ function renderSessionOverview(D, sport) {
   const tile = (value, label) => `<div><strong>${escapeHtml(value)}</strong><span>${escapeHtml(loamT(label))}</span></div>`;
   host.innerHTML = `<div class="session-heading"><div><h1 class="activity-title" tabindex="-1">${activityIcon(sport)}<span>${escapeHtml(title)}</span></h1>
       <p>${escapeHtml([D.eBike ? 'e-MTB' : sessionSportLabel(sport), when].filter(Boolean).join(' · '))}</p></div>
-      <button type="button" class="session-share">${loamT('Share card')}</button></div>
+      <button type="button" class="session-share card-share" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
     <div class="session-facts">${Number.isFinite(distance) ? tile(U.dist(distance), 'Distance') : ''}
       ${Number.isFinite(duration) ? tile(duration < 60 ? `${Math.round(duration)}s` : fmtDuration(duration), 'Moving time') : ''}
       ${Number.isFinite(s.altLoss ?? s.altDrop) ? tile(U.elev(s.altLoss ?? s.altDrop), 'Descent') : ''}</div>
@@ -40280,130 +40482,299 @@ function saveRideSignature() {
   try { rideSigCompose(); } catch (e) { console.warn('save ride signature failed', e); }
 }
 
-function renderTimeline(t, yawSeg, loc, turns, ride, fitInRide, ridingJumps, crashes) {
-  const stride = 5;
-  const tSub = [], ySub = [];
-  for (let i = 0; i < t.length; i += stride) {
-    if (t[i] >= ride.start - 5 && t[i] <= ride.end + 5) { tSub.push(t[i] - ride.start); ySub.push(yawSeg[i]); }
-  }
-  const locInRide = loc.filter(r => r.t >= ride.start - 5 && r.t <= ride.end + 5);
-  const tSpGps = locInRide.map(r => r.t - ride.start);
-  /* Speeds follow the Units toggle (they used to hardcode mph). */
-  const ySpGps = locInRide.map(r => U.speedNum(r.speed));
+/* A BIKE'S TIMELINE IS ONE ROW PER CHANNEL TOO (owner, 2026-09-20: "let's give the biking sports a
+   similar treatment as we did for running ... separating out graphs", and "aim for a strava like
+   cleanliness of graphs and layout, while still conveying what strava cannot"). The ride timeline
+   was one plot carrying yaw rate on the left axis and GPS speed (plus FIT wheel speed) on the right,
+   and the FIT's power, motor power, heart rate and cadence lived in a SECOND dual-axis chart further
+   down the page (`fitDataSection`); a road ride drew that same four-channel chart AS its timeline,
+   and then a third chart of speed over altitude (`roadSpeedSection`). Both are retired. Every one of those is the
+   crossing-lines, two-tick-colour picture the run's 2026-09-16 split was written against.
 
-  /* Hover: without a template Plotly prints raw floats, and traces sampled at different timestamps
-     than the hovered point show as full-precision "(t, y)" tuples. Round to what a rider reads. */
-  const traces = [
-    { x: tSub, y: ySub, type: 'scatter', mode: 'lines', line: { color: '#e87b3d', width: 1.5 }, name: loamT('Yaw rate'), yaxis: 'y', hovertemplate: '%{y:.0f}°/s' },
-    { x: tSpGps, y: ySpGps, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 1.2, dash: 'dot' }, name: loamT((fitInRide && fitInRide.length) ? 'GPS speed' : 'GPS speed (est.)'), yaxis: 'y2', opacity: 0.6, hovertemplate: `%{y:.1f} ${U.speedUnit()}` },
-  ];
-  if (fitInRide && fitInRide.length) {
-    const tFit = fitInRide.map(r => r.t_phone - ride.start);
-    const sFit = fitInRide.map(r => r.speed != null ? U.speedNum(r.speed) : null);
-    traces.push({ x: tFit, y: sFit, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: 2 }, name: loamT('FIT wheel speed'), yaxis: 'y2', hovertemplate: `%{y:.1f} ${U.speedUnit()}` });
+   This is the bike half of that split, and it serves every bike path: the descents-and-turns view
+   (MTB, e-MTB, an outdoor ski day), a road FIT, and a GPS-only FIT (through renderRunTimeline's bike
+   branch). Rows, top to bottom, each drawn only when the recording carried it:
+
+     turning   -- body-frame yaw rate, the IMU path only. On TOP deliberately: it is the row Strava
+                  cannot draw, and it is the row the corner numbers along the lane belong to, so the
+                  numbers sit directly over the bands they name instead of four rows away.
+     speed     -- the FIT's WHEEL speed when a head unit recorded it, else GPS. One line, not both:
+                  two speeds for one rider is the overlay this exists to remove, and the wheel is the
+                  better instrument wherever it exists.
+     elevation -- `climbAltSeries`, the one answer to "what is this recording's altitude" that the
+                  grade shading and the Climbs panels already read, with those segments shaded on this
+                  row only.
+     heart rate, power (rider, plus the MOTOR on an e-bike -- field 7 and field 82, labelled as such),
+     cadence -- the head unit's and the watch's channels, each on its own row.
+
+   Rows are sized in PIXELS and the host grows to fit them, the rule the foot stack established:
+   splitting only helps if a row is not a share of the old height. Supporting rows are shorter than
+   the foot's (TL_BIKE_ROW_PX) because a bike can carry six channels where a run carries three.
+
+   NO LEGEND: every row's axis title names its channel, and a legend repeating those titles above
+   the lane was the clutter. The two-line power row names its own lines in-row.
+
+   Each shading sits on the row that explains it (`<axis> domain` refs): turn bands on turning,
+   airtime on speed, descents on elevation. Only a crash crosses every row, because it is the one
+   event every channel was measuring at once. */
+const TL_BIKE_LEAD_PX = 150;    // the lead row (turning on an IMU ride, speed otherwise)
+const TL_BIKE_ROW_PX = 92;      // a supporting row
+
+function bikeTimelineRows(D) {
+  const ride = D.ride;
+  const inRide = (r) => r.t >= ride.start && r.t <= ride.end;
+  const loc = ((D.sensors && D.sensors.location) || []).filter(r => r.t >= ride.start - 5 && r.t <= ride.end + 5);
+  const fit = (D.fitInRide && D.fitInRide.length) ? D.fitInRide : (D.timelineFit || []);
+  const fitT = (r) => r.t_phone - ride.start;
+  const has = (key) => fit.filter(r => r[key] != null).length > 1;
+  const rows = [];
+
+  /* Turning: the IMU path's yaw rate, decimated 100 Hz -> 20 Hz as it always was. */
+  if (D.t && D.yawSeg && D.t.length) {
+    const x = [], y = [];
+    for (let i = 0; i < D.t.length; i += 5) {
+      if (D.t[i] >= ride.start - 5 && D.t[i] <= ride.end + 5) { x.push(D.t[i] - ride.start); y.push(D.yawSeg[i]); }
+    }
+    rows.push({ key: 'turning', label: loamT('turning'), title: loamT('turning (°/s)'), color: '#e87b3d',
+      range: [-200, 200],
+      traces: [{ x, y, line: { color: '#e87b3d', width: 1.3 }, name: loamT('Yaw rate'), hovertemplate: '%{y:.0f}°/s' }] });
   }
 
-  const shapes = turns.map(T => ({
-    type: 'rect', xref: 'x', yref: 'paper',
-    x0: T.tStart - ride.start, x1: T.tEnd - ride.start, y0: 0, y1: 1,
-    fillcolor: T.direction === 'R' ? 'rgba(193,78,46,0.13)' : 'rgba(31,123,166,0.13)',
-    line: { width: 0 }, layer: 'below'
-  }));
-  if (ridingJumps) {
-    for (const J of ridingJumps) {
-      const tLand = J.t_phone - ride.start;
-      const tLift = tLand - (J.hang || 0);
-      shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: tLift, x1: tLand, y0: 0, y1: 1,
-        fillcolor: 'rgba(212,165,116,0.40)', line: { width: 0 }, layer: 'below' });
+  /* Speed: the wheel where a companion head unit measured it (the IMU path's FIT, which is what the
+     old timeline called "FIT wheel speed"), GPS otherwise. A road or GPS-only FIT's own speed field
+     is not known to come from a wheel sensor, so those read the track's speed and say "speed". */
+  if (has('speed') && D.fitInRide && D.fitInRide.length && D.t) {
+    rows.push({ key: 'speed', label: loamT('speed'), title: loamT('wheel speed ({u})', { u: U.speedUnit() }), color: '#6da7c4',
+      traces: [{ x: fit.map(fitT), y: fit.map(r => r.speed != null ? U.speedNum(r.speed) : null),
+        line: { color: '#6da7c4', width: 1.6 }, name: loamT('FIT wheel speed'), connectgaps: false,
+        hovertemplate: `%{y:.1f} ${U.speedUnit()}` }] });
+  } else if (loc.length > 1) {
+    rows.push({ key: 'speed', label: loamT('speed'), title: loamT('speed ({u})', { u: U.speedUnit() }), color: '#6da7c4',
+      traces: [{ x: loc.map(r => r.t - ride.start), y: loc.map(r => r.speed != null ? U.speedNum(r.speed) : null),
+        line: { color: '#6da7c4', width: 1.6 }, name: loamT('GPS speed'), connectgaps: false,
+        hovertemplate: `%{y:.1f} ${U.speedUnit()}` }] });
+  }
+
+  /* Elevation, from the same series the grade shading and the Climbs panels read (see
+     renderRunTimeline for why it is this function and why it is unsmoothed). */
+  const baroRows = (D.sensors && D.sensors.baro) || [];
+  const altPts = climbAltSeries(baroRows, (D.sensors && D.sensors.location) || [], ride).filter(a => a.alt != null);
+  if (altPts.length > 1) {
+    const altFromGps = climbAltSeries(baroRows, [], ride).length === 0;
+    const base = altPts[0].alt, su = U.smallUnit();
+    rows.push({ key: 'elevation', color: '#d4a574',
+      label: altFromGps ? loamT('elevation (GPS)') : loamT('elevation'),
+      title: altFromGps ? loamT('Δ elev ({u}), GPS', { u: su }) : loamT('Δ elev ({u})', { u: su }),
+      traces: [{ x: altPts.map(a => a.t - ride.start), y: altPts.map(a => U.smallNum(a.alt - base)),
+        line: { color: '#d4a574', width: 1.4 }, fill: 'tozeroy', fillcolor: 'rgba(160,111,36,0.26)',
+        name: loamT('Elevation'), hovertemplate: `%{y:.0f} ${su}` }] });
+  }
+
+  /* Heart rate: the watch's own beats first, a strap the head unit logged otherwise. */
+  const hrRows = ((D.sensors && D.sensors.heartRate) || []).filter(r => inRide(r) && r.bpm != null);
+  const hrX = hrRows.length > 1 ? hrRows.map(r => r.t - ride.start) : (has('hr') ? fit.map(fitT) : null);
+  const hrY = hrRows.length > 1 ? hrRows.map(r => r.bpm) : (has('hr') ? fit.map(r => r.hr) : null);
+  if (hrX) {
+    rows.push({ key: 'hr', label: loamT('heart rate'), title: loamT('heart rate (bpm)'), color: '#c54b3c',
+      traces: [{ x: hrX, y: hrY, line: { color: '#c54b3c', width: 1.4 }, name: loamT('Heart rate'),
+        connectgaps: false, hovertemplate: '%{y:.0f} bpm' }] });
+  }
+
+  /* Power: FIT field 7 is the RIDER, field 82 the MOTOR (CLAUDE.md, the 2026-08-14 swap). Both are
+     watts, so they share a row; they are named in-row because there is no legend. */
+  const rider = has('power'), motor = has('motorPower');
+  if (rider || motor) {
+    const traces = [];
+    if (rider) traces.push({ x: fit.map(fitT), y: fit.map(r => r.power), line: { color: '#a8453a', width: 1.3 },
+      name: loamT('Rider power'), connectgaps: false, hovertemplate: '%{y:.0f} W' });
+    if (motor) traces.push({ x: fit.map(fitT), y: fit.map(r => r.motorPower), line: { color: '#8b6fd6', width: 1.2 },
+      name: loamT('Motor power'), connectgaps: false, hovertemplate: '%{y:.0f} W' });
+    rows.push({ key: 'power', label: loamT('power'), title: loamT('power (W)'), color: '#a8453a', traces,
+      key2: rider && motor ? [{ text: loamT('rider'), color: '#a8453a' }, { text: loamT('motor'), color: '#8b6fd6' }] : null });
+  }
+
+  if (has('cad')) {
+    rows.push({ key: 'cadence', label: loamT('cadence'), title: loamT('cadence (rpm)'), color: '#8caa6d',
+      traces: [{ x: fit.map(fitT), y: fit.map(r => r.cad), line: { color: '#8caa6d', width: 1.2 },
+        name: loamT('Cadence'), connectgaps: false, hovertemplate: '%{y:.0f} rpm' }] });
+  }
+  return rows;
+}
+
+function renderBikeTimeline(D) {
+  const ride = D.ride;
+  const turns = D.turns || [];
+  const ridingJumps = D.ridingJumps || [];
+  const crashes = D.crashes || [];
+  const rows = bikeTimelineRows(D);
+  const axisOf = (i) => (i === 0 ? 'y' : 'y' + (i + 1));
+  const rowAxis = {};
+  rows.forEach((r, i) => { r.axis = axisOf(i); rowAxis[r.key] = r.axis; });
+
+  const traces = [];
+  for (const r of rows) {
+    for (const tr of r.traces) traces.push({ type: 'scatter', mode: 'lines', yaxis: r.axis, ...tr });
+  }
+
+  /* Bands, each on the row that explains it. */
+  const shapes = [];
+  if (rowAxis.turning) {
+    for (const T of turns) {
+      shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.turning + ' domain',
+        x0: T.tStart - ride.start, x1: T.tEnd - ride.start, y0: 0, y1: 1,
+        fillcolor: T.direction === 'R' ? 'rgba(193,78,46,0.16)' : 'rgba(31,123,166,0.16)',
+        line: { width: 0 }, layer: 'below' });
     }
   }
+  /* Descents (and lifts) only: shading the climbs too tinted the whole profile, and on a bike the
+     descents are what the Runs table below is made of. */
+  const segs = (D.gradeSegments || (D.running && D.running.segments) || D.segments || [])
+    .filter(s => s.dir === 'down' || s.kind === 'lift');
+  if (rowAxis.elevation) {
+    for (const s of segs) {
+      if (!(s.tEnd > s.tStart)) continue;
+      shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.elevation + ' domain',
+        x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
+        fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.20)' : 'rgba(197,75,60,0.13)',
+        line: { width: 0 }, layer: 'below' });
+    }
+  }
+  /* Airtime on the speed row, where the jump labels sit: across the whole stack a second-long band
+     is a hairline on every row, and six rows of hairlines were the clutter this layout removes. */
+  for (const J of ridingJumps) {
+    const tLand = J.t_phone - ride.start, tLift = tLand - (J.hang || 0);
+    shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.speed ? rowAxis.speed + ' domain' : 'paper', x0: tLift, x1: tLand, y0: 0, y1: 1,
+      fillcolor: 'rgba(212,165,116,0.40)', line: { width: 0 }, layer: 'below' });
+  }
 
-  /* Labels along the lane above the plot -- turn numbers on its first row, a crash's CRASH on the
-     second so it never fights the number of the corner it happened in -- and jump labels along the
-     bottom edge, each at the foot of its own shaded airtime. Every row is thinned to what fits the
-     visible range (thinTimelineLabels; a tech section packs many turns into a few seconds, and the
-     numbers used to collide into an unreadable smear), and re-thinned on every zoom, pan and resize,
-     so you always see as many as actually fit. */
-  const margin = { l: 56, r: 56, t: 32, b: 50 };
+  /* The lane: corner numbers on its first row (with a crash's pinned "tap"), CRASH on the second;
+     on a ride with no corners, the annotation marks take the first row instead, as on the run. */
   const numFont = { family: 'JetBrains Mono', size: 11, color: '#475569' };
-  const turnLabels = turns.map(T => {
+  const tapFont = { family: 'JetBrains Mono', size: 9, color: '#c14e2e' };
+  const markFont = { family: 'JetBrains Mono', size: 9, color: '#d4a574' };
+  const laneLabels = rowAxis.turning ? turns.map(T => {
     const text = String(T.n);
     return { x: (T.tStart + T.tEnd) / 2 - ride.start, text, widthPx: tlLabelWidthPx(text, numFont.size, numFont.family, 0) };
-  });
-  const jumpFont = { family: 'JetBrains Mono', size: 11, color: '#d4a574' };
-  const jumpLabels = (ridingJumps || []).map((J, i) => {
-    const text = `J${i + 1}`;
-    return { x: J.t_phone - ride.start - (J.hang || 0) / 2, text, widthPx: tlLabelWidthPx(text, jumpFont.size, jumpFont.family, 0) };
-  });
-
-  /* Crash marks. TWO lines per crash, because the distinction between them is the whole point: a
-     solid red line at the anchor (the last moment the rider was moving, which is the event) and a
-     faint dotted one at the tap. Drawn together they show the get-up gap the card describes, and a
-     rider who remembers the crash being earlier than the solid line can see immediately that the
-     anchor is what to argue with. The label rides on the anchor. Neither label is ever thinned away:
-     a turn number lost to crowding costs nothing, the one marker the rider is looking for costs the
-     feature -- so "tap" is PINNED on the numbers' row and the numbers thin around it, and CRASH has
-     the row above to itself. */
+  }) : [];
+  const marks = rowAxis.turning ? []
+    : ((D.sensors && D.sensors.annotations) || []).filter(a => a.t >= ride.start && a.t <= ride.end && a.text);
+  for (const a of marks) {
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: a.t - ride.start, x1: a.t - ride.start, y0: 0, y1: 1,
+      line: { color: '#d4a574', width: 1, dash: 'dot' } });
+    const text = a.text.length > 28 ? a.text.slice(0, 26) + '…' : a.text;
+    laneLabels.push({ x: a.t - ride.start, text, mark: true, widthPx: tlLabelWidthPx(text, markFont.size, markFont.family, 3) });
+  }
   const crashAnnos = [];
-  const tapFont = { family: 'JetBrains Mono', size: 9, color: '#c14e2e' };
-  for (const c of (crashes || [])) {
+  for (const c of crashes) {
     const xA = c.anchor - ride.start;
-    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xA, x1: xA, y0: 0, y1: 1,
-      line: { color: '#c14e2e', width: 2 } });
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xA, x1: xA, y0: 0, y1: 1, line: { color: '#c14e2e', width: 2 } });
     if (c.stopped) {
       const xT = c.t - ride.start;
       shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xT, x1: xT, y0: 0, y1: 1,
         line: { color: '#c14e2e', width: 1, dash: 'dot' } });
-      turnLabels.push({ x: xT, text: 'tap', tap: true, pinned: true, widthPx: tlLabelWidthPx('tap', tapFont.size, tapFont.family, 0) });
+      laneLabels.push({ x: xT, text: 'tap', tap: true, pinned: true, widthPx: tlLabelWidthPx('tap', tapFont.size, tapFont.family, 0) });
     }
-    crashAnnos.push({
-      ...tlLaneAnno(1), x: xA, text: 'CRASH',
-      font: { family: 'JetBrains Mono', size: 10, color: '#ffffff' },
-      bgcolor: '#c14e2e', borderpad: 3,
-    });
+    crashAnnos.push({ ...tlLaneAnno(1), x: xA, text: 'CRASH',
+      font: { family: 'JetBrains Mono', size: 10, color: '#ffffff' }, bgcolor: '#c14e2e', borderpad: 3 });
   }
-  let fullLo = Infinity, fullHi = -Infinity;
-  for (const x of tSub) { if (x < fullLo) fullLo = x; if (x > fullHi) fullHi = x; }
-  for (const x of tSpGps) { if (x < fullLo) fullLo = x; if (x > fullHi) fullHi = x; }
-  if (!isFinite(fullLo)) { fullLo = 0; fullHi = (ride.end - ride.start) || 1; }
-  const laneAnnos = (lo, hi) => {
+  const laneRows = crashAnnos.length ? 2 : (laneLabels.length ? 1 : 0);
+
+  /* Geometry, in pixels. */
+  const margin = { l: 56, r: 20, t: 8 + laneRows * TL_LANE_ROW_PX + (laneRows ? TL_LANE_PAD_PX : 0), b: 44 };
+  const rowsPx = rows.map((r, i) => (i === 0 ? TL_BIKE_LEAD_PX : TL_BIKE_ROW_PX));
+  const spanPx = rowsPx.reduce((a, b) => a + b, 0) + Math.max(0, rows.length - 1) * TL_FOOT_GAP_PX;
+  const hostPx = Math.max(220, spanPx + margin.t + margin.b);
+  const domains = [];
+  let top = 1;
+  for (const px of rowsPx) {
+    const h = px / Math.max(1, spanPx);
+    domains.push([Math.max(0, top - h), top]);
+    top -= h + TL_FOOT_GAP_PX / Math.max(1, spanPx);
+  }
+
+  /* Jump labels along the bottom edge of the SPEED row, at the foot of their own shaded airtime:
+     airtime is a speed event, and the bottom of the whole stack would put them under cadence. */
+  const jumpFont = { family: 'JetBrains Mono', size: 11, color: '#d4a574' };
+  const jumpY = rowAxis.speed ? domains[rows.findIndex(r => r.key === 'speed')][0] : 0;
+  const jumpLabels = ridingJumps.map((J, i) => {
+    const text = `J${i + 1}`;
+    return { x: J.t_phone - ride.start - (J.hang || 0) / 2, text, widthPx: tlLabelWidthPx(text, jumpFont.size, jumpFont.family, 0) };
+  });
+
+  /* The power row's in-row key, top right of the row, since there is no legend to name two lines. */
+  const keyAnnos = [];
+  rows.forEach((r, i) => {
+    if (!r.key2) return;
+    const txt = r.key2.map(k => `<span style="color:${k.color}">● ${escapeHtml(k.text)}</span>`).join('  ');
+    keyAnnos.push({ xref: 'paper', yref: 'paper', x: 1, y: domains[i][1], xanchor: 'right', yanchor: 'bottom',
+      yshift: 1, showarrow: false, text: txt, font: { family: 'IBM Plex Sans', size: 10, color: '#475569' } });
+  });
+
+  let fullLo = 0, fullHi = Math.max(1, ride.end - ride.start);
+  const annos = (lo, hi) => {
     const w = tlPlotWidthPx('timelineChart', margin);
-    const top = thinTimelineLabels(turnLabels, lo, hi, w).map(l => (l.tap
+    const lane = thinTimelineLabels(laneLabels, lo, hi, w).map(l => (l.tap
       ? { ...tlLaneAnno(0), x: l.x, text: l.text, font: tapFont, opacity: 0.75 }
+      : l.mark ? { ...tlLaneAnno(0), x: l.x, text: l.text, font: markFont, bgcolor: 'rgba(20,23,27,0.85)', borderpad: 3 }
       : { ...tlLaneAnno(0), x: l.x, text: l.text, font: numFont }));
     const bottom = thinTimelineLabels(jumpLabels, lo, hi, w).map(l => ({
-      x: l.x, y: 0, yref: 'paper', xref: 'x', yanchor: 'bottom', yshift: 3, text: l.text, showarrow: false, font: jumpFont }));
-    return top.concat(bottom, crashAnnos);
+      x: l.x, y: jumpY, yref: 'paper', xref: 'x', yanchor: 'bottom', yshift: 3, text: l.text, showarrow: false, font: jumpFont }));
+    return lane.concat(bottom, crashAnnos, keyAnnos);
   };
 
+  const lastAxis = rows.length ? rows[rows.length - 1].axis : 'y';
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin,
-    xaxis: { title: { text: loamT('time in {noun}', { noun: lexNounT(pageLex()) }), font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi) },
-    yaxis: {
-      title: { text: loamT('yaw rate (°/s)'), font: { color: '#e87b3d', size: 11 } },
-      gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0',
-      tickfont: { color: '#e87b3d' }, range: [-200, 200]
-    },
-    yaxis2: {
-      title: { text: loamT('speed ({u})', { u: U.speedUnit() }), font: { color: '#6da7c4', size: 11 } },
-      overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)',
-      tickfont: { color: '#6da7c4' }
-    },
-    showlegend: true, legend: timelineLegend(TL_RIDE_HEIGHT_PX, margin, crashAnnos.length ? 2 : 1),
-    shapes, annotations: laneAnnos(fullLo, fullHi), hovermode: 'x unified'
+    xaxis: { title: { text: loamT('time in {noun}', { noun: lexNounT(pageLex()) }), font: { size: 11 } },
+      gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi),
+      anchor: lastAxis, showspikes: true, spikemode: 'across', spikesnap: 'cursor',
+      spikethickness: 1, spikedash: 'dot', spikecolor: '#94a3b8' },
+    showlegend: false,
+    shapes, annotations: annos(fullLo, fullHi), hovermode: 'x unified',
   };
-  /* The timeline host is shared with the (shorter) running timeline; pin this view's height. */
-  document.getElementById('timelineChart').style.height = TL_RIDE_HEIGHT_PX + 'px';
-  loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
-    /* Re-lay the labels with the width the plot actually got, then on every zoom, pan and resize. */
-    wireTimelineRelayout(document.getElementById('timelineChart'), fullLo, fullHi, (lo, hi) => {
-      const tk = loamTimeTicks(lo, hi);
-      return { annotations: laneAnnos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
-    });
+  rows.forEach((r, i) => {
+    layout['yaxis' + (i === 0 ? '' : i + 1)] = {
+      title: { text: r.title, font: { color: r.color, size: 11 } },
+      gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', tickfont: { color: r.color }, domain: domains[i],
+      ...(r.range ? { range: r.range } : {}),
+      /* Speed, power and cadence from zero, since zero means stopped or coasting; heart rate and
+         elevation hug their own range, the way every training app draws them. */
+      ...((r.key === 'speed' || r.key === 'power' || r.key === 'cadence') ? { rangemode: 'tozero' } : {}),
+    };
   });
-  linkTimelineToMap(loc, ride);
+
+  /* The subtitle names the rows that were drawn, in order, and what the shading means. */
+  const sub = document.getElementById('timelineSubtitle');
+  if (sub) {
+    const bits = [rows.map(r => r.label).join(' · ') + (rows.length > 1 ? loamT(', one row each') : '')];
+    if (rowAxis.turning && turns.length) bits.push(loamT('turns shaded'));
+    if (ridingJumps.length) bits.push(loamT('jump airtime shaded'));
+    if (rowAxis.elevation && segs.length) bits.push(loamT('descents shaded'));
+    sub.textContent = bits.join(' · ');
+  }
+  /* The pedal count moved here with the cadence row it is integrated from (it sat under the retired
+     "FIT bike data" chart). */
+  const foot = document.getElementById('timelineFootnote');
+  if (foot) {
+    const fit = (D.fitInRide && D.fitInRide.length) ? D.fitInRide : [];
+    const revs = fit.length ? totalPedalStrokes(fit) : 0;
+    foot.innerHTML = revs > 0
+      ? loamT('Total pedal count: <strong>{n}</strong> crank revolutions over the ride (integrated from FIT cadence).', { n: Math.round(revs).toLocaleString() })
+      : '';
+    foot.classList.toggle('hidden', !(revs > 0));
+  }
+
+  const host = document.getElementById('timelineChart');
+  host.style.height = hostPx + 'px';
+  loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
+    wireTimelineRelayout(host, fullLo, fullHi, (lo, hi) => {
+      const tk = loamTimeTicks(lo, hi);
+      return { annotations: annos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
+    });
+  }).catch(() => {});
+  linkTimelineToMap((D.sensors && D.sensors.location) || [], ride);
 }
 
 /* One model for the on-screen summary and its exported image. */
@@ -40432,14 +40803,28 @@ function jumpStatsModel(D) {
 
 /* Draw directly to canvas so sharing also works offline in WKWebView. No DOM screenshot,
    remote fonts or map tiles are needed, and coordinates never enter the exported card. */
-function shareJumpStats(D) {
+async function shareJumpStats(D) {
   try {
     const m = jumpStatsModel(D);
     if (!m) return;
+    /* The same to-scale drawing the card shows, rasterized into the poster. Everything below it moves
+       down by ART_H; a phone-only (hang-only) card has no distance to draw and keeps its old layout. */
+    let art = null;
+    const svg = m.maxDist != null ? jumpArcSVG(m.top, { ground: '#4a5243', accent: '#e0a458', ink: '#f1f5f0',
+      dim: '#afbaa7', bike: '#f1f5f0', bg: '#10170f', faint: 'rgba(224,164,88,0.45)' }) : '';
+    if (svg) {
+      try {
+        art = await new Promise((res, rej) => {
+          const im = new Image(); im.onload = () => res(im); im.onerror = rej;
+          im.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        });
+      } catch (e) { art = null; }
+    }
+    const ART_H = art ? 300 : 0;
     const canvas = document.createElement('canvas');
-    canvas.width = 1080; canvas.height = 1200;
+    canvas.width = 1080; canvas.height = 1200 + ART_H;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#10170f'; ctx.fillRect(0, 0, 1080, 1200);
+    ctx.fillStyle = '#10170f'; ctx.fillRect(0, 0, 1080, canvas.height);
     const text = (value, x, y, size = 28, color = '#f1f5f0') => {
       ctx.fillStyle = color; ctx.font = `600 ${size}px sans-serif`;
       ctx.fillText(String(value), x, y, 960);
@@ -40451,7 +40836,9 @@ function shareJumpStats(D) {
     text(m.maxDist != null ? 'LONGEST JUMP' : 'BIGGEST AIR', 60, 260, 26, '#afbaa7');
     text(m.maxDist != null ? U.small(m.maxDist) : `${m.heroMs ?? '—'} ms`, 60, 360, 86, '#e0a458');
     if (m.maxDist != null) text(`${U.speed(m.longest.speed_mps)} takeoff × ${Math.round(m.longest.hang * 1000)} ms hang`, 60, 411, 28);
-    text(`${m.n} jump${m.n === 1 ? '' : 's'}${m.nBig ? ` · ${m.nBig} over ${U.small(JUMP_BIG_M)}` : ''}`, 60, 474, 32);
+    if (art) ctx.drawImage(art, 40, 440, 1000, 1000 * 132 / 340);
+    const o = ART_H;
+    text(`${m.n} jump${m.n === 1 ? '' : 's'}${m.nBig ? ` · ${m.nBig} over ${U.small(JUMP_BIG_M)}` : ''}`, 60, 474 + o, 32);
     const stats = [
       ['TOTAL AIRTIME', `${m.totalAir.toFixed(1)} s`],
       ['TOP TAKEOFF', m.maxSpeed != null ? U.speed(m.maxSpeed) : '—'],
@@ -40459,21 +40846,104 @@ function shareJumpStats(D) {
       ['AVERAGE HANG', `${m.avgMs ?? '—'} ms`],
     ];
     stats.forEach(([label, value], i) => {
-      const x = 60 + (i % 2) * 500, y = 550 + Math.floor(i / 2) * 135;
+      const x = 60 + (i % 2) * 500, y = 550 + o + Math.floor(i / 2) * 135;
       text(label, x, y, 23, '#afbaa7'); text(value, x, y + 56, 43);
     });
     if (m.maxDist != null && m.top.length > 1) {
-      text(`TOP ${m.top.length}`, 60, 820, 24, '#afbaa7');
-      m.top.forEach((j, i) => text(`${i + 1}. ${U.small(j.dist)} · ${U.speed(j.speed_mps)} × ${Math.round(j.hang * 1000)} ms${j.landingG != null ? ` · landed ${j.landingG.toFixed(1)} g` : ''}`, 60, 863 + i * 43, 27));
+      text(`TOP ${m.top.length}`, 60, 820 + o, 24, '#afbaa7');
+      m.top.forEach((j, i) => text(`${i + 1}. ${U.small(j.dist)} · ${U.speed(j.speed_mps)} × ${Math.round(j.hang * 1000)} ms${j.landingG != null ? ` · landed ${j.landingG.toFixed(1)} g` : ''}`, 60, 863 + o + i * 43, 27));
     }
-    text(`${m.nLanded} of ${m.n} with a measured landing`, 60, 1010, 24, '#afbaa7');
+    text(`${m.nLanded} of ${m.n} with a measured landing`, 60, 1010 + o, 24, '#afbaa7');
     const caveat = m.maxDist != null
       ? ["Distance estimates takeoff speed × hang time on level ground.", 'It is not a measured landing point.']
       : ['Hang time only; jump distance is unavailable.'];
-    caveat.forEach((line, i) => text(line, 60, 1065 + i * 36, 25, '#afbaa7'));
-    text('Analyzed with Loam', 60, 1160, 24, '#e0a458');
+    caveat.forEach((line, i) => text(line, 60, 1065 + o + i * 36, 25, '#afbaa7'));
+    text('Analyzed with Loam', 60, 1160 + o, 24, '#e0a458');
     return loamShareImage(canvas.toDataURL('image/png'), loamCardFilename('jumps', when), 'My jump stats, analyzed with Loam.');
   } catch (e) { console.warn('jump stats export failed', e); loamCardShareFailed(); }
+}
+
+/* THE LONGEST JUMP, DRAWN TO SCALE (owner, 2026-09-20: "can we get cooler illustrations for the jump
+   card? maybe indicate how long that longest jump was?"). The top jumps as arcs over one ground line,
+   the longest in the accent colour with a dimension line under it and bike lengths ticked along the
+   ground, so "20 ft" is something the eye can size rather than a number to take on trust.
+
+   EVERY PIXEL IS ONE SCALE, HORIZONTAL AND VERTICAL ALIKE, and the arc's height is not a new claim:
+   on the level ground the distance already assumes (`dist = takeoff x hang`, see the jump reads in
+   CLAUDE.md), a projectile airborne for `hang` seconds peaks at g*hang^2/8 above its takeoff, so the
+   shape follows from the two numbers the card already shows. The peak is NOT labelled -- it would be
+   a third figure that reads as measured and is not -- and the card's own caveat about level ground
+   covers the drawing exactly as it covers the distance.
+
+   A bike length is a SCALE REFERENCE, not a measurement: ~1.8 m is a typical trail bike's
+   tyre-to-tyre length, and the label says "about". Pure string output with explicit colours, so the
+   share card can rasterize the same drawing (an SVG with no CSS variables and no foreignObject draws
+   into a canvas without tainting it). */
+const JUMP_BIKE_LENGTH_M = 1.8;
+/* The page's own tokens as literal colours, so the on-page drawing follows light/dark and the winter
+   palette while the SVG stays self-contained. */
+function jumpArcPalette() {
+  try {
+    const css = getComputedStyle(document.documentElement);
+    const v = (n, d) => (css.getPropertyValue(n) || '').trim() || d;
+    return { ground: v('--border', '#5b6352'), accent: v('--accent-4', '#e0a458'), ink: v('--text', '#e8ecdf'),
+      dim: v('--text-muted', '#9aa391'), bike: v('--text', '#e8ecdf'), bg: v('--surface', '#151a11'),
+      faint: 'rgba(214,158,46,0.40)' };
+  } catch (e) { return {}; }
+}
+function jumpArcSVG(jumps, pal) {
+  const js = (jumps || []).filter(j => j && j.dist != null && j.hang != null && j.dist > 0).slice(0, 3);
+  if (!js.length) return '';
+  const c = Object.assign({ ground: '#5b6352', faint: 'rgba(224,164,88,0.38)', accent: '#e0a458',
+    ink: '#e8ecdf', dim: '#9aa391', bike: '#e8ecdf' }, pal || {});
+  const W = 340, H = 132, x0 = 22, groundY = 96, span = W - x0 - 22;
+  const longest = js[0];
+  const g = 9.81;
+  const peakOf = (j) => g * j.hang * j.hang / 8;
+  /* One scale for both axes; shrink it only if a very floaty jump would leave the top of the box. */
+  let pxPerM = span / longest.dist;
+  const maxPeak = Math.max(...js.map(peakOf));
+  if (maxPeak * pxPerM > groundY - 18) pxPerM = (groundY - 18) / maxPeak;
+  const arc = (j) => {
+    const x1 = x0 + j.dist * pxPerM, peak = peakOf(j) * pxPerM;
+    /* A quadratic whose control point sits at twice the peak height passes through the peak at its
+       midpoint, which is a parabola -- the flight path, not an approximation of one. */
+    return { x1, d: `M ${x0} ${groundY} Q ${(x0 + x1) / 2} ${groundY - 2 * peak} ${x1} ${groundY}`, peak };
+  };
+  const esc = (t) => String(t).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+  const parts = [];
+  /* Ground, with a tick every bike length from the takeoff. */
+  parts.push(`<line x1="4" y1="${groundY}" x2="${W - 4}" y2="${groundY}" stroke="${c.ground}" stroke-width="1.5"/>`);
+  const bikes = longest.dist / JUMP_BIKE_LENGTH_M;
+  for (let k = 1; k * JUMP_BIKE_LENGTH_M * pxPerM <= span + 0.5; k++) {
+    const x = x0 + k * JUMP_BIKE_LENGTH_M * pxPerM;
+    parts.push(`<line x1="${x.toFixed(1)}" y1="${groundY}" x2="${x.toFixed(1)}" y2="${groundY + 5}" stroke="${c.ground}" stroke-width="1.2"/>`);
+  }
+  /* The takeoff lip. */
+  parts.push(`<path d="M ${x0 - 16} ${groundY} Q ${x0 - 4} ${groundY - 1} ${x0} ${groundY - 7} L ${x0} ${groundY}" fill="${c.ground}"/>`);
+  /* The runners-up first, faint and dashed, so the longest draws over them. */
+  for (const j of js.slice(1).reverse()) {
+    parts.push(`<path d="${arc(j).d}" fill="none" stroke="${c.faint}" stroke-width="1.6" stroke-dasharray="4 4"/>`);
+  }
+  const L = arc(longest);
+  parts.push(`<path d="${L.d}" fill="none" stroke="${c.accent}" stroke-width="2.6" stroke-linecap="round"/>`);
+  parts.push(`<circle cx="${L.x1.toFixed(1)}" cy="${groundY}" r="3.2" fill="${c.accent}"/>`);
+  /* A small bike at the top of the flight, level, riding left to right. */
+  const bx = (x0 + L.x1) / 2, by = groundY - L.peak - 9;
+  parts.push(`<g transform="translate(${bx.toFixed(1)} ${by.toFixed(1)})" stroke="${c.bike}" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">`
+    + `<circle cx="-7" cy="0" r="4.6"/><circle cx="7" cy="0" r="4.6"/>`
+    + `<path d="M -7 0 L -2 -6 L 5 -6 L 7 0 M -2 -6 L 0 0 L -7 0 M 4 -9 L 5 -6 M 2.5 -9 L 6 -9 M -3 -8 L -1 -8"/></g>`);
+  /* Dimension line under the longest: |<- 20.0 ft ->|. */
+  const dy = groundY + 16;
+  parts.push(`<path d="M ${x0} ${dy - 4} V ${dy + 4} M ${L.x1.toFixed(1)} ${dy - 4} V ${dy + 4} M ${x0} ${dy} H ${L.x1.toFixed(1)}" stroke="${c.dim}" stroke-width="1"/>`);
+  const mid = (x0 + L.x1) / 2;
+  const label = `${U.small(longest.dist)} · ${loamT('about {n} bike lengths', { n: bikes.toFixed(1) })}`;
+  const lw = label.length * 6.1 + 10;
+  parts.push(`<rect x="${(mid - lw / 2).toFixed(1)}" y="${dy - 8}" width="${lw.toFixed(1)}" height="16" rx="3" fill="${c.bg || 'rgba(16,23,15,0.92)'}"/>`);
+  parts.push(`<text x="${mid.toFixed(1)}" y="${dy + 4}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="${c.ink}">${esc(label)}</text>`);
+  /* The air time beside the apex. */
+  parts.push(`<text x="${(bx + 16).toFixed(1)}" y="${(by - 2).toFixed(1)}" font-family="JetBrains Mono, monospace" font-size="10" fill="${c.dim}">${esc(loamT('{ms} ms air', { ms: Math.round(longest.hang * 1000) }))}</text>`);
+  return `<svg class="jump-arc" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${esc(loamT('The longest jump drawn to scale: {d}, about {n} bike lengths', { d: U.small(longest.dist), n: bikes.toFixed(1) }))}">${parts.join('')}</svg>`;
 }
 
 /* Headline strip above the jumps table: the ride's LONGEST jump as the hero, shown as the
@@ -40490,8 +40960,6 @@ function renderJumpSummary(D) {
   const el = document.getElementById('jumpSummary');
   if (!el) return;
   const m = jumpStatsModel(D);
-  const share = document.getElementById('jumpStatsShare');
-  if (share) { share.hidden = !m; share.onclick = m ? () => shareJumpStats(D) : null; }
   if (!m) { el.innerHTML = ''; el.style.display = 'none'; return; }
   el.style.display = '';
   const { n, totalAir, maxSpeed, top, longest, maxDist, heroMs, avgMs, nBig, nLanded } = m;
@@ -40520,6 +40988,7 @@ function renderJumpSummary(D) {
     <div class="jump-hero">
       <div>${heroBlock}</div>
       <div class="meta">${loamT(n > 1 ? '{n} jumps' : '{n} jump', { n })}${dup}${nBig ? '<br>' + loamT('{n} over {bar}', { n: nBig, bar: U.small(JUMP_BIG_M) }) : ''}${nLanded ? '<br>' + loamT('{n} with a measured landing', { n: nLanded }) : ''}</div>
+      ${maxDist != null ? jumpArcSVG(top, jumpArcPalette()) : ''}
     </div>
     <div class="stat accent4">
       <div class="label">${loamT('Total airtime')}</div>
@@ -41129,50 +41598,6 @@ function totalPedalStrokes(fitInRide) {
   }
   return revs;
 }
-function renderFitChart(fitInRide, ride, opts = {}) {
-  const target = opts.target || 'fitChart';
-  /* `r.power` is FIT field 7 = RIDER power (CLAUDE.md: the field 7 / 82 swap was fixed on
-     2026-08-14 everywhere except this legend, which still called the rider's watts the motor's). The
-     motor is field 82 (`r.motorPower`) and gets its own trace when the ride carries it. */
-  const powerLabel = loamT(opts.powerLabel || 'Rider power (W)');
-  const t = fitInRide.map(r => r.t_phone - ride.start);
-  const traces = [];
-  if (fitInRide.some(r => r.power != null)) {
-    traces.push({ x: t, y: fitInRide.map(r => r.power), type: 'scatter', mode: 'lines',
-                  line: { color: '#c54b3c', width: 1.5 }, name: powerLabel, yaxis: 'y' });
-  }
-  if (fitInRide.some(r => r.motorPower != null)) {
-    traces.push({ x: t, y: fitInRide.map(r => r.motorPower), type: 'scatter', mode: 'lines',
-                  line: { color: '#7c3aed', width: 1.2 }, name: loamT('Motor power (W)'), yaxis: 'y' });
-  }
-  if (fitInRide.some(r => r.hr != null)) {
-    traces.push({ x: t, y: fitInRide.map(r => r.hr), type: 'scatter', mode: 'lines',
-                  line: { color: '#e87b3d', width: 1.5 }, name: loamT('Heart rate (bpm)'), yaxis: 'y2' });
-  }
-  if (fitInRide.some(r => r.cad != null)) {
-    traces.push({ x: t, y: fitInRide.map(r => r.cad), type: 'scatter', mode: 'lines',
-                  line: { color: '#8caa6d', width: 1.2, dash: 'dot' }, name: loamT('Cadence (rpm)'), yaxis: 'y2' });
-  }
-  const layout = {
-    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
-    font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    margin: { l: 56, r: 56, t: 32, b: 44 },
-    xaxis: { title: { text: loamT('time in ride'), font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, t.length ? t.reduce((m, v) => Math.max(m, v), 0) : 1) },
-    yaxis: { title: { text: loamT('power (W)'), font: { color: '#c54b3c', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#c54b3c' } },
-    yaxis2: { title: { text: loamT('HR (bpm) / cad (rpm)'), font: { color: '#e87b3d', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#e87b3d' } },
-    showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 10 } },
-    hovermode: 'x unified'
-  };
-  loamPlot(target, traces, layout, PLOT_CFG);
-  const el = target === 'fitChart' ? document.getElementById('fitPedalCount') : null;
-  if (el) {
-    const revs = totalPedalStrokes(fitInRide);
-    el.innerHTML = revs > 0
-      ? loamT('Total pedal count: <strong>{n}</strong> crank revolutions over the ride (integrated from FIT cadence).', { n: Math.round(revs).toLocaleString() })
-      : loamT('No cadence in this FIT, so pedal count is unavailable.');
-  }
-}
-
 /* ==================== Road cycling (FIT-only) =============   A bare Garmin FIT dropped on its own is a road-cycling ride: power, cadence, HR, GPS, and the head
    unit's own ride/lap summaries, but no phone IMU. The functions below are vendored copies of the
    tested modules under analyzer/ (core/parsers/garmin-fit.js, sports/road/power-metrics.js,
@@ -41743,18 +42168,14 @@ function renderAllRoad(D) {
   renderRunMap(D.sensors.location, D.ride, D.segments);
   renderRoadCornerMarkers(D);
   { const lg = document.querySelector('#overviewSection .map-legend'); if (lg) lg.classList.add('hidden'); }
-  const sub = document.getElementById('timelineSubtitle'); if (sub) sub.textContent = loamT('power · cadence · heart rate over the ride');
-  /* #timelineChart has no CSS height (the MTB/run timelines set it before plotting); do the same so
-     Plotly does not collapse the road power chart to a sliver. */
-  { const tc = document.getElementById('timelineChart'); if (tc) tc.style.height = '320px'; }
-  renderFitChart(D.fitInRide, D.ride, { target: 'timelineChart', powerLabel: 'Power (W)' });
+  /* Speed, elevation, heart rate, power and cadence, one row each (renderBikeTimeline). This used to
+     be the four-channel dual-axis power chart, with speed-over-altitude as a second chart below it. */
+  renderBikeTimeline(D);
   renderRoadClimbsAndBalance(D);
   show('roadSection');
   /* Plotly measures the container at plot time, so a chart drawn inside a hidden section gets a
      stale default width until a window resize. Show each chart section BEFORE plotting into it,
-     the same order the MTB path uses (show('fitDataSection') then renderFitChart). */
-  show('roadSpeedSection');
-  renderRoadSpeedChart(D);
+     the same order the MTB path uses. */
   renderRoadDescents(D);
   { const cav = document.getElementById('roadCornersCaveat');
     if (cav) cav.textContent = loamT('Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.'); }
@@ -41791,35 +42212,6 @@ function resizeChartsSoon() {
   const fire = () => { try { window.dispatchEvent(new Event('resize')); } catch (e) {} };
   setTimeout(fire, 80);
   setTimeout(fire, 450);
-}
-
-function renderRoadSpeedChart(D) {
-  const loc = D.sensors.location.filter(r => r.t >= D.ride.start && r.t <= D.ride.end);
-  const t = loc.map(r => r.t - D.ride.start);
-  const traces = [
-    { x: t, y: loc.map(r => r.speed != null ? U.speedNum(r.speed) : null), type: 'scatter', mode: 'lines',
-      line: { color: '#3d6fb0', width: 1.5 }, name: loamT('Speed ({unit})', { unit: U.speedUnit() }), yaxis: 'y' },
-  ];
-  const alts = loc.filter(r => r.altitude != null);
-  if (alts.length > 10) {
-    traces.push({ x: alts.map(r => r.t - D.ride.start), y: alts.map(r => U.smallNum(r.altitude)), type: 'scatter', mode: 'lines',
-      line: { color: '#8a8f7c', width: 1 }, fill: 'tozeroy', fillcolor: 'rgba(138,143,124,0.12)',
-      name: loamT('Elevation ({unit})', { unit: U.smallUnit() }), yaxis: 'y2' });
-  }
-  const shapes = (D.descents || []).map(d => ({ type: 'rect', xref: 'x', yref: 'paper',
-    x0: d.tStart - D.ride.start, x1: d.tEnd - D.ride.start, y0: 0, y1: 1,
-    fillcolor: 'rgba(197,75,60,0.07)', line: { width: 0 } }));
-  const layout = {
-    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
-    font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    margin: { l: 56, r: 56, t: 24, b: 44 },
-    xaxis: { title: { text: loamT('time in ride (s)'), font: { size: 11 } }, gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: loamT('speed ({unit})', { unit: U.speedUnit() }), font: { color: '#3d6fb0', size: 11 } }, gridcolor: '#e2e8f0', tickfont: { color: '#3d6fb0' }, rangemode: 'tozero' },
-    yaxis2: { title: { text: loamT('elevation ({unit})', { unit: U.smallUnit() }), font: { color: '#8a8f7c', size: 11 } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#8a8f7c' } },
-    showlegend: true, legend: { x: 0, y: 1.1, orientation: 'h', font: { size: 10 } },
-    shapes, hovermode: 'x unified',
-  };
-  loamPlot('roadSpeedChart', traces, layout, PLOT_CFG);
 }
 
 /* Corner color = tightness (apex radius, in meters, so it is unit-independent). Warm reads as
@@ -42708,7 +43100,7 @@ function addFiles(fileList) {
   if (skipped.length && !pendingFiles.length) {
     showError(`Unsupported file type: ${skipped.join(', ')}. Loam reads a Sensor Logger .zip, a Loam Capture Combined .csv (or .csv.gz), and a .fit (companion or standalone).`);
   } else if (skipped.length) {
-    loamToast(`Skipped unsupported: ${skipped.join(', ')}`);
+    loamToast(loamT('Skipped unsupported: {names}', { names: skipped.join(', ') }));
   }
   renderPendingFiles();
 }
@@ -43322,7 +43714,7 @@ function routeDroppedFiles(files) {
       return;
     }
     /* Toast, not setStatus: analyze() overwrites the status line in the same tick. */
-    loamToast(`Skipped unsupported: ${names}`);
+    loamToast(loamT('Skipped unsupported: {names}', { names }));
   }
   const dzVisible = !document.getElementById('dropzone').classList.contains('hidden');
   if (dzVisible) { addFiles(supported); return; }
@@ -44131,7 +44523,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'ff22c487b · 2026-09-21';
+const LOAM_BUILD = '440a1e0ab · 2026-09-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
@@ -44277,20 +44669,24 @@ function loamPostTheme() {
   const btn = document.getElementById('themeBtn');
   if (!btn) return;
   const order = ['auto', 'light', 'dark'];
-  const label = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+  /* Through the lookup, and from the SAME map `localizeStaticChrome` reads. This control rewrites
+     its own label, which is the shape four other controls were fixed for on 2026-09-18 ("Kjor mot
+     spokelset" was right until you pressed it); this one was missed because the guard that catches
+     them reads a hand-written list of function names and nobody thought of the theme toggle. */
+  const label = (t) => loamT(THEME_LABELS[t] || THEME_LABELS.auto);
   const current = () => document.documentElement.dataset.theme || 'auto';
   const apply = (t) => {
     if (t === 'auto') { delete document.documentElement.dataset.theme; try { localStorage.removeItem('loamTheme'); } catch (e) {} }
     else { document.documentElement.dataset.theme = t; try { localStorage.setItem('loamTheme', t); } catch (e) {} }
-    btn.textContent = label[t];
+    btn.textContent = label(t);
     loamPostTheme();   // keep the native chrome in step with the toggle
   };
-  btn.textContent = label[current()];
+  btn.textContent = label(current());
   btn.addEventListener('click', () => {
     const next = order[(order.indexOf(current()) + 1) % order.length];
     apply(next);
     if (document.getElementById('results') && !document.getElementById('results').classList.contains('hidden'))
-      loamToast('Theme set to ' + label[next] + '. Charts adopt it on the next render.');
+      loamToast(loamT('Theme set to {theme}. Charts adopt it on the next render.', { theme: label(next) }));
   });
   // Initial report, and follow the OS scheme while on Auto (the toggle handles the forced cases).
   loamPostTheme();
