@@ -1351,6 +1351,23 @@
     padding: 6px 26px 6px 10px; font-family: 'IBM Plex Sans', sans-serif; font-size: 13px;
     border-radius: var(--radius); letter-spacing: 0.02em;
   }
+  /* The typed-length row. Wraps rather than overflowing, because it sits beside a select inside an
+     inline-flex row and a 320px phone has no width to spare. */
+  .pool-custom { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* 16px is not a taste: anything smaller makes iOS zoom the page in on focus, which on the segment
+     modal once pushed the Save button off screen. Asserted by checkTouchFormZoom in the E2E. */
+  .pool-custom input[type="number"] {
+    width: 5.5em; font-size: 16px; font-family: 'IBM Plex Sans', sans-serif;
+    background-color: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 5px 8px; letter-spacing: 0.02em;
+  }
+  .pool-custom select { font-size: 16px; padding: 5px 24px 5px 8px; }
+  .pool-custom button {
+    background-color: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 6px 12px; cursor: pointer;
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; letter-spacing: 0.02em;
+  }
+  .pool-custom button:hover { border-color: var(--accent-4); }
 
   /* flow-root so the dismiss button can FLOAT rather than sit absolutely in the corner over a
      reserved strip of padding. The reserve was `padding-right: 74px`, a width measured once against
@@ -1907,7 +1924,17 @@
            whatever the pool, so in an 11 m length they are a large share of it, and distance per
            stroke there partly measures the wall rather than the stroke. -->
       <option value="11" data-unit="m">11 m</option>
+      <!-- ANY length, because the six above are the pools that have STANDARDS and most pools do not
+           have one. Reported by a swimmer whose hotel pool is 50 ft: the nearest offered length was
+           50 yd, three times longer, and picking it scaled every distance in the session by three.
+           Feet are offered as an ENTRY unit for exactly that swimmer -- an older US hotel or
+           residential pool is built and advertised in feet -- and only as an entry unit, because no
+           pace clock anywhere reads per 100 ft. See analyzer/sports/swim/pool.js. -->
+      <option value="custom">Custom…</option>
     </select>
+    <!-- Filled by poolCustomRowHTML at startup and revealed only for "Custom…", so the number field
+         is not a second answer sitting beside the picker's. -->
+    <span class="pool-custom hidden" id="poolCustomWrap"></span>
   </div>
 
   <!-- Kept in step with isReadableSensorFile, which is the one predicate both intake paths ask.
@@ -13573,7 +13600,20 @@ function detectStrength(sensors, ride) {
      * reproduced by `standingFidget()` in detect.test.js. So do NOT tighten the rep/set thresholds
      * blind: rep count and per-set amplitude both INTERLEAVE with the real squat reference (four real
      * sets sit below this negative's best set), legitimate strength work runs as few as 2 to 3 reps
-     * per set, and raising the floor would drop real low-rep sets. */
+     * per set, and raising the floor would drop real low-rep sets.
+     * THERE ARE THREE NEGATIVES NOW, and the two added on 2026-09-08 are ORDINARY LOCOMOTION rather
+     * than fidgeting, so "that was an unusual thing to record" no longer applies: 25 minutes of
+     * ALPINE SKIING reads `strength` at 1.0 ("14 sets, 52 reps") and 10.6 minutes of WALKING AROUND
+     * A BUILDING reads `strength` at 1.0 ("18 sets, 60 reps") -- more reps for the walkabout than
+     * for the skiing. Skiing and walking ARE low-frequency pocket-tilt oscillation, which is the
+     * signal this function reads, so that is mechanical rather than a tuning miss, and indoors there
+     * is no GPS for the gate above to catch it with. Both are reproduced in detect.test.js off the
+     * dome fixtures. TEMPO CONSISTENCY -- the surviving lead in the original report -- is measured
+     * there to be a dead end too: linked ski turns are a metronome (209 edge changes alternating 85%
+     * at 1.1 s per turn on the real SNO runs), so a rhythm rule admits skiing BEFORE it admits a
+     * lift. What is left is a channel this function does not read, and the cheapest open question is
+     * whether CMPedometer counts squat reps as steps -- if it does not, steps-per-set separates a
+     * set from a stride. Nobody has measured it; it needs a device and one real lift session. */
     const confidence = Math.min(1, 0.4 + 0.13 * R.nSets + 0.02 * R.nReps);
     return { sport: 'strength', confidence: +confidence.toFixed(2), reasons, nSets: R.nSets, nReps: R.nReps };
   }
@@ -15146,6 +15186,107 @@ function detectGolf(sensors, ride) {
    not show. See swim-spec.md.
    ============================================================================ */
 const LoamSwim = (function () {
+
+/* ---- Pool lengths and their units -------------------------------------------------------------
+   Ported verbatim from analyzer/sports/swim/pool.js (drift-pinned). A pool stopped being one of six
+   fixed choices on 2026-09-20: a swimmer can type any length, in metres, yards or FEET, so the
+   unit is stored beside the length instead of being derived from it -- 15.24 m is both "50 ft" and
+   "15.24 m" and nothing in the number says which the swimmer meant. Feet are an ENTRY unit only:
+   the pool is NAMED in feet and everything derived from it is paced in yards, because no clock
+   anywhere reads per 100 ft. */
+/* The order they are offered in. Metres first: it is the world default and the one this project's
+   own validated session was swum in. */
+const POOL_UNITS = ['m', 'yd', 'ft'];
+
+/* Metres per unit. Both are exact by definition (international yard and foot, 1959). */
+const POOL_UNIT_M = { m: 1, yd: 0.9144, ft: 0.3048 };
+
+/* The range a typed length is accepted in, as a sanity check on the keyboard rather than a claim
+   about pools. The floor admits a swim-spa / endless pool (a few metres) and the ceiling admits an
+   Olympic pool with room to spare; what they exist to catch is a fat finger -- "500" for 50, or a
+   length typed in centimetres -- because a wrong pool length is not a small error. It scales every
+   distance, pace and distance-per-stroke in the session by a constant, silently, with nothing on
+   screen looking broken. */
+const POOL_MIN_M = 3;
+const POOL_MAX_M = 100;
+
+/* Normalize whatever a caller has to one of the three, or fall back. Anything unrecognized becomes
+   the fallback rather than throwing: this reads values off stored sidecars and localStorage written
+   by older builds, where the field is simply absent. */
+function poolUnitOf(unit, fallback = 'm') {
+  const u = typeof unit === 'string' ? unit.toLowerCase() : '';
+  if (POOL_UNIT_M[u] != null) return u;
+  return POOL_UNIT_M[fallback] != null ? fallback : 'm';
+}
+
+/* The unit the LENGTH a swimmer typed is in, for a pool declared before the unit was stored
+   alongside it. Yards is the only thing the metres can still betray: 25 yd and 50 yd are the two
+   non-metric pools that were ever on offer, and neither is a round number of metres. Compared with
+   a tolerance so a re-rounded value still reads as yards instead of silently flipping to metres.
+   Mirrors `CaptureSettings.inferredPoolUnit(forLengthM:)` on the Swift side. */
+function inferredPoolUnit(m) {
+  if (m == null || !Number.isFinite(m)) return 'm';
+  return [22.86, 45.72].some((y) => Math.abs(y - m) < 0.05) ? 'yd' : 'm';
+}
+
+/* A typed length in `unit` -> metres, or null when it is not a pool. Rounded to the centimetre
+   because that is the precision a pool is built and advertised to, and because an unrounded
+   50 ft = 15.240000000000002 would make two identical pools fail `swimPoolsMatch`. */
+function poolMetres(value, unit) {
+  const u = poolUnitOf(unit);
+  const v = Number(value);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  const m = +(v * POOL_UNIT_M[u]).toFixed(2);
+  if (m < POOL_MIN_M || m > POOL_MAX_M) return null;
+  return m;
+}
+
+/* Metres -> the number a swimmer would read in their own unit. Not rounded here: the label rounds,
+   and a caller pre-filling a text field wants the value it will print. */
+function poolValue(m, unit) {
+  if (m == null || !Number.isFinite(m)) return null;
+  return m / POOL_UNIT_M[poolUnitOf(unit)];
+}
+
+/* The pool, written the way the swimmer who swims it would write it: "50 ft", "25 yd", "33.33 m".
+ *
+ * Deliberately NOT `swimDistanceLabel`. That one rounds to the whole unit, which is right for a
+ * session distance and wrong here: it renders a 33.33 m pool as "33 m" and -- once feet exist -- a
+ * 50 ft pool as "15 m", which is the exact unreadability the display unit was introduced to stop.
+ * Trailing zeros are trimmed so an exact length prints exactly. */
+function swimPoolLabel(m, unit) {
+  if (m == null || !Number.isFinite(m)) return '—';
+  const u = poolUnitOf(unit);
+  return `${poolValueText(m, u)} ${u}`;
+}
+
+/* The length alone, trimmed, for a text field to open on. Shares its rounding with the label so a
+ * field pre-filled from a stored pool and the label beside it cannot disagree by a decimal.
+ *
+ * THE TOLERANCE IS IN METRES AND THAT IS THE WHOLE POINT. `poolMetres` rounds to the centimetre,
+ * which is lossy in every unit but feet is where it shows: a swimmer types 36 ft, it stores as
+ * 10.97 m, and 10.97 / 0.3048 is 35.9908 -- so a tolerance of "0.005 of a unit" prints their pool
+ * back at them as "35.99 ft". Converting the tolerance instead (half a centimetre, expressed in the
+ * target unit) says exactly what is true: the stored value is a centimetre-rounded one, so anything
+ * within half a centimetre of a whole unit IS that whole unit. */
+function poolValueText(m, unit) {
+  if (m == null || !Number.isFinite(m)) return '';
+  const u = poolUnitOf(unit);
+  const v = m / POOL_UNIT_M[u];
+  if (Math.abs(v - Math.round(v)) * POOL_UNIT_M[u] < 0.005) return String(Math.round(v));
+  return v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/* The unit every OTHER swim number reads in, given the pool's own unit. Feet collapse to yards for
+   the reason in the header: there is no such thing as a 100 ft pace. `fallback` is consulted only
+   when no pool was ever named, and is the page's own metric/imperial toggle. */
+function swimDisplayUnit(poolUnit, fallback = 'm') {
+  const u = typeof poolUnit === 'string' ? poolUnit.toLowerCase() : '';
+  if (u === 'yd' || u === 'ft') return 'yd';
+  if (u === 'm') return 'm';
+  return fallback === 'yd' ? 'yd' : 'm';
+}
+
   function median(arr){ const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2? s[m] : (s[m-1]+s[m])/2; }
 
   /* ---- ported from analyzer/sports/swim/import.js ---- */
@@ -15225,6 +15366,15 @@ function normalizeSwimImport(raw) {
      in METRES; only the display converts (see swimDistanceLabel and friends in summary.js). */
   const displayUnit = raw.displayUnit === 'yd' ? 'yd' : 'm';
 
+  /* The unit the POOL ITSELF was declared in, which is not always a unit a swim is paced in. Since
+     2026-09-20 a swimmer can type any length, in metres, yards or FEET (hotel and residential pools
+     in the US are commonly built in feet), so the pool's own unit no longer follows from its metres
+     -- 15.24 m is both "50 ft" and "15.24 m" and only the swimmer knows which. It is carried
+     separately and used only where the pool is NAMED; every derived number still reads in
+     displayUnit, because no clock anywhere reads per 100 ft. Defaults to displayUnit, which is what
+     every swim declared before this existed meant. See pool.js. */
+  const poolUnit = poolUnitOf(raw.poolUnit, displayUnit);
+
   const rows = Array.isArray(raw.lengths) ? raw.lengths.slice() : [];
   rows.sort((a, b) => Number(a.t0) - Number(b.t0));
 
@@ -15274,7 +15424,7 @@ function normalizeSwimImport(raw) {
     title: typeof raw.title === 'string' ? raw.title : null,
     start, end,
     durationS: +(end - start).toFixed(1),
-    locationType, poolLengthM, displayUnit,
+    locationType, poolLengthM, displayUnit, poolUnit,
     totalDistanceM, totalStrokes,
     activeEnergyKcal: Number.isFinite(kcalRaw) && kcalRaw > 0 ? Math.round(kcalRaw) : null,
     lengths, hr, route, strokeSamples,
@@ -15855,6 +16005,11 @@ function swimDigest(D) {
       ? 'swimming (RECORDED by Loam: Apple Watch wrist motion, no Apple Health data)'
       : 'swimming (imported from Apple Health)',
     pool_length_m: poolM,
+    /* The same pool, named the way the SWIMMER names it, because since 2026-09-20 that need not be
+       metres: a 50 ft hotel pool is 15.24 m, and a coach that quotes "15.24 m" back at someone who
+       typed "50 ft" is describing a pool they do not recognise. Both are given -- the metres to
+       compute with, the label to speak. */
+    pool_label: poolM != null ? swimPoolLabel(poolM, poolUnitOf(session.poolUnit, session.displayUnit)) : null,
     location: session.locationType || 'unknown',
     display_unit: session.displayUnit || 'm',
     duration_min: r1((s.durationS || 0) / 60),
@@ -15916,8 +16071,13 @@ function swimCaveats(poolM, s, source = 'apple-health', session = null) {
     'A swim can be recorded by Loam only with the phone left on the pool deck and the Apple Watch on the wrist, and even then it yields wrist motion alone. This session is not that: it is an Apple Health import, which is the richer path for a pool swim and the only path for one Loam did not record.',
   ];
   if (poolM != null && poolM <= 15) {
+    /* Named in the pool's own unit with the metres beside it, for the reason `pool_label` exists:
+       the caveat is the one place the coach is told to quote the pool back, and a swimmer who typed
+       "36 ft" does not recognise "10.97 m". A metric pool reads exactly as it always did. */
+    const poolUnit = poolUnitOf(session && session.poolUnit, 'm');
+    const named = poolUnit === 'm' ? `${poolM} m` : `${swimPoolLabel(poolM, poolUnit)} (${poolM} m)`;
     parts.push(
-      `IMPORTANT: this is a ${poolM} m pool, which is SHORT. The push-off and glide after each wall are a fixed few metres regardless of pool length, so in a pool this short they are a large share of every length. Distance per stroke here therefore partly measures the push-off, not the hold on the water, and it is more sensitive to glide variation than to stroke quality. Hedge every distance-per-stroke read accordingly, and prefer the pace spread and the set structure as the trustworthy signals.`);
+      `IMPORTANT: this is a ${named} pool, which is SHORT. The push-off and glide after each wall are a fixed few metres regardless of pool length, so in a pool this short they are a large share of every length. Distance per stroke here therefore partly measures the push-off, not the hold on the water, and it is more sensitive to glide variation than to stroke quality. Hedge every distance-per-stroke read accordingly, and prefer the pace spread and the set structure as the trustworthy signals.`);
   }
   if (!s || !s.totalStrokes) {
     parts.push('This session carries NO stroke counts, so distance per stroke, stroke rate and SWOLF are unavailable and no trend could be fitted. Coach the pace and the set structure only.');
@@ -16022,6 +16182,9 @@ function computeSwimSummary(session, R) {
   const hr = session.hr || [];
   if (hr.length) {
     hrAvg = Math.round(hr.reduce((s, r) => s + r.bpm, 0) / hr.length);
+    /* Rounded like the average. HealthKit stores bpm as a DOUBLE, so an un-rounded max rendered as
+       "111.9925390743" on screen, and -- worse -- read as a max BELOW its own average, because the
+       average was rounded up to 112 and the max was not rounded at all. */
     hrMax = Math.round(Math.max(...hr.map(r => r.bpm)));
   }
 
@@ -16037,6 +16200,11 @@ function computeSwimSummary(session, R) {
     locationType: session.locationType,
     poolLengthM: session.poolLengthM,
     displayUnit: session.displayUnit,
+    /* The pool's OWN unit, which since 2026-09-20 need not be the unit the swim is paced in: a pool
+       typed in feet is labelled in feet and paced in yards. Carried so every surface that NAMES the
+       pool can reach it without re-deriving it from the metres, which stopped being possible when
+       any length became typeable. See pool.js. */
+    poolUnit: session.poolUnit,
     totalDistanceM: R.totalDistanceM,
     totalStrokes: R.totalStrokes,
     nLengths: R.nLengths,
@@ -16141,6 +16309,12 @@ function swimHistoryRecord(session, R) {
     locationType: session.locationType,
     poolLengthM: session.poolLengthM,
     displayUnit: session.displayUnit || 'm',
+    /* The pool's own unit, stored alongside because the cross-session read NAMES the pool ("your
+       freestyle lengths, in 50 ft water") and a stored record is the only thing that surface has to
+       name it from. A record written before this has none and falls back to displayUnit, which is
+       what it meant; nothing re-derives it from the metres, because since any length is typeable
+       that is no longer possible. See pool.js. */
+    poolUnit: session.poolUnit || session.displayUnit || 'm',
     durationS: session.durationS,
     totalDistanceM: R.totalDistanceM,
     nLengths: R.nLengths,
@@ -16698,7 +16872,7 @@ function detectSwim(sensors, ride) {
  * @param title        session name for the view's header
  * @param displayUnit  'm' | 'yd', presentation only -- every value here stays metric
  */
-function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayUnit = 'm' } = {}) {
+function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayUnit = 'm', poolUnit = null } = {}) {
   const a = analyzeCapturedSwim({ wrist, poolLengthM });
   const lengths = a.lengths.map((L) => ({
     t0: L.start,
@@ -16723,6 +16897,7 @@ function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayU
     locationType: a.lengthsInferred ? 'pool' : 'unknown',
     poolLengthM: a.lengthsInferred ? poolLengthM : null,
     displayUnit,
+    poolUnit: poolUnit || displayUnit,
     totalDistanceM: a.totals.distanceM,
     totalStrokes: a.totals.strokes > 0 ? a.totals.strokes : null,
     activeEnergyKcal: null,
@@ -16745,6 +16920,8 @@ function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayU
     swimPoolsMatch, swimHistoryRecord, swimHistoryUpsert, swimComparableSessions,
     swimHistoryStyles, swimHistoryGap, swimHistoryTrend, swimHistoryRead, swimHistoryReference,
     computeSwimSummary, fmtSwimPace, swimToYards, swimDistanceLabel, swimDpsLabel, swimPaceLabel,
+    POOL_UNITS, POOL_UNIT_M, POOL_MIN_M, POOL_MAX_M,
+    poolUnitOf, inferredPoolUnit, poolMetres, poolValue, swimPoolLabel, poolValueText, swimDisplayUnit,
     swimDigest, swimCaveats, swimCoachPrompt, swimCapturedCoachPrompt,
     analyzeOpenWater, straightnessWindows, sliceStraightness, routeCumulative,
     strokeRateSeries, seriesTrendPct, navigationRead, routePoints };
@@ -19268,8 +19445,15 @@ function analysisKeyParts(contentHash, fallbackName, fitHash = null, hasFit = !!
        Only added where a swim is possible (declared, or still undecided on Auto). A declared ride or
        run is unaffected by a pool length, so it must not take a cache miss for one it once picked. */
     const poolKeyM = loamPoolLengthM();
+    /* The UNIT is in the key for the same reason the length is, now that the two are independent.
+       Every pool label in the cached render is built from it, so a swim re-declared from "15.24 m"
+       to "50 ft" -- same water, same distances, different name for it everywhere on screen -- would
+       otherwise replay the old labels and the correction would appear to do nothing. Metres add no
+       suffix, so the pools that were on offer before this all keep their existing entries; a yard
+       pool takes one recompute, which is a pause and not a wrong answer. */
+    const poolKeyUnit = loamSwimPoolUnit();
     const poolSuffix = (poolKeyM && (!declaredSportKey || declaredSportKey === 'auto' || isSwimSport(declaredSportKey)))
-      ? ':pool=' + poolKeyM : '';
+      ? ':pool=' + poolKeyM + (poolKeyUnit && poolKeyUnit !== 'm' ? ':poolu=' + poolKeyUnit : '') : '';
     /* The CROP is the same kind of input as the two above and belongs in the key for the same reason:
        it changes what the analysis is computed over, so a cached render is only valid for the window
        it was computed in. Read from STORAGE rather than derived from the span, because the span needs
@@ -20052,6 +20236,7 @@ async function analyze(files) {
       const payload = LoamSwim.capturedSwimPayload({
         wrist: (sensors.wrist || []).filter(r => r.t >= ride.start && r.t <= ride.end),
         poolLengthM, title: sensorFile && sensorFile.name, displayUnit: loamSwimDisplayUnit(),
+        poolUnit: loamSwimPoolUnit(),
       });
       /* capturedTotals is attached HERE rather than passed through normalizeSwimImport, which
          validates a foreign payload field by field and would have to either trust a nested object
@@ -25405,7 +25590,7 @@ function swimHistorySection(D, unit) {
       <tbody>${rows}</tbody></table></div>
     ${leadNote(
       loamT('Your {style} lengths only, in {pool} water, because distance per stroke and SWOLF only mean anything within one stroke and one pool length.',
-        { style: escapeHtml(loamT(style)), pool: U.swimDistanceLabel(current.poolLengthM, unit) })
+        { style: escapeHtml(loamT(style)), pool: U.swimPoolLabel(current.poolLengthM, current.poolUnit || unit) })
        + (others.length ? ' ' + loamT('You also have enough {others} to trend; only your most-swum stroke is charted here.',
            { others: others.map(o => escapeHtml(loamT(o))).join(loamT(' and ')) }) : '')
        + (dropped > 0 ? ' ' + (dropped === 1
@@ -26225,10 +26410,17 @@ function renderSwim(D) {
   const R = D.swim || {}, s = D.summary || {};
   const el = document.getElementById('swimResults');
   const unit = s.displayUnit || 'm';
+  /* Two units, and they are not the same question. `unit` is what every DERIVED number reads in
+     (metres or yards; there is no per-100-ft pace anywhere), `poolUnit` is what the pool itself is
+     CALLED. They differ only for a pool typed in feet, which is exactly the swimmer this exists
+     for. Falls back to the display unit for every swim declared before the unit was recorded. */
+  const poolUnit = s.poolUnit || unit;
   const U = LoamSwim;
 
   const tile = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${loamT(l)}</div></div>`;
-  const poolLabel = s.poolLengthM != null ? U.swimDistanceLabel(s.poolLengthM, unit) : null;
+  /* swimPoolLabel, not swimDistanceLabel: the pool is named in ITS OWN unit and to the centimetre,
+     so a 50 ft hotel pool reads "50 ft" rather than "15 m" and a 33 1/3 m pool keeps its third. */
+  const poolLabel = s.poolLengthM != null ? U.swimPoolLabel(s.poolLengthM, poolUnit) : null;
   const where = s.locationType === 'openWater' ? loamT('open water')
     : (poolLabel ? loamT('{len} pool', { len: poolLabel }) : loamT('pool'));
 
@@ -26381,9 +26573,27 @@ function swimCapturedNote(D) {
   ].filter(Boolean).join(' &middot; ');
 
   if (inferred) {
+    /* The pool can be CORRECTED here, not only named here. Until 2026-09-20 this control appeared
+       only when no pool had been set, which answers the swimmer who never picked one and leaves the
+       swimmer who picked the WRONG one with a view stating "50 YD POOL" on its face and nothing to
+       press -- the reported case, where 50 yd stood in for a 50 ft hotel pool and every distance on
+       screen was 3x. The distances shown ARE the pool length, so the place to fix it is beside them.
+
+       Offered only where it can do something: a library or cache replay has no File to re-analyze,
+       and in the app the HOST owns the pool (the Sessions list's "Pool length" row), where a second
+       control on this page would be visible, changeable and completely inert -- the exact failure
+       that hid the dropzone picker under a host declaration in the first place. */
+    const poolSel = document.getElementById('poolLength');
+    const fixable = poolSel && _lastSensorFile && !loamHostDeclaredPool();
+    const change = fixable
+      ? `<p class="swim-mech">${loamT('Not your pool?')}`
+        + ` <select id="swimPoolFix" aria-label="${loamT('Pool length')}">${poolOptionsHTML()}</select>`
+        + ` <span class="pool-custom hidden" id="swimPoolFixCustom"></span></p>`
+      : '';
     return `<div class="swim-set">
       <div class="swim-set-head"><span class="swim-set-n">${loamT('Lengths from your rests')}</span></div>
       <p class="swim-mech">${facts}. ${loamT('Your {n} lengths are the stretches of unbroken stroking between pauses at the wall &mdash; Loam cannot see a turn, only a rest, so this works because you stopped at every wall. Swim a set continuously and it will read as one long block.', { n: t.blocks })}</p>
+      ${change}
     </div>`;
   }
   /* The one case the swimmer can actually fix: lengths were found, the pool was never named.
@@ -26399,9 +26609,10 @@ function swimCapturedNote(D) {
      page), and a fourth copy is the one that would drift. Offered only when a re-run is possible --
      a library or cache replay has no File to re-analyze, and the old instruction is right for it. */
   const poolSel = document.getElementById('poolLength');
-  const fix = t.blocks > 1 && poolSel && _lastSensorFile
+  const fix = t.blocks > 1 && poolSel && _lastSensorFile && !loamHostDeclaredPool()
     ? loamT('No pool length was set, and nothing in wrist motion reveals how long a pool is. Name it and the lengths above become a distance and a pace:')
-      + ` <select id="swimPoolFix" aria-label="${loamT('Pool length')}">${poolSel.innerHTML}</select>`
+      + ` <select id="swimPoolFix" aria-label="${loamT('Pool length')}">${poolOptionsHTML()}</select>`
+      + ` <span class="pool-custom hidden" id="swimPoolFixCustom"></span>`
     : loamT('No pool length was set, and nothing in wrist motion reveals how long a pool is. Pick <strong>Swimming</strong> and your pool length on the drop screen, then drop this recording again, and the lengths above become a distance and a pace.');
   return `<div class="swim-set">
     <div class="swim-set-head"><span class="swim-set-n">${loamT('No length count for this swim')}</span></div>
@@ -26532,7 +26743,7 @@ function swimCardModel(D) {
   const lengthsLine = loamT('{n} lengths', { n: s.nLengths }) + ' · ' + swimStyleMixLabel(s);
 
   return {
-    eyebrow: s.poolLengthM != null ? loamT('{len} POOL', { len: U.swimDistanceLabel(s.poolLengthM, unit).toUpperCase() }) : loamT('POOL SWIM'),
+    eyebrow: s.poolLengthM != null ? loamT('{len} POOL', { len: U.swimPoolLabel(s.poolLengthM, s.poolUnit || unit).toUpperCase() }) : loamT('POOL SWIM'),
     hero: proud ? loamT(t.kind === 'holding' ? 'You held the stroke' : 'You built through it') : distance,
     subhead: proud
       ? loamT(t.kind === 'holding' ? 'The stroke you finished on is the stroke you started with.'
@@ -26881,7 +27092,7 @@ function drawSwimStrokeRate(R) {
    feature ever saw was a 12 m pool, and reading its DPS trend as technique would be wrong. */
 function swimShortPoolNote(s) {
   if (s.poolLengthM == null || s.poolLengthM > 15) return '';
-  const label = LoamSwim.swimDistanceLabel(s.poolLengthM, s.displayUnit || 'm');
+  const label = LoamSwim.swimPoolLabel(s.poolLengthM, s.poolUnit || s.displayUnit || 'm');
   return ' ' + loamT('This was a {len} pool, which is short: the push-off and glide after each wall are a fixed few metres whatever the pool length, so they are a large share of every length here. Distance per stroke is correspondingly more sensitive to your push-off than to your stroke, and the pace spread is the more trustworthy read.', { len: label });
 }
 
@@ -28700,6 +28911,21 @@ function renderDescentComparison(D) {
       <td class="${bCls}">${bStr}</td>
     </tr>`;
   };
+  /* The window's best SUSTAINED five seconds, not its single fastest fix. `maxSpeed` is one Doppler
+     sample: on a bike that is a real top speed and is kept below, and on foot it is routinely a bad
+     fix. Measured across the run corpus, the peak prints a pace 1.08x to 1.43x faster than any five
+     seconds the athlete actually ran -- `data/run/2026-06-05_14-54-13.csv` reads a 3:39/mi peak
+     against a 5:13/mi sustained best, and a walk's first window reads 9:41/mi against 16:32/mi. The
+     runs table's "Best 5s pace" column and the cross-ride laps table both already refuse it for that
+     reason ("a bike's top speed and a runner's single bad fix"); this was the third surface and the
+     only one still printing it, which is worse HERE than on either of those, because this row is
+     COLOURED: one bad fix on one descent marks that descent the winner.
+     Computed at the CALL SITE, so the drift-pinned `compareDescents` keeps returning a finished
+     field -- the arrangement `coachDigestD` and the corner ledger already use. Null when no window
+     qualifies, which `U.pace` prints as a dash. */
+  const best5s = (w) => bestFiveSecondSpeed(
+    ((D.sensors && D.sensors.location) || []).filter(p => p.t >= w.startT && p.t <= w.endT),
+    (D.ride && D.ride.pausedSpans) || []);
   if (footSport) {
     tbody.innerHTML =
       row('Window start', first.startT, second.startT, v => `${Math.round(v)}s`, null) +
@@ -28708,7 +28934,7 @@ function renderDescentComparison(D) {
       /* SPEEDS formatted as pace, so the faster descent is the HIGHER value here even though its pace
          reads lower. 'lower' coloured the slower descent green. */
       row('Avg pace', first.avgSpeed, second.avgSpeed, v => U.pace(v), 'higher') +
-      row('Max pace', first.maxSpeed, second.maxSpeed, v => U.pace(v), 'higher') +
+      row('Best 5s pace', best5s(first), best5s(second), v => U.pace(v), 'higher') +
       row('Avg cadence', first.avgCadence, second.avgCadence, v => v ? `${v.toFixed(0)} SPM` : '—', null);
   } else {
     tbody.innerHTML =
@@ -30004,6 +30230,12 @@ const LOAM_NB = {
   'Swimming (beta)': 'Svømming (beta)',
   'Pool length': 'Bassenglengde',
   'Not sure': 'Usikker',
+  'Not your pool?': 'Ikke ditt basseng?',
+  'Custom…': 'Egendefinert…',
+  'Unit': 'Enhet',
+  'Set pool': 'Angi basseng',
+  'A pool length has to be between {min} and {max} m.':
+    'En bassenglengde må være mellom {min} og {max} m.',
   'Analyzing your activity…': 'Analyserer aktiviteten din…',
   'unpacking archive': 'pakker ut arkivet',
   'Drop to analyze': 'Slipp for å analysere',
@@ -30218,7 +30450,6 @@ const LOAM_NB = {
   'Nothing in this recording confirms it \u2014 there is no FIT carrying motor power.':
     'Ingenting i dette opptaket bekrefter det \u2014 det finnes ingen FIT-fil med motorwatt.',
   'Window start': 'Vindusstart',
-  'Max pace': 'Beste tempo',
   'Avg cadence': 'Snittkadens',
   'Pace vs distance into descent': 'Tempo mot distanse inn i nedkjøringen',
   'Pace vs distance into segment': 'Tempo mot distanse inn i segmentet',
@@ -42637,25 +42868,157 @@ function loamPoolLengthM() {
   const host = typeof window !== 'undefined' ? Number(window.LOAM_POOL_LENGTH_M) : NaN;
   if (Number.isFinite(host) && host > 0) return host;
   const sel = document.getElementById('poolLength');
-  if (sel) { const v = Number(sel.value); return Number.isFinite(v) && v > 0 ? v : null; }
-  const stored = Number(localStorage.getItem('loam_pool_m'));
-  return Number.isFinite(stored) && stored > 0 ? stored : null;
+  if (sel) {
+    /* "Custom…" is a MODE, not a length: the length it stands for lives in storage, because the
+       option's value cannot carry it (the same option has to serve 15.24 m today and 12 m
+       tomorrow). Everything else answers from its own value, and '' is "Not sure" and must stay
+       null rather than falling through to a remembered pool. */
+    if (sel.value === 'custom') return loamStoredPoolM();
+    const v = Number(sel.value);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }
+  return loamStoredPoolM();
+}
+/* Whether the HOST named this recording's pool, in which case the page must not offer to change it:
+   in the app the answer lives on the session (Sessions > Pool length) and this page reads it, so an
+   on-page control would be visible, changeable and completely inert -- two answers to "which pool"
+   on one screen, which is the failure injecting it was meant to close. */
+function loamHostDeclaredPool() {
+  const host = typeof window !== 'undefined' ? Number(window.LOAM_POOL_LENGTH_M) : NaN;
+  return Number.isFinite(host) && host > 0;
+}
+/* The custom pool as last typed, in metres. Split out because three callers need it and two of them
+   run before the select exists. */
+function loamStoredPoolM() {
+  try {
+    const v = Number(localStorage.getItem('loam_pool_m'));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch (e) { return null; }   // private mode
+}
+function loamStoredPoolUnit() {
+  try { return LoamSwim.poolUnitOf(localStorage.getItem('loam_pool_unit'), 'm'); }
+  catch (e) { return 'm'; }
+}
+/* The unit the POOL ITSELF was declared in: 'm', 'yd' or 'ft', or null when no pool was named.
+   Since any length is typeable this no longer follows from the metres -- 15.24 m is both "50 ft"
+   and "15.24 m" -- so it is carried, not derived. */
+function loamSwimPoolUnit() {
+  const host = typeof window !== 'undefined' ? window.LOAM_POOL_UNIT : null;
+  if (host === 'yd' || host === 'm' || host === 'ft') return host;
+  const sel = document.getElementById('poolLength');
+  if (!sel) return loamStoredPoolM() ? loamStoredPoolUnit() : null;
+  if (sel.value === 'custom') return loamStoredPoolM() ? loamStoredPoolUnit() : null;
+  const opt = sel.selectedOptions && sel.selectedOptions[0];
+  const declared = opt && opt.getAttribute('data-unit');
+  return declared === 'yd' || declared === 'm' || declared === 'ft' ? declared : null;
 }
 /* The unit this swim should READ in, which is the pool's own and not the page's Units toggle. A
    swimmer who picked a 25 yd pool thinks in yards even on a metric page, and one who picked 50 m
    thinks in metres even on an imperial one -- the pool is the more specific answer to "what does
    this person read", the same way the import path takes it from HKHealthStore.preferredUnits rather
-   than from anything of ours. Falls back to the toggle only when no pool was named. */
+   than from anything of ours. Falls back to the toggle only when no pool was named.
+
+   FEET COLLAPSE TO YARDS here and only here: a pool can be BUILT in feet and is named in feet, but
+   no pace clock anywhere reads per 100 ft, so everything derived from the length is imperial-but-
+   in-yards. `swimPoolLabel` is what keeps the pool itself in feet. */
 function loamSwimDisplayUnit() {
   /* The host's pool wins for the same reason its length does: the swimmer already answered, and a
      25 yd pool rendered as "22.9 m" is technically correct and unreadable to the person who swam it. */
-  const host = typeof window !== 'undefined' ? window.LOAM_POOL_UNIT : null;
-  if (host === 'yd' || host === 'm') return host;
+  return LoamSwim.swimDisplayUnit(loamSwimPoolUnit(), loamUnits() === 'metric' ? 'm' : 'yd');
+}
+/* The dropzone selector's options, cloned for a picker rendered inside the results, with the pool
+   currently in use marked SELECTED.
+ *
+ * `poolSel.innerHTML` alone does not carry that: a <select>'s current choice is a PROPERTY, not an
+ * attribute, so the clone opens on its first option. That was harmless while this control only ever
+ * appeared when no pool was set (first option: "Not sure", which was the truth), and became a lie
+ * the moment it was offered on a swim that HAS a pool -- "Not your pool? [Not sure]" reads as though
+ * nothing had been picked, on a view whose eyebrow says 50 YD POOL. */
+function poolOptionsHTML() {
   const sel = document.getElementById('poolLength');
-  const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
-  const declared = opt && opt.getAttribute('data-unit');
-  if (declared === 'yd' || declared === 'm') return declared;
-  return loamUnits() === 'metric' ? 'm' : 'yd';
+  if (!sel) return '';
+  return [...sel.options].map((o) => {
+    const unit = o.getAttribute('data-unit');
+    return `<option value="${escapeHtml(o.value)}"${unit ? ` data-unit="${escapeHtml(unit)}"` : ''}`
+      + `${o.value === sel.value ? ' selected' : ''}>${escapeHtml(o.textContent)}</option>`;
+  }).join('');
+}
+/* The typed-length row, offered wherever the pool can be picked: beside the dropzone selector and
+   inside the Swim view's own fix. ONE generator rather than two blocks of markup, because the two
+   differ only in an id prefix and a copy would drift the moment a unit was added.
+
+   `prefix` namespaces the ids; `poolCustomApply` reads them back by the same rule. */
+function poolCustomRowHTML(prefix) {
+  const unit = LoamSwim.poolUnitOf(loamSwimPoolUnit(), 'm');
+  /* Pre-filled with the pool actually in use, so "Custom…" opens on the current answer rather than
+     on a blank field the swimmer has to re-derive. Trimmed by the same function the LABEL uses, so
+     the field and the name beside it cannot disagree by a decimal. */
+  const val = LoamSwim.poolValueText(loamPoolLengthM(), unit);
+  const units = LoamSwim.POOL_UNITS.map((u) =>
+    `<option value="${u}"${u === unit ? ' selected' : ''}>${u}</option>`).join('');
+  return `<input type="number" id="${prefix}CustomVal" value="${escapeHtml(val)}" `
+    + `min="1" max="400" step="0.01" inputmode="decimal" aria-label="${escapeHtml(loamT('Pool length'))}">`
+    + `<select id="${prefix}CustomUnit" aria-label="${escapeHtml(loamT('Unit'))}">${units}</select>`
+    + `<button type="button" id="${prefix}CustomSet">${escapeHtml(loamT('Set pool'))}</button>`;
+}
+/* Read a typed length back and adopt it, or say why not. Returns true when the pool changed.
+
+   The range check is `poolMetres`'s, so the page and the Record screen reject the same lengths (see
+   pool-contract.test.js). It exists to catch a keyboard, not to have an opinion about pools: a pool
+   length scales every distance, pace and distance-per-stroke by a constant, so "500" typed for 50
+   produces a session that is wrong by 10x and looks entirely normal. */
+function poolCustomApply(prefix) {
+  const val = document.getElementById(prefix + 'CustomVal');
+  const unitSel = document.getElementById(prefix + 'CustomUnit');
+  if (!val || !unitSel) return false;
+  const unit = LoamSwim.poolUnitOf(unitSel.value, 'm');
+  const m = LoamSwim.poolMetres(val.value, unit);
+  if (m == null) {
+    setStatus(loamT('A pool length has to be between {min} and {max} m.',
+      { min: LoamSwim.POOL_MIN_M, max: LoamSwim.POOL_MAX_M }), false);
+    val.focus();
+    return false;
+  }
+  return adoptPoolLength(m, unit);
+}
+/* The ONE place a pool length is adopted, whichever control said so. The dropzone selector, its
+   typed-length row, the Swim view's fix and the Swim view's own typed row all land here, so they
+   cannot end up disagreeing about which pool this swim was in -- and re-analysis happens once,
+   here, rather than at four call sites that each have to remember it. */
+function adoptPoolLength(m, unit) {
+  const sel = document.getElementById('poolLength');
+  const u = m > 0 ? LoamSwim.poolUnitOf(unit, LoamSwim.inferredPoolUnit(m)) : null;
+  try {
+    localStorage.setItem('loam_pool_m', m > 0 ? String(m) : '');
+    if (u) localStorage.setItem('loam_pool_unit', u); else localStorage.removeItem('loam_pool_unit');
+  } catch (e) { /* private mode / quota */ }
+  if (sel) {
+    if (!(m > 0)) sel.value = '';
+    else {
+      /* A fixed option only stands in for a typed length when its UNIT agrees too. 22.86 typed as
+         metres is not "25 yd": same distance, different thing to call it, and the label is the half
+         of this the swimmer reads. */
+      const exact = sel.querySelector(`option[value="${m}"]`);
+      sel.value = exact && (exact.getAttribute('data-unit') || 'm') === u ? String(m) : 'custom';
+    }
+  }
+  syncPoolCustomRow();
+  /* Re-analyze, the same way the Calibration selector does. The pool length is read once, during
+     analysis, so picking one AFTERWARDS used to do nothing at all -- and the swimmer who most needs
+     this control is precisely the one already looking at a swim with no distance on it, being told
+     by the status line to name their pool. Guarded on a loaded recording: an IMPORTED swim gets its
+     distances from Apple and never consults this. */
+  if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+  return true;
+}
+/* Show the typed-length row only in "Custom…", and rebuild it so it opens on the pool in use. */
+function syncPoolCustomRow() {
+  const sel = document.getElementById('poolLength');
+  const wrap = document.getElementById('poolCustomWrap');
+  if (!sel || !wrap) return;
+  const on = sel.value === 'custom';
+  if (on) wrap.innerHTML = poolCustomRowHTML('pool');
+  wrap.classList.toggle('hidden', !on);
 }
 {
   const sportSel = document.getElementById('sportOverride');
@@ -42673,20 +43036,26 @@ function loamSwimDisplayUnit() {
      answers to "which pool" on one screen, the exact thing injecting it was meant to stop. */
   const syncPool = () => {
     if (!poolWrap || !sportSel) return;
-    const hostDeclared = Number.isFinite(Number(window.LOAM_POOL_LENGTH_M)) && Number(window.LOAM_POOL_LENGTH_M) > 0;
-    poolWrap.classList.toggle('hidden', hostDeclared || (sportSel.value || '').toLowerCase() !== 'swimming');
+    poolWrap.classList.toggle('hidden', loamHostDeclaredPool() || (sportSel.value || '').toLowerCase() !== 'swimming');
   };
   if (poolSel) {
-    const stored = localStorage.getItem('loam_pool_m');
-    if (stored != null && poolSel.querySelector(`option[value="${stored}"]`)) poolSel.value = stored;
+    /* Restore the remembered pool. A stored length that matches no option is a TYPED one, so the
+       picker opens on "Custom…" with the row pre-filled rather than silently reverting to "Not
+       sure" -- which would lose the pool a swimmer typed the last time they were here. */
+    const stored = loamStoredPoolM();
+    if (stored != null) {
+      const exact = poolSel.querySelector(`option[value="${stored}"]`);
+      poolSel.value = exact && (exact.getAttribute('data-unit') || 'm') === loamStoredPoolUnit()
+        ? String(stored) : 'custom';
+    }
+    syncPoolCustomRow();
     poolSel.addEventListener('change', () => {
-      try { localStorage.setItem('loam_pool_m', poolSel.value); } catch (e) { /* private mode / quota */ }
-      /* Re-analyze, the same way the Calibration selector does. The pool length is read once, during
-         analysis, so picking one AFTERWARDS used to do nothing at all -- and the swimmer who most
-         needs this control is precisely the one already looking at a swim with no distance on it,
-         being told by the status line to name their pool. Guarded on a loaded recording: an IMPORTED
-         swim gets its distances from Apple and never consults this. */
-      if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+      /* "Custom…" only OPENS the field; nothing is adopted and nothing is re-analyzed until a
+         length is actually typed and Set. Adopting on selection would re-run the analysis against
+         whatever was last in storage, which is not what the swimmer just asked for. */
+      if (poolSel.value === 'custom') { syncPoolCustomRow(); return; }
+      const opt = poolSel.selectedOptions && poolSel.selectedOptions[0];
+      adoptPoolLength(Number(poolSel.value) || 0, opt && opt.getAttribute('data-unit'));
     });
   }
   if (sportSel) sportSel.addEventListener('change', syncPool);
@@ -42697,13 +43066,36 @@ function loamSwimDisplayUnit() {
 
   /* The same pick, made from inside the Swim view (see swimCapturedNote). Delegated on the document
      because that select is written into innerHTML on every render, so nothing can hold a reference
-     to it. It writes through the dropzone's select, which is what loamPoolLengthM reads, so the two
-     controls cannot end up disagreeing about which pool this swim was in. */
+     to it. Both routes land in adoptPoolLength, which is what loamPoolLengthM reads, so no two
+     controls on the page can end up disagreeing about which pool this swim was in. */
   document.addEventListener('change', (e) => {
-    if (!e.target || e.target.id !== 'swimPoolFix' || !poolSel) return;
-    poolSel.value = e.target.value;
-    try { localStorage.setItem('loam_pool_m', poolSel.value); } catch (err) { /* private mode / quota */ }
-    if (_lastSensorFile) analyze(_lastFitFile ? [_lastSensorFile, _lastFitFile] : [_lastSensorFile]);
+    if (!e.target || e.target.id !== 'swimPoolFix') return;
+    const wrap = document.getElementById('swimPoolFixCustom');
+    if (e.target.value === 'custom') {
+      /* Reveal the typed-length row in place, beside the select the swimmer just used. Same rule as
+         the dropzone's: choosing "Custom…" opens the field and adopts nothing. */
+      if (wrap) { wrap.innerHTML = poolCustomRowHTML('swimPoolFix'); wrap.classList.remove('hidden'); }
+      return;
+    }
+    if (wrap) wrap.classList.add('hidden');
+    const opt = e.target.selectedOptions && e.target.selectedOptions[0];
+    adoptPoolLength(Number(e.target.value) || 0, opt && opt.getAttribute('data-unit'));
+  });
+  /* Set, from either typed-length row. One handler for both because the rows differ only in their
+     id prefix, which is exactly what poolCustomRowHTML generated and what poolCustomApply reads. */
+  document.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('button') : null;
+    if (!btn) return;
+    if (btn.id === 'poolCustomSet') poolCustomApply('pool');
+    else if (btn.id === 'swimPoolFixCustomSet') poolCustomApply('swimPoolFix');
+  });
+  /* Enter commits the typed length, because a number field beside a button is a form and behaving
+     like one costs nothing. keydown rather than a real <form>: there is no form element here and
+     wrapping one around a control inside a rendered notice would change its layout. */
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !e.target || e.target.tagName !== 'INPUT') return;
+    if (e.target.id === 'poolCustomVal') { e.preventDefault(); poolCustomApply('pool'); }
+    else if (e.target.id === 'swimPoolFixCustomVal') { e.preventDefault(); poolCustomApply('swimPoolFix'); }
   });
 }
 
@@ -43596,7 +43988,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '3da26685e · 2026-09-18';
+const LOAM_BUILD = '77a25a3a4 · 2026-09-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
