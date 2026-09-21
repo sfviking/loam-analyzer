@@ -15435,6 +15435,10 @@ function normalizeSwimImport(raw) {
        an import can never accidentally describe itself as inferred. */
     lengthsInferred: raw.lengthsInferred === true,
     restBased: raw.restBased === true,
+    /* And which of the two a capture's ledger is: 'watch' (watchOS's lap events written into the
+       recording as it swam) or 'rests' (the rest detector). Null on an import, whose lengths need no
+       such label -- they are the lap events themselves. */
+    lengthSource: raw.lengthSource === 'watch' || raw.lengthSource === 'rests' ? raw.lengthSource : null,
   };
 }
 
@@ -16033,9 +16037,12 @@ function swimDigest(D) {
     heart_rate_avg_unreliable: s.hrAvg,
     heart_rate_max_unreliable: s.hrMax,
     active_energy_kcal: s.activeEnergyKcal,
-    /* A capture's lengths were inferred from rests at the wall, not measured. Stated as data so the
-       coach hedges the per-length reads rather than treating them as Apple's lap events. */
+    /* A capture's lengths were either inferred from rests at the wall or counted by the watch. Stated
+       as data so the coach hedges the per-length reads exactly as far as their source deserves:
+       rest-inferred lengths are a weaker claim than Apple's lap events, watch-counted ones ARE Apple's
+       lap events, written into the recording as they happened. */
     lengths_inferred_from_rests: captured ? (session.lengthsInferred === true) : undefined,
+    lengths_counted_by_watch: captured ? (session.lengthSource === 'watch') : undefined,
     sets,
     data_caveats: swimCaveats(poolM, s, captured ? 'captured' : 'apple-health', session),
   };
@@ -16050,14 +16057,24 @@ function swimCaveats(poolM, s, source = 'apple-health', session = null) {
      detector inferred. Telling a swimmer who just recorded a swim that Loam cannot record swims is
      the specific failure this branch exists to prevent. */
   const captured = source === 'captured';
+  /* Two facts about THIS capture change three of its caveats: whether the watch counted the lengths
+     (its lap events written into the recording, see captured.js), and whether any of those lengths
+     carry a stroke-style label watchOS attached. Both are read off the session rather than assumed,
+     because a capture from a watch build that does not relay laps has neither. */
+  const watchCounted = !!(session && session.lengthSource === 'watch');
+  const styled = !!(s && Array.isArray(s.styles) && s.styles.some((x) => x && x !== 'unknown'));
   const parts = captured ? [
-    'BETA, estimate-only. This session was RECORDED by Loam: an Apple Watch on the wrist streaming rotation rate, with the phone on the pool deck. It did NOT come from Apple Health, so there are no Apple lengths, no Apple stroke counts, and no stroke-style labels anywhere in this data.',
+    `BETA, estimate-only. This session was RECORDED by Loam: an Apple Watch on the wrist streaming rotation rate, with the phone on the pool deck. It did NOT come from Apple Health, so there are no Apple stroke counts${watchCounted ? '' : ', no Apple lengths'} and ${styled ? 'no stroke-style labels beyond the ones watchOS attached to its own lap events' : 'no stroke-style labels'} in this data.`,
     'Every stroke here is a PEAK IN WRIST ROTATION of the watch arm only: one pull of one arm. How that relates to an Apple Watch stroke count is NOT a fixed factor and depends on the stroke. Apple sees the same single wrist and infers the arm it cannot see from its stroke-style classifier: for freestyle and backstroke the arms alternate, so it reports both and its figure is about double this one; for breaststroke and butterfly the arms move together and the two counts are on the same scale. Loam has no stroke classifier and cannot tell which case a length was, so never convert between the two, and never compare these counts to a watch reading, a published stroke count, or an imported Loam swim.',
-    'There is no stroke classifier: every length is style "unknown". Never name a stroke, and never compare two lengths as though you knew they were the same stroke.',
+    styled
+      ? 'Loam has no stroke classifier of its own. The stroke styles on these lengths are watchOS\'s labels, carried on the lap events it emitted; a length with no label reads "unknown". Compare two lengths as the same stroke only when both carry the same label, and never name a stroke a length does not carry.'
+      : 'There is no stroke classifier: every length is style "unknown". Never name a stroke, and never compare two lengths as though you knew they were the same stroke.',
     'SWOLF here is time plus ONE-ARM strokes, so it is not the SWOLF anyone else means by the word. Use it only to compare this swimmer\'s lengths within this one session, never against a published figure, a watch reading, or another pool.',
-    session && session.lengthsInferred
-      ? 'The lengths were INFERRED FROM RESTS AT THE WALL, not from detected turns: a pause long enough to break the stroke rhythm ended each one. That was graded 4/4 on the one swim behind this feature, but only because the swimmer stopped at every wall. A continuous swimmer produces no such gaps, and a slow open turn can over-split one length into two. Hedge the length count and anything derived from it.'
-      : 'This swim did not break into separate lengths, so there is NO length count and NO distance at all: the swimmer did not pause at the walls and nothing here can detect a turn. Coach the stroke rate, the rhythm and the duration only, and do not estimate a distance, a pace, or a distance per stroke from anything.',
+    watchCounted
+      ? 'The lengths were COUNTED BY THE WATCH: watchOS emitted one lap event per length from its own turn detection, the same events an Apple Health import reads as ground truth, and the capture app wrote each into the recording as it happened. The length count, the distance and the pace are therefore as trustworthy as an import\'s; hedge them no more than that. The STROKES inside each length are still Loam\'s one-arm peaks, so distance per stroke and SWOLF keep every one-arm caveat above.'
+      : session && session.lengthsInferred
+        ? 'The lengths were INFERRED FROM RESTS AT THE WALL, not from detected turns: a pause long enough to break the stroke rhythm ended each one. That was graded 4/4 on the one swim behind this feature, but only because the swimmer stopped at every wall. A continuous swimmer produces no such gaps, and a slow open turn can over-split one length into two. Hedge the length count and anything derived from it.'
+        : 'This swim did not break into separate lengths, so there is NO length count and NO distance at all: the swimmer did not pause at the walls and nothing here can detect a turn. Coach the stroke rate, the rhythm and the duration only, and do not estimate a distance, a pace, or a distance per stroke from anything.',
     'There is NO push-off or glide measurement, NO stroke-to-stroke consistency read, NO body roll, and nothing about the non-watch arm, the kick, breathing, or head position. Those need analysis that does not exist yet, not data that is missing. Never infer or invent them.',
     'Heart rate during a swim is unreliable: optical HR reads poorly through water. Treat it as indicative at most.',
     'No swim ground truth exists for this project beyond a single 4 x 50 m session, so the stroke detector, the rest threshold and the trend thresholds are unverified heuristics.',
@@ -16133,8 +16150,8 @@ Method - for every point, follow "metric -> mechanism -> action":
 
 What this data IS, and it is thinner than an Apple Health swim in exactly three ways:
 - Every stroke is a peak in the rotation rate of the WATCH ARM. One arm, not two. There is NO fixed factor to an Apple stroke count for the same swim: Apple infers the unseen arm from the stroke style it classified (freestyle and backstroke alternate, so its figure is about twice one wrist's pulls; breaststroke and butterfly move both arms together, so one cycle is one stroke), and Loam has no stroke classifier, so it cannot tell which case a length was. Never compare these counts to a watch reading, to a published figure, or to an imported Loam swim, in either direction.
-- There is no stroke classifier, so every length reads style "unknown". Never name a stroke and never compare lengths as though you knew they matched.
-- The lengths, when there are any, came from RESTS AT THE WALL rather than from detected turns. Read lengths_inferred_from_rests: when it is false there is no length count and no distance at all, and you must not estimate either.
+- Loam has no stroke classifier of its own. A length carries a stroke style only where watchOS attached one to the lap event it counted (strokes_swum lists what is present); every other length reads style "unknown". Never name a stroke a length does not carry, and never compare two lengths as the same stroke unless both carry the same label.
+- The lengths, when there are any, came from one of two places, and the digest says which. lengths_counted_by_watch true: watchOS counted them itself, one lap event per length from its own turn detection, and the app wrote each into the recording -- the same count an Apple Health import carries, so trust the length count, distance and pace as you would an import's. lengths_inferred_from_rests true: Loam's own rest detector split the stroking at pauses at the wall, which cannot see a turn, so hedge the count. Both false: there is no length count and no distance at all, and you must not estimate either.
 
 What this data has that an import does not: the motion itself, at 25 Hz. Today that buys the stroke timing and the rhythm. It does NOT yet buy push-off and glide quality, stroke-to-stroke consistency, or body roll - those analyses are not built. Say so at most once if the swimmer would want them; never describe their technique as though you watched it.
 
@@ -16585,6 +16602,13 @@ const MIN_BLOCK_S = 10;
  * `analyzeCapturedSwim` reports the session's measured peak next to this number, so the first thing
  * to do with a real captured swim is read the two against each other rather than re-deriving them. */
 const MIN_STROKE_PEAK_RADS = 0.8;
+/** The leading word of a length mark the capture app writes for each pool length watchOS counted:
+ * `SwimLengthMark.word` in ios/Sources/Export/PauseMarks.swift. The two spellings are pinned together
+ * by analyzer/swim-length-mark-contract.test.js, the way the pause words are. Matched exactly and
+ * case-sensitively on the way in, so an athlete's own note about a length is a remark, not a length. */
+const LENGTH_MARK_WORD = 'Length';
+/** Field separator inside a mark, a spaced middle dot (`SwimLengthMark.separator`). */
+const LENGTH_MARK_SEP = ' \u00B7 ';
 
 /**
  * Wrist rotation magnitude on a uniform grid.
@@ -16693,6 +16717,61 @@ function segmentBlocks(strokeTimes, opts = {}) {
     .map((b, i) => ({ index: i, start: b.start, end: b.end, durationS: b.end - b.start, strokes: b.strokes }));
 }
 
+function parseSwimLengthMark(text) {
+  if (typeof text !== 'string') return null;
+  const fields = text.trim().split(LENGTH_MARK_SEP);
+  const head = fields[0].trim().split(/\s+/);
+  if (head.length !== 2 || head[0] !== LENGTH_MARK_WORD) return null;
+  const index = Number(head[1]);
+  if (!Number.isInteger(index) || index < 1) return null;
+  let durationS = null;
+  let style = null;
+  let strokesSoFar = null;
+  for (const raw of fields.slice(1)) {
+    const f = raw.trim();
+    let m;
+    if ((m = /^(\d+) strokes so far$/.exec(f))) strokesSoFar = Number(m[1]);
+    else if ((m = /^(\d+(?:\.\d+)?) s$/.exec(f))) durationS = Number(m[1]);
+    else if (/^[A-Za-z]+$/.test(f)) style = f.toLowerCase();
+  }
+  return { index, durationS, style, strokesSoFar };
+}
+
+function parseSwimLengthMarks(annotations) {
+  const out = [];
+  const seen = new Set();
+  for (const a of annotations || []) {
+    if (!a || !Number.isFinite(a.t)) continue;
+    const p = parseSwimLengthMark(a.text);
+    if (!p || seen.has(p.index)) continue;
+    seen.add(p.index);
+    out.push({ ...p, t: a.t });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+function watchLengths(marks, strokeTimes) {
+  const out = [];
+  let prevEnd = null;
+  for (const m of marks || []) {
+    const end = m.t;
+    let start = m.durationS != null && m.durationS > 0 ? end - m.durationS : prevEnd;
+    if (start == null) {
+      const first = (strokeTimes || []).find((t) => t <= end);
+      start = first != null ? first : end;
+    }
+    if (prevEnd != null && start < prevEnd) start = prevEnd;
+    if (!(end > start)) { prevEnd = end; continue; }
+    const strokes = (strokeTimes || []).filter((t) => t >= start && t <= end).length;
+    out.push({
+      index: out.length, start, end, durationS: end - start, strokes,
+      style: m.style || null, strokesSoFar: m.strokesSoFar ?? null,
+    });
+    prevEnd = end;
+  }
+  return out;
+}
+
 /**
  * The full read for a captured swim.
  *
@@ -16700,7 +16779,7 @@ function segmentBlocks(strokeTimes, opts = {}) {
  * a wrist stream reveals how long the pool is. Without it the result is honest but thin (strokes,
  * rate, duration) — which is the correct output, not a degraded one.
  */
-function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
+function analyzeCapturedSwim({ wrist, poolLengthM = null, marks = [], opts = {} } = {}) {
   const strokeTimes = detectStrokes(wrist, opts);
   const blocks = segmentBlocks(strokeTimes, opts);
 
@@ -16713,18 +16792,28 @@ function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
   let peakRotationRads = 0;
   for (const v of values) if (v > peakRotationRads) peakRotationRads = v;
 
-  const swimmingS = blocks.reduce((a, b) => a + b.durationS, 0);
-  const inBlockStrokes = blocks.reduce((a, b) => a + b.strokes, 0);
+  /* The watch's own count wins when the recording carries it: those are watchOS's lap events, the
+     same ground truth an import reads, and they count a swimmer through a turn where a rest detector
+     cannot. The rest blocks are still computed and reported, because the two disagreeing is itself a
+     reading (on the 2026-09-20 swim, 24 marks against 19 blocks is five turns swum through). */
+  const fromWatch = watchLengths(marks, strokeTimes);
+  const lengthSource = fromWatch.length ? 'watch' : 'rests';
+  const counted = lengthSource === 'watch' ? fromWatch : blocks;
 
-  /* Distance is offered only when BOTH hold: a pool length was supplied, and the swim broke into
-     more than one block. A single block means either a genuinely continuous swim (whose length count
-     this cannot know) or a swimmer who never paused, and in both cases multiplying one block by one
-     pool length would report a 50 m swim for a 400 m one. */
-  const lengthsInferred = poolLengthM > 0 && blocks.length > 1;
-  const distanceM = lengthsInferred ? blocks.length * poolLengthM : null;
+  const swimmingS = counted.reduce((a, b) => a + b.durationS, 0);
+  const inBlockStrokes = counted.reduce((a, b) => a + b.strokes, 0);
 
-  const lengths = blocks.map((b) => {
-    const dist = lengthsInferred ? poolLengthM : null;
+  /* From rests, distance is offered only when BOTH hold: a pool length was supplied, and the swim
+     broke into more than one block. A single block means either a genuinely continuous swim (whose
+     length count this cannot know) or a swimmer who never paused, and in both cases multiplying one
+     block by one pool length would report a 50 m swim for a 400 m one. From the watch, a count is a
+     count -- one length is one length -- and only the pool is needed. */
+  const lengthsInferred = lengthSource === 'rests' && poolLengthM > 0 && blocks.length > 1;
+  const hasDistance = poolLengthM > 0 && (lengthSource === 'watch' || lengthsInferred);
+  const distanceM = hasDistance ? counted.length * poolLengthM : null;
+
+  const lengths = counted.map((b) => {
+    const dist = hasDistance ? poolLengthM : null;
     return {
       index: b.index,
       start: b.start,
@@ -16737,6 +16826,9 @@ function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
       distancePerStrokeM: dist && b.strokes > 0 ? dist / b.strokes : null,
       strokeRateSpm: b.durationS > 0 ? (b.strokes / b.durationS) * 60 : null,
       paceSecPer100m: dist > 0 ? (b.durationS / dist) * 100 : null,
+      /* watchOS's stroke-style label for the length when the lap event carried one, else null. Never
+         guessed: Loam has no stroke classifier. Always null on the rest path. */
+      style: b.style || null,
     };
   });
 
@@ -16745,11 +16837,16 @@ function analyzeCapturedSwim({ wrist, poolLengthM = null, opts = {} } = {}) {
     strokeTimes,
     lengths,
     lengthsInferred,
-    /* The caveat the surface must carry. What was graded is rest detection: a swimmer who does not
-       pause at the wall yields one block and no length count at all. */
-    restBased: true,
+    /* Where the length ledger came from, so every surface can say so: 'watch' is watchOS's own lap
+       events written into the recording; 'rests' is this module's rest detector, with the caveat the
+       surface must carry -- a swimmer who does not pause at the wall yields one block and no length
+       count at all. */
+    lengthSource,
+    restBased: lengthSource === 'rests',
     totals: {
       blocks: blocks.length,
+      lengths: counted.length,
+      marks: (marks || []).length,
       strokes: inBlockStrokes,
       swimmingS,
       peakRotationRads,
@@ -16872,15 +16969,20 @@ function detectSwim(sensors, ride) {
  * @param title        session name for the view's header
  * @param displayUnit  'm' | 'yd', presentation only -- every value here stays metric
  */
-function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayUnit = 'm', poolUnit = null } = {}) {
-  const a = analyzeCapturedSwim({ wrist, poolLengthM });
+function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayUnit = 'm', poolUnit = null, annotations = [] } = {}) {
+  const marks = parseSwimLengthMarks(annotations);
+  const a = analyzeCapturedSwim({ wrist, poolLengthM, marks });
+  const watch = a.lengthSource === 'watch';
   const lengths = a.lengths.map((L) => ({
     t0: L.start,
     t1: L.end,
     strokes: L.strokes > 0 ? L.strokes : null,
-    // Never guessed. See the header: there is no stroke classifier behind this.
-    style: 'unknown',
+    // Never guessed: watchOS's own label when the lap event carried one, else 'unknown'. See the
+    // header: there is no stroke classifier behind this.
+    style: watch && L.style ? L.style : 'unknown',
   }));
+  /* Lengths are on offer from either source; distance needs a pool as well. */
+  const counted = watch || a.lengthsInferred;
 
   const first = a.lengths[0];
   const last = a.lengths[a.lengths.length - 1];
@@ -16892,29 +16994,33 @@ function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayU
     title,
     start: first ? first.start : null,
     end: last ? last.end : null,
-    /* 'pool' only when lengths were actually inferred. A single-block swim has no walls we can
-       demonstrate, and claiming 'pool' would invite the per-length reads it cannot support. */
-    locationType: a.lengthsInferred ? 'pool' : 'unknown',
-    poolLengthM: a.lengthsInferred ? poolLengthM : null,
+    /* 'pool' only when lengths were actually counted, by the watch or from rests. A single rest
+       block has no walls we can demonstrate, and claiming 'pool' would invite the per-length reads it
+       cannot support. */
+    locationType: counted ? 'pool' : 'unknown',
+    poolLengthM: counted && poolLengthM > 0 ? poolLengthM : null,
     displayUnit,
     poolUnit: poolUnit || displayUnit,
     totalDistanceM: a.totals.distanceM,
     totalStrokes: a.totals.strokes > 0 ? a.totals.strokes : null,
     activeEnergyKcal: null,
-    lengths: a.lengthsInferred ? lengths : [],
+    lengths: counted ? lengths : [],
     hr: [],
     route: [],
     strokeSamples: [],
     /* Carried so the view can label what it is showing rather than presenting an inference as a
-       measurement: lengths came from rests at the wall, not from detected turns. */
+       measurement: whether the lengths are the watch's own count or came from rests at the wall
+       rather than from detected turns. */
     lengthsInferred: a.lengthsInferred,
-    restBased: true,
+    lengthSource: a.lengthSource,
+    restBased: !watch,
     capturedTotals: a.totals,
   };
 }
 
   return { normalizeSwimImport, swimLengthMetrics, isStrokeStyle,
     analyzeCapturedSwim, detectStrokes, segmentBlocks, strokeSignal, capturedSwimPayload, detectSwim,
+    parseSwimLengthMark, parseSwimLengthMarks, watchLengths,
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
     swimEffortRead, swimPaceCv, isCountable, swimStyleSplits, swimPerStrokeSplit,
     swimPoolsMatch, swimHistoryRecord, swimHistoryUpsert, swimComparableSessions,
@@ -20233,8 +20339,13 @@ async function analyze(files) {
     if (isSwimSport(sport)) {
       onProgress('detecting strokes');
       const poolLengthM = loamPoolLengthM();
+      /* The annotations ride along for the watch's own length count: the capture app writes a
+         `Length n` mark at every wall watchOS counted (SwimLengthMark), and when those are present
+         they are the lengths -- the rest detector cannot count a swimmer who turns without stopping
+         (19 blocks for a 24-length swim, 2026-09-20). See parseSwimLengthMarks. */
       const payload = LoamSwim.capturedSwimPayload({
         wrist: (sensors.wrist || []).filter(r => r.t >= ride.start && r.t <= ride.end),
+        annotations: (sensors.annotations || []).filter(a => a.t >= ride.start && a.t <= ride.end),
         poolLengthM, title: sensorFile && sensorFile.name, displayUnit: loamSwimDisplayUnit(),
         poolUnit: loamSwimPoolUnit(),
       });
@@ -20269,14 +20380,21 @@ async function analyze(files) {
       if (cacheKey) { putCachedAnalysis(cacheKey, sport, swimRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
       renderSwim(swimRender);
       const blocks = payload.capturedTotals.blocks;
+      const watchCounted = payload.lengthSource === 'watch';
       /* Two different reasons produce no distance and the status must not confuse them: a swimmer
          who never named a pool can fix it in one pick, while a swimmer who did not pause at the
          walls cannot fix it at all (Loam detects rests, not turns). Blaming the pool length for the
-         second sends them to a picker that will not help. */
-      const why = blocks > 1 ? loamT('no distance without a pool length')
+         second sends them to a picker that will not help. With the watch's own count the second
+         reason cannot arise, so only the pool is ever named. */
+      const why = watchCounted || blocks > 1 ? loamT('no distance without a pool length')
         : loamT('no length count: swum without pausing at the walls');
+      /* Lengths when the watch counted them, blocks when the rest detector did: the noun is the
+         claim, and "4 blocks" was never a length count. */
+      const counted = watchCounted
+        ? loamT(payload.capturedTotals.lengths === 1 ? '{n} length · watch' : '{n} lengths · watch', { n: payload.capturedTotals.lengths })
+        : loamT(blocks === 1 ? '{n} block' : '{n} blocks', { n: blocks });
       setStatus(loamT('Swim loaded ({blocks} · {strokes} strokes{tail})', {
-        blocks: loamT(blocks === 1 ? '{n} block' : '{n} blocks', { n: blocks }),
+        blocks: counted,
         strokes: payload.capturedTotals.strokes,
         tail: ' · ' + (payload.totalDistanceM ? LoamSwim.swimDistanceLabel(payload.totalDistanceM, session.displayUnit) : why) }), true);
       return;
@@ -26565,12 +26683,28 @@ function renderSwim(D) {
 function swimCapturedNote(D) {
   const t = (D.session && D.session.capturedTotals) || {};
   const inferred = D.session && D.session.lengthsInferred;
+  const watchCounted = D.session && D.session.lengthSource === 'watch';
   const rate = t.strokeRateSpm != null ? t.strokeRateSpm.toFixed(0) : null;
   const facts = [
     t.strokes ? loamT('<strong>{n}</strong> strokes of your watch arm', { n: t.strokes }) : null,
     rate ? loamT('<strong>{n}</strong> per minute while swimming', { n: rate }) : null,
     t.swimmingS ? loamT('<strong>{t}</strong> of stroking', { t: fmtDuration(t.swimmingS) }) : null,
   ].filter(Boolean).join(' &middot; ');
+
+  /* The watch's own count, written into the recording at each wall (SwimLengthMark). Says so, and
+     says what the rest detector would have made of the same swim when the two disagree -- that
+     difference is the turns swum through without a rest, which is the case the rest count exists to
+     confess it cannot see. */
+  if (watchCounted) {
+    const turns = t.lengths > t.blocks ? loamT(' Loam\'s own rest detector saw only {b} rests here, so {k} of your turns were swum straight through &mdash; a count it could not have made on its own.', { b: t.blocks, k: t.lengths - t.blocks }) : '';
+    const noPool = !D.session.totalDistanceM
+      ? ' ' + loamT('No pool length was set, so the count is not yet a distance: name your pool above and it becomes one.')
+      : '';
+    return `<div class="swim-set">
+      <div class="swim-set-head"><span class="swim-set-n">${loamT('Lengths from your watch')}</span></div>
+      <p class="swim-mech">${facts}. ${loamT('Your {n} lengths are the ones your Apple Watch counted at the wall &mdash; its own turn detection, the same count an Apple Health import carries &mdash; relayed to the phone and written into this recording as you swam. The strokes are still Loam\'s, from your watch arm only.', { n: t.lengths })}${turns}${noPool}</p>
+    </div>`;
+  }
 
   if (inferred) {
     /* The pool can be CORRECTED here, not only named here. Until 2026-09-20 this control appeared
@@ -26609,7 +26743,7 @@ function swimCapturedNote(D) {
      page), and a fourth copy is the one that would drift. Offered only when a re-run is possible --
      a library or cache replay has no File to re-analyze, and the old instruction is right for it. */
   const poolSel = document.getElementById('poolLength');
-  const fix = t.blocks > 1 && poolSel && _lastSensorFile && !loamHostDeclaredPool()
+  const fix = (t.lengths || t.blocks) > 1 && poolSel && _lastSensorFile && !loamHostDeclaredPool()
     ? loamT('No pool length was set, and nothing in wrist motion reveals how long a pool is. Name it and the lengths above become a distance and a pace:')
       + ` <select id="swimPoolFix" aria-label="${loamT('Pool length')}">${poolOptionsHTML()}</select>`
       + ` <span class="pool-custom hidden" id="swimPoolFixCustom"></span>`
@@ -32120,6 +32254,15 @@ const LOAM_NB = {
     '<strong>{n}</strong> per minutt mens du svømte',
   '<strong>{t}</strong> of stroking': '<strong>{t}</strong> med armtak',
   'Lengths from your rests': 'Lengder fra hvilene dine',
+  '{n} length · watch': '{n} lengde · klokke',
+  '{n} lengths · watch': '{n} lengder · klokke',
+  'Lengths from your watch': 'Lengder fra klokken din',
+  'Your {n} lengths are the ones your Apple Watch counted at the wall &mdash; its own turn detection, the same count an Apple Health import carries &mdash; relayed to the phone and written into this recording as you swam. The strokes are still Loam\'s, from your watch arm only.':
+    'De {n} lengdene dine er dem Apple Watch telte ved veggen &mdash; klokkens egen vendingsdeteksjon, samme telling som en import fra Apple Helse bærer &mdash; sendt til telefonen og skrevet inn i dette opptaket mens du svømte. Armtakene er fortsatt Loams, bare fra klokkearmen din.',
+  ' Loam\'s own rest detector saw only {b} rests here, so {k} of your turns were swum straight through &mdash; a count it could not have made on its own.':
+    ' Loams egen hviledetektor så bare {b} hviler her, så {k} av vendingene dine ble svømt rett gjennom &mdash; en telling den ikke kunne ha gjort på egen hånd.',
+  'No pool length was set, so the count is not yet a distance: name your pool above and it becomes one.':
+    'Ingen bassenglengde ble satt, så tellingen er ennå ikke en distanse: oppgi bassenget ditt over, så blir den det.',
   'Your {n} lengths are the stretches of unbroken stroking between pauses at the wall &mdash; Loam cannot see a turn, only a rest, so this works because you stopped at every wall. Swim a set continuously and it will read as one long block.':
     'De {n} lengdene dine er strekkene med sammenhengende armtak mellom pausene ved veggen &mdash; Loam kan ikke se en vending, bare en hvile, så dette fungerer fordi du stoppet ved hver vegg. Svøm et sett sammenhengende, så leses det som én lang blokk.',
   'No pool length was set, and nothing in wrist motion reveals how long a pool is. Name it and the lengths above become a distance and a pace:':
@@ -43988,7 +44131,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '77a25a3a4 · 2026-09-20';
+const LOAM_BUILD = 'ff22c487b · 2026-09-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
