@@ -4075,13 +4075,22 @@ function extractFromZip(zipData) {
   return out;
 }
 
-/* Sample-rate guard. The whole pipeline assumes 100 Hz phone motion (the Butterworth coefficients
-   are precomputed for fs=100, and the turn detector integrates duration / heading change over
-   SAMPLE COUNTS with fs hardcoded to 100), so a recording captured at another rate parses fine and
-   then silently mis-scales every time-based metric. detectImuRateHz reads the median spacing of an
-   IMU row array (the median shrugs off grid jitter, dropped cells, and recording gaps);
-   imuRateWarning turns an off-rate into the user-facing warning text, null when the rate is fine
-   or unknown. Extracted to analyzer/core/parsers/sample-rate.js; a drift guard pins the copies. */
+/* Sample-rate guard. The 100 Hz assumption is real but NOT uniform: the Butterworth coefficients are
+   precomputed for fs=100 and the turn detector integrates duration / heading change over SAMPLE
+   COUNTS with fs hardcoded to 100, but neither runs on a foot sport -- analyze() returns from the
+   running branch before calibration, the filters or detectTurns are reached -- and every band a walk
+   or run reads tops out at 3.6 Hz. What binds there is a sample-count gate rather than Nyquist:
+   analyzeRunning skips a 10 s cadence window under 200 samples, i.e. 20 Hz. So the warning is asked
+   per sport: a 25 Hz ride is still wrong and still says so, a 25 Hz walk is fine and says nothing,
+   which is what lets the capture app record one (PhoneStreamPolicy in the iOS app).
+   detectImuRateHz reads the median spacing of an IMU row array (the median shrugs off grid jitter,
+   dropped cells, and recording gaps); nominalImuRateHz snaps that to the rate it evidently is, for
+   the code that turns fs into a window LENGTH; imuRateWarning turns an off-rate into the user-facing
+   text. Extracted to analyzer/core/parsers/sample-rate.js; a drift guard pins the copies. */
+const IMU_NOMINAL_HZ = 100;
+const IMU_RATE_TOLERANCE = 0.15;
+const IMU_FOOT_MIN_HZ = 20;
+const IMU_TOLERANT_SPORTS = new Set(['walking', 'walk', 'hiking', 'hike', 'running', 'run']);
 function detectImuRateHz(rows) {
   if (!rows || rows.length < 50) return null;
   const dts = [];
@@ -4094,19 +4103,47 @@ function detectImuRateHz(rows) {
   const dt = dts[dts.length >> 1];
   return dt > 0 ? 1 / dt : null;
 }
-function imuRateWarning(hz) {
-  /* 100 Hz expected; 15% tolerance keeps real 100 Hz recordings (grid jitter, dropped cells)
-     quiet while catching every other rate Sensor Logger offers (1, 10, 50, 200 Hz). */
+function nominalImuRateHz(hz) {
+  if (hz == null || !isFinite(hz) || hz <= 0) return IMU_NOMINAL_HZ;
+  /* Every rate Sensor Logger offers a preset for, plus the two Loam Capture records at. Snapping
+     matters for the COMMON case, not the exotic one: the export grid is an exact multiple of 0.01 s
+     and 1/0.01 in doubles is 99.99999999999999, so an ordinary 100 Hz recording measures a hair
+     under 100 and would size the calibration window one sample away from every validated result. */
+  for (const n of [1, 5, 10, 20, 25, 50, 100, 200]) {
+    if (Math.abs(hz - n) <= n * 0.05) return n;
+  }
+  return Math.round(hz * 10) / 10;
+}
+function imuRateIsTolerant(sport) {
+  /* An absent / unknown sport is NOT tolerant: a recording that could not say what it is gets the
+     strict answer. */
+  return typeof sport === 'string' && IMU_TOLERANT_SPORTS.has(sport.toLowerCase());
+}
+function imuRateWarning(hz, sport) {
   if (hz == null || !isFinite(hz)) return null;
-  if (Math.abs(hz - 100) <= 100 * 0.15) return null;
-  return 'This recording\'s phone motion is ~' + Math.round(hz) + ' Hz, but the analysis assumes 100 Hz, '
-    + 'so time-based metrics are scaled wrong (turn durations and heading change especially). '
-    + 'Record at 100 Hz: Loam Capture always does; in Sensor Logger set the sampling frequency to 100 Hz.';
+  if (Math.abs(hz - IMU_NOMINAL_HZ) <= IMU_NOMINAL_HZ * IMU_RATE_TOLERANCE) return null;
+  const rounded = Math.round(hz);
+  if (imuRateIsTolerant(sport)) {
+    if (hz >= IMU_FOOT_MIN_HZ) return null;
+    return 'This recording\'s phone motion is ~' + rounded + ' Hz. Cadence is measured in sliding '
+      + '10-second windows that need at least 20 Hz to run at all, so cadence and the vertical '
+      + 'oscillation derived from it are missing or unreliable here. Distance, pace and heart rate '
+      + 'are unaffected.';
+  }
+  return 'This recording\'s phone motion is ~' + rounded + ' Hz, but this sport\'s analysis assumes '
+    + '100 Hz, so time-based metrics are scaled wrong (turn durations and heading change especially). '
+    + 'Record at 100 Hz: Loam Capture does for every sport except walking, which needs only 25; in '
+    + 'Sensor Logger set the sampling frequency to 100 Hz.';
 }
 
 /* ========== Calibration & rotation ========== */
-function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strategy, locationRows) {
-  const fs = 100, winSec = 20, winN = winSec * fs;
+function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strategy, locationRows, rateHz) {
+  /* The still window is 20 SECONDS, and it used to be 2000 SAMPLES -- identical at 100 Hz and not at
+     anything else, so a 25 Hz recording searched an 80-second window while reporting a 20-second one.
+     `rateHz` is the recording's own measured rate (nominalImuRateHz); omitted, it is the 100 this was
+     written against, so every existing caller and every 100 Hz recording is unchanged. */
+  const fs = Math.max(1, Math.round(rateHz > 0 && isFinite(rateHz) ? rateHz : 100));
+  const winSec = 20, winN = winSec * fs;
   /* 'riding': define the body frame from the RIDING window itself rather than from any still window
      before it (user report #546, a drone session: "I sometimes think the form replay shows that I'm
      leaning left in a right hand turn").
@@ -4152,7 +4189,7 @@ function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strat
     still = findCalibWithWindow(gravityRows, accelRows, rideStart, rideEnd, winN, fs, strategy);
   }
   if (still) return still;
-  return findMidrideCalibrationWindow(gravityRows, accelRows, locationRows, rideStart, rideEnd);
+  return findMidrideCalibrationWindow(gravityRows, accelRows, locationRows, rideStart, rideEnd, fs);
 }
 
 /*
@@ -4163,10 +4200,14 @@ function findCalibrationWindow(gravityRows, accelRows, rideStart, rideEnd, strat
  * body's lateral/total pose must agree with the mean riding pose. The 8s floor and these gates recover
  * the reported 2026-09-15 recording at 39:06 without admitting its quieter but sideways rest stops.
  */
-function findMidrideCalibrationWindow(gravityRows, accelRows, locationRows, rideStart, rideEnd) {
+function findMidrideCalibrationWindow(gravityRows, accelRows, locationRows, rideStart, rideEnd, rateHz) {
   if (!Array.isArray(locationRows) || !locationRows.length
       || !Number.isFinite(rideStart) || !Number.isFinite(rideEnd)) return null;
-  const fs = 100, winSec = 8, winN = winSec * fs;
+  /* Same seconds-not-samples fix as above, and here it was not merely wrong but self-cancelling: the
+     `Math.abs((t1 - t0) - winSec) > 0.25` check below asks the window to really be 8 seconds long, so
+     off 100 Hz every candidate failed it and this returned null for every recording. */
+  const fs = Math.max(1, Math.round(rateHz > 0 && isFinite(rateHz) ? rateHz : 100));
+  const winSec = 8, winN = winSec * fs;
   const maxSigma = 0.20;       // CalibrationStillness.maxSigma in the native capture app.
   const maxGpsSpeed = 0.30;    // Stationary GPS jitter, well below the 1 m/s walking threshold.
   const maxLateralDeg = 12;    // CALIB_POSE_LATERAL_DEG, which protects turn-side attribution.
@@ -15106,7 +15147,7 @@ const LoamGolf = (function () {
     let gyroBody = null, hasPelvis = false;
     if (gyro.length && grav.length && accel.length && gPhoneIsWorn(gyro, det.swings)) {
       try {
-        const win = findCalibrationWindow(grav, accel, null, null, 'quietest');
+        const win = findCalibrationWindow(grav, accel, null, null, 'quietest', null, nominalImuRateHz(detectImuRateHz(accel)));
         if (win) { const rot = calibrationRotation(grav, win.start, win.end); gyroBody = applyRotation(rot.R, gyro); hasPelvis = true; }
       } catch (e) { gyroBody = null; hasPelvis = false; }
     }
@@ -16754,14 +16795,20 @@ function parseSwimLengthMark(text) {
 function parseSwimLengthMarks(annotations) {
   const out = [];
   let seen = new Set();
+  /* A `wall at` field is in its OWN recording's clock, and `SessionMerge` shifts only the time
+     column -- so in any fragment after the first it has to be moved by that fragment's offset,
+     which is exactly where the merge put the seam mark. Unshifted, fragment 2's late length landed
+     back inside fragment 1 and `watchLengths` clamped it to nothing. */
+  let fragmentStart = 0;
   /* Annotations in FILE order, so a merge's seam falls between its fragments. */
   const sorted = (annotations || []).filter((a) => a && Number.isFinite(a.t)).sort((a, b) => a.t - b.t);
   for (const a of sorted) {
-    if (isSeamMark(a.text)) { seen = new Set(); continue; }
+    if (isSeamMark(a.text)) { seen = new Set(); fragmentStart = a.t; continue; }
     const p = parseSwimLengthMark(a.text);
     if (!p || seen.has(p.index)) continue;
     seen.add(p.index);
-    const wall = p.wallS != null && p.wallS <= a.t ? p.wallS : a.t;
+    const wallT = p.wallS != null ? fragmentStart + p.wallS : null;
+    const wall = wallT != null && wallT <= a.t ? wallT : a.t;
     out.push({ ...p, t: wall });
   }
   return out.sort((a, b) => a.t - b.t);
@@ -19989,7 +20036,12 @@ async function analyze(files) {
          its accelerometer recorded a table, and the WRIST is the only channel carrying the swim.
          Named as its own error because "no motion data" would be false and unactionable here -- the
          recording is full of phone motion data, all of it useless. */
-      if (isSwim && !(sensors.wrist && sensors.wrist.length))
+      /* Unless the watch's own length marks are in the file: those are watchOS's count, relayed
+         without any wrist motion, and are a swim in their own right (heart rate with no wrist stream
+         is a documented, recurring failure). The analysis below reads them and says the strokes are
+         missing. */
+      if (isSwim && !(sensors.wrist && sensors.wrist.length)
+          && !(sensors.annotations || []).some(a => a && LoamSwim.parseSwimLengthMark(a.text)))
         throw new Error('No Apple Watch motion in this recording. A swim is read entirely from the wrist, so it needs a watch streaming to the phone; the phone itself only sat on the deck.');
       if (!sensors.gravity.length && !sensors.accel.length && !(sensors.wrist && sensors.wrist.length))
         throw new Error('No motion data found in this recording');
@@ -20379,7 +20431,12 @@ async function analyze(files) {
          43/min, and with a pool length picked and two noise blocks it would have reported a distance.
          The peak is quoted because it is the number that separates "the watch never swam" from "the
          detector is broken", and a swimmer can sanity-check it against what they did. */
-      if (!payload.capturedTotals.strokes) throw new Error(capturedSwimNoStrokeMessage(payload.capturedTotals));
+      /* EXCEPT when the watch counted lengths. watchOS's own lap events are proof the athlete swam,
+         whatever the wrist stream did -- and a watch streaming heart rate with no wrist motion is a
+         documented, recurring failure. Refusing there threw away every length watchOS counted and
+         told the swimmer no swimming was found, above the advice that they check whether the watch
+         was streaming. The lengths render; the stroke reads say they are missing. */
+      if (!payload.capturedTotals.strokes && payload.lengthSource !== 'watch') throw new Error(capturedSwimNoStrokeMessage(payload.capturedTotals));
       const session = { ...LoamSwim.normalizeSwimImport(payload), capturedTotals: payload.capturedTotals };
       const swim = LoamSwim.analyzeSwim(session);
       const summary = LoamSwim.computeSwimSummary(session, swim);
@@ -20427,7 +20484,7 @@ async function analyze(files) {
     onProgress('finding calibration window');
     const calibWin = calibrationSource
       ? { ...calibrationSource.window, strategy: 'borrowed', sourceName: calibrationSource.name, sourceKey: calibrationSource.key }
-      : findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy, sensors.location);
+      : findCalibrationWindow(sensors.gravity, sensors.accel, ride.start, ride.end, calibStrategy, sensors.location, nominalImuRateHz(imuRateHz));
     if (!calibWin) throw new Error('Could not find a still calibration window');
 
     onProgress('computing body-frame rotation');
@@ -26613,7 +26670,9 @@ function renderSwim(D) {
     tile(fmtDuration(s.durationS || 0), 'duration'),
     s.hrAvg != null ? tile(s.hrAvg + ' / ' + s.hrMax, 'hr avg / max ~') : '',
   ] : R.hasLengths ? [
-    tile(U.swimDistanceLabel(s.totalDistanceM, unit), 'distance'),
+    /* A watch-counted capture with no pool named HAS lengths and no distance, and "0 yd" there reads
+       as a measurement. A dash, like the pace beside it. */
+    tile(s.totalDistanceM ? U.swimDistanceLabel(s.totalDistanceM, unit) : '—', 'distance'),
     tile(fmtDuration(s.swimmingS || 0), 'swimming'),
     tile(U.swimPaceLabel(s.medianPace100S, unit).replace(/\/100(m|yd)$/, ''), loamT('pace /100{u}', { u: unit })),
     /* On a CAPTURED swim a "stroke" is one pull of the watch arm, so distance-per-stroke is roughly
@@ -26718,11 +26777,13 @@ function swimCapturedNote(D) {
   const t = (D.session && D.session.capturedTotals) || {};
   const inferred = D.session && D.session.lengthsInferred;
   const watchCounted = D.session && D.session.lengthSource === 'watch';
-  const rate = t.strokeRateSpm != null ? t.strokeRateSpm.toFixed(0) : null;
+  /* Only with strokes behind it: a watch-counted swim whose wrist stream never arrived has a rate of
+     0 over zero strokes, which is an absence, not a measurement. */
+  const rate = t.strokes && t.strokeRateSpm != null ? t.strokeRateSpm.toFixed(0) : null;
   const facts = [
     t.strokes ? loamT('<strong>{n}</strong> strokes of your watch arm', { n: t.strokes }) : null,
     rate ? loamT('<strong>{n}</strong> per minute while swimming', { n: rate }) : null,
-    t.swimmingS ? loamT('<strong>{t}</strong> of stroking', { t: fmtDuration(t.swimmingS) }) : null,
+    t.strokes && t.swimmingS ? loamT('<strong>{t}</strong> of stroking', { t: fmtDuration(t.swimmingS) }) : null,
   ].filter(Boolean).join(' &middot; ');
 
   /* The watch's own count, written into the recording at each wall (SwimLengthMark). Says so, and
@@ -26730,13 +26791,32 @@ function swimCapturedNote(D) {
      difference is the turns swum through without a rest, which is the case the rest count exists to
      confess it cannot see. */
   if (watchCounted) {
-    const turns = t.lengths > t.blocks ? loamT(' Loam\'s own rest detector saw only {b} rests here, so {k} of your turns were swum straight through &mdash; a count it could not have made on its own.', { b: t.blocks, k: t.lengths - t.blocks }) : '';
-    const noPool = !D.session.totalDistanceM
-      ? ' ' + loamT('No pool length was set, so the count is not yet a distance: name your pool above and it becomes one.')
+    const turns = t.strokes && t.lengths > t.blocks ? loamT(' Loam\'s own rest detector saw only {b} rests here, so {k} of your turns were swum straight through &mdash; a count it could not have made on its own.', { b: t.blocks, k: t.lengths - t.blocks }) : '';
+    /* The pool control the rest-counted branch below carries, for the same two swimmers: the one who
+       never named a pool and the one who named the wrong one. This branch used to tell the first to
+       "name your pool above" with nothing above to name it in, and offered the second nothing at all
+       -- and since 2026-09-20 every new capture carries the watch's marks, so this is the branch most
+       swims take. Same `fixable` rule: only where a re-run can happen and the host does not own it. */
+    const poolSel = document.getElementById('poolLength');
+    const fixable = poolSel && _lastSensorFile && !loamHostDeclaredPool();
+    const noDist = !D.session.totalDistanceM;
+    const noPool = noDist
+      ? ' ' + (fixable
+        ? loamT('No pool length was set, so the count is not yet a distance: name your pool below and it becomes one.')
+        : loamT('No pool length was set, so the count is not yet a distance.'))
       : '';
+    const change = fixable
+      ? `<p class="swim-mech">${noDist ? loamT('Pool length') + ':' : loamT('Not your pool?')}`
+        + ` <select id="swimPoolFix" aria-label="${loamT('Pool length')}">${poolOptionsHTML()}</select>`
+        + ` <span class="pool-custom hidden" id="swimPoolFixCustom"></span></p>`
+      : '';
+    const strokesLine = t.strokes
+      ? ' ' + loamT('The strokes are still Loam\'s, from your watch arm only.')
+      : ' ' + loamT('Your watch sent no arm motion this time, so there are no stroke counts &mdash; the lengths and their times are the watch\'s own.');
     return `<div class="swim-set">
       <div class="swim-set-head"><span class="swim-set-n">${loamT('Lengths from your watch')}</span></div>
-      <p class="swim-mech">${facts}. ${loamT('Your {n} lengths are the ones your Apple Watch counted at the wall &mdash; its own turn detection, the same count an Apple Health import carries &mdash; relayed to the phone and written into this recording as you swam. The strokes are still Loam\'s, from your watch arm only.', { n: t.lengths })}${turns}${noPool}</p>
+      <p class="swim-mech">${facts ? facts + '. ' : ''}${loamT('Your {n} lengths are the ones your Apple Watch counted at the wall &mdash; its own turn detection, the same count an Apple Health import carries &mdash; relayed to the phone and written into this recording as you swam.', { n: t.lengths })}${strokesLine}${turns}${noPool}</p>
+      ${change}
     </div>`;
   }
 
@@ -27611,7 +27691,7 @@ function swimSetCards(R, unit) {
     const t = set.trend;
     const head = `<div class="swim-set-head">
       <span class="swim-set-n">${loamT('Set {n}', { n: set.index })}</span>
-      <span class="swim-set-sub">${set.nLengths} x ${U.swimDistanceLabel(set.distanceM / set.nLengths, unit)} &middot; ${escapeHtml(loamT(set.dominantStyle))}${set.mixedStyles ? ' ' + loamT('(mixed)') : ''} &middot; ${U.swimPaceLabel(set.medianPace100S, unit)}${set.paceCvPct != null ? ' &middot; ' + loamT('spread {pct}%', { pct: set.paceCvPct }) + (set.mixedStyles ? ' (' + escapeHtml(loamT(set.dominantStyle)) + ')' : '') : ''}</span>
+      <span class="swim-set-sub">${set.distanceM ? `${set.nLengths} x ${U.swimDistanceLabel(set.distanceM / set.nLengths, unit)}` : loamT('{n} lengths', { n: set.nLengths })} &middot; ${escapeHtml(loamT(set.dominantStyle))}${set.mixedStyles ? ' ' + loamT('(mixed)') : ''} &middot; ${U.swimPaceLabel(set.medianPace100S, unit)}${set.paceCvPct != null ? ' &middot; ' + loamT('spread {pct}%', { pct: set.paceCvPct }) + (set.mixedStyles ? ' (' + escapeHtml(loamT(set.dominantStyle)) + ')' : '') : ''}</span>
       ${t ? `<span class="swim-verdict ${t.kind}">${escapeHtml(modCopyT(t.read.label))}</span>` : ''}
     </div>`;
     const rest = set.restBeforeS != null
@@ -32326,12 +32406,18 @@ const LOAM_NB = {
   '{n} length · watch': '{n} lengde · klokke',
   '{n} lengths · watch': '{n} lengder · klokke',
   'Lengths from your watch': 'Lengder fra klokken din',
-  'Your {n} lengths are the ones your Apple Watch counted at the wall &mdash; its own turn detection, the same count an Apple Health import carries &mdash; relayed to the phone and written into this recording as you swam. The strokes are still Loam\'s, from your watch arm only.':
-    'De {n} lengdene dine er dem Apple Watch telte ved veggen &mdash; klokkens egen vendingsdeteksjon, samme telling som en import fra Apple Helse bærer &mdash; sendt til telefonen og skrevet inn i dette opptaket mens du svømte. Armtakene er fortsatt Loams, bare fra klokkearmen din.',
+  'Your {n} lengths are the ones your Apple Watch counted at the wall &mdash; its own turn detection, the same count an Apple Health import carries &mdash; relayed to the phone and written into this recording as you swam.':
+    'De {n} lengdene dine er dem Apple Watch telte ved veggen &mdash; klokkens egen vendingsdeteksjon, samme telling som en import fra Apple Helse bærer &mdash; sendt til telefonen og skrevet inn i dette opptaket mens du svømte.',
+  'The strokes are still Loam\'s, from your watch arm only.':
+    'Armtakene er fortsatt Loams, bare fra klokkearmen din.',
   ' Loam\'s own rest detector saw only {b} rests here, so {k} of your turns were swum straight through &mdash; a count it could not have made on its own.':
     ' Loams egen hviledetektor så bare {b} hviler her, så {k} av vendingene dine ble svømt rett gjennom &mdash; en telling den ikke kunne ha gjort på egen hånd.',
-  'No pool length was set, so the count is not yet a distance: name your pool above and it becomes one.':
-    'Ingen bassenglengde ble satt, så tellingen er ennå ikke en distanse: oppgi bassenget ditt over, så blir den det.',
+  'No pool length was set, so the count is not yet a distance: name your pool below and it becomes one.':
+    'Ingen bassenglengde ble satt, så tellingen er ennå ikke en distanse: oppgi bassenget ditt under, så blir den det.',
+  'No pool length was set, so the count is not yet a distance.':
+    'Ingen bassenglengde ble satt, så tellingen er ennå ikke en distanse.',
+  'Your watch sent no arm motion this time, so there are no stroke counts &mdash; the lengths and their times are the watch\'s own.':
+    'Klokken sendte ingen armbevegelse denne gangen, så det finnes ingen armtakstellinger &mdash; lengdene og tidene deres er klokkens egne.',
   'Your {n} lengths are the stretches of unbroken stroking between pauses at the wall &mdash; Loam cannot see a turn, only a rest, so this works because you stopped at every wall. Swim a set continuously and it will read as one long block.':
     'De {n} lengdene dine er strekkene med sammenhengende armtak mellom pausene ved veggen &mdash; Loam kan ikke se en vending, bare en hvile, så dette fungerer fordi du stoppet ved hver vegg. Svøm et sett sammenhengende, så leses det som én lang blokk.',
   'No pool length was set, and nothing in wrist motion reveals how long a pool is. Name it and the lengths above become a distance and a pace:':
@@ -38300,7 +38386,9 @@ function renderTruncNotice(D) {
 function renderSampleRateNotice(D) {
   const sec = document.getElementById('sampleRateNotice');
   if (!sec) return;
-  const warn = imuRateWarning(D && D.imuRateHz);
+  /* Every render payload already carries `sport` beside `imuRateHz`, so the sport-aware warning
+     needs no new plumbing and a CACHED replay picks up the new rule on reopen. */
+  const warn = imuRateWarning(D && D.imuRateHz, D && D.sport);
   if (!warn) { sec.classList.add('hidden'); return; }
   const body = document.getElementById('sampleRateNoticeBody');
   if (body) body.textContent = ' ' + warn;
@@ -40121,6 +40209,18 @@ function openSessionDataSources() {
 function renderSessionOverview(D, sport) {
   const host = document.getElementById('sessionOverview');
   if (!host) return;
+  /* THIS LINE NAMES THE SPORT, so it takes the recording's own rather than the caller's RENDER PATH.
+     `renderAll` passes `renderPathSport`'s value, which deliberately folds e-MTB into the 'mtb'
+     literal every other surface on that path carries -- byte-identical everywhere except here, where
+     it made the masthead read "Mountain biking" under a plain bike mark on a ride the session card,
+     the library row, the coach digest and the Strava activity type all called e-MTB (owner report,
+     2026-09-21). `displaySport` is the same accessor `pageLex` already uses, so the GPS-only import's
+     gpsSport still wins there; the parameter stays as the fallback for a D carrying no sport.
+     Byte-identical for every other caller: renderAllRoad passes 'road' over a D holding 'road',
+     renderAllRunning's 'running'/'walking' and the GPS-only path's gpsSport both already match, and a
+     declared ski day is 'skiing' on both sides -- the selector's option value IS `renderPathSport`'s
+     ski return. Only e-MTB moves. */
+  sport = displaySport(D) || sport;
   const s = D.summary || {}, ride = D.ride || {};
   const duration = s.movingTime ?? s.duration ?? (ride.end - ride.start);
   const distance = s.riddenDistance ?? s.distance;
@@ -40410,7 +40510,14 @@ function renderRideSignature(D, sport) {
     const btn = document.getElementById('rideSigSave');
     if (btn) btn.onclick = saveRideSignature;
     sec.classList.remove('hidden');
-  } catch (e) { console.warn('ride signature failed', e); sec.classList.add('hidden'); }
+  } catch (e) {
+    console.warn('ride signature failed', e); sec.classList.add('hidden');
+    /* The masthead's share button opens the card this just hid, and its handler returns early when
+       the card is hidden -- so leaving it up leaves a button that does nothing. Same as the
+       too-few-points exit above. */
+    const share = document.querySelector('#sessionOverview .session-share');
+    if (share) share.hidden = true;
+  }
 }
 
 /* Hand the finished PNG to the native share sheet (app) or download it (web). */
@@ -44523,7 +44630,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '440a1e0ab · 2026-09-21';
+const LOAM_BUILD = 'e2168e0cd · 2026-09-22';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
