@@ -2729,6 +2729,9 @@
       Timeline
       <span class="subtitle" id="timelineSubtitle">yaw rate + speed · turns shaded · jump airtime shaded</span>
     </div>
+    <div id="runPaceTitle" class="hidden" style="margin-bottom:8px;">
+      <label class="smooth-lbl"><input id="runPaceSmooth" type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> Smooth pace</label>
+    </div>
     <div class="chart" id="timelineChart"></div>
     <div id="timelineFootnote" class="dim hidden" style="font-size:12px; margin-top:6px;"></div>
   </section>
@@ -22207,7 +22210,7 @@ let _progressReturn = null;
 async function openProgress() {
   if (!document.getElementById('progressResults').classList.contains('hidden')) return;
   const ids = ['results','crossResults','coachSection','cropSection','sampleRateNotice','truncNotice',
-    'miniSummary','strengthResults','golfResults','swimResults','skiResults'];
+    'miniSummary','strengthResults','runPaceTitle','golfResults','swimResults','skiResults'];
   _progressReturn = ids.some(id => !document.getElementById(id)?.classList.contains('hidden')) && document.getElementById('dropzone').classList.contains('hidden')
     ? { view: _lastRender, y: window.scrollY, status: document.getElementById('statusText').textContent,
         coach: coachState, visible: ids.filter(id => document.getElementById(id) && !document.getElementById(id).classList.contains('hidden')) } : null;
@@ -29362,6 +29365,20 @@ function rollingMedianMasked(vals, win) {
   }
   return out;
 }
+/* Time-based pace smoothing keeps the same window for phone and sparse GPS recordings.
+   Missing readings remain gaps. Sustained slower running is retained; only short deviations
+   are suppressed, and raw readings remain available through the toggle. */
+function smoothRunPace(times, values) {
+  let left = 0, right = 0;
+  return values.map((v, i) => {
+    if (!Number.isFinite(v)) return null;
+    while (left < i && times[left] < times[i] - 15) left++;
+    while (right < times.length && times[right] <= times[i] + 15) right++;
+    const window = values.slice(left, right).filter(Number.isFinite).sort((a, b) => a - b);
+    const mid = window.length >> 1;
+    return window.length % 2 ? window[mid] : (window[mid - 1] + window[mid]) / 2;
+  });
+}
 /* The per-section "smooth" checkboxes all drive one shared preference; flipping either re-renders the
    whole view (same path the units toggle uses) so cadence, oscillation, and the pace timeline update
    together. syncSmoothToggles mirrors the stored preference back onto every checkbox on each render. */
@@ -29520,6 +29537,9 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  'Battery used': 'Batteri brukt',
+  ' · ~{p}%/h': ' · ~{p} %/t',
+  ' · bike gauge': ' · sykkelens måler',
   'Distance': 'Distanse',
   'Moving time': 'Tid i bevegelse',
   'Share card': 'Del kort',
@@ -31046,6 +31066,7 @@ const LOAM_NB = {
   'L/R': 'V/H',
   'Drop': 'Fall',
   'smooth': 'glattet',
+  'Smooth pace': 'Jevn ut tempo',
   'Rolling median that suppresses the spikes from stops; also smooths oscillation and pace':
     'Glidende median som demper toppene fra stopp; glatter også svingning og tempo',
   'Rolling median that suppresses the spikes from stops; also smooths cadence and pace':
@@ -33872,6 +33893,7 @@ function clearRunFocus() {
 }
 
 function renderRunTimeline(D) {
+  show('runPaceTitle');
   /* A bike FIT on the GPS-only path draws the bike stack (speed, elevation, heart rate, power,
      cadence -- see renderBikeTimeline); everything below is the foot timeline. */
   { const sp = normalizeSport(D.gpsSport || D.sport || '');
@@ -33910,15 +33932,20 @@ function renderRunTimeline(D) {
     const paceMin = (mps) => (mps != null && !isNaN(mps) && mps >= 1.0) ? (U.metric() ? 1000 / mps : 1609.34 / mps) / 60 : null;
     const fmtPace = (p) => { if (p == null) return ''; const m = Math.floor(p), s = Math.round((p - m) * 60); return `${m}:${String(s).padStart(2, '0')} ${U.metric() ? '/km' : '/mi'}`; };
     const paceY = loc.map(r => paceMin(r.speed));
-    traces.push({ x: t, y: paceY, type: 'scatter', mode: 'lines',
-      line: { color: '#6da7c4', width: smooth ? 1 : 1.5 }, opacity: smooth ? 0.4 : 1,
+    // Only plot the chosen series: a faint raw trace still expands Plotly's auto-range.
+    const pace = smooth ? smoothRunPace(t, paceY) : paceY;
+    traces.push({ x: t, y: pace, type: 'scatter', mode: 'lines',
+      line: { color: '#6da7c4', width: smooth ? 2.5 : 1.5 },
       name: loamT('Pace ({u})', { u: U.metric() ? 'min/km' : 'min/mi' }), yaxis: 'y', connectgaps: false,
-      text: paceY.map(fmtPace), hovertemplate: '%{text}<extra></extra>', hoverinfo: smooth ? 'skip' : 'all' });
-    if (smooth) {
-      const sm = rollingMedianMasked(paceY, 15);
-      traces.push({ x: t, y: sm, type: 'scatter', mode: 'lines', line: { color: '#4a86a6', width: 2.5 },
-        name: loamT('Pace (median)'), yaxis: 'y', connectgaps: false,
-        text: sm.map(fmtPace), hovertemplate: '%{text}<extra></extra>' });
+      text: pace.map(fmtPace), hovertemplate: '%{text}<extra></extra>' });
+    const gapY = timelineGapSpeeds(loc, climbAltSeries(D.sensors.baro || [], D.sensors.location, ride))
+      .map(v => Number.isFinite(v) && v > 0 ? (U.metric() ? 1000 : 1609.34) / v / 60 : null);
+    if (gapY.some(p => p != null)) {
+      const gap = smooth ? smoothRunPace(t, gapY) : gapY;
+      traces.push({ x: t, y: gap, type: 'scatter', mode: 'lines',
+        line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: 'dash' },
+        name: `GAP (${U.metric() ? 'min/km' : 'min/mi'})`, yaxis: 'y', connectgaps: false,
+        text: gap.map(fmtPace), hovertemplate: 'GAP %{text}<extra></extra>' });
     }
     chans.push({ axis: 'y', label: loamT('pace'), color: '#6da7c4', reversed: true,
       title: loamT('pace ({u})', { u: U.metric() ? 'min/km' : 'min/mi' }) });
@@ -34284,6 +34311,28 @@ function runningClimbMetrics(seg, alts, cadSeries, hrRows, index) {
    computed over no grade is just the pace, and printing it twice under two names is a claim that
    something was corrected when nothing was. */
 const GAP_GRADE_WIN_S = 20;
+/* Timeline GAP uses the session's 20-second grade window and Minetti model. Require
+   altitude coverage at both ends and leave stops and sensor dropouts as gaps. */
+function timelineGapSpeeds(rows, alts) {
+  let ai = 0;
+  const altAt = (t) => {
+    while (ai < alts.length - 1 && alts[ai + 1].t <= t) ai++;
+    while (ai > 0 && alts[ai].t > t) ai--;
+    const a = alts[ai], b = alts[ai + 1];
+    if (!a || t < a.t || !Number.isFinite(a.alt)) return null;
+    if (a.t === t) return a.alt;
+    if (!b || b.t - a.t > 5 || !Number.isFinite(b.alt)) return null;
+    return a.alt + (b.alt - a.alt) * (t - a.t) / (b.t - a.t);
+  };
+  return rows.map((r, i) => {
+    if (!Number.isFinite(r.speed) || r.speed < 1 ||
+        (i > 0 && r.t - rows[i - 1].t > 5)) return null;
+    const a0 = altAt(r.t - GAP_GRADE_WIN_S / 2);
+    const a1 = altAt(r.t + GAP_GRADE_WIN_S / 2);
+    if (a0 == null || a1 == null) return null;
+    return gradeAdjustedSpeed(r.speed, 100 * (a1 - a0) / (r.speed * GAP_GRADE_WIN_S));
+  });
+}
 function sessionGapSpeed(locRows, alts, ride) {
   if (!alts || alts.length < 2) return null;
   const rows = (locRows || []).filter(r => r && r.t >= ride.start && r.t <= ride.end && r.speed != null);
@@ -40721,6 +40770,7 @@ function bikeTimelineRows(D) {
 }
 
 function renderBikeTimeline(D) {
+  hide('runPaceTitle');
   const ride = D.ride;
   const turns = D.turns || [];
   const ridingJumps = D.ridingJumps || [];
@@ -42904,6 +42954,41 @@ function renderAnalog(fitInRide, ride) {
      <br><br><strong>This detector has never been graded on a real motor-off ride</strong>, because there isn't one in the reference data yet. Its thresholds are set from the opposite direction: across 118 minutes of fully-assisted riding the longest stretch that could be mistaken for analog was 44 seconds, and the floor here is 90, so it finds nothing on any assisted ride. That bounds false positives and says nothing yet about whether it catches every real analog stretch.`);
 }
 
+/*
+ * Battery used on an e-MTB ride, read off the bike's OWN battery gauge (Specialized FIT field 118,
+ * `batteryPct`, decoded by extractFitData since 2026-08-14 and shown nowhere until now).
+ *
+ * Start and end are the head unit's first and last readings inside the ride window; their
+ * difference is subtraction. The gauge reports whole
+ * percent, so the difference has about one percentage point of quantization uncertainty. The
+ * hourly rate is an average over the observed span, withheld below BATTERY_RATE_MIN_S.
+ *
+ * Returns null when there is nothing honest to say: fewer than two readings, a reading outside
+ * 0-100, non-increasing timestamps, or any gauge increase (possible charging or a gauge reset).
+ * An unchanged gauge also gives no tile. Missing readings are skipped, never treated as zero.
+ * A null renders as no tile, never as "0%".
+ */
+const BATTERY_RATE_MIN_S = 900;
+
+function batteryUse(rows) {
+  const pts = (rows || []).filter(r => r && r.batteryPct != null);
+  if (pts.length < 2 || pts.some(r => !Number.isFinite(r.batteryPct)
+    || r.batteryPct < 0 || r.batteryPct > 100 || !Number.isFinite(r.t_phone))) return null;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].t_phone <= pts[i - 1].t_phone || pts[i].batteryPct > pts[i - 1].batteryPct) return null;
+  }
+  const first = pts[0], last = pts[pts.length - 1];
+  const usedPct = first.batteryPct - last.batteryPct;
+  if (!(usedPct > 0)) return null;
+  const spanS = last.t_phone - first.t_phone;
+  return {
+    startPct: first.batteryPct,
+    endPct: last.batteryPct,
+    usedPct,
+    perHourPct: spanS >= BATTERY_RATE_MIN_S ? usedPct / (spanS / 3600) : null,
+  };
+}
+
 function renderCadPower(fitInRide, ride) {
   const sec = document.getElementById('cadPowerSection');
   if (!sec) return;
@@ -42911,6 +42996,9 @@ function renderCadPower(fitInRide, ride) {
   if (!st) { sec.classList.add('hidden'); return; }
   sec.classList.remove('hidden');
   const { rows, grade, avgCad, avgClimbCad, avgAssist, energyWh, lugPct } = st;
+  // The shared FIT window includes 30 seconds of padding for interpolation. Battery use must
+  // describe only the selected ride, excluding those before/after readings.
+  const bat = batteryUse(fitInRide.filter(r => r.t_phone >= ride.start && r.t_phone <= ride.end));
 
   document.getElementById('cadPowerSummary').innerHTML = `
     <div class="stat accent"><div class="label">Avg cadence</div><div class="value">${avgCad.toFixed(0)}<span class="unit">rpm</span></div><div class="sub">while pedaling</div></div>
@@ -42918,6 +43006,7 @@ function renderCadPower(fitInRide, ride) {
     <div class="stat"><div class="label">Avg motor assist</div><div class="value">${avgAssist.toFixed(0)}<span class="unit">W</span></div><div class="sub">while pedaling</div></div>
     <div class="stat accent4"><div class="label">Motor energy</div><div class="value">${energyWh.toFixed(0)}<span class="unit">Wh</span></div><div class="sub">motor output; battery drain is more</div></div>
     ${lugPct != null ? `<div class="stat"><div class="label">Lugging on climbs</div><div class="value">${lugPct}<span class="unit">%</span></div><div class="sub">&lt;60 rpm under load</div></div>` : ''}
+    ${bat ? `<div class="stat"><div class="label">${loamT('Battery used')}</div><div class="value">${bat.usedPct}<span class="unit">%</span></div><div class="sub">${bat.startPct}% → ${bat.endPct}%${bat.perHourPct != null ? loamT(' · ~{p}%/h', { p: bat.perHourPct.toFixed(0) }) : ''}${loamT(' · bike gauge')}</div></div>` : ''}
   `;
 
   const maxCad = Math.max(110, ...rows.map(r => r.cad));
@@ -44642,7 +44731,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '849b65f4d · 2026-09-23';
+const LOAM_BUILD = 'e732f59d7 · 2026-09-23';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
