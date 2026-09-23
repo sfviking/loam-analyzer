@@ -29398,6 +29398,19 @@ function rollingMedianMasked(vals, win) {
   }
   return out;
 }
+/* Break the pace trace across recorded pauses and missing GPS, including pauses with no
+   samples. Keep the original timestamps so the other timeline rows stay aligned. */
+function runPaceSamples(rows, pausedSpans = []) {
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i], prev = rows[i - 1];
+    if (prev && (r.t - prev.t > 5 || pausedSpans.some(p => p.start < r.t && p.end > prev.t))) {
+      out.push({ t: (prev.t + r.t) / 2, speed: null });
+    }
+    out.push(pausedSpans.some(p => r.t >= p.start && r.t < p.end) ? { ...r, speed: null } : r);
+  }
+  return out;
+}
 /* Time-based pace smoothing keeps the same window for phone and sparse GPS recordings.
    Missing readings remain gaps. Sustained slower running is retained; only short deviations
    are suppressed, and raw readings remain available through the toggle. */
@@ -29408,6 +29421,8 @@ function smoothRunPace(times, values) {
     while (left < i && times[left] < times[i] - 15) left++;
     while (right < times.length && times[right] <= times[i] + 15) right++;
     const window = values.slice(left, right).filter(Number.isFinite).sort((a, b) => a - b);
+    // A few GPS movement blips during a stop must not become isolated pace fragments.
+    if (window.length <= (right - left) / 2) return null;
     const mid = window.length >> 1;
     return window.length % 2 ? window[mid] : (window[mid - 1] + window[mid]) / 2;
   });
@@ -33960,11 +33975,12 @@ function renderRunTimeline(D) {
   syncSmoothToggles();
   const smooth = loamSmooth();
   const ride = D.ride;
-  const loc = D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end);
-  const t = loc.map(r => r.t - ride.start);
+  let loc = D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end);
   /* Foot activities read in pace (min/mi or /km), not riding speed; bikes keep speed. */
   const sport = normalizeSport(D.gpsSport || D.sport || '');
   const footSport = sport === 'run' || sport === 'walk';
+  if (footSport) loc = runPaceSamples(loc, ride.pausedSpans);
+  const t = loc.map(r => r.t - ride.start);
   const traces = [];
   /* ON FOOT, ONE CHANNEL PER ROW, sharing one x axis -- the way Strava stacks an activity, and the
      answer to the 2026-09-16 report ("grafene ... blir veldig knotete og små på telefonen").
@@ -34000,7 +34016,7 @@ function renderRunTimeline(D) {
     if (gapY.some(p => p != null)) {
       const gap = smooth ? smoothRunPace(t, gapY) : gapY;
       traces.push({ x: t, y: gap, type: 'scatter', mode: 'lines',
-        line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: 'dash' },
+        line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: '6px,2px' },
         name: `GAP (${U.metric() ? 'min/km' : 'min/mi'})`, yaxis: 'y', connectgaps: false,
         text: gap.map(fmtPace), hovertemplate: 'GAP %{text}<extra></extra>' });
     }
@@ -44806,7 +44822,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'd0898269a · 2026-09-23';
+const LOAM_BUILD = '630406d1d · 2026-09-23';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
