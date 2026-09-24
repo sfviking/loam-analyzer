@@ -686,6 +686,7 @@
      Only explicitly marked prose is removed; labels, controls, empty states and caveats survive. */
   .analysis-view-bar { display:none; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; margin:0 0 12px; }
   .analysis-view-bar > .prefs { display:none; }
+  body:has(#cropSection.hidden) #cropOpenBtn { display:none; }
   body:has(#results:not(.hidden)) .analysis-view-bar > .prefs { display:block; }
   .analysis-view-bar select, #displayPrefsBtn { min-height:44px; }
   .analysis-view-bar select { font-size:16px; }
@@ -766,6 +767,14 @@
   .pbp-turn:hover { border-color: var(--accent); }
   .pbp-row-link { cursor: pointer; color: var(--text-muted); font-size: 11px; text-decoration: underline; white-space: nowrap; }
   .pbp-row-link:hover { color: var(--accent); }
+  .comparison-toggle { background:none; border:0; padding:4px 0; color:inherit; font:inherit; font-weight:inherit; cursor:pointer; text-align:left; }
+  .comparison-toggle::before { content:'▾'; display:inline-block; width:1em; }
+  .comparison-toggle[aria-expanded="false"]::before { content:'▸'; }
+  :is(#playByPlay, #ghostRace)[data-collapsed] > :not(.section-title),
+  :is(#playByPlay, #ghostRace)[data-collapsed] > .section-title > :not(.comparison-toggle) { display:none !important; }
+  .comparison-notes { margin:8px 0; font-size:12px; color:var(--text-dim); }
+  .comparison-notes summary { cursor:pointer; padding:4px 0; }
+  :root[data-analysis-view="minimalist"] #ghostHow { display:none; }
   .pbp-focus { margin-bottom: 8px; line-height: 1.7; }
   /* The play-by-play's expander borrows the corner ledger's .ledger-more styling; it just needs a
      box of its own, since it is not sitting flush at the bottom of a bordered panel. */
@@ -2054,7 +2063,6 @@
   </div>
   <div class="crop-bar">
     <span id="cropBarState"></span>
-    <button type="button" id="cropOpenBtn">Trim&hellip;</button>
     <button type="button" id="cropClearBtn" class="hidden">Use the whole recording</button>
   </div>
   <div id="cropPanel" class="crop-panel hidden">
@@ -2085,10 +2093,10 @@
   #cropOpenBtn, #cropClearBtn { min-height:44px; }
   .crop-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; font-size: 12px;
     color: var(--text-muted, #94a3b8); padding: 7px 0; }
-  .crop-bar button, .crop-actions button { font: 500 12px 'JetBrains Mono', monospace; padding: 5px 11px;
+  #cropOpenBtn, .crop-bar button, .crop-actions button { font: 500 12px 'JetBrains Mono', monospace; padding: 5px 11px;
     border-radius: 8px; border: 1px solid var(--border, #e2e8f0); background: var(--surface-2, #eef2f6);
     color: var(--text-dim, #475569); cursor: pointer; }
-  .crop-bar button:hover, .crop-actions button:hover { color: var(--text, #1a202c); }
+  #cropOpenBtn:hover, .crop-bar button:hover, .crop-actions button:hover { color: var(--text, #1a202c); }
   /* `clear` because a flex container establishes its own formatting context and so would be SQUEEZED
      alongside the floated dismiss button rather than flowing under it. Today's notices carry enough
      prose that the float has ended long before, which is precisely the kind of accident that stops
@@ -2152,6 +2160,7 @@
       <option value="detailed" selected>Detailed</option>
     </select>
   </label>
+  <button type="button" id="cropOpenBtn" class="hidden">Trim&hellip;</button>
     <div class="prefs">
       <button id="displayPrefsBtn" type="button" aria-expanded="false" aria-controls="displayPrefs" title="Map size, basemap, units and calibration">&#9881; Options</button>
       <div id="displayPrefs" class="prefs-pop hidden">
@@ -2829,7 +2838,7 @@
       <div class="chart detail-chart" id="runsDtwChart" style="height:260px; margin-top:8px;"></div>
       <div id="playByPlay" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
-          Play-by-play
+          <button type="button" class="comparison-toggle" aria-expanded="true" aria-controls="pbpBody" onclick="toggleComparisonPanel(this)">Play-by-play</button>
           <!-- Set per sport by setupPlayByPlay: the corner clause only where corners exist. -->
           <span class="subtitle" id="pbpSubtitle">vs your best comparable lap of the same segment</span>
           <select id="pbpRun" style="margin-left:auto;"></select>
@@ -2838,7 +2847,7 @@
       </div>
       <div id="ghostRace" class="hidden" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
         <div class="section-title" style="font-size:15px; margin-bottom:8px;">
-          Ghost race
+          <button type="button" class="comparison-toggle" aria-expanded="true" aria-controls="ghostControls ghostHow ghostNote" onclick="toggleComparisonPanel(this)">Ghost race</button>
           <!-- Set by setupGhostRace in the runs panel's own row noun (descent / lap / run). -->
           <span class="subtitle" id="ghostSubtitle">replay a lap against your fastest lap of the same segment</span>
           <select id="ghostRun" style="margin-left:auto;"></select>
@@ -8011,6 +8020,12 @@ function pbpRankDeltas(deltas) {
     gained: gains.length,
   };
 }
+function toggleComparisonPanel(button) {
+  const collapsed = button.getAttribute('aria-expanded') === 'true';
+  button.setAttribute('aria-expanded', String(!collapsed));
+  button.closest('#playByPlay, #ghostRace').toggleAttribute('data-collapsed', collapsed);
+  if (collapsed && button.closest('#ghostRace')) ghostRaceStop();
+}
 function renderPlayByPlay(run, ref, D) {
   const body = document.getElementById('pbpBody');
   if (!body) return;
@@ -8077,28 +8092,30 @@ function renderPlayByPlay(run, ref, D) {
     ? `<span style="color:var(--text-muted);">${loamT('too close to call')}${Math.abs(dt) >= 0.05 ? loamT(', {t}s apart', { t: Math.abs(dt).toFixed(1) }) : ''}</span>`
     : `<span style="color:${faster ? '#7fb069' : 'var(--accent)'};">${loamT(faster ? '{t}s faster' : '+{t}s slower', { t: Math.abs(dt).toFixed(1) })}</span>`;
   let html = `<div style="margin-bottom:8px;"><strong>${labA}</strong> vs `
-    + `<strong>${labF}</strong> (${refWhat}): ${verdict}</div>`;
+    + `<strong>${labF}</strong><span class="minimalist-explanation"> (${refWhat})</span>: ${verdict}</div>`;
+  let notes = '';
   if (tied)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
+    notes += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
       + loamT('A gate-to-gate time carries a second or two depending on where the saved track\'s points happen to fall, so this gap is inside what the timing itself moves by. The corners below are still measured, and two laps can tie on the clock while differing at them.')
       + `</div>`;
   if (ref.crossRide)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
+    notes += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
       + loamT('Compared across {sessions}, both cut to this segment\'s start and finish gates so the two times measure the same ground.',
         { sessions: sportNounT(displaySport(D), { plural: true }) })
       + `</div>`;
   if (ref.crossRide && ref.excluded)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
+    notes += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
       + loamT(ref.excluded === 'self'
           ? 'Your fastest lap here is {t}{label}, and it is not the reference because it is in this recording &mdash; a lap is not compared with itself.'
           : 'Your fastest lap here is {t}{label}, and it is not the reference because it was saved without per-corner data, so there is nothing to line up turn for turn.',
         { t: fmtDuration(ref.fastestDuration), label: ref.fastestLabel ? ` (${escapeHtml(ref.fastestLabel)})` : '' })
       + `</div>`;
   if (countA || countF)
-    html += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
+    notes += `<div class="dim" style="font-size:12px; margin-bottom:8px;">`
       + loamT('Matched {n} corners by trail position and direction ({here} detected here, {there} on the reference). Missing GPS, uncertain direction, or ambiguous matches are left unpaired. Matching is an estimate; speed differences do not establish braking or technique.',
         { n: deltas.length, here: countA, there: countF })
       + `</div>`;
+  if (notes) html += `<details class="comparison-notes"${analysisView() === 'minimalist' ? '' : ' open'}><summary>${loamT('Comparison details')}</summary>${notes}</details>`;
   /* Speed deltas follow the Units toggle like the turn table (they used to hardcode mph). The delta
      math stays in mph (pbpDeltasFromTurns, thresholds below); only the display converts. */
   const spd = (mph) => `${U.speedNum(Math.abs(mph) / 2.23694).toFixed(1)} ${U.speedUnit()}`;
@@ -8139,7 +8156,7 @@ function renderPlayByPlay(run, ref, D) {
     html += `<div class="dim">${loamT('No per-turn data for this {row}, so only the total time is compared.', { row: rowNounT(rowNoun) })}</div>`;
   } else if (!cmp.length) {
     /* Turns exist but their speeds never resolved, so every delta would be an artifact. */
-    html += `<div class="dim">${loamT('No reliably matched corners with usable speeds, so only the total time above is compared.')}</div>`;
+    html += `<div class="dim"><span class="minimalist-only">${loamT('Time only · no matched corner speeds.')}</span><span class="minimalist-explanation">${loamT('No reliably matched corners with usable speeds, so only the total time above is compared.')}</span></div>`;
   } else if (!noted.length) {
     html += `<div class="dim">${loamT('No notable turn-by-turn differences (within ~{v} at the matched corners).', { v: spd(1.0) })}</div>`;
   } else {
@@ -8458,12 +8475,12 @@ function setupGhostRace(runs, D, rowNoun) {
          the table above; the verb follows the sport, so a runner is not told to ride. */
       const lex = sportLex(displaySport(D));
       const rows = `${runs.length} ${rowNounT(rn, runs.length !== 1)}`;
-      note.innerHTML = `<span style="color:var(--text);">`
+      note.innerHTML = `<span class="minimalist-only">${loamT('Repeat a segment in this recording to race a ghost.')}</span><span class="minimalist-explanation"><span style="color:var(--text);">`
         + loamT('No ghost on this {noun}: its {rows} are each on a different stretch of ground, so there is no second lap to race.',
           { noun: lexNounT(lex, { definite: true }), rows })
         + `</span><br>`
         + loamT('{Verb} one stretch twice in one recording and the faster lap becomes the ghost.',
-          { Verb: lexVerbT(lex, true) });
+          { Verb: lexVerbT(lex, true) }) + `</span>`;
     }
     return;
   }
@@ -29445,13 +29462,26 @@ function smoothRunPace(times, values, windowS = 30) {
     return window.length % 2 ? window[mid] : (window[mid - 1] + window[mid]) / 2;
   });
 }
-/* Display-only smoothing: keep event markers and the source analysis untouched. Short windows
-   preserve corner shape and sustained changes; missing readings stay gaps. */
+/* Display-only smoothing: keep event markers and the source analysis untouched. A fixed
+   sub-second window disappears at whole-ride scale, so use 1/200 of the timeline duration
+   (about two pixels on a phone), capped at 30 s to retain sustained efforts and stops.
+   Short timelines keep the lighter windows; missing readings stay gaps. */
 function smoothTimelineTraces(traces, windowS = 3) {
   syncSmoothToggles();
   if (!loamSmooth()) return traces;
+  let start = Infinity, end = -Infinity;
+  for (const trace of traces) {
+    if (trace.mode !== 'lines') continue;
+    for (const t of trace.x) {
+      if (!Number.isFinite(t)) continue;
+      start = Math.min(start, t);
+      end = Math.max(end, t);
+    }
+  }
+  const overviewWindowS = Number.isFinite(end - start) ? Math.min(30, (end - start) / 200) : 0;
   return traces.map(trace => trace.mode === 'lines'
-    ? { ...trace, y: smoothRunPace(trace.x, trace.y, windowS) }
+    ? { ...trace, y: smoothRunPace(trace.x, trace.y,
+      Math.max(windowS, overviewWindowS)) }
     : trace);
 }
 /* The per-section "smooth" checkboxes all drive one shared preference; flipping either re-renders the
@@ -31171,6 +31201,9 @@ const LOAM_NB = {
     'Glidende median som demper toppene fra stopp; glatter også kadens og tempo',
   'Play-by-play': 'Detaljert sammenligning',
   'Ghost race': 'Spøkelsesløp',
+  'Time only · no matched corner speeds.': 'Kun tid · ingen sammenlignbare svinghastigheter.',
+  'Comparison details': 'Detaljer om sammenligningen',
+  'Repeat a segment in this recording to race a ghost.': 'Gjenta et segment i dette opptaket for å kjøre mot et spøkelse.',
   '▶ Race the ghost': '▶ Kjør mot spøkelset',
   /* --- The ghost race's live controls and HUD ---------------------------------------------------
      '▶ Race the ghost' above had a translation from the first pass and a reader could still only
@@ -39461,6 +39494,7 @@ function setAnalysisView(value) {
   document.documentElement.dataset.analysisView = view;
   document.getElementById('analysisView').value = view;
   try { localStorage.setItem('loam_analysis_view', view); } catch (e) { /* session-only if storage is unavailable */ }
+  document.querySelectorAll('.comparison-notes').forEach(el => { el.open = view !== 'minimalist'; });
   buildSectionNav();
   requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
 }
@@ -44870,7 +44904,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '6d671167e · 2026-09-23';
+const LOAM_BUILD = 'c6082a1f1 · 2026-09-23';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
