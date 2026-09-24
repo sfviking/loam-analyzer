@@ -697,10 +697,13 @@
   .analysis-view-bar select { min-width:116px; }
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) :is(.lf-note, .lift-sig-cap, .swim-sig-cap, .gr-note, .swim-mech, .swim-act, .be-foot) { display:none; }
   .analysis-visual-only { display:none; }
+  /* The coach panel is session prose in these views -- except where Progress borrows it INTO the
+     training plan, whose "Write my plan with the coach" button would otherwise scroll to nothing,
+     and Progress carries no View picker to get out of the mode. */
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) .analysis-detailed-only,
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) .analysis-explanation,
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) :is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults) .caveat-more,
-  :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) :is(#coachHighlights, #coachSection, #gpsUpsellSection, #roadUpsellSection, #geekStatsSection, #landscapeTip),
+  :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) :is(#coachHighlights, #coachSection:not(#progressPlanCoachHost #coachSection), #gpsUpsellSection, #roadUpsellSection, #geekStatsSection, #landscapeTip),
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) :is(.lift-coach, .golf-tips, .focus-toggle) { display:none !important; }
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) .analysis-visual-only { display:block; }
   :root:is([data-analysis-view="visual"], [data-analysis-view="minimalist"]) .analysis-compact-note { color:var(--text-dim); font-size:12px; margin:8px 0; }
@@ -713,7 +716,7 @@
     .minimalist-explanation, .gr-card .p, .gr-tier .d, .gr-gated, .ski-note, .be-sub, #runsCta, .map-help,
     .section-title > .subtitle, .rep-detail-title > .subtitle) { display:none !important; }
   :root[data-analysis-view="minimalist"] :is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults)
-    :is(.strength-tablenote, .golf-tablenote):not(:only-child):not(.hrz-caveat):not(:has(button, input, select, a)) { display:none !important; }
+    :is(.strength-tablenote, .golf-tablenote):not(:only-child):not(.hrz-caveat):not(.hrz-keep):not(:has(button, input, select, a)) { display:none !important; }
   :root[data-analysis-view="minimalist"] .stat .value { font-size:clamp(30px, 4vw, 44px); line-height:1.1; }
   :root[data-analysis-view="minimalist"] .stile-v { font-size:clamp(26px, 3vw, 36px); line-height:1.15; }
   :root[data-analysis-view="minimalist"] .stats-panel { gap:24px 18px; }
@@ -29449,17 +29452,26 @@ function runPaceSamples(rows, pausedSpans = []) {
 /* Time-based pace smoothing keeps the same window for phone and sparse GPS recordings.
    Missing readings remain gaps. Sustained slower running is retained; only short deviations
    are suppressed, and raw readings remain available through the toggle. */
+/* A running median over a time window. The window's finite values are kept SORTED and updated as
+   the window slides (binary-search insert and delete) rather than re-sliced and re-sorted for every
+   sample: the bike timeline's turning row is 20 Hz, and once the window scales with the ride
+   (smoothTimelineTraces) re-sorting a 23 s window at every one of a 78-minute ride's 94k samples
+   blocked the page for ~5 s on every render. Same window, same median, same gap rule. */
 function smoothRunPace(times, values, windowS = 30) {
-  let left = 0, right = 0;
+  let left = 0, right = 0, lo = 0, hi = 0;
+  const sorted = [];
+  const at = (v) => { let a = 0, b = sorted.length; while (a < b) { const m = (a + b) >> 1; if (sorted[m] < v) a = m + 1; else b = m; } return a; };
   return values.map((v, i) => {
     if (!Number.isFinite(v)) return null;
     while (left < i && times[left] < times[i] - windowS / 2) left++;
     while (right < times.length && times[right] <= times[i] + windowS / 2) right++;
-    const window = values.slice(left, right).filter(Number.isFinite).sort((a, b) => a - b);
+    if (left > right) return null;   // only reachable with an out-of-order clock
+    for (; hi < right; hi++) if (Number.isFinite(values[hi])) sorted.splice(at(values[hi]), 0, values[hi]);
+    for (; lo < left; lo++) if (Number.isFinite(values[lo])) sorted.splice(at(values[lo]), 1);
     // A few GPS movement blips during a stop must not become isolated pace fragments.
-    if (window.length <= (right - left) / 2) return null;
-    const mid = window.length >> 1;
-    return window.length % 2 ? window[mid] : (window[mid - 1] + window[mid]) / 2;
+    if (sorted.length <= (right - left) / 2) return null;
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   });
 }
 /* Display-only smoothing: keep event markers and the source analysis untouched. A fixed
@@ -31194,6 +31206,11 @@ const LOAM_NB = {
   'L/R': 'V/H',
   'Drop': 'Fall',
   'smooth': 'glattet',
+  'Smooth': 'Glattet',
+  'Reduce brief spikes in timeline readings. Turn off to see raw readings.':
+    'Demper korte topper i tidslinjen. Slå av for å se rådata.',
+  'Watch': 'Klokke',
+  'Phone': 'Telefon',
   'Smooth pace': 'Jevn ut tempo',
   'Rolling median that suppresses the spikes from stops; also smooths oscillation and pace':
     'Glidende median som demper toppene fra stopp; glatter også svingning og tempo',
@@ -34065,7 +34082,7 @@ function renderRunTimeline(D) {
        spike to infinity. Axis is reversed so faster (lower pace) sits at the top, matching the old
        speed trace's "up = faster" reading. */
     const paceMin = (mps) => (mps != null && !isNaN(mps) && mps >= 1.0) ? (U.metric() ? 1000 / mps : 1609.34 / mps) / 60 : null;
-    const fmtPace = (p) => { if (p == null) return ''; const m = Math.floor(p), s = Math.round((p - m) * 60); return `${m}:${String(s).padStart(2, '0')} ${U.metric() ? '/km' : '/mi'}`; };
+    const fmtPace = (p) => { if (p == null) return ''; const tot = Math.round(p * 60), m = Math.floor(tot / 60), s = tot % 60; return `${m}:${String(s).padStart(2, '0')} ${U.metric() ? '/km' : '/mi'}`; };
     const paceY = loc.map(r => paceMin(r.speed));
     // Only plot the chosen series: a faint raw trace still expands Plotly's auto-range.
     const pace = smooth ? smoothRunPace(t, paceY) : paceY;
@@ -35054,7 +35071,7 @@ function renderHrZones(D) {
     <div class="hrz-list">${bars}</div>
     <div class="strength-tablenote">${prov.caption}</div>
     ${prov.caveat ? `<div class="strength-tablenote hrz-caveat">${prov.caveat}</div>` : ''}
-    ${prov.peakNote ? `<div class="strength-tablenote">${prov.peakNote}</div>` : ''}
+    ${prov.peakNote ? `<div class="strength-tablenote hrz-keep">${prov.peakNote}</div>` : ''}
     ${loamHasMaxHRHost() ? '' : hrZonesMaxInput(r.maxHR)}
     ${prov.method}
     ${leadNote(
@@ -44904,7 +44921,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = 'c6082a1f1 · 2026-09-23';
+const LOAM_BUILD = '15a1bb8b1 · 2026-09-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
