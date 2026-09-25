@@ -34178,8 +34178,16 @@ function renderRunTimeline(D) {
   let subtitle = chans.map(c => c.label).join(stacked ? ' · ' : ' + ')
     + (stacked ? loamT(', one row each') : '') + ' · ' + loamT('climb/descent segments shaded');
   if (D.sport !== 'walking' && D.gait && D.gait.breaks && D.gait.breaks.length) subtitle += ' · ' + loamT('walk breaks hatched');
+  /* SEPARATE PANELS, NOT ONE CHART CUT INTO ROWS (owner, 2026-09-25: "a bit too busy"). Stacked,
+     every band used to run `yref: 'paper'` -- top to bottom through every row AND the gaps between
+     them -- so a hilly run painted the whole figure in red and green stripes and the rows read as
+     one striped block. Each band now sits on the row whose quantity it describes: climb/descent is
+     an ALTITUDE fact and walk breaks are a PACE fact. With no altitude row the grade bands fall back
+     to the pace row, where they always were. The single plot keeps `paper`: it has one row. */
+  const rowRef = (axis) => stacked ? axis + ' domain' : 'paper';
+  const altAxis = (chans.find(c => c.axis === 'y2') || chans[0]).axis;
   const shapes = D.running.segments.map(s => ({
-    type: 'rect', xref: 'x', yref: 'paper',
+    type: 'rect', xref: 'x', yref: rowRef(altAxis),
     x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
     /* Gray for detected lift rides (GPS-only FIT rides); red/green for descents/climbs. */
     fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.22)' : s.dir === 'down' ? 'rgba(197,75,60,0.15)' : 'rgba(140,170,109,0.15)',
@@ -34189,9 +34197,21 @@ function renderRunTimeline(D) {
   if (D.sport !== 'walking' && D.gait && D.gait.breaks) {
     for (const b of D.gait.breaks) {
       shapes.push({
-        type: 'rect', xref: 'x', yref: 'paper',
+        type: 'rect', xref: 'x', yref: rowRef(chans[0].axis),
         x0: b.t0 - ride.start, x1: b.t1 - ride.start, y0: 0, y1: 1,
         fillcolor: 'rgba(100,108,120,0.20)', line: { width: 0 }, layer: 'below',
+      });
+    }
+  }
+  /* Each row's own panel: a faint card behind its plot area, so the gap between two rows reads as
+     the page rather than as more chart. Translucent, not a palette hex, so it lifts the ground in
+     the dark theme and darkens it in the light one without a theme-map entry, and never hides the
+     grid under it. */
+  if (stacked) {
+    for (const c of chans) {
+      shapes.push({
+        type: 'rect', xref: 'paper', yref: c.axis + ' domain', x0: 0, x1: 1, y0: 0, y1: 1,
+        fillcolor: 'rgba(148,163,184,0.07)', line: { color: 'rgba(148,163,184,0.28)', width: 1 }, layer: 'below',
       });
     }
   }
@@ -40258,11 +40278,11 @@ const TL_RUN_HEIGHT_PX = 340;   // the run timeline host, and still its height w
 /* The foot timeline's stacked rows (see renderRunTimeline). Sized in pixels rather than as shares of
    a fixed host, because the point of splitting the channels apart is that each one gets MORE height,
    not a share of the same. The lead row is the pace row. A three-channel run therefore asks for
-   168 + 2*(118 + 34) = 472px of plot, against the ~210px the single dual-axis plot gave two channels
+   168 + 2*(118 + 46) = 496px of plot, against the ~210px the single dual-axis plot gave two channels
    between the lane and the x axis. */
 const TL_FOOT_LEAD_PX = 168;    // the pace row: the read the other rows support
 const TL_FOOT_ROW_PX = 118;     // a supporting row (altitude, heart rate)
-const TL_FOOT_GAP_PX = 34;      // between rows: room for the lower row's own axis title
+const TL_FOOT_GAP_PX = 46;      // between rows: the lower row's axis title, and clear page between panels
 
 /* The legend of a timeline whose lane holds `rows` rows of labels: horizontal, bottom-anchored just
    above the lane. `hostPx` is the chart host's height and `margin` the layout's own margins, from
@@ -44927,7 +44947,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '2d50a32e2 · 2026-09-25';
+const LOAM_BUILD = '37ab20638 · 2026-09-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
