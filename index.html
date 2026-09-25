@@ -2792,6 +2792,7 @@
       Timeline
       <span class="subtitle analysis-explanation" id="timelineSubtitle">yaw rate + speed · turns shaded · jump airtime shaded</span>
       <label class="smooth-lbl" style="margin-left:auto;" title="Reduce brief spikes in timeline readings. Turn off to see raw readings."><input id="timelineSmooth" type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> Smooth</label>
+      <label class="smooth-lbl hidden" id="timelineGapLbl" title="Show grade-adjusted pace: the flat-ground pace that would take the same effort."><input id="timelineGap" type="checkbox" onchange="onTimelineGapToggle(this)"> GAP</label>
     </div>
     <div class="chart" id="timelineChart"></div>
     <div id="timelineFootnote" class="dim hidden" style="font-size:12px; margin-top:6px;"></div>
@@ -22908,6 +22909,7 @@ function hideAllSections() {
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
      sport's default (the MTB "yaw rate" timeline subtitle and MTB map legend used to leak this way). */
   { const ts = document.getElementById('timelineSubtitle'); if (ts) ts.textContent = ''; }
+  { const gl = document.getElementById('timelineGapLbl'); if (gl) gl.classList.add('hidden'); }
   /* And the athlete's Dashboard layout, for exactly the same reason one line up.
      `applySectionLayout` sets AND clears `data-layout-off` on every catalog row every time, and its
      own comment says that is what stops one sport's layout leaking into the next render. That was
@@ -29503,6 +29505,11 @@ function smoothTimelineTraces(traces, windowS = 3) {
    whole view (same path the units toggle uses) so cadence, oscillation, and the pace timeline update
    together. syncSmoothToggles mirrors the stored preference back onto every checkbox on each render. */
 function onSmoothToggle(el) { setLoamSmooth(el.checked); rerenderUnits(); }
+/* GAP on the foot timeline: OFF unless the athlete turns it on (owner, 2026-09-25). A second line
+   in the pace row is the busiest thing left on the chart, and GAP is the comparison read, not the
+   primary one -- the Climbs panel already carries it per climb. */
+function loamTimelineGap() { try { return localStorage.getItem('loam_timeline_gap') === '1'; } catch (e) { return false; } }
+function onTimelineGapToggle(el) { try { localStorage.setItem('loam_timeline_gap', el.checked ? '1' : '0'); } catch (e) {} rerenderUnits(); }
 function syncSmoothToggles() { document.querySelectorAll('.smoothToggle').forEach(cb => { cb.checked = loamSmooth(); }); }
 /* MTB calibration-window strategy. 'preride' (default) calibrates from the last sufficiently-still
    window before the ride, i.e. your final mount pose, which is more reliable when the phone moves
@@ -30135,6 +30142,8 @@ const LOAM_NB = {
   'Δ elev ({u}), GPS': 'Δ høyde ({u}), GPS',
   'power': 'effekt',
   'cadence': 'kadens',
+  'cadence (spm)': 'kadens (skritt/min)',
+  'Cadence (spm)': 'Kadens (skritt/min)',
   'Rider power': 'Rytterens effekt',
   'Motor power': 'Motoreffekt',
   'rider': 'rytter',
@@ -31210,6 +31219,8 @@ const LOAM_NB = {
   'Drop': 'Fall',
   'smooth': 'glattet',
   'Smooth': 'Glattet',
+  'Show grade-adjusted pace: the flat-ground pace that would take the same effort.':
+    'Vis stigningsjustert tempo: tempoet på flatmark som ville krevd samme innsats.',
   'Reduce brief spikes in timeline readings. Turn off to see raw readings.':
     'Demper korte topper i tidslinjen. Slå av for å se rådata.',
   'Watch': 'Klokke',
@@ -34095,7 +34106,12 @@ function renderRunTimeline(D) {
       text: pace.map(fmtPace), hovertemplate: '%{text}<extra></extra>' });
     const gapY = timelineGapSpeeds(loc, climbAltSeries(D.sensors.baro || [], D.sensors.location, ride))
       .map(v => Number.isFinite(v) && v > 0 ? (U.metric() ? 1000 : 1609.34) / v / 60 : null);
-    if (gapY.some(p => p != null)) {
+    /* The checkbox is offered only when there is a GAP to show; the line is drawn only when it is on. */
+    const hasGap = gapY.some(p => p != null);
+    { const gl = document.getElementById('timelineGapLbl'), cb = document.getElementById('timelineGap');
+      if (gl) gl.classList.toggle('hidden', !hasGap);
+      if (cb) cb.checked = loamTimelineGap(); }
+    if (hasGap && loamTimelineGap()) {
       const gap = smooth ? smoothRunPace(t, gapY) : gapY;
       traces.push({ x: t, y: gap, type: 'scatter', mode: 'lines',
         line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: '6px,2px' },
@@ -34166,6 +34182,31 @@ function renderRunTimeline(D) {
       name: loamT('Heart rate (bpm)'), yaxis: hrAxis, connectgaps: false,
     });
     chans.push({ axis: hrAxis, label: loamT('heart rate'), title: loamT('heart rate (bpm)'), color: '#c54b3c' });
+  }
+  /* Cadence, on the same time axis as pace (owner, 2026-09-25) -- "does my cadence hold on the
+     climb" is a read across rows, and the separate cadence chart counted its x axis from the first
+     cadence window rather than from the start of the run, so the two could not be lined up by eye.
+     The SAME series and the same confidence gate the cadence chart and the splits use (conf > 0.15),
+     so a stop or a junk window is a gap in the row, never a dive to it. Last in the stack so the
+     altitude row keeps axis y2, which the band placement and the source label key on. Vertical
+     oscillation deliberately stays out: it is an upper bound, and a row beside measured channels
+     would lend it their weight. Teal rather than the cadence chart's amber, which sits too close to
+     the altitude tan once both are stacked. */
+  const cadRows = footSport ? ((D.running && D.running.cadSeries) || []).filter(c => c.t >= ride.start && c.t <= ride.end) : [];
+  const cadOk = cadRows.filter(c => c.conf > 0.15 && Number.isFinite(c.spm));
+  if (cadOk.length > 1) {
+    const cadAxis = 'y' + (chans.length + 1);
+    const masked = cadRows.map(c => (c.conf > 0.15 && Number.isFinite(c.spm)) ? c.spm : null);
+    const cadY = smooth ? rollingMedianMasked(masked, 11) : masked;
+    const spms = cadOk.map(c => c.spm);
+    traces.push({
+      x: cadRows.map(c => c.t - ride.start), y: cadY,
+      type: 'scatter', mode: 'lines', line: { color: '#4a8f8f', width: smooth ? 2 : 1.4 },
+      name: loamT('Cadence (spm)'), yaxis: cadAxis, connectgaps: false,
+      hovertemplate: '%{y:.0f} spm<extra></extra>',
+    });
+    chans.push({ axis: cadAxis, label: loamT('cadence'), title: loamT('cadence (spm)'), color: '#4a8f8f',
+      range: [Math.min(140, Math.floor(Math.min(...spms) - 10)), Math.max(200, Math.ceil(Math.max(...spms) + 10))] });
   }
   /* Stacked only when there is more than one channel to stack: a run with no barometer and no watch
      is one pace line, which is exactly the plot it already was. */
@@ -34293,6 +34334,7 @@ function renderRunTimeline(D) {
       title: { text: c.title, font: { color: c.color, size: 11 } },
       gridcolor: '#e2e8f0', tickfont: { color: c.color },
       ...(c.reversed ? { autorange: 'reversed' } : {}),
+      ...(c.range ? { range: c.range } : {}),
       ...(stacked ? { domain: domains[i] }
         /* The single-plot path is unchanged: altitude overlays the first axis on the right. */
         : i > 0 ? { overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)' } : {}),
@@ -44947,7 +44989,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '37ab20638 · 2026-09-25';
+const LOAM_BUILD = '0302883da · 2026-09-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
