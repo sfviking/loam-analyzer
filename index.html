@@ -5890,6 +5890,105 @@ function applyHeadCadence(running, headSeries) {
   return running;
 }
 
+/*
+ * PEDALING cadence from the AIRPODS, for a phone-recorded ride with no head unit. See
+ * analyzer/sports/mtb/pedal-head-cadence.js for the measurements; the short version: the head dips
+ * once per pedal STROKE, so rpm = bob Hz x 30. Graded 2026-09-26 against an ankle-worn watch on one
+ * road ride: 84% of pedaling windows read, 90% of those within 3 rpm, 1 of 58 coasting windows
+ * admitted. A smooth spinner loses COVERAGE (the bob shrinks past 110 rpm) rather than accuracy, so
+ * coverage is reported beside the number. Not validated off-road.
+ */
+const PH_WIN_S = 10;
+const PH_HOP_S = 2;
+/** Head-bob band in Hz: two bobs per revolution, so 1.6-4.4 Hz is 48-132 rpm. */
+const PH_BAND_LO_HZ = 1.6;
+const PH_BAND_HI_HZ = 4.4;
+/** 0.02 Hz of bob is 0.6 rpm. */
+const PH_BAND_STEP_HZ = 0.02;
+/**
+ * Peak-over-RMS gate on the shipped formula (a pure sine reads 0.707). Set on the 2026-09-26 ride:
+ * see the header and the sweep in pedal-head-cadence.test.js's comment for what each value costs.
+ */
+const PH_MIN_CONF = 0.30;
+/**
+ * Vertical RMS floor in m/s². Pedaling bob measured median 2.2 (p05 1.4); coasting median 0.9.
+ * Deliberately LOWER than running's 2.0: a bike's bob is a quarter of a run's, and the confidence
+ * gate does most of the rejecting here. Anything in 0.8-1.2 gave identical results on that ride.
+ */
+const PH_MIN_AMP_MS2 = 1.0;
+const PH_MIN_SAMPLES = 100;
+const PH_MIN_SPAN_S = 6;
+/** Readings needed before the ride shows a cadence at all (~20 s of pedaling). */
+const PH_MIN_WINDOWS = 10;
+/** GPS speed that counts as moving for the coverage denominator (m/s). */
+const PH_MOVING_MPS = 1.5;
+/** headphone_acceleration* is exported in g, headphone_gravity* in m/s² -- see head-cadence.js. */
+const PH_G = 9.80665;
+
+function pedalHeadCadenceSeries(headRows, ride) {
+  const rows = (headRows || []).filter(
+    (r) => r && r.t >= ride.start && r.t <= ride.end
+      && Number.isFinite(r.accelerationX) && Number.isFinite(r.accelerationY) && Number.isFinite(r.accelerationZ)
+      && Number.isFinite(r.gravityX) && Number.isFinite(r.gravityY) && Number.isFinite(r.gravityZ));
+  if (rows.length < PH_MIN_SAMPLES) return [];
+  const tArr = rows.map((r) => r.t);
+  const vert = rows.map((r) => {
+    const gm = Math.hypot(r.gravityX, r.gravityY, r.gravityZ) || 1;
+    return PH_G * (r.accelerationX * r.gravityX + r.accelerationY * r.gravityY + r.accelerationZ * r.gravityZ) / gm;
+  });
+  const lower = (arr, x) => {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; }
+    return lo;
+  };
+  const series = [];
+  for (let w0 = ride.start; w0 + PH_WIN_S <= ride.end; w0 += PH_HOP_S) {
+    const w1 = w0 + PH_WIN_S;
+    const i0 = lower(tArr, w0), i1 = lower(tArr, w1);
+    if (i1 - i0 < PH_MIN_SAMPLES) continue;
+    if (tArr[i1 - 1] - tArr[i0] < PH_MIN_SPAN_S) continue;
+    const sig = vert.slice(i0, i1);
+    const m = sig.reduce((s, v) => s + v, 0) / sig.length;
+    const detr = sig.map((v) => v - m);
+    const rms = Math.sqrt(detr.reduce((s, v) => s + v * v, 0) / detr.length);
+    /* A still or coasting head is the absence of a reading, not a low cadence. */
+    if (rms < PH_MIN_AMP_MS2) continue;
+    const ts = tArr.slice(i0, i1).map((t) => t - w0);
+    const fPeak = dftPeakFreq(detr, ts, PH_BAND_LO_HZ, PH_BAND_HI_HZ, PH_BAND_STEP_HZ);
+    const conf = Math.min(dftMagAt(detr, ts, fPeak) / rms, 1);
+    if (conf < PH_MIN_CONF) continue;
+    series.push({ t: (w0 + w1) / 2, freq: fPeak, rpm: fPeak * 30, conf });
+  }
+  return series;
+}
+
+function pedalCadenceSummary(series, location, ride) {
+  if (!series || series.length < PH_MIN_WINDOWS) return null;
+  const rpms = series.map((c) => c.rpm).sort((a, b) => a - b);
+  const median = rpms[Math.floor(rpms.length / 2)];
+  /* Coverage: of the 2 s steps GPS called moving, how many sit inside a window that produced a
+     reading. The sentinel -1 speed is not moving (it is nulled at ingestion, but guard anyway). */
+  const moving = (location || []).filter((r) => r && r.t >= ride.start && r.t <= ride.end
+    && Number.isFinite(r.speed) && r.speed >= PH_MOVING_MPS).map((r) => r.t);
+  let movingSteps = 0, readSteps = 0;
+  if (moving.length) {
+    let i = 0, j = 0;
+    const centers = series.map((c) => c.t);
+    for (let t = ride.start; t <= ride.end; t += PH_HOP_S) {
+      while (i < moving.length && moving[i] < t - PH_HOP_S / 2) i++;
+      if (!(i < moving.length && moving[i] <= t + PH_HOP_S / 2)) continue;
+      movingSteps++;
+      while (j < centers.length && centers[j] < t - PH_WIN_S / 2) j++;
+      if (j < centers.length && Math.abs(centers[j] - t) <= PH_WIN_S / 2) readSteps++;
+    }
+  }
+  return {
+    median,
+    windows: series.length,
+    coverage: movingSteps ? readSteps / movingSteps : null,
+  };
+}
+
 function lowerBound(arr, target) {
   let lo = 0, hi = arr.length;
   while (lo < hi) {
@@ -11248,7 +11347,7 @@ function computeBestEfforts(loc, ride, distances) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 17;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank)
+const ANALYSIS_CACHE_VERSION = 18;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -20778,10 +20877,26 @@ async function analyze(files) {
          that passes `turns`, and therefore the only one that stores mechanics at all. */
       turnSidesUnreliable: dTurnSidesUnreliable({ sensors, R, ride }),
     });
+    /* Pedaling cadence from the AirPods, for a bike with no head unit reporting cadence: the watch is
+       on a wrist that holds the bar, so the head is the one worn sensor that moves with the pedals.
+       Computed HERE because the render cache keeps only the AirPods' t and yaw (CACHE_PROJECT_CHANNELS),
+       so a reopened ride could not re-derive it. Skiing shares this path and has no pedals. */
+    let pedalCad = null;
+    const fitHasCad = !!(fitInRide && fitInRide.filter(r => r.cad != null).length > 1);
+    if (!isSkiSport(sport) && !fitHasCad) {
+      const series = pedalHeadCadenceSeries(sensors.headphone || [], ride);
+      const pcSummary = pedalCadenceSummary(series, sensors.location || [], ride);
+      if (pcSummary) {
+        pedalCad = { series: series.map(c => ({ t: c.t, rpm: c.rpm })), summary: pcSummary };
+        dbg('[cadence] AirPods pedaling cadence:', series.length, 'windows, median', pcSummary.median.toFixed(0), 'rpm');
+      }
+    }
+
     if (superseded()) return;
     onProgress('rendering');
     hide('loading'); show('results');
     const mtbRender = {
+      pedalCad,
       sensors, t, yawSeg, rollSmooth, R,
       ride, turns, summary, gradeSegments, calibWin, sport, imuRateHz, fitRepair, emtbReason,
       fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
@@ -33102,6 +33217,14 @@ const LOAM_NB = {
   'Cadence (rpm)': 'Kadens (rpm)',
   'time in ride': 'tid i turen',
   'HR (bpm) / cad (rpm)': 'Puls (bpm) / kadens (rpm)',
+  'cadence (AirPods)': 'kadens (AirPods)',
+  'cadence (rpm), AirPods': 'kadens (rpm), AirPods',
+  'Cadence from AirPods head bob: median <strong>{rpm} rpm</strong>.':
+    'Kadens fra hodebevegelsen i AirPods: median <strong>{rpm} rpm</strong>.',
+  'Read for {pct}% of moving time; coasting is never read.':
+    'Avlest for {pct}% av tiden i bevegelse; frihjul blir aldri avlest.',
+  'Checked on one road ride against an ankle-worn watch; not yet validated off-road.':
+    'Kontrollert på én landeveistur mot en klokke på ankelen; ennå ikke validert i terrenget.',
   'Total pedal count: <strong>{n}</strong> crank revolutions over the ride (integrated from FIT cadence).':
     'Totalt antall tråkk: <strong>{n}</strong> krankomdreininger gjennom turen (integrert fra kadens i FIT-filen).',
   'No cadence in this FIT, so pedal count is unavailable.':
@@ -41499,8 +41622,30 @@ function bikeTimelineRows(D) {
     rows.push({ key: 'cadence', label: loamT('cadence'), title: loamT('cadence (rpm)'), color: '#8caa6d',
       traces: [{ x: fit.map(fitT), y: fit.map(r => r.cad), line: { color: '#8caa6d', width: 1.2 },
         name: loamT('Cadence'), connectgaps: false, hovertemplate: '%{y:.0f} rpm' }] });
+  } else if (D.pedalCad && D.pedalCad.series && D.pedalCad.series.length > 1) {
+    /* AirPods head bob, only when no head unit spoke. Gaps are breaks in the line, never zeros:
+       a window with no reading is coasting or an unreadable bob, not a cadence of 0. */
+    const pts = D.pedalCad.series, gapX = [], gapY = [];
+    pts.forEach((c, i) => {
+      if (i && c.t - pts[i - 1].t > 2 * PH_HOP_S) { gapX.push(null); gapY.push(null); }
+      gapX.push(c.t - ride.start); gapY.push(c.rpm);
+    });
+    rows.push({ key: 'cadence', label: loamT('cadence (AirPods)'), title: loamT('cadence (rpm), AirPods'), color: '#8caa6d',
+      traces: [{ x: gapX, y: gapY, line: { color: '#8caa6d', width: 1.2 },
+        name: loamT('Cadence'), connectgaps: false, hovertemplate: '%{y:.0f} rpm' }] });
   }
   return rows;
+}
+
+/* The AirPods cadence's own caption. Coverage is half the answer, not a footnote to it: a smooth
+   spinner's head barely bobs, so a thin reading is expected there and must not pass for the whole
+   ride. Only ever called when no FIT cadence exists, so it cannot contradict one. */
+function pedalCadenceNote(pc) {
+  if (!pc || !pc.summary) return '';
+  const s = pc.summary;
+  const cov = s.coverage == null ? '' : ' ' + loamT('Read for {pct}% of moving time; coasting is never read.', { pct: Math.round(s.coverage * 100) });
+  return loamT('Cadence from AirPods head bob: median <strong>{rpm} rpm</strong>.', { rpm: Math.round(s.median) }) + cov
+    + ' ' + loamT('Checked on one road ride against an ankle-worn watch; not yet validated off-road.');
 }
 
 function renderBikeTimeline(D) {
@@ -41667,8 +41812,8 @@ function renderBikeTimeline(D) {
     const revs = fit.length ? totalPedalStrokes(fit) : 0;
     foot.innerHTML = revs > 0
       ? loamT('Total pedal count: <strong>{n}</strong> crank revolutions over the ride (integrated from FIT cadence).', { n: Math.round(revs).toLocaleString() })
-      : '';
-    foot.classList.toggle('hidden', !(revs > 0));
+      : pedalCadenceNote(D.pedalCad);
+    foot.classList.toggle('hidden', !foot.innerHTML);
   }
 
   const host = document.getElementById('timelineChart');
@@ -45461,7 +45606,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '1ffceedae · 2026-09-26';
+const LOAM_BUILD = '912daba70 · 2026-09-26';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
