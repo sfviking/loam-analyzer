@@ -2645,6 +2645,12 @@
      the option text ran straight over it. Same trap the base select rule names; pinned by assertSelectChevrons in the E2E. */
   .lf-set { font: 500 12px 'JetBrains Mono', monospace; padding: 4px 24px 4px 10px; border-radius: 7px; border: 1px solid var(--border, #2a2e37); background-color: var(--surface-2, #eef2f6); color: var(--text, #1a202c);
     min-width: 0; max-width: 100%; }
+  .lf-head-r { display: inline-flex; align-items: center; gap: 8px; min-width: 0; margin-left: auto; }
+  .lf-head-r .card-share { margin-left: 0; }
+  .lf-share.recording { color: var(--accent); border-color: var(--accent); cursor: progress; animation: lfRec 1s ease-in-out infinite alternate; }
+  .lf-share.ready { color: #fff; background: var(--accent); border-color: var(--accent); }
+  @keyframes lfRec { from { opacity: 1; } to { opacity: 0.45; } }
+  @media (prefers-reduced-motion: reduce) { .lf-share.recording { animation: none; } }
   .lf-stage { width: 100%; border-radius: 12px; overflow: hidden; line-height: 0; }
   .lf-stage svg { display: block; width: 100%; height: auto; }
   /* Shown in place of the animation for a lift we have no proven pose for, instead of a stand-in body. */
@@ -20759,7 +20765,9 @@ async function analyze(files) {
        rider's own 7.9% climb). Same call, same detector, same inputs as the GPS-only path's. */
     const gradeSegments = markLiftSegments(
       detectGradeSegments(sensors.baro, sensors.location, ride), sensors.location);
-    const summary = computeSummary(sensors.location, sensors.baro, ride, turns, calibWin, ridingJumps, gradeSegments);
+    const summary = summaryTurnsForSport(
+      computeSummary(sensors.location, sensors.baro, ride, turns, calibWin, ridingJumps, gradeSegments),
+      turns, sport);
 
     onProgress('saving to library');
     const saved = await saveRideToLibrary({
@@ -21044,6 +21052,25 @@ function mtbSpeedCorroborates(a, b, impliedMps) {
   const reported = Math.max(a.speed == null ? -1 : a.speed, b.speed == null ? -1 : b.speed);
   if (reported < 0) return false;
   return impliedMps <= Math.max(reported, 0.01) * MTB_TELEPORT_RATIO;
+}
+
+/* Descent scoping is an off-road rule, and on a ROAD ride it reads every corner as absent. The
+   uphill-weave pollution it exists for is a trail phenomenon; a road bike's corners are mostly on
+   flats and climbs, so a Pacifica road loop (owner report, 2026-09-26) showed "Turns 0" and a blank
+   radius above a corner ledger listing seven turns -- the grade detector had found descents, and no
+   corner happened to fall inside one. Undone here rather than inside the pinned computeSummary, and
+   applied at render time as well as before the save, so a road ride already in the library or the
+   analysis cache is repaired on reopen instead of keeping the old zero. */
+function summaryTurnsForSport(summary, turns, sport) {
+  if (!summary || !summary.turnsScopedToDescents) return summary;
+  if (!(sport === 'road' || sport === 'gravel' || sport === 'cycling')) return summary;
+  const all = turns || [];
+  const radii = all.map(T => T.radius).filter(r => !isNaN(r));
+  return { ...summary,
+    nTurns: all.length, nTurnsAll: all.length, turnsScopedToDescents: false,
+    rightTurns: all.filter(T => T.direction === 'R').length,
+    leftTurns: all.filter(T => T.direction === 'L').length,
+    medianRadius: radii.length ? median(radii) : null };
 }
 
 function computeSummary(loc, baro, ride, turns, calibWin, ridingJumps, gradeSegments) {
@@ -23678,28 +23705,18 @@ function liftRefDepthSVG(refScale, targetDmax, leanDeg, barPos, lift, tf, t) {
     + `<text x="277" y="${(y + 11).toFixed(1)}" text-anchor="end" fill="#8fd3ff" font-size="7.5" letter-spacing="0.7" font-family="'JetBrains Mono',monospace">${label}</text></g>`;
 }
 
-function liftFormFrame(ts) {
-  const st = _liftForm;
-  if (!st.D || !st.D.strength.sets.length) return;
-  const set = st.D.strength.sets[st.setIdx] || st.D.strength.sets[0];
-  // Only animate lifts with a proven, fact-driven pose (squat, deadlift, curl). For anything else the
-  // figure would be a neutral stand-in, not the real movement, so show nothing rather than a body we
-  // cannot honestly animate. Stops the loop for this set; picking a squat/deadlift/curl set resumes it.
-  const controls = document.getElementById('liftFormControls');
-  if (liftFormNoPose(set)) {
-    if (controls) controls.style.display = 'none';
-    liftFormShowNoPose(set);
-    return;
-  }
-  if (controls) controls.style.display = '';
+/* One frame of the replay as a standalone SVG string, advancing `st`'s trail and pose history. `st`
+   is either the live `_liftForm` or a private state the video export owns, so the shared clip is
+   drawn by the SAME function the page animates with rather than a second copy that could drift from
+   it. `keyChanged` tells the live caller the transform was rebuilt (its cue to refresh the caption
+   and the ghost toggle); the export has no DOM to refresh and ignores it. */
+function liftFormCompose(st, set, elapsedS) {
   const planKey = st.setIdx + ':' + set.reps + ':' + set.tempoS + ':'
     + JSON.stringify(set.repTimes || []) + ':' + JSON.stringify(set.repPhaseTimes || []) + ':' + JSON.stringify(set.repDepthsM || []);
   if (!st.plan || st.planKey !== planKey) { st.plan = liftRepTimeline(set); st.planKey = planKey; st.repIdx = -1; }
-  if (!st.t0) st.t0 = ts;
-  const frame = liftRepFrame(st.plan, (ts - st.t0) / 1000);
+  const frame = liftRepFrame(st.plan, elapsedS);
   const targetDmax = liftDepthMaxDeg(set), dmax = targetDmax * frame.depthScale, ln = liftLeanDeg(set);
   const thigh = liftThighAt(dmax, frame.phase, frame.progress);
-  const reps = st.plan.reps.length, repNo = frame.repIdx + 1;
   const ghostOn = liftGhostEnabled();
   const ghostRead = ghostOn ? liftGhostRead(st.plan, frame) : null;
   const ck = liftFormCharKey(), c = LIFT_CHARS.find(x => x.key === ck) || LIFT_CHARS[0], bp = liftBarPos(set), lk = liftFormLift(set);
@@ -23707,13 +23724,10 @@ function liftFormFrame(ts) {
   // trail lives in a stable frame; recompute (and drop the trail/ghosts) only when any of those change.
   const maxDmax = targetDmax * Math.max(...st.plan.reps.map(r => r.depthScale));
   const key = ck + ':' + st.setIdx + ':' + maxDmax + ':' + ln + ':' + bp + ':' + lk + ':' + planKey + ':' + (ghostOn ? 'g1' : 'g0');
+  let keyChanged = false;
   if (st.tfKey !== key) {
     st.tf = liftFitTransform(c, maxDmax, ln, bp, lk, 12, 8, 276, 292); st.tfKey = key; st.trail = []; st.ghosts = [];
-    const note = document.getElementById('liftFormNote'); if (note) note.textContent = liftFormNoteFor(set, st.plan, ghostOn);
-    /* Offer the toggle only where the comparison exists at all. Asked with the ghost forced ON, so
-       switching it off cannot also hide the control that switches it back on. */
-    const gb = document.getElementById('liftFormGhost');
-    if (gb) { gb.style.display = liftGhostRead(st.plan, frame) ? '' : 'none'; gb.classList.toggle('on', ghostOn); }
+    keyChanged = true;
   }
   /* A new rep may have a different measured ROM. Do not smear the previous rep's model path or pose
      ghosts into it; the comparison should be between clean repetitions, not accumulated neon. */
@@ -23735,8 +23749,7 @@ function liftFormFrame(ts) {
       ln, bp, lk, st.tf, { ghost: true });
     refGhost = `<g class="lf-ref-ghost" opacity="0.34">${gh.markup}</g>`;
   }
-  const stage = document.getElementById('liftFormStage');
-  if (stage) stage.innerHTML = `<svg viewBox="0 0 300 320" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">`
+  const svg = `<svg viewBox="0 0 300 320" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">`
     + `<defs><linearGradient id="lfBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#20291b"/><stop offset="100%" stop-color="#0a0d07"/></linearGradient>`
     + `<filter id="lfGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
     + `<filter id="lfGlowSoft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
@@ -23752,6 +23765,39 @@ function liftFormFrame(ts) {
     + liftTrailSVG(st.trail, trailCol)
     + cur.markup
     + `</svg>`;
+  return { svg, frame, ghostRead, keyChanged };
+}
+
+function liftFormFrame(ts) {
+  const st = _liftForm;
+  if (!st.D || !st.D.strength.sets.length) return;
+  const set = st.D.strength.sets[st.setIdx] || st.D.strength.sets[0];
+  // Only animate lifts with a proven, fact-driven pose (squat, deadlift, curl). For anything else the
+  // figure would be a neutral stand-in, not the real movement, so show nothing rather than a body we
+  // cannot honestly animate. Stops the loop for this set; picking a squat/deadlift/curl set resumes it.
+  const controls = document.getElementById('liftFormControls');
+  const share = document.getElementById('liftFormShare');
+  if (liftFormNoPose(set)) {
+    if (controls) controls.style.display = 'none';
+    if (share) share.style.display = 'none';
+    liftFormShowNoPose(set);
+    return;
+  }
+  if (controls) controls.style.display = '';
+  if (share) share.style.display = '';
+  if (!st.t0) st.t0 = ts;
+  const { svg, frame, ghostRead, keyChanged } = liftFormCompose(st, set, (ts - st.t0) / 1000);
+  if (keyChanged) {
+    const ghostOn = liftGhostEnabled();
+    const note = document.getElementById('liftFormNote'); if (note) note.textContent = liftFormNoteFor(set, st.plan, ghostOn);
+    /* Offer the toggle only where the comparison exists at all. Asked with the ghost forced ON, so
+       switching it off cannot also hide the control that switches it back on. */
+    const gb = document.getElementById('liftFormGhost');
+    if (gb) { gb.style.display = liftGhostRead(st.plan, frame) ? '' : 'none'; gb.classList.toggle('on', ghostOn); }
+  }
+  const reps = st.plan.reps.length, repNo = frame.repIdx + 1;
+  const stage = document.getElementById('liftFormStage');
+  if (stage) stage.innerHTML = svg;
   const rc = document.getElementById('liftFormRep');
   if (rc) rc.textContent = loamT('Rep {n} / {total}', { n: repNo, total: reps });
   const ph = document.getElementById('liftFormPhase');
@@ -23798,7 +23844,7 @@ function liftFormStop() {
 /* The write is best-effort: private mode / a full quota throws, and letting that escape would take
    the character switch (and the replay restart below it) down with it. Same guard every other
    preference write on this page uses; the pick still applies to this render. */
-function setLiftFormChar(k) { try { localStorage.setItem('loam.liftChar', k); } catch (e) { /* private mode / quota */ } document.querySelectorAll('.lf-char').forEach(b => b.classList.toggle('on', b.dataset.k === k)); liftFormStart(); }
+function setLiftFormChar(k) { try { localStorage.setItem('loam.liftChar', k); } catch (e) { /* private mode / quota */ } document.querySelectorAll('.lf-char').forEach(b => b.classList.toggle('on', b.dataset.k === k)); liftClipInvalidate(); liftFormStart(); }
 /* Default ON, which is a deliberate departure from "opt-in". The ghost is only ever drawn where the
    wrist measured a depth for EVERY rep of the set, so wherever it appears it has a real comparison to
    make -- and a comparison nobody switches on is a comparison nobody sees. Off is one tap and sticks. */
@@ -23806,17 +23852,164 @@ function liftGhostEnabled() { try { return localStorage.getItem('loam.liftGhost'
 function toggleLiftFormGhost() {
   const on = !liftGhostEnabled();
   try { localStorage.setItem('loam.liftGhost', on ? '1' : '0'); } catch (e) { /* private mode / quota */ }
+  liftClipInvalidate();
   liftFormStart();
 }
-function setLiftFormSet(i) { _liftForm.setIdx = +i; liftFormStart(); }
+function setLiftFormSet(i) { _liftForm.setIdx = +i; liftClipInvalidate(); liftFormStart(); }
 function toggleLiftFormPlay() {
   _liftForm.playing = !_liftForm.playing;
   const b = document.getElementById('liftFormPlay'); if (b) b.textContent = _liftForm.playing ? loamT('❙❙ Pause') : loamT('▶ Play');
   if (_liftForm.playing) { _liftForm.t0 = 0; _liftForm.raf = requestAnimationFrame(liftFormFrame); }
   else cancelAnimationFrame(_liftForm.raf);
 }
+/* ---- Sharing the Spotter Cam as a clip. The replay is drawn by `liftFormCompose` into a private
+   state (the live one keeps animating), rasterized frame by frame onto a canvas, and recorded with
+   MediaRecorder off `canvas.captureStream`. The recorder is REAL-TIME -- there is no frame-accurate
+   encoder without a muxer this page does not ship -- so the clip is as long as the set's replay,
+   capped, and a slow rasterize drops frames rather than slowing the movement: every frame is drawn at
+   the wall-clock instant it lands on, so the cadence in the clip is the measured cadence.
+
+   The clip travels without the caption under the stage, so its honesty line is burned into the
+   footer: what was measured and what was modeled, in the picture itself.
+
+   No MediaRecorder (or no captureStream) is a real case, not an edge: it falls back to a still of
+   rep 1 at the bottom through the card pipeline, rather than a Share button that does nothing. */
+const LIFT_CLIP_MAX_S = 30;
+const LIFT_CLIP_W = 720, LIFT_CLIP_H = 960, LIFT_CLIP_STAGE_H = 768;   // 300x320 stage at 2.4x, 3:4 overall
+let _liftClip = { busy: false, ready: null };
+function liftClipMime() {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') return null;
+  /* MP4 first: it is what Safari/WKWebView record, and the only one Photos and Instagram take. */
+  for (const m of ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
+    try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (e) { /* keep looking */ }
+  }
+  return null;
+}
+function liftClipRaster(svg) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error('spotter frame did not rasterize'));
+    im.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
+function liftClipPaint(ctx, img, info) {
+  const W = LIFT_CLIP_W, H = LIFT_CLIP_H, SH = LIFT_CLIP_STAGE_H;
+  ctx.fillStyle = '#0a0d07'; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, 0, 0, W, SH);
+  const pad = 36, mono = '"JetBrains Mono", ui-monospace, monospace';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#e8ecdf'; ctx.font = `700 40px "Bricolage Grotesque", sans-serif`;
+  ctx.fillText(info.rep, pad, SH + 58, W * 0.5);
+  ctx.fillStyle = info.phase === 'drive' ? '#e0a458' : info.phase === 'lockout' ? '#8d9684' : '#7fb069';
+  ctx.font = `600 22px ${mono}`;
+  ctx.textAlign = 'right'; ctx.fillText(info.phaseWord.toUpperCase(), W - pad, SH + 56); ctx.textAlign = 'left';
+  ctx.fillStyle = '#8d9684'; ctx.font = `500 20px ${mono}`;
+  ctx.fillText(info.setLabel, pad, SH + 96, W - pad * 2);
+  ctx.fillText(info.provenance, pad, SH + 126, W - pad * 2);
+  ctx.fillStyle = '#e0a458'; ctx.font = `600 20px "IBM Plex Sans", sans-serif`;
+  ctx.fillText('Spotter Cam · Loam', pad, H - 22);   // both are names, not copy (see the nb table's Spotter Cam note)
+}
+function liftClipSetLabel(set, setIdx) {
+  const name = liftNameLower(set.lift) || liftNameLower('squat');
+  return loamT('Set {n}', { n: setIdx + 1 }) + ' · ' + name + ' · ' + loamT('{n} reps', { n: set.reps });
+}
+function liftClipButton(state) {
+  const b = document.getElementById('liftFormShare');
+  if (!b) return;
+  b.disabled = state === 'recording';
+  b.classList.toggle('recording', state === 'recording');
+  b.classList.toggle('ready', state === 'ready');
+  const label = state === 'recording' ? loamT('Recording the replay…')
+    : state === 'ready' ? loamT('Clip ready: tap to share') : loamT('Share replay');
+  b.title = label; b.setAttribute('aria-label', label);
+}
+/* Called whenever what the clip would show changes (set, character, ghost), so a clip recorded for
+   set 1 is never handed out from under set 2's picker. */
+function liftClipInvalidate() { _liftClip.ready = null; if (!_liftClip.busy) liftClipButton('idle'); }
+async function shareLiftForm() {
+  if (_liftClip.busy) return;
+  const D = _liftForm.D;
+  const setIdx = _liftForm.setIdx;
+  const set = D && D.strength.sets[setIdx];
+  if (!set || liftFormNoPose(set)) return;
+  const key = setIdx + ':' + liftFormCharKey() + ':' + liftGhostEnabled();
+  /* The second tap of the web path: the recording outlived the tap's user activation, so the share
+     sheet refused it, and this tap -- a fresh gesture -- is what delivers it. */
+  if (_liftClip.ready && _liftClip.ready.key === key) {
+    const r = _liftClip.ready;
+    const out = await loamShareVideo(r.blob, r.filename, r.caption, r.poster);
+    if (out !== 'needs-gesture') liftClipInvalidate();
+    return;
+  }
+  _liftClip.busy = true; _liftClip.ready = null;
+  liftClipButton('recording');
+  try {
+    const when = parseUTCFromFilename((D && D.title) || '');
+    const caption = loamT('My lift, replayed rep by rep with Loam.');
+    const canvas = document.createElement('canvas');
+    canvas.width = LIFT_CLIP_W; canvas.height = LIFT_CLIP_H;
+    const ctx = canvas.getContext('2d');
+    const fresh = () => ({ setIdx, plan: null, planKey: '', tf: null, tfKey: '', trail: [], ghosts: [], repIdx: -1 });
+    const setLabel = liftClipSetLabel(set, setIdx);
+    const paintAt = async (st, t) => {
+      const { svg, frame } = liftFormCompose(st, set, t);
+      liftClipPaint(ctx, await liftClipRaster(svg), {
+        rep: loamT('Rep {n} / {total}', { n: frame.repIdx + 1, total: st.plan.reps.length }),
+        phase: frame.phase, phaseWord: liftPhaseWord(frame.phase), setLabel,
+        provenance: st.plan.cadenceMeasured ? loamT('Rep timing measured · side-view pose modeled')
+          : loamT('Median tempo · side-view pose modeled'),
+      });
+      return st.plan;
+    };
+    /* The poster, and the whole share where video is not available: rep 1 at the bottom. */
+    const pst = fresh();
+    const plan = liftRepTimeline(set);
+    await paintAt(pst, plan.reps[0].bottomS);
+    const poster = canvas.toDataURL('image/png');
+    const mime = liftClipMime();
+    if (!mime || typeof canvas.captureStream !== 'function') {
+      await loamShareImage(poster, loamCardFilename('spotter', when), caption);
+      return;
+    }
+    const st = fresh();
+    await paintAt(st, 0);   // the first frame the recorder sees is the replay, not a blank canvas
+    const durS = Math.min(LIFT_CLIP_MAX_S, plan.durationS);
+    const stream = canvas.captureStream(30);
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4000000 });
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { recorder.onstop = res; });
+    recorder.start(250);
+    const t0 = performance.now();
+    for (;;) {
+      const el = (performance.now() - t0) / 1000;
+      if (el >= durS) break;
+      await paintAt(st, el);
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    recorder.stop();
+    await stopped;
+    stream.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(chunks, { type: mime.split(';')[0] });
+    if (!blob.size) { loamClipShareFailed(); return; }
+    const ext = /mp4/.test(mime) ? 'mp4' : 'webm';
+    const filename = loamCardFilename('spotter', when).replace(/\.png$/, '.' + ext);
+    const out = await loamShareVideo(blob, filename, caption, poster);
+    if (out === 'needs-gesture') {
+      _liftClip.ready = { key, blob, filename, caption, poster };
+      setStatus(loamT('Clip ready: tap to share'));
+    }
+  } catch (e) {
+    console.warn('spotter clip failed', e);
+    loamClipShareFailed();
+  } finally {
+    _liftClip.busy = false;
+    liftClipButton(_liftClip.ready ? 'ready' : 'idle');
+  }
+}
 function renderLiftForm(D) {
-  _liftForm.D = D; _liftForm.setIdx = 0;
+  _liftForm.D = D; _liftForm.setIdx = 0; _liftClip.ready = null;
   const sets = D.strength.sets;
   const ck = liftFormCharKey();
   const chars = LIFT_CHARS.map(c => `<button class="lf-char ${c.key === ck ? 'on' : ''}" data-k="${c.key}" onclick="setLiftFormChar('${c.key}')">${loamT(c.name)}</button>`).join('');
@@ -23830,7 +24023,8 @@ function renderLiftForm(D) {
   }).join('');
   document.getElementById('liftForm').innerHTML = `
     <div class="lf-head"><span class="lf-title">${loamT('Spotter Cam')}</span>
-      <select class="lf-set" onchange="setLiftFormSet(this.value)">${setOpts}</select></div>
+      <span class="lf-head-r"><select class="lf-set" onchange="setLiftFormSet(this.value)">${setOpts}</select>
+      <button id="liftFormShare" type="button" class="card-share lf-share" onclick="shareLiftForm()" title="${escapeHtml(loamT('Share replay'))}" aria-label="${escapeHtml(loamT('Share replay'))}">${CARD_SHARE_SVG}</button></span></div>
     <div id="liftFormStage" class="lf-stage"></div>
     <div class="lf-bar" id="liftFormControls">
       <button id="liftFormPlay" class="lf-play" onclick="toggleLiftFormPlay()">${loamT('❙❙ Pause')}</button>
@@ -30102,6 +30296,14 @@ const LOAM_NB = {
   'The faint body behind you is rep 1 at the same point in the movement: only depth differs between reps, because torso lean is drawn from your taps rather than measured.':
     'Den svake figuren bak deg er repetisjon 1 på samme punkt i bevegelsen: bare dybden skiller repetisjonene, fordi helningen i overkroppen tegnes fra trykkene dine og ikke måles.',
   'This lift': 'Denne øvelsen',
+  'Share replay': 'Del avspillingen',
+  'Recording the replay…': 'Tar opp avspillingen …',
+  'Clip ready: tap to share': 'Klippet er klart: trykk for å dele',
+  'My lift, replayed rep by rep with Loam.': 'Løftet mitt, spilt av repetisjon for repetisjon med Loam.',
+  'Rep timing measured · side-view pose modeled': 'Rytmen er målt · stillingen sett fra siden er modellert',
+  'Median tempo · side-view pose modeled': 'Mediantempo · stillingen sett fra siden er modellert',
+  'Replay could not be shared': 'Avspillingen kunne ikke deles',
+  'This replay could not be recorded, so nothing was shared.': 'Avspillingen kunne ikke tas opp, så ingenting ble delt.',
   'No form view for {lift} yet': 'Ingen teknikkvisning for {lift} ennå',
   'We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.':
     'Vi animerer bare øvelser vi kan vise ærlig (knebøy, markløft, curl). Repetisjonene, tempoet og stangfarten over er fortsatt ekte tall.',
@@ -33561,6 +33763,49 @@ async function loamShareImage(dataURL, filename, caption) {
     }
   } catch (e) { /* Web Share / File unsupported here: fall through to a download */ }
   const a = document.createElement('a'); a.href = dataURL; a.download = filename; a.click();
+}
+
+/* The clip equivalent of loamShareImage, with the same three paths, and one difference that is the
+   reason it returns a value: recording takes as long as the replay, which outlives the tap's user
+   activation, so the Web Share API refuses the sheet (NotAllowedError). That is reported back as
+   'needs-gesture' rather than downgraded to a download, and the caller turns its button into
+   "tap to share" -- the second tap is a fresh gesture. The app bridge needs no gesture.
+   `poster` is a PNG of the clip for the share sheet's header thumbnail in the app. */
+function loamClipShareFailed() {
+  setStatus(loamT('Replay could not be shared'));
+  try { alert(loamT('This replay could not be recorded, so nothing was shared.')); } catch (e) {}
+}
+function loamBlobDataURL(blob) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
+}
+async function loamShareVideo(blob, filename, caption, poster) {
+  const text = loamShareText(caption);
+  if (!blob || !blob.size) { loamClipShareFailed(); return 'failed'; }
+  const embedded = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
+    && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam;
+  if (embedded) {
+    try {
+      const dataURL = await loamBlobDataURL(blob);
+      window.webkit.messageHandlers.loam.postMessage({ type: 'saveVideo', dataURL, filename, text, poster: poster || '' });
+      return 'shared';
+    } catch (e) { console.warn('clip share bridge failed', e); loamClipShareFailed(); return 'failed'; }
+  }
+  try {
+    if (navigator.canShare && typeof File === 'function') {
+      const file = new File([blob], filename, { type: blob.type || 'video/mp4' });
+      if (navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], text }); return 'shared'; }
+        catch (err) {
+          if (err && err.name === 'AbortError') return 'cancelled';
+          if (err && err.name === 'NotAllowedError') return 'needs-gesture';
+        }
+      }
+    }
+  } catch (e) { /* Web Share / File unsupported here: fall through to a download */ }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return 'downloaded';
 }
 
 /* Plotly config used by every chart: a mode bar exposing just a "save snapshot" (PNG, 2x) button, so
@@ -40040,6 +40285,7 @@ function buildSectionNav() {
 function renderAll(D) {
   const rSport = renderPathSport(D.sport);
   _lastRender = { fn: renderAll, D };
+  D.summary = summaryTurnsForSport(D.summary, D.turns, D.sport);
   hideAllSections();
   /* AFTER hideAllSections, which clears it. This path is the descents-and-turns view, which serves a
      bike ride and an OUTDOOR ski day alike -- and an outdoor ski day is as much on snow as a dome
@@ -45215,7 +45461,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '5e0275c6f · 2026-09-26';
+const LOAM_BUILD = '1ffceedae · 2026-09-26';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
