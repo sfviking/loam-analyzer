@@ -3009,6 +3009,28 @@
     </details>
   </section>
 
+  <!-- Every foot channel OVERLAID on one plot, in the style of the retired standalone cadence and
+       oscillation charts (owner, 2026-09-26: "keep the current one but add another chart ... render
+       on one single chart"). The timeline above stacks the same channels one row each; this is the
+       comparison view. Its boxes are its own, so ticking a channel here does not reshape the stack. -->
+  <section id="runOverlaySection" class="hidden">
+    <div class="section-title">
+      Overlay
+      <span class="subtitle"><span class="analysis-explanation">every ticked channel on one plot · the first two name the left and right axes</span>
+        <label class="smooth-lbl" title="Rolling median that suppresses the spikes from stops"><input type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> smooth</label>
+      </span>
+    </div>
+    <div id="runOverlayChans" class="tl-chans">
+      <label class="smooth-lbl hidden" data-ov-chan="cad"><input id="overlayChCad" type="checkbox" data-ov-chan="cad" onchange="onOverlayChanToggle(this)"> Cadence</label>
+      <label class="smooth-lbl hidden" data-ov-chan="osc" title="Estimated from the phone or AirPods, not measured: treat it as a trend, not a number."><input id="overlayChOsc" type="checkbox" data-ov-chan="osc" onchange="onOverlayChanToggle(this)"> Oscillation</label>
+      <label class="smooth-lbl hidden" data-ov-chan="pace"><input id="overlayChPace" type="checkbox" data-ov-chan="pace" onchange="onOverlayChanToggle(this)"> Pace</label>
+      <label class="smooth-lbl hidden" data-ov-chan="gap" title="Show grade-adjusted pace: the flat-ground pace that would take the same effort."><input id="overlayChGap" type="checkbox" data-ov-chan="gap" onchange="onOverlayChanToggle(this)"> GAP</label>
+      <label class="smooth-lbl hidden" data-ov-chan="hr"><input id="overlayChHr" type="checkbox" data-ov-chan="hr" onchange="onOverlayChanToggle(this)"> HR</label>
+      <label class="smooth-lbl hidden" data-ov-chan="alt"><input id="overlayChAlt" type="checkbox" data-ov-chan="alt" onchange="onOverlayChanToggle(this)"> Altitude</label>
+    </div>
+    <div class="chart" id="runOverlayChart" style="height:300px;"></div>
+  </section>
+
   <section id="runMountNotice" class="hidden">
     <div class="mount-notice">
       <strong>Phone in hand detected.</strong> Arm-swing energy at half cadence
@@ -22884,7 +22906,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','golfResults','swimResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','golfResults','swimResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -28063,6 +28085,7 @@ function renderAllRunning(D) {
   renderCoachHighlights(D, sport);
   renderRunMap(D.sensors.location, D.ride, D.running.segments);
   renderRunTimeline(D);
+  renderRunOverlay(D);
   /* Splits follow the athlete's unit setting: an imperial runner gets miles, not a metric table
      under an imperial headline. Computed off the same GPS rows the summary walks. */
   renderRunDistanceReads(D);
@@ -28153,6 +28176,7 @@ function renderAllGps(D) {
      ground-truth gating the oscillation and posture metrics need, and none needs the phone IMU.
      They were unreachable here only because this path never called them. */
   if (foot) {
+    renderRunOverlay(D);
     renderRunDistanceReads(D);
   }
   /* THE LAPS ARE THE ATHLETE'S OWN MARKS, WHICH IS NOT A RUNNING CONCEPT, and they were rendered
@@ -29500,6 +29524,17 @@ function loamTimelineChan(k) {
   if (k === 'gap') return loamTimelineGap();
   try { return localStorage.getItem('loam_tl_' + k) !== '0'; } catch (e) { return true; }
 }
+/* The overlay chart's boxes: cadence and oscillation ON by default -- the two charts it grew out
+   of -- and the rest OFF, because six units on one plot is a comparison the athlete asks for, not
+   a default. Their own keys, so they never reshape the stacked timeline. */
+function loamOverlayChan(k) {
+  const dflt = k === 'cad' || k === 'osc';
+  try { const v = localStorage.getItem('loam_ov_' + k); return v == null ? dflt : v === '1'; } catch (e) { return dflt; }
+}
+function onOverlayChanToggle(el) {
+  try { localStorage.setItem('loam_ov_' + el.dataset.ovChan, el.checked ? '1' : '0'); } catch (e) {}
+  rerenderUnits();
+}
 function onTimelineChanToggle(el) {
   const k = el.dataset.chan;
   try { localStorage.setItem(k === 'gap' ? 'loam_timeline_gap' : 'loam_tl_' + k, el.checked ? '1' : '0'); } catch (e) {}
@@ -30145,6 +30180,11 @@ const LOAM_NB = {
   'oscillation, est. (cm)': 'svingning, anslått (cm)',
   'oscillation, upper bound (cm)': 'svingning, øvre grense (cm)',
   'Tick a channel above to plot it.': 'Huk av en kanal over for å vise den.',
+  'Overlay': 'Overlagt',
+  'every ticked channel on one plot · the first two name the left and right axes':
+    'alle avhukede kanaler i ett plott · de to første gir navn til venstre og høyre akse',
+  'Rolling median that suppresses the spikes from stops':
+    'Glidende median som demper toppene fra stopp',
   'Estimated from the phone or AirPods, not measured: treat it as a trend, not a number.':
     'Anslått fra telefonen eller AirPods, ikke målt: les det som en trend, ikke et tall.',
   'Rider power': 'Rytterens effekt',
@@ -34439,6 +34479,146 @@ function renderRunTimeline(D) {
     });
   }).catch(() => {});
   linkTimelineToMap(D.sensors.location, ride);
+}
+
+/* The overlay chart: the foot channels on ONE plot, each on its own y axis overlaid on the first.
+   The first ticked channel owns the left axis and the second the right; any further ones get an
+   invisible axis of their own, so each still fills the plot height and its values read in the
+   unified hover rather than being squashed onto another channel's scale. Pace and GAP are one
+   quantity and share an axis. Series are the same ones the timeline rows read (same gates, same
+   smoothing); the cadence and oscillation traces keep their old charts' markers-plus-median look. */
+function renderRunOverlay(D) {
+  const sport = normalizeSport(D.gpsSport || D.sport || '');
+  if (sport !== 'run' && sport !== 'walk') { hide('runOverlaySection'); return; }
+  syncSmoothToggles();
+  const smooth = loamSmooth();
+  const ride = D.ride;
+  const X = (t) => t - ride.start;
+  const unitPace = U.metric() ? 'min/km' : 'min/mi';
+  const fmtPace = (p) => { if (p == null) return ''; const tot = Math.round(p * 60), m = Math.floor(tot / 60), sec = tot % 60; return `${m}:${String(sec).padStart(2, '0')} ${U.metric() ? '/km' : '/mi'}`; };
+  const perUnit = U.metric() ? 1000 : 1609.34;
+  const ch = {};
+
+  const cadRows = ((D.running && D.running.cadSeries) || []).filter(c => c.t >= ride.start && c.t <= ride.end && Number.isFinite(c.spm));
+  const cadOk = cadRows.filter(c => c.conf > 0.15);
+  if (cadOk.length > 1) {
+    const x = cadRows.map(c => X(c.t));
+    const traces = [{ x, y: cadRows.map(c => c.spm), type: 'scatter', mode: smooth ? 'markers' : 'lines+markers',
+      line: { color: '#e87b3d', width: 2 },
+      marker: { color: cadRows.map(c => c.conf > 0.15 ? (smooth ? 'rgba(160,111,36,0.26)' : '#e87b3d')
+                                                     : (smooth ? 'rgba(148,163,184,0.28)' : '#94a3b8')), size: smooth ? 4 : 5 },
+      name: loamT('Cadence (spm)'), showlegend: !smooth, hoverinfo: smooth ? 'skip' : 'all', hovertemplate: smooth ? undefined : '%{y:.0f} spm<extra></extra>' }];
+    if (smooth) traces.push({ x, y: rollingMedianMasked(cadRows.map(c => c.conf > 0.15 ? c.spm : null), 11), type: 'scatter', mode: 'lines',
+      line: { color: '#e87b3d', width: 3 }, name: loamT('Cadence (spm)'), connectgaps: false,
+      hovertemplate: '%{y:.0f} spm<extra></extra>' });
+    const spms = cadOk.map(c => c.spm);
+    ch.cad = { traces, color: '#e87b3d', title: loamT('cadence (spm)'),
+      range: [Math.min(140, Math.floor(Math.min(...spms) - 10)), Math.max(200, Math.ceil(Math.max(...spms) + 10))] };
+  }
+
+  const oscRows = sport === 'run'
+    ? ((D.running && D.running.oscSeries) || []).filter(o => o.t >= ride.start && o.t <= ride.end && Number.isFinite(o.oscCm)) : [];
+  if (oscRows.length > 1) {
+    const x = [], y = [];
+    oscRows.forEach((o, i) => { if (i > 0 && o.t - oscRows[i - 1].t > 6) { x.push(null); y.push(null); } x.push(X(o.t)); y.push(o.oscCm); });
+    const traces = [{ x, y, type: 'scatter', mode: smooth ? 'markers' : 'lines+markers', line: { color: '#8caa6d', width: 2 },
+      marker: { color: smooth ? 'rgba(140,170,109,0.30)' : '#8caa6d', size: smooth ? 4 : 5 },
+      name: loamT('Oscillation (cm, est.)'), showlegend: !smooth, hoverinfo: smooth ? 'skip' : 'all', connectgaps: false,
+      hovertemplate: smooth ? undefined : '%{y:.1f} cm<extra></extra>' }];
+    if (smooth) traces.push({ x, y: rollingMedianMasked(y, 11), type: 'scatter', mode: 'lines', line: { color: '#6f8f4f', width: 3 },
+      name: loamT('Oscillation (cm, est.)'), connectgaps: false, hovertemplate: '%{y:.1f} cm<extra></extra>' });
+    const hand = D.running && D.running.mount === 'hand';
+    ch.osc = { traces, color: '#8caa6d',
+      title: hand ? loamT('oscillation, upper bound (cm)') : loamT('oscillation, est. (cm)'),
+      range: [0, Math.max(10, Math.ceil(Math.max(...oscRows.map(o => o.oscCm)) * 1.1))] };
+  }
+
+  const loc = runPaceSamples(D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end), ride.pausedSpans);
+  const t = loc.map(r => X(r.t));
+  const paceY = loc.map(r => (r.speed != null && !isNaN(r.speed) && r.speed >= 1.0) ? perUnit / r.speed / 60 : null);
+  if (paceY.some(p => p != null)) {
+    const y = smooth ? smoothRunPace(t, paceY) : paceY;
+    ch.pace = { traces: [{ x: t, y, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: smooth ? 2.5 : 1.5 },
+      name: loamT('Pace ({u})', { u: unitPace }), connectgaps: false, text: y.map(fmtPace), hovertemplate: '%{text}<extra></extra>' }],
+      color: '#6da7c4', title: loamT('pace ({u})', { u: unitPace }), reversed: true };
+  }
+  const baroRows = D.sensors.baro || [];
+  const altPts = climbAltSeries(baroRows, D.sensors.location, ride);
+  const gapY = timelineGapSpeeds(loc, altPts).map(v => Number.isFinite(v) && v > 0 ? perUnit / v / 60 : null);
+  if (gapY.some(p => p != null)) {
+    const y = smooth ? smoothRunPace(t, gapY) : gapY;
+    ch.gap = { traces: [{ x: t, y, type: 'scatter', mode: 'lines', line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: '6px,2px' },
+      name: `GAP (${unitPace})`, connectgaps: false, text: y.map(fmtPace), hovertemplate: 'GAP %{text}<extra></extra>' }],
+      color: '#b899db', title: `GAP (${unitPace})`, reversed: true, shareWith: 'pace' };
+  }
+  const hrRows = (D.sensors.heartRate || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.bpm != null);
+  if (hrRows.length > 1) {
+    ch.hr = { traces: [{ x: hrRows.map(r => X(r.t)), y: hrRows.map(r => r.bpm), type: 'scatter', mode: 'lines',
+      line: { color: '#c54b3c', width: 1.4 }, name: loamT('Heart rate (bpm)'), connectgaps: false,
+      hovertemplate: '%{y:.0f} bpm<extra></extra>' }],
+      color: '#c54b3c', title: loamT('heart rate (bpm)') };
+  }
+  if (altPts.length > 1) {
+    const altFromGps = climbAltSeries(baroRows, [], ride).length === 0;
+    const su = U.smallUnit(), base = altPts[0].alt;
+    /* A background line, dotted, as on the bike's single plot: here it crosses other quantities. */
+    ch.alt = { traces: [{ x: altPts.map(a => X(a.t)), y: altPts.map(a => U.smallNum(a.alt - base)), type: 'scatter', mode: 'lines',
+      line: { color: '#d4a574', width: 1.4, dash: 'dot' },
+      name: altFromGps ? loamT('Δ altitude ({u}), GPS', { u: su }) : loamT('Δ altitude ({u})', { u: su }) }],
+      color: '#d4a574', title: altFromGps ? loamT('Δ alt ({u}), GPS', { u: su }) : loamT('Δ alt ({u})', { u: su }) };
+  }
+
+  const order = ['cad', 'osc', 'pace', 'gap', 'hr', 'alt'];
+  const box = document.getElementById('runOverlayChans');
+  if (box) {
+    box.querySelectorAll('label[data-ov-chan]').forEach(l => l.classList.toggle('hidden', !ch[l.dataset.ovChan]));
+    box.querySelectorAll('input[data-ov-chan]').forEach(cb => { cb.checked = loamOverlayChan(cb.dataset.ovChan); });
+  }
+  if (!order.some(k => ch[k])) { hide('runOverlaySection'); return; }
+  show('runOverlaySection');
+  const host = document.getElementById('runOverlayChart');
+  const ticked = order.filter(k => ch[k] && loamOverlayChan(k));
+  if (!ticked.length) {
+    Plotly.purge(host);
+    host.innerHTML = '<div style="padding:40px; text-align:center; color:#475569;">'
+      + escapeHtml(loamT('Tick a channel above to plot it.')) + '</div>';
+    return;
+  }
+  if (!host.data) host.innerHTML = '';
+  const traces = [];
+  const axisOf = {};
+  const axes = [];   // [{ id, c }] in tick order; GAP rides on pace's axis when both are ticked
+  for (const k of ticked) {
+    const c = ch[k];
+    const shared = c.shareWith && axisOf[c.shareWith];
+    const id = shared || (axes.length ? 'y' + (axes.length + 1) : 'y');
+    if (!shared) axes.push({ id, c });
+    axisOf[k] = id;
+    for (const tr of c.traces) traces.push({ ...tr, yaxis: id });
+  }
+  const twoAxes = axes.length > 1;
+  const layout = {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+    font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 56, r: twoAxes ? 56 : 24, t: 24, b: 44 },
+    xaxis: { title: { text: loamT('time in {noun}', { noun: sportNounT(displaySport(D)) }), font: { size: 11 } },
+             gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start) },
+    showlegend: ticked.length > 1, legend: { orientation: 'h', x: 0, y: -0.22, font: { size: 10 } },
+    hovermode: 'x unified',
+  };
+  if (ticked.length > 1) layout.margin.b = 80;
+  axes.forEach(({ id, c }, i) => {
+    layout['yaxis' + id.slice(1)] = {
+      title: { text: i < 2 ? c.title : '', font: { color: c.color, size: 11 } },
+      tickfont: { color: c.color }, gridcolor: i === 0 ? '#e2e8f0' : 'rgba(0,0,0,0)', zeroline: false,
+      ...(c.reversed ? { autorange: 'reversed' } : {}),
+      ...(c.range ? { range: c.range } : {}),
+      ...(i > 0 ? { overlaying: 'y', side: 'right' } : {}),
+      ...(i > 1 ? { visible: false } : {}),
+    };
+  });
+  host.style.height = (ticked.length > 1 ? 330 : 280) + 'px';
+  loamPlot('runOverlayChart', traces, layout, PLOT_CFG);
 }
 
 /* How the cadence row was measured, for the caption under the timeline. It was the standalone
@@ -39203,6 +39383,7 @@ const SECTION_CATALOG = [
   { id: 'radiusSection', label: 'Radius' },
   { id: 'jumpsSection', label: 'Jumps' },
   { id: 'airtimeSection', label: 'Airtime' },
+  { id: 'runOverlaySection', label: 'Overlay' },
   { id: 'runSplitsSection', label: 'Splits' },
   { id: 'runLapsSection', label: 'Laps' },
   { id: 'hrZonesSection', label: 'HR zones' },
@@ -45034,7 +45215,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '0eb4431a8 · 2026-09-26';
+const LOAM_BUILD = '5e0275c6f · 2026-09-26';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
