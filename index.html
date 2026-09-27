@@ -12458,6 +12458,14 @@ function fitDeclaredSport(messages) {
    the "development" manufacturer (255) and the placeholder serial 0x12345678. In an MTB analyzer an
    e-bike is an e-MTB, so this only relabels a 'ride' as e-MTB; it never changes the bike-vs-foot
    split. See [[amflow-avinox-fit-format]]. */
+/* FIT sub-sport mountain (8) or downhill (9). Read only to pick the estimated-power setup family. */
+function fitIsMountain(messages) {
+  const sportMsg = messages.find(m => m.gm === 12);
+  const sess = messages.find(m => m.gm === 18);
+  const sub = (sportMsg && sportMsg.fields[1] != null) ? sportMsg.fields[1] : (sess ? sess.fields[6] : null);
+  return sub === 8 || sub === 9;
+}
+
 function fitIsEbike(messages) {
   const sportMsg = messages.find(m => m.gm === 12);
   const sess = messages.find(m => m.gm === 18);
@@ -12899,7 +12907,11 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   const foot = gpsSport !== 'ride';
   /* A bike ride from an e-bike/e-MTB (Avinox, Specialized Levo, etc.) is relabeled e-MTB; it is
      still the same GPS 'ride' render, only the wording and library sport change. */
-  const eBike = !foot && fitIsEbike(messages);
+  /* fitIsEbike reads the DECLARED sport; the router above also counts field 82 (the motor's own
+     power), which a Levo writes whatever sport its head unit declares. Asking only the first let a
+     file the router sent here BECAUSE of its motor render as an unpowered ride. */
+  const eBike = !foot && (fitIsEbike(messages)
+    || records.filter(r => r.motorPower != null && r.motorPower > 0).length >= 20);
   const { sensors: sensorsFull, speedDerived, startFitSec } = fitOnlySensors(records);
   /* A head unit gets left running too (a lift-served day where the last "descent" is the drive out
      of the car park). Everything below this line reads `sensors` -- computeGpsSummary included -- so
@@ -12990,6 +13002,9 @@ async function analyzeFitOnly(fitFile, onProgress, superseded) {
   hide('loading'); show('results');
   const D = {
     sensors, ride, summary, segments, sport: gpsSport, gpsSport, eBike, gpsOnly: true, speedDerived,
+    /* Mountain rather than road, for the estimated-power setup only: FIT sub-sport mountain (8) or
+       downhill (9), or a detected lift. Read nowhere else. */
+    gpsMountain: !foot && (fitIsMountain(messages) || segments.some(sg => sg.kind === 'lift')),
     /* Sweeping-corner analysis is a bike concept; suppress it for foot activities (a run's
        "descents" are not cornering lines), so the road-corners section + digest corners stay off. */
     descents: foot ? [] : descents, descentGroups: foot ? [] : descentGroups,
@@ -24061,7 +24076,9 @@ async function shareLiftForm() {
   const key = setIdx + ':' + liftFormCharKey() + ':' + liftGhostEnabled();
   /* The second tap of the web path: the recording outlived the tap's user activation, so the share
      sheet refused it, and this tap -- a fresh gesture -- is what delivers it. */
-  if (_liftClip.ready && _liftClip.ready.key === key) {
+  /* The key names the set and the look, not the SESSION, so the recording is compared too: a clip
+     that finished after another lift was opened must not be shared from that lift's button. */
+  if (_liftClip.ready && _liftClip.ready.key === key && _liftClip.ready.D === D) {
     const r = _liftClip.ready;
     const out = await loamShareVideo(r.blob, r.filename, r.caption, r.poster);
     if (out !== 'needs-gesture') liftClipInvalidate();
@@ -24121,8 +24138,8 @@ async function shareLiftForm() {
     const ext = /mp4/.test(mime) ? 'mp4' : 'webm';
     const filename = loamCardFilename('spotter', when).replace(/\.png$/, '.' + ext);
     const out = await loamShareVideo(blob, filename, caption, poster);
-    if (out === 'needs-gesture') {
-      _liftClip.ready = { key, blob, filename, caption, poster };
+    if (out === 'needs-gesture' && _liftForm.D === D) {
+      _liftClip.ready = { key, D, blob, filename, caption, poster };
       setStatus(loamT('Clip ready: tap to share'));
     }
   } catch (e) {
@@ -43607,12 +43624,17 @@ const POWER_FAMILY_DEFAULTS = {
  */
 function powerEstimateFamily(D) {
   if (!D || D.eBike) return null;
-  const fit = D.fitInRide || [];
+  /* A standalone head-unit FIT keeps its records on `timelineFit`, not `fitInRide`, so both are read:
+     a Levo file that declares no e-bike sport still carries field 82 (motor) and field 7 (measured
+     rider watts), and an estimate of "a ride with no power meter" is wrong on both counts there. */
+  const fit = [...(D.fitInRide || []), ...(D.timelineFit || [])];
   if (fit.some((r) => r && r.motorPower > 0)) return null;
   if (fit.filter((r) => r && r.power > 0).length >= 20) return null;
   if (D.sport === 'road') return 'road';
   if (D.sport === 'mtb') return 'mtb';
-  if (D.gpsOnly && (D.gpsSport || 'ride') === 'ride') return 'road';
+  /* A GPS-only ride is road unless the file says mountain (FIT sub-sport) or rode a lift, which no
+     road ride does: a bike-park day estimated with a 9 kg road bike on the hoods is the wrong model. */
+  if (D.gpsOnly && (D.gpsSport || 'ride') === 'ride') return D.gpsMountain ? 'mtb' : 'road';
   return null;
 }
 
@@ -46113,7 +46135,7 @@ const LOAM_VERSION = '1.4.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'August 2026';
-const LOAM_BUILD = '0f57cc017 · 2026-09-26';
+const LOAM_BUILD = '3223e7a53 · 2026-09-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
