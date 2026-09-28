@@ -711,8 +711,11 @@
   :root[data-analysis-view="visual"] .analysis-visual-only { display:block; }
   /* Visual is the charts-first page (owner, 2026-09-26: "in visual mode let's hide descents and
      climbs"): the climb and descent ledgers are tables of segments, which only Detailed shows.
-     Minimalist was merged into Visual the same day, bringing the caption rules below. Mirrored in VIEW_DROPPED so the Dashboard chooser does not offer a dead row for them. */
-  :root[data-analysis-view="visual"] :is(#runSegmentsSection, #roadSection, #roadDescentsSection, #roadDescentHistorySection) { display:none !important; }
+     Minimalist was merged into Visual the same day, bringing the caption rules below. Mirrored in VIEW_DROPPED so the Dashboard chooser does not offer a dead row for them.
+     The same day the owner added "what this was measured from" and the MTB runs table when it is
+     segmenting by DESCENTS; the runs table in its Runs or Laps modes stays. `data-runs-mode` is
+     written by drawRuns/drawRunsEmpty, so switching the mode picker in Detailed moves it. */
+  :root[data-analysis-view="visual"] :is(#runSegmentsSection, #roadSection, #roadDescentsSection, #roadDescentHistorySection, #recordingQualitySection, #runsSection[data-runs-mode="descents"]) { display:none !important; }
   :root[data-analysis-view="visual"] .analysis-compact-note { color:var(--text-dim); font-size:12px; margin:8px 0; }
   :root[data-analysis-view="visual"] :is(.session-lead, .lift-form-row) { grid-template-columns:minmax(0, 1fr); }
   :root[data-analysis-view="visual"] #results > section { margin-bottom:24px; }
@@ -3021,7 +3024,7 @@
        comparison view. Its boxes are its own, so ticking a channel here does not reshape the stack. -->
   <section id="runOverlaySection" class="hidden">
     <div class="section-title">
-      Overlay
+      All channels
       <span class="subtitle"><span class="analysis-explanation">every ticked channel on one plot · the first two name the left and right axes</span>
         <label class="smooth-lbl" title="Rolling median that suppresses the spikes from stops"><input type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> smooth</label>
       </span>
@@ -7106,8 +7109,14 @@ function wireRunsFold() {
 
    The nav is rebuilt on both paths. The old early return skipped buildSectionNav() entirely, which
    is precisely why the chip went stale rather than disappearing with the section it targets. */
+/* The resolved mode, for the Visual rule that drops the table only while it lists descents. */
+function setRunsModeAttr(mode) {
+  const sec = document.getElementById('runsSection');
+  if (sec) sec.dataset.runsMode = mode || '';
+}
 function drawRunsEmpty(mode) {
   const nav = () => { if (typeof buildSectionNav === 'function') buildSectionNav(); };
+  setRunsModeAttr(mode);
   if (_runsMode === 'auto') { hide('runsSection'); nav(); return; }
   show('runsSection');
   wireRunsFold();
@@ -7201,6 +7210,7 @@ function drawRuns() {
   currentSavedDescents = D.savedDescents || null;
   currentLibraryRideId = D.libraryRideId;
   const { mode, runs, lapInfo } = segmentRuns(D, _runsMode);
+  setRunsModeAttr(mode);
   if (!runs.length) { drawRunsEmpty(mode); return; }
   /* Read once for the whole table: the rider's "not a trail" marks, as time windows, so a mark made
      in one segmentation mode is still visible (and still clearable) from another. */
@@ -10694,7 +10704,11 @@ function drawRunsOverlay(runs, D) {
   });
   loamPlot(el, [...traces, ...connectors], {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    title: { text: loamT(showPace ? 'Pace vs distance into run (overlay to compare)' : 'Speed vs distance into run (overlay to compare)')
+    /* "Overlay" only when there is something to lay over: one run is just a run, and the word also
+       named the foot channels chart below, so it read as a promise the chart could not keep. */
+    title: { text: loamT(traces.length > 1
+        ? (showPace ? 'Pace vs distance, runs overlaid' : 'Speed vs distance, runs overlaid')
+        : (showPace ? 'Pace vs distance into run' : 'Speed vs distance into run'))
       + (connectors.length ? '<br><sup>' + loamT('Dashed = gap in measured pace') + '</sup>' : ''), font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
     margin: { l: 48, r: 14, t: connectors.length ? 48 : 32, b: 62 },
     xaxis: { title: { text: loamT('distance ({u})', { u: U.smallUnit() }), font: { size: 11 } }, gridcolor: '#e2e8f0' },
@@ -21915,11 +21929,24 @@ function renderCrossRide({ perRide, clusters }) {
        legend entry (the wall of "recording.csv" that buried the plot). Index-based colours + a date
        label (memberDate: filename UTC, else the library row's recordedAt, so app sessions get real
        dates too) keep the rides apart; the PR is flagged so the legend reads. */
-    const CMP_COLORS = ['#e0573a','#5b8fb0','#8caa6d','#e0a458','#9b7fb0','#56a3a6','#b0905b','#c45d5d'];
+    /* Eight hues validated for colour-blind and normal-vision separation on this page's cream and dark
+       chart grounds (dark steps are in loamChartTheme). The old set cycled after eight, so on a
+       13-lap segment the PR and the ninth-fastest lap drew the SAME red when both were ticked (owner
+       report), and its amber/sage pair was 3.5 dE apart under protanopia. The two laps the charts open
+       on (PR and its comparison) take the first two slots so the default pair is always blue vs orange;
+       a lap past the eighth reuses a hue with a DASHED line, so no two laps ever draw identically. */
+    const CMP_COLORS = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];
+    const CMP_DASHES = ['solid', 'dash', 'dot'];
     const dateLabels = memberDateLabels(members);
+    const partner = cmp === pr ? ref : cmp;
+    const slotOrder = [pr, ...(partner && partner !== pr ? [partner] : []),
+                       ...members.filter(m => m !== pr && m !== partner)];
+    slotOrder.forEach((m, slot) => {
+      m.color = CMP_COLORS[slot % CMP_COLORS.length];
+      m.dash = CMP_DASHES[Math.floor(slot / CMP_COLORS.length) % CMP_DASHES.length];
+    });
     members.forEach((m, i) => {
       m._mi = i;
-      m.color = CMP_COLORS[i % CMP_COLORS.length];
       m.tag = dateLabels[i];
       if (m === pr) m.tag += ' ⚡';
       if (m === ref && m !== pr) m.tag += ' · ' + loamT('ref');
@@ -22008,10 +22035,13 @@ function renderCrossRide({ perRide, clusters }) {
     const gapToPr = m => m === pr
       ? `<span style="color:var(--moss); font-weight:600;">PR</span>`
       : `<span style="color:var(--text-muted);">+${(m.duration - pr.duration).toFixed(1)}s</span>`;
+    /* The table's lap names wear the same hue as their line, so they follow the theme the same way. */
+    const chartTheme = loamChartTheme();
+    const cmpInk = c => chartTheme[c] || c;
     const rowHtml = m => `
       <tr>
         <td style="text-align:center;"><input type="checkbox" class="cmp-check" data-mi="${m._mi}" ${selectedMembers.has(m) ? 'checked' : ''} style="cursor:pointer;"></td>
-        <td style="color:${m.color}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}${tieBadge(m)}${standingBadge(m)}</td>
+        <td style="color:${cmpInk(m.color)}; font-weight:600; text-align:left;">${escapeHtml(m.tag)}${tieBadge(m)}${standingBadge(m)}</td>
         <td>${fmtDuration(m.duration)}</td>
         <td>${gapToPr(m)}</td>
         <td>${U.dist(m.distance)}${(m.distanceGps != null && Math.abs(m.distanceGps - m.distance) >= 5) ? ` <span style="color:var(--text-muted); font-size:10px;">${loamT('(GPS {dist})', { dist: U.dist(m.distanceGps) })}</span>` : ''}</td>
@@ -22109,7 +22139,7 @@ function renderCrossRide({ perRide, clusters }) {
           hovertemplate: `%{text} ${paceUnit}<extra>%{fullData.name}</extra>`,
         } : {}),
         type: 'scatter', mode: 'lines',
-        line: { color: m.color, width: 2 },
+        line: { color: m.color, width: 2, dash: m.dash },
         name: m.tag,
       }));
       const paceTicks = paceComparison ? chartPaceTicks(speedTraces.flatMap(t => t.y)) : [];
@@ -22138,7 +22168,7 @@ function renderCrossRide({ perRide, clusters }) {
         dtwTraces.push({
           x, y: result.delta,
           type: 'scatter', mode: 'lines',
-          line: { color: m.color, width: 2 },
+          line: { color: m.color, width: 2, dash: m.dash },
           name: m.tag,
         });
       }
@@ -22191,7 +22221,7 @@ function renderCrossRide({ perRide, clusters }) {
               return pbpSpeedUsable(t) ? U.speedNum(t.vPeak) : null;
             }),
             type: 'scatter', mode: 'lines+markers', connectgaps: false,
-            line: { color: m.color, width: 2 }, marker: { size: 6 }, name: m.tag,
+            line: { color: m.color, width: 2, dash: m.dash }, marker: { size: 6 }, name: m.tag,
           };
         });
         const turnNote = note + `<br><span style="font-size:11px">${loamT('reference corner numbers; gaps mean no reliable match with usable speeds')}</span>`;
@@ -29849,7 +29879,7 @@ function smoothTimelineTraces(traces, windowS = 3) {
 /* The per-section "smooth" checkboxes all drive one shared preference; flipping either re-renders the
    whole view (same path the units toggle uses) so cadence, oscillation, and the pace timeline update
    together. syncSmoothToggles mirrors the stored preference back onto every checkbox on each render. */
-function onSmoothToggle(el) { setLoamSmooth(el.checked); rerenderUnits(); }
+function onSmoothToggle(el) { setLoamSmooth(el.checked); rerenderUnits(el); }
 /* GAP on the foot timeline: OFF unless the athlete turns it on (owner, 2026-09-25). A second line
    in the pace row is the busiest thing left on the chart, and GAP is the comparison read, not the
    primary one -- the Climbs panel already carries it per climb. */
@@ -29868,14 +29898,17 @@ function loamOverlayChan(k) {
   const dflt = k === 'cad' || k === 'osc';
   try { const v = localStorage.getItem('loam_ov_' + k); return v == null ? dflt : v === '1'; } catch (e) { return dflt; }
 }
+/* Redraws the overlay alone: its boxes change nothing else on the page, and re-running the whole
+   running render for them is both slow on a long run and what moved the page under the reader. */
 function onOverlayChanToggle(el) {
   try { localStorage.setItem('loam_ov_' + el.dataset.ovChan, el.checked ? '1' : '0'); } catch (e) {}
-  rerenderUnits();
+  if (_lastRender && _lastRender.D && (_lastRender.fn === renderAllRunning || _lastRender.fn === renderAllGps)) renderRunOverlay(_lastRender.D);
+  else rerenderUnits(el);
 }
 function onTimelineChanToggle(el) {
   const k = el.dataset.chan;
   try { localStorage.setItem(k === 'gap' ? 'loam_timeline_gap' : 'loam_tl_' + k, el.checked ? '1' : '0'); } catch (e) {}
-  rerenderUnits();
+  rerenderUnits(el);
 }
 function syncSmoothToggles() { document.querySelectorAll('.smoothToggle').forEach(cb => { cb.checked = loamSmooth(); }); }
 /* MTB calibration-window strategy. 'preride' (default) calibrates from the last sufficiently-still
@@ -30560,7 +30593,7 @@ const LOAM_NB = {
   'oscillation, est. (cm)': 'svingning, anslått (cm)',
   'oscillation, upper bound (cm)': 'svingning, øvre grense (cm)',
   'Tick a channel above to plot it.': 'Huk av en kanal over for å vise den.',
-  'Overlay': 'Overlagt',
+  'All channels': 'Alle kanaler',
   'every ticked channel on one plot · the first two name the left and right axes':
     'alle avhukede kanaler i ett plott · de to første gir navn til venstre og høyre akse',
   'Rolling median that suppresses the spikes from stops':
@@ -32356,8 +32389,10 @@ const LOAM_NB = {
   'cadence (SPM)': 'kadens (skritt/min)',
   'oscillation (cm, peak-to-peak)': 'svingning (cm, topp til topp)',
   'distance ({u})': 'distanse ({u})',
-  'Pace vs distance into run (overlay to compare)': 'Tempo mot distanse inn i etappen (lagt oppå hverandre)',
-  'Speed vs distance into run (overlay to compare)': 'Fart mot distanse inn i etappen (lagt oppå hverandre)',
+  'Pace vs distance into run': 'Tempo mot distanse inn i etappen',
+  'Speed vs distance into run': 'Fart mot distanse inn i etappen',
+  'Pace vs distance, runs overlaid': 'Tempo mot distanse, etappene lagt oppå hverandre',
+  'Speed vs distance, runs overlaid': 'Fart mot distanse, etappene lagt oppå hverandre',
   'Dashed = gap in measured pace': 'Stiplet = hull i målt tempo',
   'Time lag vs fastest run (#{n}, positive = slower)': 'Tidsforskjell mot raskeste etappe (#{n}, positivt = tregere)',
   'seconds into fastest run': 'sekunder inn i raskeste etappe',
@@ -33709,7 +33744,25 @@ const U = {
 };
 /* Remember the last render so the units toggle can re-render in place. */
 let _lastRender = null;
-function rerenderUnits() { if (_lastRender) _lastRender.fn(_lastRender.D); }
+/* `anchor` is the control that asked for the re-render. A full render starts with hideAllSections(),
+   which collapses the page for a moment; the browser clamps scrollY to the shrunken height and it is
+   never given back, so a checkbox tapped halfway down a run threw the reader ~760 px up the page (to
+   the timeline, at 390 px) and their next tap landed on whatever had slid under their finger (owner
+   report, 2026-09-28). Holding the anchor's viewport position across the render undoes that; a second
+   pass after layout catches the charts that size themselves a frame later. */
+function rerenderUnits(anchor) {
+  if (!_lastRender) return;
+  const top = anchor && anchor.isConnected ? anchor.getBoundingClientRect().top : null;
+  _lastRender.fn(_lastRender.D);
+  if (top == null) return;
+  const hold = () => {
+    if (!anchor.isConnected || !anchor.getClientRects().length) return;
+    const delta = anchor.getBoundingClientRect().top - top;
+    if (Math.abs(delta) > 1) window.scrollTo({ top: window.scrollY + delta, behavior: 'instant' });
+  };
+  hold();
+  requestAnimationFrame(hold);
+}
 
 /* Save the chart as a PNG. On the desktop web page this is a normal browser download. Inside the iOS
    app (WKWebView) a normal download silently vanishes (the web view has no download handler), so when
@@ -34096,6 +34149,15 @@ function loamChartTheme() {
     '#d4a574': dark ? '#d4a574' : '#a8763a',   /* tan */
     '#a78bd9': dark ? '#8f7ad6' : '#7b5fc0',   /* violet */
     '#c54b3c': dark ? '#d95f38' : '#c14e2e',   /* red -> clay */
+    /* segment lap-compare hues (CMP_COLORS), light -> dark steps */
+    '#2a78d6': dark ? '#3987e5' : '#2a78d6',
+    '#eb6834': dark ? '#d95926' : '#eb6834',
+    '#1baf7a': dark ? '#199e70' : '#1baf7a',
+    '#eda100': dark ? '#c98500' : '#eda100',
+    '#e87ba4': dark ? '#d55181' : '#e87ba4',
+    '#008300': dark ? '#008300' : '#008300',
+    '#4a3aa7': dark ? '#9085e9' : '#4a3aa7',
+    '#e34948': dark ? '#e66767' : '#e34948',
     /* new light-theme literals -> their dark steps (identity in light) */
     '#557a2f': dark ? '#a8d08a' : '#557a2f',
     '#1f7ba6': dark ? '#3f97c9' : '#1f7ba6',
@@ -39814,7 +39876,7 @@ const SECTION_CATALOG = [
   { id: 'radiusSection', label: 'Radius' },
   { id: 'jumpsSection', label: 'Jumps' },
   { id: 'airtimeSection', label: 'Airtime' },
-  { id: 'runOverlaySection', label: 'Overlay' },
+  { id: 'runOverlaySection', label: 'All channels' },
   { id: 'runSplitsSection', label: 'Splits' },
   { id: 'runLapsSection', label: 'Laps' },
   { id: 'hrZonesSection', label: 'HR zones' },
@@ -40162,8 +40224,16 @@ function setDashboardFamilyLayout(mutate) {
    stylesheet). The chooser leaves them out rather than offer a checkbox that changes nothing. */
 const VIEW_DROPPED = {
   visual: ['coachSection', 'geekStatsSection', 'gpsUpsellSection', 'roadUpsellSection',
-           'runSegmentsSection', 'roadSection', 'roadDescentsSection', 'roadDescentHistorySection'],
+           'runSegmentsSection', 'roadSection', 'roadDescentsSection', 'roadDescentHistorySection',
+           'recordingQualitySection'],
 };
+/* VIEW_DROPPED plus the one conditional drop: the runs table, while it is listing descents. */
+function viewDroppedSections(view) {
+  const out = (VIEW_DROPPED[view] || []).slice();
+  const runs = document.getElementById('runsSection');
+  if (view === 'visual' && runs && runs.dataset.runsMode === 'descents') out.push('runsSection');
+  return out;
+}
 function renderDashboardBody() {
   const host = document.getElementById('dashboardBody');
   if (!host) return;
@@ -40188,7 +40258,7 @@ function renderDashboardBody() {
      that quietly omits things reads as a list that lost them. */
   /* The chooser only shapes Visual, which drops these sections whatever a layout
      says (the compact-view CSS), so a row for one would be a checkbox that changes nothing. */
-  const viewDropped = VIEW_DROPPED[analysisView()] || [];
+  const viewDropped = viewDroppedSections(analysisView());
   const rows = layoutableSections(SECTION_CATALOG).filter(row => !viewDropped.includes(row.id)).map(row => {
     const here = avail.has(row.id);
     const on = here && !off.has(row.id);
@@ -41188,6 +41258,9 @@ function openSessionDataSources() {
   const section = document.getElementById('recordingQualitySection');
   const detail = section && section.querySelector('details');
   if (!section || section.classList.contains('hidden')) return;
+  /* Visual drops this panel, and the warning carrying this button stays on screen there, so the
+     button would otherwise scroll to nothing. */
+  if (analysisView() === 'visual') setAnalysisView('detailed');
   if (detail) detail.open = true;
   section.scrollIntoView({ block: 'start' });
   const summary = detail && detail.querySelector('summary');
@@ -46135,7 +46208,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'b8018c496 · 2026-09-27';
+const LOAM_BUILD = 'dc776bc19 · 2026-09-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
@@ -46146,7 +46219,7 @@ const LOAM_WHATS_NEW = [
     ['Choose the fields your watch shows', 'Settings > Watch fields picks the figures on the watch\'s recording screen for a run, a walk, or a ride or ski day, their order, and a layout: side by side, one big figure, or stacked.'],
     ['Your watch\'s length count reaches your phone', 'each length the watch counts during a pool swim is relayed to the phone as it happens and written into the recording, so a length you turn into without stopping still counts. Set or correct the pool length afterwards, in metres, yards or feet.'],
     ['Upload to Strava automatically', 'Settings > Strava > Upload every session sends each new session as it is saved, with its sport and gear. Nothing recorded before you turn it on is ever sent without a tap.'],
-    ['An overlay chart for runs', 'tick cadence, oscillation, pace, GAP, heart rate or altitude and see them on one plot, below the timeline.'],
+    ['All your run channels on one chart', 'the All channels chart, below the timeline: tick cadence, oscillation, pace, GAP, heart rate or altitude and see them on one plot.'],
     ['Share the Spotter Cam as a video', 'the Lift view\'s Spotter Cam records the selected set\'s rep-by-rep replay as a clip with the rep counter, ready to share.'],
     ['Indoor skiing (experimental)', 'a dome session recorded as Ski (test) reads its runs from the barometer, plus your turns and lateral load run by run. Checked against one session at one hall so far, and labelled so.'],
     /* Untagged: every sport that renders the results flow gets a chooser, so there is nothing to
