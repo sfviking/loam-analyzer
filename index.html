@@ -32557,6 +32557,8 @@ const LOAM_NB = {
   'to your AI server at {host}, not to Anthropic.': 'til AI-serveren din på {host}, ikke til Anthropic.',
   'your metrics, turned into coaching — sent to your own AI server, only when you ask':
     'tallene dine, gjort om til coaching — sendes til din egen AI-server, kun når du ber om det',
+  '{host} is this phone, not the computer running your model. Use that computer\'s network address instead, for example http://192.168.1.20:11434.':
+    '{host} er denne telefonen, ikke datamaskinen som kjører modellen din. Bruk datamaskinens nettverksadresse i stedet, for eksempel http://192.168.1.20:11434.',
   'Could not reach your AI server at {host}. Check it is running and allows requests from this page (for Ollama, set OLLAMA_ORIGINS).':
     'Fikk ikke kontakt med AI-serveren din på {host}. Sjekk at den kjører og tillater forespørsler fra denne siden (for Ollama: sett OLLAMA_ORIGINS).',
   'your metrics, turned into coaching — sent to Anthropic with your own API key, only when you ask':
@@ -37413,6 +37415,14 @@ function coachEndpointHost(ep) {
   try { return new URL(ep.url).host; } catch (e) { return ep.url; }
 }
 
+/* Whether the server is THIS device. On a computer that is a local model; inside the iOS app it is
+   the phone itself, where no model is running, so the page says so instead of blaming CORS. */
+function coachEndpointIsLoopback(ep) {
+  let h;
+  try { h = new URL(ep.url).hostname.toLowerCase(); } catch (e) { return false; }
+  return h === 'localhost' || h.endsWith('.localhost') || h === '[::1]' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
+}
+
 /* A Messages-API content value (a string, or an array of blocks some of which carry cache_control)
    as plain text, for servers that take a string. */
 function flattenCoachContent(c) {
@@ -37473,6 +37483,16 @@ function coachSetEndpoint(ep) {
 function coachOwnKey() { return coachSessionKey() || coachRememberedKey(); }
 /* Whether a question can be sent at all. A custom server needs no key (a local one has none). */
 function coachCanSend() { return !!coachEndpoint() || !!coachKey(); }
+/* Why a custom server could not be reached. Inside the iOS app "localhost" is the phone, not the
+   computer running the model, so that case gets its own answer; CORS advice there would send the
+   athlete to fix a server that was never asked. */
+function coachEndpointUnreachableText(ep) {
+  const embedded = typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED;
+  if (embedded && coachEndpointIsLoopback(ep)) {
+    return loamT('{host} is this phone, not the computer running your model. Use that computer\'s network address instead, for example http://192.168.1.20:11434.', { host: coachEndpointHost(ep) });
+  }
+  return loamT('Could not reach your AI server at {host}. Check it is running and allows requests from this page (for Ollama, set OLLAMA_ORIGINS).', { host: coachEndpointHost(ep) });
+}
 /* Whether this request is billed to the developer's shared account, which is what the daily cap and
    the "developer's account" copy are about. Never true on a custom server. */
 function coachOnBundled() { return !coachEndpoint() && !coachHasOwnKey() && !!coachBundledKey(); }
@@ -38864,7 +38884,7 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
       /* A custom server that cannot be reached is almost always one of two things, and neither is
          in the error text a browser gives: the server is not running, or it does not allow requests
          from this page (CORS). */
-      if (ep) { onError(loamT('Could not reach your AI server at {host}. Check it is running and allows requests from this page (for Ollama, set OLLAMA_ORIGINS).', { host: coachEndpointHost(ep) })); return; }
+      if (ep) { onError(coachEndpointUnreachableText(ep)); return; }
       onError(coachErrorText(loamT('Network error: {why}', { why: e.message }))); return;
     }
     if (!resp.ok || !resp.body) {
@@ -38995,7 +39015,7 @@ function toggleCoachEndpointForm() {
   const fmt = (v, l) => `<option value="${v}" ${ep.format === v ? 'selected' : ''}>${escapeHtml(loamT(l))}</option>`;
   host.insertAdjacentHTML('beforeend',
     `<div class="coach-endpoint" id="coachEndpointForm">` +
-    `<label>${escapeHtml(loamT('Server URL'))}<input id="coachEndpointUrl" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="http://localhost:11434" value="${escapeHtml(ep.url)}"></label>` +
+    `<label>${escapeHtml(loamT('Server URL'))}<input id="coachEndpointUrl" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="${(typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED) ? 'http://192.168.1.20:11434' : 'http://localhost:11434'}" value="${escapeHtml(ep.url)}"></label>` +
     `<label>${escapeHtml(loamT('API format'))}<select id="coachEndpointFormat">${fmt('openai', 'OpenAI-compatible (Ollama, LM Studio, llama.cpp)')}${fmt('anthropic', 'Anthropic-compatible')}</select></label>` +
     `<label>${escapeHtml(loamT('Model'))}<input id="coachEndpointModel" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="llama3.1" value="${escapeHtml(ep.model)}"></label>` +
     `<div class="analysis-explanation">${escapeHtml(loamT('Your session summary goes to this server instead of Anthropic. Your own API key is sent only if you set one; the shared key never is. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.'))}</div>` +
@@ -46566,7 +46586,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '872595a4e · 2026-09-28';
+const LOAM_BUILD = '69cfde5bd · 2026-09-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
