@@ -1753,6 +1753,12 @@
   .coach-controls select { background-color:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:3px 22px 3px 8px; font-family:inherit; }
   .coach-controls a { color:var(--accent-3); text-decoration:none; }
   .coach-controls a:hover { text-decoration:underline; }
+  /* The custom AI server form. Fields at 16px: iOS zooms the page into any smaller text field. */
+  .coach-endpoint { flex-basis:100%; display:grid; gap:8px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; background:var(--surface-2); }
+  .coach-endpoint input, .coach-endpoint select { font-size:16px; font-family:inherit; color:var(--text); background-color:var(--surface); border:1px solid var(--border); border-radius:4px; padding:5px 8px; min-width:0; width:100%; box-sizing:border-box; }
+  .coach-endpoint label { display:grid; gap:3px; }
+  .coach-endpoint .coach-endpoint-actions { display:flex; gap:10px; flex-wrap:wrap; }
+  .coach-endpoint button { font:inherit; font-size:13px; padding:5px 12px; border-radius:4px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; }
   .coach-key-ok { color:var(--accent-2); }
   .coach-key-scope { color:var(--text-muted); }
   .coach-thread { display:flex; flex-direction:column; gap:10px; max-height:440px; overflow-y:auto; }
@@ -9933,7 +9939,7 @@ function formAskCoach() {
   if (!_form || !_form.S) return;
   if (!_form.turn && !_form.run) return;
   if (!coachState) return;
-  if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
+  if (!coachCanSend()) { promptCoachKey(); if (!coachCanSend()) return; }
   revealCoachConversation();
   scrollToCoach();
   sendCoach(_form.turn
@@ -16280,7 +16286,9 @@ function swimDigest(D) {
     source: captured ? 'captured' : 'apple-health',
     sport: captured
       ? 'swimming (RECORDED by Loam: Apple Watch wrist motion, no Apple Health data)'
-      : 'swimming (imported from Apple Health)',
+      : session.source === 'fit'
+        ? 'swimming (imported from a FIT file: the watch\'s per-length aggregates, the same data class as an Apple Health import)'
+        : 'swimming (imported from Apple Health)',
     pool_length_m: poolM,
     /* The same pool, named the way the SWIMMER names it, because since 2026-09-20 that need not be
        metres: a 50 ft hotel pool is 15.24 m, and a coach that quotes "15.24 m" back at someone who
@@ -17302,7 +17310,104 @@ function capturedSwimPayload({ wrist, poolLengthM = null, title = null, displayU
   };
 }
 
+  /* ---- ported from analyzer/sports/swim/fit.js ---- */
+/* FIT sport enum 5 is swimming, declared on the sport message (12, field 0) and again on the
+   session (18, field 5). The sport message wins when both are present, as in `fitDeclaredSport`. */
+function fitIsSwim(messages) {
+  const sportMsg = (messages || []).find(m => m.gm === 12);
+  let sport = sportMsg && sportMsg.fields[0] != null ? sportMsg.fields[0] : null;
+  if (sport == null) {
+    const sess = (messages || []).find(m => m.gm === 18);
+    if (sess && sess.fields[5] != null) sport = sess.fields[5];
+  }
+  return sport === 5;
+}
+
+/* FIT swim_stroke -> the style names the Swift import emits. `drill` maps to kickboard because the
+   two mean the same thing downstream: a length whose arm count is not a stroke count, which every
+   stroke-derived read must exclude. Apple's kickboard lengths leave HealthFit as FIT drill. */
+function swimStyleFromFit(n) {
+  switch (n) {
+    case 0: return 'freestyle';
+    case 1: return 'backstroke';
+    case 2: return 'breaststroke';
+    case 3: return 'butterfly';
+    case 4: return 'kickboard';
+    case 5: case 6: return 'mixed';
+    default: return 'unknown';
+  }
+}
+
+/* Build the raw swim payload (see import.js for the shape) from parsed FIT messages. Throws only
+   when the file has no usable time span; everything else degrades to what survives, exactly as
+   `normalizeSwimImport` does. */
+function swimPayloadFromFit(messages, title = null) {
+  const msgs = messages || [];
+  const epoch = (v) => (v != null ? v + FIT_EPOCH_UNIX : null);
+  const sess = msgs.find(m => m.gm === 18);
+  const sportMsg = msgs.find(m => m.gm === 12);
+  const sf = sess ? sess.fields : {};
+  const subSport = sportMsg && sportMsg.fields[1] != null ? sportMsg.fields[1] : sf[6];
+
+  const lengths = [];
+  for (const m of msgs) {
+    if (m.gm !== 101) continue;
+    const f = m.fields;
+    if (f[12] === 0) continue;   // idle length: rest at the wall, not swimming
+    const elapsed = f[3] != null ? f[3] / 1000 : null;
+    if (elapsed == null || !(elapsed > 0)) continue;
+    const t0 = f[2] != null ? epoch(f[2]) : (f[253] != null ? epoch(f[253]) - elapsed : null);
+    if (t0 == null) continue;
+    lengths.push({
+      t0, t1: +(t0 + elapsed).toFixed(3),
+      strokes: f[5] != null ? f[5] : null,
+      style: swimStyleFromFit(f[7]),
+    });
+  }
+  lengths.sort((a, b) => a.t0 - b.t0);
+
+  const hr = [];
+  const route = [];
+  const SEMI_TO_DEG = 180 / 2147483648;
+  for (const m of msgs) {
+    if (m.gm !== 20 || m.fields[253] == null) continue;
+    const f = m.fields, t = epoch(f[253]);
+    if (f[3] != null && f[3] > 0) hr.push({ t, bpm: f[3] });
+    if (f[0] != null && f[1] != null) route.push({ t, lat: f[0] * SEMI_TO_DEG, lon: f[1] * SEMI_TO_DEG });
+  }
+
+  const times = [...lengths.map(l => l.t0), ...hr.map(r => r.t), ...route.map(r => r.t)];
+  const endTimes = [...lengths.map(l => l.t1), ...hr.map(r => r.t), ...route.map(r => r.t)];
+  const start = sf[2] != null ? epoch(sf[2]) : (times.length ? Math.min(...times) : null);
+  const end = start != null && sf[7] != null ? start + sf[7] / 1000
+    : (endTimes.length ? Math.max(...endTimes) : null);
+  if (start == null || end == null || !(end > start)) throw new Error('This swim FIT has no usable start and end time.');
+
+  const poolLengthM = sf[44] != null && sf[44] > 0 ? sf[44] / 100 : null;
+  /* pool_length_unit is FIT display_measure: 1 = statute, i.e. the pool was declared in yards. */
+  const unit = sf[46] === 1 ? 'yd' : 'm';
+  const locationType = subSport === 18 ? 'openWater'
+    : subSport === 17 || poolLengthM != null || lengths.length ? 'pool'
+    : route.length ? 'openWater' : 'unknown';
+
+  return {
+    source: 'fit',
+    title,
+    start, end,
+    locationType,
+    poolLengthM,
+    displayUnit: unit,
+    poolUnit: unit,
+    totalDistanceM: sf[9] != null ? sf[9] / 100 : null,
+    activeEnergyKcal: sf[11] != null ? sf[11] : null,
+    lengths,
+    hr,
+    route: locationType === 'openWater' ? route : [],
+  };
+}
+
   return { normalizeSwimImport, swimLengthMetrics, isStrokeStyle,
+    fitIsSwim, swimStyleFromFit, swimPayloadFromFit,
     analyzeCapturedSwim, detectStrokes, segmentBlocks, strokeSignal, capturedSwimPayload, detectSwim,
     parseSwimLengthMark, parseSwimLengthMarks, watchLengths,
     analyzeSwim, analyzeSwimSet, groupSwimSets, swimTrend, classifySwimEffort,
@@ -20050,6 +20155,14 @@ async function analyze(files) {
       const probeBuf = await fitFile.arrayBuffer();
       if (superseded()) return;
       const probeMsgs = parseFIT(probeBuf);
+      /* A swim is asked about BEFORE power and GPS: a pool swim has neither, so it fell through to
+         the GPS-only path and failed "no usable GPS track", and an open-water one has GPS and
+         rendered as a ride. The watch's length messages are the same ground truth the Health
+         import reads, so it goes through that import's renderer (tester report, 2026-09-28). */
+      if (LoamSwim.fitIsSwim(probeMsgs)) {
+        window.onSwimImport(LoamSwim.swimPayloadFromFit(probeMsgs));
+        return;
+      }
       const probe = extractFitData(probeMsgs);
       /* An E-BIKE is asked about FIRST, and the reason is the same one that moved sport detection off
          field 7 on 2026-08-14 (CLAUDE.md, "Specialized FIT e-bike block"): field 7 is the RIDER's
@@ -30758,7 +30871,6 @@ const LOAM_NB = {
   'Light': 'Lys',
   'Dark': 'M\u00f8rk',
   'Theme: follows system by default': 'Tema: f\u00f8lger systemet som standard',
-  'Theme set to {theme}. Charts adopt it on the next render.': 'Tema satt til {theme}. Grafene f\u00f8lger etter ved neste opptegning.',
   'Skipped unsupported: {names}': 'Hoppet over filer som ikke st\u00f8ttes: {names}',
   'Training plan': 'Treningsplan',
   'a goal, set against what you have actually recorded': 'et mål, satt opp mot det du faktisk har registrert',
@@ -32431,6 +32543,22 @@ const LOAM_NB = {
   'Intermediate': 'Viderekommen',
   'Advanced': 'Avansert',
   'set API key': 'legg inn API-nøkkel',
+  'your AI server': 'din AI-server',
+  'change': 'endre',
+  'use another AI server': 'bruk en annen AI-server',
+  'Server URL': 'Serveradresse',
+  'API format': 'API-format',
+  'OpenAI-compatible (Ollama, LM Studio, llama.cpp)': 'OpenAI-kompatibel (Ollama, LM Studio, llama.cpp)',
+  'Anthropic-compatible': 'Anthropic-kompatibel',
+  'Use Anthropic': 'Bruk Anthropic',
+  'Your session summary goes to this server instead of Anthropic. Your own API key is sent only if you set one; the shared key never is. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.':
+    'Sammendraget av økten sendes til denne serveren i stedet for Anthropic. Din egen API-nøkkel sendes bare hvis du har lagt inn en; den delte nøkkelen sendes aldri. Treneren er skrevet for Claude, så Loam har ikke kontrollert svarene fra en annen modell.',
+  'Enter a URL starting with http:// or https://, and a model name.': 'Skriv inn en adresse som starter med http:// eller https://, og et modellnavn.',
+  'to your AI server at {host}, not to Anthropic.': 'til AI-serveren din på {host}, ikke til Anthropic.',
+  'your metrics, turned into coaching — sent to your own AI server, only when you ask':
+    'tallene dine, gjort om til coaching — sendes til din egen AI-server, kun når du ber om det',
+  'Could not reach your AI server at {host}. Check it is running and allows requests from this page (for Ollama, set OLLAMA_ORIGINS).':
+    'Fikk ikke kontakt med AI-serveren din på {host}. Sjekk at den kjører og tillater forespørsler fra denne siden (for Ollama: sett OLLAMA_ORIGINS).',
   'your metrics, turned into coaching — sent to Anthropic with your own API key, only when you ask':
     'tallene dine, gjort om til coaching — sendes til Anthropic med din egen API-nøkkel, kun når du ber om det',
   'your metrics, turned into coaching — sent to Anthropic on the developer\'s account, only when you ask':
@@ -34124,12 +34252,16 @@ function loamPlotText(s) {
    makes charts follow the light/dark theme; new charts can also write the
    light-theme palette hexes below and get the dark variants for free.
    Deliberately colored values not in the map pass through untouched. */
-function loamChartTheme() {
+function loamChartThemeState() {
   const dark = (document.documentElement.dataset.theme ||
     (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
   /* The SAME attribute `applyPalette` stamps, read here rather than re-derived from the sport, so a
      cold page cannot draw warm charts: one source, one answer. */
   const winter = document.documentElement.dataset.palette === 'winter';
+  return { dark, winter };
+}
+function loamChartTheme(state) {
+  const { dark, winter } = state || loamChartThemeState();
   const M = {
     /* chrome: paper, grid, ink (legacy slate values -> theme) */
     '#ffffff': dark ? '#151a11' : '#fcfaf3',
@@ -34239,10 +34371,56 @@ function loamThemeValue(v, M) {
 function loamPlot(el, traces, layout, cfg) {
   const touch = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
     || (window.matchMedia && window.matchMedia('(hover: none)').matches);
-  const M = loamChartTheme();
+  const state = loamChartThemeState();
+  const M = loamChartTheme(state);
   const themedTraces = loamThemeValue(traces, M);
   const themedLayout = loamThemeValue(layout, M);
+  const node = typeof el === 'string' ? document.getElementById(el) : el;
+  if (node) node._loamChartTheme = state;
   return Plotly.newPlot(el, themedTraces, touch ? { ...themedLayout, dragmode: false } : themedLayout, cfg);
+}
+
+/* Re-theme every chart already on the page when the theme changes. Charts were themed only when
+   drawn, so the OS flipping to dark at sunset (or the app's Appearance setting) left light charts on
+   a dark page until the next analysis (tester report, 2026-09-28).
+   The LIVE figure is translated old palette -> new palette, not re-drawn from its source, because
+   charts are changed after they are drawn (zoom, range relayouts, the swim chart's scope) and a
+   re-draw would silently undo that. The translation is a map from each key's value under the old
+   theme to its value under the new one, which is only sound if no two keys share an old value but
+   disagree on the new one; `loamChartRethemeMap` returns null when that happens and the chart is
+   left alone rather than recoloured wrongly. Pinned by the `chart-retheme` E2E. */
+function loamChartRethemeMap(from, to) {
+  const A = loamChartTheme(from), B = loamChartTheme(to), out = {};
+  for (const k of Object.keys(A)) {
+    const a = A[k].toLowerCase(), b = B[k];
+    if (Object.prototype.hasOwnProperty.call(out, a) && out[a] !== b) return null;
+    out[a] = b;
+  }
+  return out;
+}
+function loamRethemeCharts() {
+  if (typeof Plotly === 'undefined') return 0;
+  const to = loamChartThemeState();
+  let n = 0;
+  document.querySelectorAll('.js-plotly-plot').forEach((gd) => {
+    const from = gd._loamChartTheme;
+    if (!from || (from.dark === to.dark && from.winter === to.winter)) return;
+    const map = loamChartRethemeMap(from, to);
+    if (!map || !gd.data || !gd.layout) return;
+    const swap = (v) => {
+      if (typeof v === 'string') { const k = v.toLowerCase(); return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : v; }
+      if (Array.isArray(v)) return v.map(swap);
+      if (v && typeof v === 'object' && (v.constructor === Object || v.constructor === undefined)) {
+        const o = {};
+        for (const k of Object.keys(v)) o[k] = swap(v[k]);
+        return o;
+      }
+      return v;
+    };
+    gd._loamChartTheme = to;
+    try { Plotly.react(gd, swap(gd.data), swap(gd.layout)); n++; } catch (e) {}
+  });
+  return n;
 }
 
 /* ---------- Carry-position override ----------
@@ -37178,7 +37356,7 @@ function renderRunParams(D) {
    in localStorage. No backend, no proxy — preserves the "all in-browser" guarantee.
    We send a compact metrics digest (not raw sensor data) and stream the reply. */
 
-const COACH_LS = { key: 'loam_anthropic_key', model: 'loam_coach_model', level: 'loam_coach_level' };
+const COACH_LS = { key: 'loam_anthropic_key', model: 'loam_coach_model', level: 'loam_coach_level', endpoint: 'loam_coach_endpoint' };
 const COACH_MODELS = [['claude-opus-5', 'Opus 5 — best'], ['claude-sonnet-5', 'Sonnet 5 — faster/cheaper']];
 const COACH_MODEL_DEFAULT = COACH_MODELS[0][0];
 /* Default when the request is billed to the BUNDLED key (the owner's account, injected by the iOS
@@ -37204,6 +37382,100 @@ const COACH_LEVELS = ['beginner', 'intermediate', 'advanced'];
 const COACH_MAX_TURNS = 30;
 let coachState = null;          /* { sport, digest, messages, streaming } */
 let coachAbort = null;
+
+/* ---- ported from analyzer/core/coaching/endpoint.js ---- */
+const COACH_ENDPOINT_FORMATS = ['openai', 'anthropic'];
+
+/* A stored endpoint, validated on every read (it is user-typed and lives in localStorage). Returns
+   null for anything unusable, which the caller reads as "use Anthropic". */
+function normalizeCoachEndpoint(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const url = typeof raw.url === 'string' ? raw.url.trim() : '';
+  let parsed;
+  try { parsed = new URL(url); } catch (e) { return null; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  const format = COACH_ENDPOINT_FORMATS.indexOf(raw.format) !== -1 ? raw.format : 'openai';
+  const model = typeof raw.model === 'string' ? raw.model.trim() : '';
+  if (!model) return null;
+  return { url: url.replace(/\/+$/, ''), format, model };
+}
+
+/* The URL a request goes to. A base URL ("http://localhost:11434", ".../v1") gets the format's path
+   appended; a URL that already names the path is used as typed. */
+function coachEndpointUrl(ep) {
+  const path = ep.format === 'anthropic' ? '/messages' : '/chat/completions';
+  if (ep.url.endsWith(path)) return ep.url;
+  return ep.url + (/\/v1$/.test(ep.url) ? '' : '/v1') + path;
+}
+
+/* Host shown to the athlete wherever the page says where their data goes. */
+function coachEndpointHost(ep) {
+  try { return new URL(ep.url).host; } catch (e) { return ep.url; }
+}
+
+/* A Messages-API content value (a string, or an array of blocks some of which carry cache_control)
+   as plain text, for servers that take a string. */
+function flattenCoachContent(c) {
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return '';
+  return c.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n\n');
+}
+
+function coachEndpointRequest(ep, { system, messages, key, maxTokens }) {
+  const headers = { 'content-type': 'application/json' };
+  if (ep.format === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01';
+    if (key) headers['x-api-key'] = key;
+    return {
+      url: coachEndpointUrl(ep), headers,
+      body: { model: ep.model, max_tokens: maxTokens, stream: true, system, messages },
+    };
+  }
+  if (key) headers.authorization = 'Bearer ' + key;
+  const sys = flattenCoachContent(system);
+  return {
+    url: coachEndpointUrl(ep), headers,
+    body: {
+      model: ep.model, max_tokens: maxTokens, stream: true,
+      messages: [
+        ...(sys ? [{ role: 'system', content: sys }] : []),
+        ...messages.map(m => ({ role: m.role, content: flattenCoachContent(m.content) })),
+      ],
+    },
+  };
+}
+
+/* One parsed server-sent event -> { text } | { error } | null. */
+function coachStreamDelta(format, ev) {
+  if (!ev || typeof ev !== 'object') return null;
+  if (format === 'anthropic') {
+    if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') return { text: ev.delta.text };
+    if (ev.type === 'error') return { error: (ev.error && ev.error.message) || 'stream error' };
+    return null;
+  }
+  if (ev.error) return { error: (ev.error && ev.error.message) || String(ev.error) };
+  const ch = Array.isArray(ev.choices) ? ev.choices[0] : null;
+  const text = ch && ch.delta && typeof ch.delta.content === 'string' ? ch.delta.content : '';
+  return text ? { text } : null;
+}
+
+/* The athlete's custom AI server, or null for Anthropic. A settings value like the model, so it lives
+   in localStorage; it is not a secret (a key for it is stored exactly as the Anthropic key is). */
+function coachEndpoint() {
+  try { return normalizeCoachEndpoint(JSON.parse(localStorage.getItem(COACH_LS.endpoint) || 'null')); }
+  catch (e) { return null; }
+}
+function coachSetEndpoint(ep) {
+  try { if (ep) localStorage.setItem(COACH_LS.endpoint, JSON.stringify(ep)); else localStorage.removeItem(COACH_LS.endpoint); }
+  catch (e) { /* private mode / quota */ }
+}
+/* The athlete's OWN key, never the bundled one: this is the only key a custom server may receive. */
+function coachOwnKey() { return coachSessionKey() || coachRememberedKey(); }
+/* Whether a question can be sent at all. A custom server needs no key (a local one has none). */
+function coachCanSend() { return !!coachEndpoint() || !!coachKey(); }
+/* Whether this request is billed to the developer's shared account, which is what the daily cap and
+   the "developer's account" copy are about. Never true on a custom server. */
+function coachOnBundled() { return !coachEndpoint() && !coachHasOwnKey() && !!coachBundledKey(); }
 
 /* Guarded like every other storage read in this file: `localStorage` itself throws (not just the
    write) when a browser is set to block all storage, and this one sits on the path that builds the
@@ -37250,7 +37522,7 @@ function coachDailyBump() {
   const r = coachDailyRecord(); r.n += 1;
   try { localStorage.setItem(COACH_LS_DAILY, JSON.stringify(r)); } catch (e) { /* private mode / quota */ }
 }
-function coachDailyExhausted() { return !coachHasOwnKey() && !!coachBundledKey() && coachDailyUsed() >= COACH_MAX_DAILY_BUNDLED; }
+function coachDailyExhausted() { return coachOnBundled() && coachDailyUsed() >= COACH_MAX_DAILY_BUNDLED; }
 function coachSession() { try { return window.sessionStorage; } catch (e) { return null; } }
 function coachSessionKey() { const s = coachSession(); try { return (s && s.getItem(COACH_LS.key)) || ''; } catch (e) { return ''; } }
 function coachRememberedKey() { try { return localStorage.getItem(COACH_LS.key) || ''; } catch (e) { return ''; } }
@@ -38550,15 +38822,19 @@ function coachRetryPause(ms, signal) {
    second attempt cheap. Once text has streamed, the drop is reported with the partial kept and the
    decision left to the rider, since re-asking is a paid call and half an answer is still information. */
 async function callClaude({ system, messages, onText, onDone, onError, onNotice, signal }) {
-  const key = coachKey();
+  /* A custom server gets the athlete's OWN key or none -- never the bundled owner key. */
+  const ep = coachEndpoint();
+  const key = ep ? coachOwnKey() : coachKey();
   const model = coachModel();
-  if (!key) { onError('No API key set.'); return; }
+  if (!ep && !key) { onError('No API key set.'); return; }
+  const epReq = ep ? coachEndpointRequest(ep, { system, messages, key, maxTokens: 8192 }) : null;
   /* max_tokens bounds thinking AND the visible answer together, so adaptive thinking spends from
      the same budget the coaching text needs. 4096 was tight enough on the newer models (which
      think by default and write longer) that a deep MTB analysis could run out mid-bullet; the
      per-sport prompts already cap the format at a handful of bullets, so the extra headroom buys
      completeness rather than length. Streaming, so a big ceiling costs no latency. */
-  const body = JSON.stringify({ model, max_tokens: 8192, stream: true, thinking: { type: 'adaptive' }, system, messages });
+  const body = epReq ? JSON.stringify(epReq.body)
+    : JSON.stringify({ model, max_tokens: 8192, stream: true, thinking: { type: 'adaptive' }, system, messages });
 
   for (let attempt = 0; ; attempt++) {
     let full = '';
@@ -38568,9 +38844,9 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
 
     let resp;
     try {
-      resp = await fetch('https://api.anthropic.com/v1/messages', {
+      resp = await fetch(epReq ? epReq.url : 'https://api.anthropic.com/v1/messages', {
         method: 'POST', signal,
-        headers: {
+        headers: epReq ? epReq.headers : {
           'content-type': 'application/json',
           'x-api-key': key,
           'anthropic-version': '2023-06-01',
@@ -38585,11 +38861,15 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
         if (!await pause()) { onDone(''); return; }
         continue;
       }
+      /* A custom server that cannot be reached is almost always one of two things, and neither is
+         in the error text a browser gives: the server is not running, or it does not allow requests
+         from this page (CORS). */
+      if (ep) { onError(loamT('Could not reach your AI server at {host}. Check it is running and allows requests from this page (for Ollama, set OLLAMA_ORIGINS).', { host: coachEndpointHost(ep) })); return; }
       onError(coachErrorText(loamT('Network error: {why}', { why: e.message }))); return;
     }
     if (!resp.ok || !resp.body) {
       let msg = 'HTTP ' + resp.status;
-      try { const j = await resp.json(); if (j.error && j.error.message) msg = j.error.message; } catch (e) {}
+      try { const j = await resp.json(); if (j.error && j.error.message) msg = j.error.message; else if (typeof j.error === 'string') msg = j.error; } catch (e) {}
       if (COACH_RETRY_STATUS.indexOf(resp.status) !== -1 && mayRetry()) {
         if (onNotice) onNotice(loamT('Claude is busy — retrying…'));
         if (!await pause()) { onDone(''); return; }
@@ -38597,7 +38877,7 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
       }
       /* On the bundled key the raw API text ("invalid x-api-key", a billing or rate-limit message)
          names a problem the tester cannot act on: the key is not theirs. Say what they CAN do. */
-      if (!coachHasOwnKey() && coachBundledKey()) {
+      if (coachOnBundled()) {
         const why = (resp.status === 401 || resp.status === 403) ? loamT('its key was rotated')
           : resp.status === 429 ? loamT('it is rate-limited') : 'HTTP ' + resp.status;
         msg = loamT('The shared coach account is not available right now ({why}). Try again later, or add your own Anthropic API key in the coach settings to keep going now.', { why });
@@ -38619,6 +38899,12 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
           if (!t.startsWith('data:')) continue;
           const data = t.slice(5).trim();
           let ev; try { ev = JSON.parse(data); } catch (e) { continue; }
+          if (ep) {
+            const d = coachStreamDelta(ep.format, ev);
+            if (d && d.error) { onError(d.error); return; }
+            if (d && d.text) { full += d.text; onText(d.text, full); }
+            continue;
+          }
           if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
             full += ev.delta.text; onText(ev.delta.text, full);
           } else if (ev.type === 'error') {
@@ -38669,6 +38955,15 @@ function mdToHtml(md) {
 function renderCoachKeyStatus() {
   const el = document.getElementById('coachKeyStatus');
   if (!el) return;
+  const ep = coachEndpoint();
+  const modelSel = document.getElementById('coachModel');
+  if (modelSel && modelSel.parentElement) modelSel.parentElement.classList.toggle('hidden', !!ep);
+  if (ep) {
+    el.innerHTML = `<span class="coach-key-ok">✓ ${escapeHtml(loamT('your AI server'))}</span> · ${escapeHtml(coachEndpointHost(ep))} · ${escapeHtml(ep.model)} · <a href="#" id="coachEndpointChange">${escapeHtml(loamT('change'))}</a>`;
+    const c = document.getElementById('coachEndpointChange');
+    if (c) c.onclick = e => { e.preventDefault(); toggleCoachEndpointForm(); };
+    return;
+  }
   if (coachHasOwnKey()) {
     /* Say which it is, so "why do I have to paste this again?" has a visible answer rather than
        reading as a bug: this session only (the default) vs remembered on this device. */
@@ -38681,8 +38976,53 @@ function renderCoachKeyStatus() {
   } else {
     el.innerHTML = `<a href="#" id="coachKeyChange">${loamT('set API key')}</a>`;
   }
+  el.insertAdjacentHTML('beforeend', ` · <a href="#" id="coachEndpointChange">${escapeHtml(loamT('use another AI server'))}</a>`);
   const a = document.getElementById('coachKeyChange');
   if (a) a.onclick = e => { e.preventDefault(); promptCoachKey(); };
+  const c = document.getElementById('coachEndpointChange');
+  if (c) c.onclick = e => { e.preventDefault(); toggleCoachEndpointForm(); };
+}
+
+/* The custom AI server form (tester request, 2026-09-28). A local model keeps the coach entirely on
+   the athlete's own machines; the trade, stated in the form, is that the coach's prompts are written
+   and checked against Claude, and another model's answers are not. */
+function toggleCoachEndpointForm() {
+  const host = document.getElementById('coachControls');
+  if (!host) return;
+  const open = document.getElementById('coachEndpointForm');
+  if (open) { open.remove(); return; }
+  const ep = coachEndpoint() || { url: '', format: 'openai', model: '' };
+  const fmt = (v, l) => `<option value="${v}" ${ep.format === v ? 'selected' : ''}>${escapeHtml(loamT(l))}</option>`;
+  host.insertAdjacentHTML('beforeend',
+    `<div class="coach-endpoint" id="coachEndpointForm">` +
+    `<label>${escapeHtml(loamT('Server URL'))}<input id="coachEndpointUrl" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="http://localhost:11434" value="${escapeHtml(ep.url)}"></label>` +
+    `<label>${escapeHtml(loamT('API format'))}<select id="coachEndpointFormat">${fmt('openai', 'OpenAI-compatible (Ollama, LM Studio, llama.cpp)')}${fmt('anthropic', 'Anthropic-compatible')}</select></label>` +
+    `<label>${escapeHtml(loamT('Model'))}<input id="coachEndpointModel" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="llama3.1" value="${escapeHtml(ep.model)}"></label>` +
+    `<div class="analysis-explanation">${escapeHtml(loamT('Your session summary goes to this server instead of Anthropic. Your own API key is sent only if you set one; the shared key never is. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.'))}</div>` +
+    `<div class="coach-endpoint-actions"><button type="button" id="coachEndpointSave">${escapeHtml(loamT('Save'))}</button>` +
+    `<button type="button" id="coachEndpointClear">${escapeHtml(loamT('Use Anthropic'))}</button></div>` +
+    `<div id="coachEndpointMsg" class="analysis-explanation" role="status"></div></div>`);
+  document.getElementById('coachEndpointSave').onclick = () => {
+    const next = normalizeCoachEndpoint({
+      url: document.getElementById('coachEndpointUrl').value,
+      format: document.getElementById('coachEndpointFormat').value,
+      model: document.getElementById('coachEndpointModel').value,
+    });
+    if (!next) {
+      document.getElementById('coachEndpointMsg').textContent = loamT('Enter a URL starting with http:// or https://, and a model name.');
+      return;
+    }
+    coachSetEndpoint(next);
+    document.getElementById('coachEndpointForm').remove();
+    refreshCoachDestinationCopy();
+    renderCoachKeyStatus();
+  };
+  document.getElementById('coachEndpointClear').onclick = () => {
+    coachSetEndpoint(null);
+    document.getElementById('coachEndpointForm').remove();
+    refreshCoachDestinationCopy();
+    renderCoachKeyStatus();
+  };
 }
 
 function promptCoachKey() {
@@ -38839,7 +39179,18 @@ function renderCoachPanel(D, sport, opts = {}) {
   /* The panel copy is written for the web page (your browser, your key). Inside the app the request
      usually rides on the developer's bundled account, and telling that user it is "billed to your
      key" was a false statement about who pays and about whose account their session summary reached. */
-  const onBundled = !coachHasOwnKey() && !!coachBundledKey();
+  refreshCoachDestinationCopy();
+  compose.classList.add('hidden');
+  if (chips) chips.classList.add('hidden');
+  renderCoachPanelChips(D, sport, chips);
+}
+
+/* The CTA note and subtitle say where a question goes, so they are rewritten whenever that changes. */
+function refreshCoachDestinationCopy() {
+  if (!coachState) return;
+  const sport = coachState.sport;
+  const onBundled = coachOnBundled();
+  const ep = coachEndpoint();
   const note = document.getElementById('coachCtaNote');
   if (note) {
     /* The plan sends weekly TOTALS of the athlete's recorded training and their goal, never a
@@ -38848,16 +39199,21 @@ function renderCoachPanel(D, sport, opts = {}) {
     const what = sport === 'training'
       ? loamT('Sends weekly totals of your recorded training (hours, sessions, distance, climb; never raw sensor data), your goal and the scaffold above, plus a summary of your Apple Health vitals when connected,')
       : loamT('Sends this session\'s metrics (not raw sensor data), plus a summary of your Apple Health vitals and recent Strava activity when those are connected,');
-    note.textContent = onBundled
+    note.textContent = ep
+      ? what + ' ' + loamT('to your AI server at {host}, not to Anthropic.', { host: coachEndpointHost(ep) })
+      : onBundled
       ? what + ' ' + loamT('to Anthropic on the developer\'s shared account (up to {n} questions a day per device; add your own key in the settings above to lift that).', { n: COACH_MAX_DAILY_BUNDLED })
       : what + ' ' + loamT('to Anthropic and streams back a coaching insight. Roughly $0.02-0.10 per insight, billed to your key.');
   }
   const sub = document.getElementById('coachSubtitle');
-  if (sub) sub.textContent = onBundled
+  if (sub) sub.textContent = ep
+    ? loamT('your metrics, turned into coaching — sent to your own AI server, only when you ask')
+    : onBundled
     ? loamT('your metrics, turned into coaching — sent to Anthropic on the developer\'s account, only when you ask')
     : loamT('your metrics, turned into coaching — sent to Anthropic with your own API key, only when you ask');
-  compose.classList.add('hidden');
-  if (chips) chips.classList.add('hidden');
+}
+
+function renderCoachPanelChips(D, sport, chips) {
 
   /* One-tap follow-ups so "what should I work on" is not a typed question. sendCoach guards against
      firing while a reply is still streaming. */
@@ -38921,7 +39277,7 @@ function revealCoachConversation() {
 
 function startCoachConversation({ focusInput }) {
   if (!coachState) return;
-  if (!coachKey()) { promptCoachKey(); if (!coachKey()) return; }
+  if (!coachCanSend()) { promptCoachKey(); if (!coachCanSend()) return; }
   revealCoachConversation();
   /* Not focused on the highlights path: that tap asked to READ the analysis, and focusing the input
      opens the mobile keyboard over the reply it just requested. */
@@ -39121,14 +39477,16 @@ async function sendCoach(text) {
     lockCoachInput('Daily limit on the shared account reached');
     return;
   }
-  if (!coachHasOwnKey() && coachBundledKey()) coachDailyBump();
+  if (coachOnBundled()) coachDailyBump();
   /* Claim the stream slot before the first await, so a rapid double-click cannot pass the
      guard twice and fire two parallel paid API calls. Every early return releases it. */
   coachState.streaming = true;
 
   // Cache only the first, deterministic "analyze this session" turn; follow-ups are conversational.
   const level = coachGet('level', 'intermediate');
-  const model = coachModel();
+  /* A reply cached from Claude must not be replayed as the custom server's answer, or vice versa. */
+  const epForKey = coachEndpoint();
+  const model = epForKey ? 'endpoint:' + coachEndpointUrl(epForKey) + ':' + epForKey.model : coachModel();
   let coachCacheKey = null;
   const state = coachState;   /* a re-render replaces coachState; never write into the new one */
 
@@ -39158,7 +39516,7 @@ async function sendCoach(text) {
     }
   }
 
-  if (!coachKey()) { promptCoachKey(); if (!coachKey()) { coachState.streaming = false; return; } }
+  if (!coachCanSend()) { promptCoachKey(); if (!coachCanSend()) { coachState.streaming = false; return; } }
   setCoachSending(true);
   const userBubble = appendCoachBubble('user', text);
   coachState.messages.push({ role: 'user', content: text });
@@ -46208,7 +46566,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'dc776bc19 · 2026-09-28';
+const LOAM_BUILD = '872595a4e · 2026-09-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
@@ -46351,8 +46709,7 @@ function markWhatsNewSeen() {
 }
 /* Theme toggle: cycles auto (follow system) -> light -> dark. The boot script
    in <head> applied the persisted choice before first paint; this just cycles
-   and persists. Charts read the active theme when they render, so already-drawn
-   charts keep their colors until the next render (analyze / switch ride). */
+   and persists. Charts already drawn are recoloured in place (loamRethemeCharts). */
 /* Report the analyzer's resolved page background (and whether it reads dark) to the embedding app, so
    the native chrome (the nav bar + safe-area fill above/around the web view) matches the analyzer's
    theme exactly, including a forced Light/Dark that differs from the OS. No-op on the web. */
@@ -46381,19 +46738,18 @@ function loamPostTheme() {
     else { document.documentElement.dataset.theme = t; try { localStorage.setItem('loamTheme', t); } catch (e) {} }
     btn.textContent = label(t);
     loamPostTheme();   // keep the native chrome in step with the toggle
+    loamRethemeCharts();
   };
   btn.textContent = label(current());
   btn.addEventListener('click', () => {
     const next = order[(order.indexOf(current()) + 1) % order.length];
     apply(next);
-    if (document.getElementById('results') && !document.getElementById('results').classList.contains('hidden'))
-      loamToast(loamT('Theme set to {theme}. Charts adopt it on the next render.', { theme: label(next) }));
   });
   // Initial report, and follow the OS scheme while on Auto (the toggle handles the forced cases).
   loamPostTheme();
   try {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-      if (current() === 'auto') loamPostTheme();
+      if (current() === 'auto') { loamPostTheme(); loamRethemeCharts(); }
     });
   } catch (e) {}
 })();
