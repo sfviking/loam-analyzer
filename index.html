@@ -1559,6 +1559,15 @@
     vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round;
   }
   #runSplitsTable .sp-spark polygon { fill: color-mix(in srgb, var(--accent-2) 15%, transparent); stroke: none; }
+  /* The Runs panel's topo column, drawn the same way. A fixed width, because an SVG-only cell has no
+     min-content in the table and no intrinsic width as a flex item in the phone's card layout. */
+  #runsTable td.run-topo .sp-spark { display: block; width: 72px; height: 20px; }
+  #runsTable td.run-topo .sp-spark polyline {
+    fill: none; stroke: var(--accent-2); stroke-width: 1.25;
+    vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round;
+  }
+  #runsTable td.run-topo .sp-spark polygon { fill: color-mix(in srgb, var(--accent-2) 15%, transparent); stroke: none; }
+  @media (max-width: 700px) { #runsTable td.run-topo { display: flex !important; align-items: center; } }
 
   /* ONE LINE PER SPLIT ON A PHONE (owner, 2026-09-17: "Include cadence and grade on run splits but
      still fit on one line in portrait mode").
@@ -3052,8 +3061,8 @@
   <section id="runMountNotice" class="hidden">
     <div class="mount-notice">
       <strong>Phone in hand detected.</strong> Arm-swing energy at half cadence
-      dominates the horizontal accel. <span id="runMountCadenceNote">Cadence and pace are reliable</span>; vertical
-      oscillation may be inflated by hand motion (treat it as an upper bound).
+      dominates the horizontal accel. <span id="runMountCadenceNote">Cadence and pace are reliable</span>; <span id="runMountOscNote">vertical
+      oscillation may be inflated by hand motion (treat it as an upper bound)</span>.
       For cleanest form metrics, switch to a hip pack or armband on your next <span id="runMountNextNoun">run</span>.
     </div>
   </section>
@@ -5918,6 +5927,81 @@ function applyHeadCadence(running, headSeries) {
 }
 
 /*
+ * Vertical oscillation from the AIRPODS when they were worn, and from RUNNING windows only. See
+ * analyzer/sports/running/oscillation.js for the measurements; the short version: on the 2026-09-28
+ * interval run the phone read 8.8 / 13.6 / 18.1 cm (p10/50/90) and climbed to 16.4 on the downhill
+ * while the head held 5.2 / 6.0 / 7.0 -- a head cannot bob 10 cm less than the body under it, so the
+ * phone was moving against the runner. Read at the PREFERRED cadence's frequency (the watch's, when
+ * worn), which is what fills the holes the phone's own cadence gate left. Walk and stop windows are
+ * dropped from either source: a walk has no flight phase and drew each recovery as a dip.
+ */
+const OSC_WIN_S = 10;
+const OSC_MIN_SAMPLES = 100;
+const OSC_MIN_SPAN_S = 6;
+const OSC_MIN_HEAD_WINDOWS = 10;
+const OSC_G = 9.80665;
+
+/**
+ * Whether the gait read nearest `t` allows an oscillation there: true for a run, false for a walk
+ * or a stop, true when no gait window covers `t` at all.
+ */
+function oscGaitAllows(gaitWindows, t) {
+  let best = null, bestD = Infinity;
+  for (const w of gaitWindows || []) {
+    if (t < w.t0 || t > w.t1) continue;
+    const d = Math.abs((w.t0 + w.t1) / 2 - t);
+    if (d < bestD) { bestD = d; best = w; }
+  }
+  return !best || best.gait === 'run';
+}
+
+function runOnlyOscillation(oscSeries, gaitWindows) {
+  return (oscSeries || []).filter(o => oscGaitAllows(gaitWindows, o.t));
+}
+
+function headOscillationSeries(headRows, cadSeries, ride, gaitWindows) {
+  const rows = (headRows || []).filter(
+    r => r && r.t >= ride.start && r.t <= ride.end
+      && Number.isFinite(r.accelerationX) && Number.isFinite(r.accelerationY) && Number.isFinite(r.accelerationZ)
+      && Number.isFinite(r.gravityX) && Number.isFinite(r.gravityY) && Number.isFinite(r.gravityZ));
+  if (rows.length < OSC_MIN_SAMPLES) return [];
+  const tArr = rows.map(r => r.t);
+  /* Along the bud's own gravity, in m/s² (the exporter writes g), as headCadenceSeries reads it. */
+  const vert = rows.map(r => {
+    const gm = Math.hypot(r.gravityX, r.gravityY, r.gravityZ) || 1;
+    return OSC_G * (r.accelerationX * r.gravityX + r.accelerationY * r.gravityY + r.accelerationZ * r.gravityZ) / gm;
+  });
+  const series = [];
+  for (const c of cadSeries || []) {
+    if (!(c.conf > 0.15) || !(c.freq > 0)) continue;
+    if (!oscGaitAllows(gaitWindows, c.t)) continue;
+    const w0 = c.t - OSC_WIN_S / 2, w1 = c.t + OSC_WIN_S / 2;
+    const i0 = lowerBound(tArr, w0), i1 = lowerBound(tArr, w1);
+    if (i1 - i0 < OSC_MIN_SAMPLES) continue;
+    if (tArr[i1 - 1] - tArr[i0] < OSC_MIN_SPAN_S) continue;
+    const sig = vert.slice(i0, i1);
+    const m = sig.reduce((s, v) => s + v, 0) / sig.length;
+    const ts = tArr.slice(i0, i1).map(t => t - w0);
+    const peakAccel = 2 * dftMagAt(sig.map(v => v - m), ts, c.freq);
+    const omega = 2 * Math.PI * c.freq;
+    series.push({ t: c.t, oscCm: peakAccel / (omega * omega) * 100 * 2, spm: c.spm });
+  }
+  return series;
+}
+
+function applyOscillation(running, series, source) {
+  if (!running || !series) return running;
+  running.oscSeries = series;
+  running.oscMedian = series.length ? median(series.map(o => o.oscCm)) : null;
+  for (const seg of running.segments || []) {
+    const segOscs = series.filter(o => o.t >= seg.tStart && o.t <= seg.tEnd);
+    seg.oscAvg = segOscs.length ? segOscs.reduce((s, o) => s + o.oscCm, 0) / segOscs.length : null;
+  }
+  if (source) running.oscSource = source;
+  return running;
+}
+
+/*
  * PEDALING cadence from the AIRPODS, for a phone-recorded ride with no head unit. See
  * analyzer/sports/mtb/pedal-head-cadence.js for the measurements; the short version: the head dips
  * once per pedal STROKE, so rpm = bob Hz x 30. Graded 2026-09-26 against an ankle-worn watch on one
@@ -7634,6 +7718,19 @@ function drawRuns() {
       ? gradeAdjustedSpeed(avgSpeeds[i], (netElev[i] / dist) * 100) : null;
   });
   const anyGap = footSport && gapSpeeds.some(v => v != null);
+  /* The SHAPE of each row's ground beside its net Elev, as the splits table draws it (owner,
+     2026-09-29: "add topo too"): a rep that climbs and gives it back nets ~0 and is not flat. One
+     scale across the ROWS rather than the whole series, so the reps read against each other and a
+     warm-up's hill off the end of them does not flatten every row. */
+  const runProfiles = runs.map(r => (footAlts.length ? splitAltSamples(r, footAlts) : null));
+  const topoRange = (() => {
+    const v = runProfiles.filter(Boolean).flat();
+    return v.length ? { min: Math.min(...v), max: Math.max(...v) } : null;
+  })();
+  const anyTopo = footSport && !!topoRange;
+  /* The splits heading's own key, because "Topo" alone is the basemap picker's ("Topografisk").
+     Keyed copy falls back to its KEY where untranslated, so the fallback is written out here. */
+  const topoWord = loamT('Topo (splits column)') === 'Topo (splits column)' ? 'Topo' : loamT('Topo (splits column)');
   const bestTop = Math.max(...topSpeeds.filter(v => v != null));
   const hi = 'style="color:#7fb069;font-weight:600;"';
   /* Turns / L·R / Radius come from body-frame turn detection, which only exists for MTB. On running
@@ -7648,7 +7745,7 @@ function drawRuns() {
   const nounCap = capitalize(rowNounT(nounSingular));
   if (thead) thead.innerHTML = showTurns
     ? `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${loamT('Top')}</th><th>${loamT('Turns')}</th><th>${loamT('L/R')}</th><th title="${loamT('Median apex radius')}">${loamT('Radius')}</th><th>${loamT('Drop')}</th><th></th></tr>`
-    : `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${topLabel}</th><th>${avgLabel}</th>${anyGap ? '<th>GAP</th>' : ''}<th>${footSport ? loamT('Elev') : loamT('Drop')}</th><th></th></tr>`;
+    : `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${topLabel}</th><th>${avgLabel}</th>${anyGap ? '<th>GAP</th>' : ''}<th>${footSport ? loamT('Elev') : loamT('Drop')}</th>${anyTopo ? `<th class="run-topo" data-i18n-key="Topo (splits column)">${topoWord}</th>` : ''}<th></th></tr>`;
   document.querySelector('#runsTable tbody').innerHTML = runs.map((r, index) => {
     const m = r.metrics;
     const label = runDisplayLabel(r);
@@ -7721,6 +7818,7 @@ function drawRuns() {
       ${footSport
         ? `<td data-l="Elev" data-s="${loamT('Elev')}" class="${netElev[index] > 0.5 ? 'dir-up' : netElev[index] < -0.5 ? 'dir-down' : ''}">${netElev[index] != null
             ? (netElev[index] >= 0 ? '+' : '\u2212') + U.elev(Math.abs(netElev[index])) : '\u2014'}</td>`
+          + (anyTopo ? `<td class="run-topo" data-l="Topo" data-s="${topoWord}">${runProfiles[index] ? topoSparkSvg(runProfiles[index], topoRange) : '\u2014'}</td>` : '')
         : `<td data-l="Drop" data-s="Drop">${m.drop != null ? U.elev(m.drop) : '—'}</td>`}
       <td class="descent-row-actions">${actions}</td>
       <td class="run-break" aria-hidden="true"></td></tr>`;
@@ -11320,6 +11418,8 @@ function computeRunSummary(loc, baro, ride, R, hr, span) {
        cadence whose provenance was dropped cannot be re-derived later. */
     cadSource: R.cadSource,
     oscMedian: R.oscMedian,
+    /* 'head' when the AirPods measured it; then a hand-carried phone no longer bounds it. */
+    oscSource: R.oscSource,
     mount: R.mount, mountConfidence: R.mountConfidence,
     nSegments: R.segments.length,
     nDownhills: R.segments.filter(s => s.dir === 'down').length,
@@ -11731,7 +11831,7 @@ function computeBestEfforts(loc, ride, distances) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 19;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava)
+const ANALYSIS_CACHE_VERSION = 20;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -21222,6 +21322,15 @@ async function analyze(files) {
           dbg('[cadence] head series preferred:', headCad.length, 'windows, median', running.cadMedian.toFixed(0), 'spm');
         }
       }
+      /* Oscillation, AFTER the cadence choice because it is read at that cadence's frequency: from the
+         AirPods when they speak for enough of the run (the head is on the body; the phone can bounce
+         against it), else the phone's own series with its walk and stop windows dropped. Runs only,
+         like every surface that shows it. See analyzer/sports/running/oscillation.js. */
+      if (sport === 'running') {
+        const headOsc = headOscillationSeries(sensors.headphone || [], running.cadSeries, ride, gait.windows);
+        if (headOsc.length >= OSC_MIN_HEAD_WINDOWS) applyOscillation(running, headOsc, 'head');
+        else applyOscillation(running, runOnlyOscillation(running.oscSeries, gait.windows), 'phone');
+      }
       /* Per-climb read from the up-segments (uses whatever cadSeries is current, so a walk gets its
          walk-band cadence, and any session gets the wrist's when it was preferred above). Geometric
          gain/grade/VAM plus GPS pace, cadence and HR as context. */
@@ -29298,6 +29407,10 @@ function renderAllRunning(D) {
       : D.running.cadSource === 'head'
       ? 'Cadence came from your AirPods instead, so hand motion did not touch it, and pace is reliable'
       : 'Cadence and pace are reliable';
+    const oscNote = document.getElementById('runMountOscNote');
+    if (oscNote) oscNote.textContent = D.running.oscSource === 'head'
+      ? 'vertical oscillation came from your AirPods, so hand motion did not touch it either'
+      : 'vertical oscillation may be inflated by hand motion (treat it as an upper bound)';
   }
   if (D.comparison && D.comparison.dtw) renderDescentComparison(D);
   else hide('runCompareSection');
@@ -31884,6 +31997,8 @@ const LOAM_NB = {
     'Vertikal svingning opptil <strong style="color:var(--text-muted);">~{cm} cm</strong> (øvre grense ved bæring i hånden, armsvingen blåser den opp).',
   'Vertical oscillation about <strong>{cm} cm</strong> (head-bob proxy for hip motion).':
     'Vertikal svingning omtrent <strong>{cm} cm</strong> (hodebevegelsen brukt som mål på hoftebevegelsen).',
+  'Vertical oscillation about <strong>{cm} cm</strong> (from the phone, which reads high if it bounces against you).':
+    'Vertikal svingning omtrent <strong>{cm} cm</strong> (fra telefonen, som viser for høyt hvis den spretter mot deg).',
   '{gain} climbed, {loss} descended.': '{gain} opp, {loss} ned.',
   '{gain} climbed.': '{gain} opp.',
 
@@ -33136,6 +33251,7 @@ const LOAM_NB = {
   '· pedometer says {spm} spm': '· skrittelleren sier {spm} spm',
   'hand carry · upper bound': 'båret i hånden · øvre grense',
   'peak-to-peak head/torso bob': 'topp-til-topp bevegelse i hode/overkropp',
+  'peak-to-peak head bob · AirPods': 'topp-til-topp bevegelse i hodet · AirPods',
   'avg · {max} max': 'snitt · {max} maks',
   'Elev gain / loss': 'Høydemeter opp / ned',
   '{loss} ↓ · {down} desc / {up} climb': '{loss} ↓ · {down} ned / {up} opp',
@@ -35354,8 +35470,10 @@ function steepestInclineTile(segments, pace) {
 function renderRunStats(s, detection, mount, ped, sport, segments) {
   const fmt = (v, unit, d=1) => v == null ? '—' : `<span class="value">${v.toFixed(d)}<span class="unit">${unit}</span></span>`;
   /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
-     Mark the number itself (~, muted) instead of relying only on the caption below. */
-  const oscHand = mount === 'hand';
+     Mark the number itself (~, muted) instead of relying only on the caption below. Not when the
+     AirPods measured it: then the phone's mount does not touch the number. */
+  const oscHead = s.oscSource === 'head';
+  const oscHand = mount === 'hand' && !oscHead;
   const oscVal = s.oscMedian == null ? '—'
     : `<span class="value"${oscHand ? ' style="color:var(--text-muted);"' : ''}>${oscHand ? '~' : ''}${s.oscMedian.toFixed(1)}<span class="unit">cm</span></span>`;
   /* The tile always said "moving time" while showing the whole active window, stops included. It now
@@ -35447,7 +35565,7 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
     <div class="stat accent2">
       <div class="label">${loamT('Oscillation')}</div>
       ${oscVal}
-      <div class="sub">${oscHand ? loamT('hand carry · upper bound') : loamT('peak-to-peak head/torso bob')}</div>
+      <div class="sub">${oscHand ? loamT('hand carry · upper bound') : oscHead ? loamT('peak-to-peak head bob · AirPods') : loamT('peak-to-peak head/torso bob')}</div>
     </div>`;
   const hrTile = s.hrAvg == null ? '' : `
     <div class="stat accent2">
@@ -35734,20 +35852,21 @@ function renderRunTimeline(D) {
      climb" is a read across rows, and the separate cadence chart counted its x axis from the first
      cadence window rather than from the start of the run, so the two could not be lined up by eye.
      The SAME series and the same confidence gate the cadence chart and the splits use (conf > 0.15),
-     so a stop or a junk window is a gap in the row, never a dive to it. The standalone cadence
+     so a junk window is never a dive in the row. The line is SOLID across the windows it drops
+     (owner, 2026-09-29: a row of fragments was harder to read than one line), which is what Strava
+     and Garmin Connect draw too; the stop itself is already on the chart as a band or a pace break. The standalone cadence
      chart is retired (owner, 2026-09-26); this row is the cadence chart now. Teal rather than its
      old amber, which sits too close to the altitude tan once both are stacked. */
   const cadRows = footSport ? ((D.running && D.running.cadSeries) || []).filter(c => c.t >= ride.start && c.t <= ride.end) : [];
   const cadOk = cadRows.filter(c => c.conf > 0.15 && Number.isFinite(c.spm));
   if (cadOk.length > 1 && offer('cad')) {
     const cadAxis = nextAxis();
-    const masked = cadRows.map(c => (c.conf > 0.15 && Number.isFinite(c.spm)) ? c.spm : null);
-    const cadY = smooth ? rollingMedianMasked(masked, 11) : masked;
     const spms = cadOk.map(c => c.spm);
+    const cadY = smooth ? rollingMedianMasked(spms, 11) : spms;
     traces.push({
-      x: cadRows.map(c => c.t - ride.start), y: cadY,
+      x: cadOk.map(c => c.t - ride.start), y: cadY,
       type: 'scatter', mode: 'lines', line: { color: '#4a8f8f', width: smooth ? 2 : 1.4 },
-      name: loamT('Cadence (spm)'), yaxis: cadAxis, connectgaps: false,
+      name: loamT('Cadence (spm)'), yaxis: cadAxis, connectgaps: true,
       hovertemplate: '%{y:.0f} spm<extra></extra>',
     });
     chans.push({ key: 'cad', axis: cadAxis, label: loamT('cadence'), title: loamT('cadence (spm)'), color: '#4a8f8f',
@@ -35765,23 +35884,20 @@ function renderRunTimeline(D) {
      in its own axis title -- "est.", or "upper bound" on a hand-carried phone, the same qualifier
      its stat tile carries -- rather than borrowing their weight. Runs only: a walk has no flight
      phase to bob through (the stat tile skips it for the same reason). The series holds only
-     moving, confident windows, so a stop is a hole in it; a null is inserted across any hole wider
-     than a few 2-s hops so the line breaks there instead of drawing a ramp across the stop. */
+     running, confident windows and is drawn SOLID across the ones it drops, like the cadence row
+     above: it used to break at every hole wider than 6 s, and on a real interval run that left a
+     row of dashes nobody could read (owner, 2026-09-29). */
   const oscRows = (footSport && sport === 'run')
     ? ((D.running && D.running.oscSeries) || []).filter(o => o.t >= ride.start && o.t <= ride.end && Number.isFinite(o.oscCm))
     : [];
   if (oscRows.length > 1 && offer('osc')) {
     const oscAxis = nextAxis();
-    const ox = [], oy = [];
-    oscRows.forEach((o, i) => {
-      if (i > 0 && o.t - oscRows[i - 1].t > 6) { ox.push(null); oy.push(null); }
-      ox.push(o.t - ride.start); oy.push(o.oscCm);
-    });
+    const ox = oscRows.map(o => o.t - ride.start), oy = oscRows.map(o => o.oscCm);
     const oscY = smooth ? rollingMedianMasked(oy, 11) : oy;
-    const hand = D.running && D.running.mount === 'hand';
+    const hand = D.running && D.running.mount === 'hand' && D.running.oscSource !== 'head';
     traces.push({
       x: ox, y: oscY, type: 'scatter', mode: 'lines', line: { color: '#8caa6d', width: smooth ? 2 : 1.4 },
-      name: loamT('Oscillation (cm, est.)'), yaxis: oscAxis, connectgaps: false,
+      name: loamT('Oscillation (cm, est.)'), yaxis: oscAxis, connectgaps: true,
       hovertemplate: '%{y:.1f} cm<extra></extra>',
     });
     chans.push({ key: 'osc', axis: oscAxis, label: loamT('oscillation (est.)'), color: '#8caa6d',
@@ -35969,7 +36085,7 @@ function renderRunTimeline(D) {
    invisible axis of their own, so each still fills the plot height and its values read in the
    unified hover rather than being squashed onto another channel's scale. Pace and GAP are one
    quantity and share an axis. Series are the same ones the timeline rows read (same gates, same
-   smoothing); the cadence and oscillation traces keep their old charts' markers-plus-median look. */
+   smoothing), each drawn as one solid line. */
 function renderRunOverlay(D) {
   const sport = normalizeSport(D.gpsSport || D.sport || '');
   if (sport !== 'run' && sport !== 'walk') { hide('runOverlaySection'); return; }
@@ -35985,16 +36101,13 @@ function renderRunOverlay(D) {
   const cadRows = ((D.running && D.running.cadSeries) || []).filter(c => c.t >= ride.start && c.t <= ride.end && Number.isFinite(c.spm));
   const cadOk = cadRows.filter(c => c.conf > 0.15);
   if (cadOk.length > 1) {
-    const x = cadRows.map(c => X(c.t));
-    const traces = [{ x, y: cadRows.map(c => c.spm), type: 'scatter', mode: smooth ? 'markers' : 'lines+markers',
-      line: { color: '#e87b3d', width: 2 },
-      marker: { color: cadRows.map(c => c.conf > 0.15 ? (smooth ? 'rgba(160,111,36,0.26)' : '#e87b3d')
-                                                     : (smooth ? 'rgba(148,163,184,0.28)' : '#94a3b8')), size: smooth ? 4 : 5 },
-      name: loamT('Cadence (spm)'), showlegend: !smooth, hoverinfo: smooth ? 'skip' : 'all', hovertemplate: smooth ? undefined : '%{y:.0f} spm<extra></extra>' }];
-    if (smooth) traces.push({ x, y: rollingMedianMasked(cadRows.map(c => c.conf > 0.15 ? c.spm : null), 11), type: 'scatter', mode: 'lines',
-      line: { color: '#e87b3d', width: 3 }, name: loamT('Cadence (spm)'), connectgaps: false,
-      hovertemplate: '%{y:.0f} spm<extra></extra>' });
+    /* One SOLID line through the confident windows, as the timeline rows draw it (owner,
+       2026-09-29): the old markers-plus-median drew low-confidence windows as grey dips and read as
+       dots with holes. */
     const spms = cadOk.map(c => c.spm);
+    const traces = [{ x: cadOk.map(c => X(c.t)), y: smooth ? rollingMedianMasked(spms, 11) : spms, type: 'scatter', mode: 'lines',
+      line: { color: '#e87b3d', width: smooth ? 3 : 2 }, name: loamT('Cadence (spm)'), connectgaps: true,
+      hovertemplate: '%{y:.0f} spm<extra></extra>' }];
     ch.cad = { traces, color: '#e87b3d', title: loamT('cadence (spm)'),
       range: [Math.min(140, Math.floor(Math.min(...spms) - 10)), Math.max(200, Math.ceil(Math.max(...spms) + 10))] };
   }
@@ -36002,15 +36115,11 @@ function renderRunOverlay(D) {
   const oscRows = sport === 'run'
     ? ((D.running && D.running.oscSeries) || []).filter(o => o.t >= ride.start && o.t <= ride.end && Number.isFinite(o.oscCm)) : [];
   if (oscRows.length > 1) {
-    const x = [], y = [];
-    oscRows.forEach((o, i) => { if (i > 0 && o.t - oscRows[i - 1].t > 6) { x.push(null); y.push(null); } x.push(X(o.t)); y.push(o.oscCm); });
-    const traces = [{ x, y, type: 'scatter', mode: smooth ? 'markers' : 'lines+markers', line: { color: '#8caa6d', width: 2 },
-      marker: { color: smooth ? 'rgba(140,170,109,0.30)' : '#8caa6d', size: smooth ? 4 : 5 },
-      name: loamT('Oscillation (cm, est.)'), showlegend: !smooth, hoverinfo: smooth ? 'skip' : 'all', connectgaps: false,
-      hovertemplate: smooth ? undefined : '%{y:.1f} cm<extra></extra>' }];
-    if (smooth) traces.push({ x, y: rollingMedianMasked(y, 11), type: 'scatter', mode: 'lines', line: { color: '#6f8f4f', width: 3 },
-      name: loamT('Oscillation (cm, est.)'), connectgaps: false, hovertemplate: '%{y:.1f} cm<extra></extra>' });
-    const hand = D.running && D.running.mount === 'hand';
+    const y = oscRows.map(o => o.oscCm);
+    const traces = [{ x: oscRows.map(o => X(o.t)), y: smooth ? rollingMedianMasked(y, 11) : y, type: 'scatter', mode: 'lines',
+      line: { color: smooth ? '#6f8f4f' : '#8caa6d', width: smooth ? 3 : 2 },
+      name: loamT('Oscillation (cm, est.)'), connectgaps: true, hovertemplate: '%{y:.1f} cm<extra></extra>' }];
+    const hand = D.running && D.running.mount === 'hand' && D.running.oscSource !== 'head';
     ch.osc = { traces, color: '#8caa6d',
       title: hand ? loamT('oscillation, upper bound (cm)') : loamT('oscillation, est. (cm)'),
       range: [0, Math.max(10, Math.ceil(Math.max(...oscRows.map(o => o.oscCm)) * 1.1))] };
@@ -37258,6 +37367,25 @@ function altRange(alts) {
   return min <= max ? { min, max } : null;
 }
 
+/* One stretch's profile as an inline SVG on a SHARED scale -- the splits table's topo column and the
+   Runs panel's draw the same thing through this, so the two cannot come to disagree about a shape.
+   `preserveAspectRatio="none"` stretches the viewBox to the column (stroke is `non-scaling-stroke` in
+   CSS); `PAD` keeps a stroke at the extremes from being half clipped; a zero span draws the flat line
+   down the middle that describes it rather than dividing by zero. */
+const SPARK_W = 100, SPARK_H = 24, SPARK_PAD = 2;
+function topoSparkSvg(vals, range) {
+  const span = range.max - range.min;
+  const pts = vals.map((v, k) => {
+    const x = (SPARK_W * k) / (vals.length - 1);
+    const y = span > 0
+      ? SPARK_H - SPARK_PAD - ((v - range.min) / span) * (SPARK_H - 2 * SPARK_PAD)
+      : SPARK_H / 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return `<svg class="sp-spark" viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none" aria-hidden="true">`
+    + `<polygon points="0,${SPARK_H} ${pts} ${SPARK_W},${SPARK_H}"/><polyline points="${pts}"/></svg>`;
+}
+
 /** The moving seconds a split should be paced on, matching what the splits table prints. */
 function pacingMovingOf(s) {
   return s.movingSeconds != null ? s.movingSeconds : s.seconds;
@@ -38016,27 +38144,8 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
     const m = Math.floor(tot / 60), ss = tot - m * 60;
     return m + ':' + String(ss).padStart(2, '0');
   };
-  /* One split's profile as an inline SVG. `preserveAspectRatio="none"` lets the viewBox stretch to
-     whatever width the column settles at -- every row gets the same width, so the rows stay
-     comparable to each other, which is the only comparison a sparkline is for. The stroke is
-     `non-scaling-stroke` in CSS, or that stretch would draw a fat vertical line and a thin
-     horizontal one out of one width.
-     `PAD` keeps the extremes off the edges so a 1.25px stroke at the very top is not half clipped,
-     and a run with NO range at all (a track, a treadmill, a barometer that never moved) draws the
-     flat line down the middle that describes it rather than dividing by a zero span. */
-  const SPARK_W = 100, SPARK_H = 24, SPARK_PAD = 2;
-  const sparkline = (vals) => {
-    const span = range.max - range.min;
-    const pts = vals.map((v, k) => {
-      const x = (SPARK_W * k) / (vals.length - 1);
-      const y = span > 0
-        ? SPARK_H - SPARK_PAD - ((v - range.min) / span) * (SPARK_H - 2 * SPARK_PAD)
-        : SPARK_H / 2;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-    return `<svg class="sp-spark" viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none" aria-hidden="true">`
-      + `<polygon points="0,${SPARK_H} ${pts} ${SPARK_W},${SPARK_H}"/><polyline points="${pts}"/></svg>`;
-  };
+  /* See `topoSparkSvg`: every row against the whole run's range. */
+  const sparkline = (vals) => topoSparkSvg(vals, range);
   /* What the shape cannot say, for a reader who hovers or uses a screen reader. NET only -- the two
      endpoints, which is what `splitGradePct` measures and what `climbOf`/`dropOf` report. Summing
      the samples would be a climb TOTAL, and this file already records that raw sample-to-sample
@@ -38167,6 +38276,7 @@ function renderRunParams(D) {
   const det = D.detection;
   const r = D.running;
   const sport = D.sport === 'walking' ? 'walking' : 'running';
+  const oscHand = r.mount === 'hand' && r.oscSource !== 'head';
   const mountStr = r.mount === 'hand' ? 'HAND (arm-swing detected)'
                  : r.mount === 'hip'  ? 'hip / torso (clean signal)'
                  : 'uncertain';
@@ -38179,7 +38289,7 @@ function renderRunParams(D) {
     <span>sport <strong>${sport.toUpperCase()}</strong> ${det.confidence ? `(${(det.confidence*100).toFixed(0)}% conf)` : ''}</span>
     <span>phone mount <strong>${mountStr}</strong></span>
     <span>cadence <strong>${r.cadMedian ? r.cadMedian.toFixed(0)+' SPM' : '—'}</strong>${sport === 'walking' ? ' (step rate)' : ''}</span>
-    <span>osc <strong${r.mount === 'hand' ? ' style="color:var(--text-muted);"' : ''}>${r.oscMedian ? (r.mount === 'hand' ? '~' : '')+r.oscMedian.toFixed(1)+' cm' : '—'}</strong>${r.mount === 'hand' ? ' (upper bound)' : ''}</span>
+    <span>osc <strong${oscHand ? ' style="color:var(--text-muted);"' : ''}>${r.oscMedian ? (oscHand ? '~' : '')+r.oscMedian.toFixed(1)+' cm' : '—'}</strong>${oscHand ? ' (upper bound)' : r.oscSource === 'head' ? ' (AirPods)' : ''}</span>
     ${gaitStr}
     <span style="margin-left:auto">${det.reasons ? det.reasons.slice(0,2).join(' · ') : ''}</span>
   `;
@@ -38583,10 +38693,15 @@ function runningHighlights(D) {
      Match the stats card and params bar: prefix ~, mute the number, and caption "upper bound" instead
      of asserting a bare figure here. */
   if (s.oscMedian != null) {
-    const oscHand = !!(D.running && D.running.mount === 'hand');
+    const oscHead = !!(D.running && D.running.oscSource === 'head');
+    const oscHand = !!(D.running && D.running.mount === 'hand') && !oscHead;
+    /* The head-bob wording is only true when the AirPods measured it; the phone's number is the
+       phone's own bounce, which reads high when it moves against the runner. */
     c.push(oscHand
       ? loamT('Vertical oscillation up to <strong style="color:var(--text-muted);">~{cm} cm</strong> (hand-carry upper bound, arm swing inflates it).', { cm: s.oscMedian.toFixed(1) })
-      : loamT('Vertical oscillation about <strong>{cm} cm</strong> (head-bob proxy for hip motion).', { cm: s.oscMedian.toFixed(1) }));
+      : oscHead
+      ? loamT('Vertical oscillation about <strong>{cm} cm</strong> (head-bob proxy for hip motion).', { cm: s.oscMedian.toFixed(1) })
+      : loamT('Vertical oscillation about <strong>{cm} cm</strong> (from the phone, which reads high if it bounces against you).', { cm: s.oscMedian.toFixed(1) }));
   }
   if (s.altGain != null) c.push(s.altLoss != null
     ? loamT('{gain} climbed, {loss} descended.', { gain: U.elev(s.altGain), loss: U.elev(s.altLoss) })
@@ -39086,6 +39201,7 @@ function buildDigest(D, sport, metric) {
       cadence_source: run.cadSource === 'wrist' ? 'apple watch wrist motion'
         : run.cadSource === 'head' ? 'airpods head motion' : 'phone accelerometer',
       vertical_oscillation_cm_median: r1(s.oscMedian),
+      oscillation_source: run.oscSource === 'head' ? 'airpods head motion' : 'phone accelerometer',
       ...u.elev('elevation_gain', s.altGain),
       ...u.elev('elevation_loss', s.altLoss),
       phone_mount: run.mount,
@@ -39094,8 +39210,11 @@ function buildDigest(D, sport, metric) {
         type: seg.dir, duration_s: r1(seg.duration), ...u.len('distance', seg.distance, 0),
         grade_pct: r1(seg.gradeAvg), cadence_spm: r1(seg.cadAvg, 0), oscillation_cm: r1(seg.oscAvg)
       })),
-      data_caveats: 'Cadence and oscillation are derived from AirPods/phone IMU; oscillation is head bob (a proxy for hip vertical motion). Phone mount detected as "' + run.mount + '" (confidence ' + r1(run.mountConfidence, 2) + ').'
-        + (run.mount === 'hand' ? ' The phone was HAND-CARRIED, so vertical_oscillation_cm is inflated by arm swing and is an UPPER BOUND, not a measurement; do not coach oscillation targets or read the number as real hip motion.' : '')
+      data_caveats: (run.oscSource === 'head'
+          ? 'Oscillation is AirPods head bob (a proxy for hip vertical motion), so the phone mount does not affect it.'
+          : 'Oscillation is read from the PHONE\'s own vertical motion, which overstates body motion when the phone bounces in a pocket or hand; treat it as an estimate.')
+        + ' Phone mount detected as "' + run.mount + '" (confidence ' + r1(run.mountConfidence, 2) + ').'
+        + (run.mount === 'hand' && run.oscSource !== 'head' ? ' The phone was HAND-CARRIED, so vertical_oscillation_cm is inflated by arm swing and is an UPPER BOUND, not a measurement; do not coach oscillation targets or read the number as real hip motion.' : '')
         /* Said explicitly because it changes which caveat applies to which number: a hand-carried
            phone makes oscillation an upper bound but leaves a wrist-sourced cadence untouched, and a
            coach told only "the phone was in a hand" would reasonably hedge both. */
@@ -47476,7 +47595,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '3ddc7771e · 2026-09-29';
+const LOAM_BUILD = 'e4f9dbe25 · 2026-09-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
