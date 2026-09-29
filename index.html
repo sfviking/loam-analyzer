@@ -1402,8 +1402,9 @@
   tbody tr.highlight { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .dir-R { color: var(--accent); font-weight: 700; }
   .dir-L { color: var(--accent-2); font-weight: 700; }
-  .dir-down { color: var(--critical); font-weight: 700; }
-  .dir-up { color: var(--accent-2); font-weight: 700; }
+  /* Climb red, descent green: the map's grade colours (see renderRunMap). */
+  .dir-down { color: var(--accent-2); font-weight: 700; }
+  .dir-up { color: var(--critical); font-weight: 700; }
 
   .sport-picker {
     display: inline-flex; align-items: center; gap: 10px;
@@ -3098,7 +3099,8 @@
              Norwegian and would render right here, in a 42px column. See `localizeStaticText`. -->
         <table id="runSplitsTable">
           <thead><tr>
-            <th>#</th><th>Pace</th>
+            <th>#</th><th class="split-pace-col">Pace</th>
+            <th class="split-gap-col" title="Grade-adjusted pace: the flat-ground pace that would take the same effort.">GAP</th>
             <th class="split-hr-col" data-u="bpm">HR</th>
             <th class="split-cad-col" data-u="spm">Cad</th>
             <th class="split-alt-col" data-i18n-key="Topo (splits column)">Topo</th>
@@ -7036,7 +7038,8 @@ function segmentRuns(D, mode) {
   /* Opt-in only: Auto above never lands here, because on a run that was not intervals every slow
      stretch would read as a recovery (see detectIntervals). */
   else if (chosen === 'intervals') {
-    intervalInfo = detectIntervals(sensors.location || [], D.ride, (D.ride && D.ride.pausedSpans) || []);
+    intervalInfo = detectIntervals(sensors.location || [], D.ride, (D.ride && D.ride.pausedSpans) || [],
+      climbAltSeries(sensors.baro || [], sensors.location || [], D.ride));
     raw = intervalInfo.runs;
   }
   const runs = raw.map((r, i) => ({
@@ -7209,9 +7212,13 @@ const INT_BRIDGE_MIN_MPS = 1.0;
 const INT_MIN_REP_S = 30;
 /** A rep's mean speed as a fraction of the session's fastest block. See the header for the margins. */
 const INT_REP_FRACTION = 0.72;
+/** A rep's grade-adjusted speed as a fraction of the session's best block GAP. See the header. */
+const INT_GAP_FRACTION = 0.78;
+/** Longest distance from a block's end to the nearest altitude sample, for its grade to count (s). */
+const INT_ALT_MAX_GAP_S = 30;
 
-function detectIntervals(location, ride, pausedSpans) {
-  const empty = { runs: [], blocks: [], fastest: null, threshold: null };
+function detectIntervals(location, ride, pausedSpans, alts) {
+  const empty = { runs: [], blocks: [], fastest: null, threshold: null, bestGap: null };
   if (!ride || !(ride.end > ride.start) || !location || !location.length) return empty;
   const t0 = Math.floor(ride.start), n = Math.floor(ride.end) - t0;
   if (n < INT_MIN_REP_S) return empty;
@@ -7255,8 +7262,10 @@ function detectIntervals(location, ride, pausedSpans) {
   for (const s of spans) {
     const prev = merged[merged.length - 1];
     if (prev && s[0] - prev[1] <= INT_BRIDGE_S) {
+      /* A gap with NO reading is a GPS dropout, not a stop, and is bridged like a slow patch that
+         still moves; a pause reads 0 above, so it still ends a rep (daily review 2026-09-29). */
       const gap = mean(prev[1], s[0]);
-      if (gap != null && gap >= INT_BRIDGE_MIN_MPS) { prev[1] = s[1]; continue; }
+      if (gap == null || gap >= INT_BRIDGE_MIN_MPS) { prev[1] = s[1]; continue; }
     }
     merged.push([s[0], s[1]]);
   }
@@ -7264,11 +7273,31 @@ function detectIntervals(location, ride, pausedSpans) {
     .map(([a, b]) => ({ tStart: t0 + a, tEnd: t0 + b, speed: mean(a, b) }))
     .filter(b => b.speed != null);
   if (!blocks.length) return empty;
+  /* Altitude at a time: the nearest sample, if one is close enough. Endpoint to endpoint over the
+     block's own ground, the way `splitGradePct` grades a split. No altitude, no GAP path. */
+  const al = (alts || []).filter(a => a && Number.isFinite(a.t) && Number.isFinite(a.alt));
+  const altAt = (t) => {
+    let lo = 0, hi = al.length - 1;
+    if (hi < 0) return null;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (al[m].t < t) lo = m + 1; else hi = m; }
+    let best = al[lo];
+    if (lo > 0 && Math.abs(al[lo - 1].t - t) < Math.abs(best.t - t)) best = al[lo - 1];
+    return Math.abs(best.t - t) <= INT_ALT_MAX_GAP_S ? best.alt : null;
+  };
+  for (const b of blocks) {
+    const a0 = altAt(b.tStart), a1 = altAt(b.tEnd), dist = b.speed * (b.tEnd - b.tStart);
+    b.grade = a0 != null && a1 != null && dist > 0 ? (a1 - a0) / dist * 100 : null;
+    b.gap = b.grade != null ? gradeAdjustedSpeed(b.speed, b.grade) : null;
+  }
   const fastest = Math.max(...blocks.map(b => b.speed));
   const threshold = fastest * INT_REP_FRACTION;
-  for (const b of blocks) b.rep = b.speed >= threshold;
+  const gaps = blocks.map(b => b.gap).filter(g => g != null);
+  const bestGap = gaps.length ? Math.max(...gaps) : null;
+  for (const b of blocks) {
+    b.rep = b.speed >= threshold || (bestGap != null && b.gap != null && b.gap >= bestGap * INT_GAP_FRACTION);
+  }
   const runs = blocks.filter(b => b.rep).map(b => ({ tStart: b.tStart, tEnd: b.tEnd }));
-  return { runs, blocks, fastest, threshold };
+  return { runs, blocks, fastest, threshold, bestGap };
 }
 
 /* ========== Running track (400 m oval) ===   Ported from analyzer/sports/running/track.js and pinned
@@ -7582,6 +7611,29 @@ function drawRuns() {
      "0.25 mi" names a distance nobody ran. */
   const onTrack = mode === 'intervals' ? trackFor(D) : null;
   const trackDists = runs.map(r => (onTrack ? trackDistance(onTrack, r.tStart, r.tEnd) : null));
+  /* Each row's average speed as the Pace cell prints it, so the reps' best pace can be marked in the
+     same green as the best 5 s pace (owner, 2026-09-29). Reps only: on laps of one course the best
+     time already says it. */
+  const avgSpeeds = runs.map((r, i) => (trackDists[i] && r.metrics.duration > 0
+    ? (trackDists[i].snapped || trackDists[i].meters) / r.metrics.duration : r.metrics.avgSpeed));
+  const bestAvg = mode === 'intervals' && footSport
+    ? Math.max(...avgSpeeds.filter(v => Number.isFinite(v) && v > 0)) : null;
+  /* On foot, the NET elevation change end to end, signed, and the GAP it implies -- the splits
+     table's arithmetic over the same altitude series (owner, 2026-09-29: "add gap and climbs show
+     drop"). The unsigned Drop column is max minus min of the barometer, which labelled a climb rep's
+     232 ft of ascent a "drop". A bike keeps Drop: there it is the descent's own measure. */
+  const footAlts = footSport ? climbAltSeries((D.sensors && D.sensors.baro) || [], D.sensors.location || [], D.ride) : [];
+  const netElev = runs.map(r => {
+    if (!footAlts.length) return null;
+    const a = pacingAltAt(footAlts, r.tStart), b = pacingAltAt(footAlts, r.tEnd);
+    return a != null && b != null ? b - a : null;
+  });
+  const gapSpeeds = runs.map((r, i) => {
+    const dist = trackDists[i] ? (trackDists[i].snapped || trackDists[i].meters) : r.metrics.distance;
+    return netElev[i] != null && dist > 0 && avgSpeeds[i] > 0
+      ? gradeAdjustedSpeed(avgSpeeds[i], (netElev[i] / dist) * 100) : null;
+  });
+  const anyGap = footSport && gapSpeeds.some(v => v != null);
   const bestTop = Math.max(...topSpeeds.filter(v => v != null));
   const hi = 'style="color:#7fb069;font-weight:600;"';
   /* Turns / L·R / Radius come from body-frame turn detection, which only exists for MTB. On running
@@ -7596,7 +7648,7 @@ function drawRuns() {
   const nounCap = capitalize(rowNounT(nounSingular));
   if (thead) thead.innerHTML = showTurns
     ? `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${loamT('Top')}</th><th>${loamT('Turns')}</th><th>${loamT('L/R')}</th><th title="${loamT('Median apex radius')}">${loamT('Radius')}</th><th>${loamT('Drop')}</th><th></th></tr>`
-    : `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${topLabel}</th><th>${avgLabel}</th><th>${loamT('Drop')}</th><th></th></tr>`;
+    : `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${topLabel}</th><th>${avgLabel}</th>${anyGap ? '<th>GAP</th>' : ''}<th>${footSport ? loamT('Elev') : loamT('Drop')}</th><th></th></tr>`;
   document.querySelector('#runsTable tbody').innerHTML = runs.map((r, index) => {
     const m = r.metrics;
     const label = runDisplayLabel(r);
@@ -7650,8 +7702,8 @@ function drawRuns() {
     const metricCells = showTurns
       ? `<td data-l="Turns" data-s="Turns">${m.nTurns}</td><td data-l="L/R" data-s="L/R">${m.leftTurns}/${m.rightTurns}</td>
          <td data-l="Radius" data-s="Rad">${m.medianRadius != null ? U.small(m.medianRadius) : '—'}</td>`
-      : `<td data-l="${avgLabel}" data-s="${avgShort}">${footSport ? U.pace(trackDists[index] && m.duration > 0
-          ? (trackDists[index].snapped || trackDists[index].meters) / m.duration : m.avgSpeed) : U.speed(m.avgSpeed)}</td>`;
+      : `<td data-l="${avgLabel}" data-s="${avgShort}" ${bestAvg != null && avgSpeeds[index] === bestAvg ? hi : ''}>${footSport ? U.pace(avgSpeeds[index]) : U.speed(m.avgSpeed)}</td>`
+        + (anyGap ? `<td data-l="GAP" data-s="GAP">${gapSpeeds[index] ? U.pace(gapSpeeds[index]) : '\u2014'}</td>` : '');
     /* A row drills into the dedicated segment page (focused map + corner ledger) when it is an MTB run
        with body-frame turns, matching the onclick below; those get a disclosure chevron so the "tap for
        more" is visible on touch, where there is no pointer cursor. */
@@ -7666,7 +7718,10 @@ function drawRuns() {
         : U.dist(m.distance)}</td>
       <td data-l="${topLabel}" data-s="${topShort}" ${topSpeeds[index] != null && topSpeeds[index] === bestTop ? hi : ''}>${footSport ? U.pace(topSpeeds[index]) : U.speed(topSpeeds[index])}</td>
       ${metricCells}
-      <td data-l="Drop" data-s="Drop">${m.drop != null ? U.elev(m.drop) : '—'}</td>
+      ${footSport
+        ? `<td data-l="Elev" data-s="${loamT('Elev')}" class="${netElev[index] > 0.5 ? 'dir-up' : netElev[index] < -0.5 ? 'dir-down' : ''}">${netElev[index] != null
+            ? (netElev[index] >= 0 ? '+' : '\u2212') + U.elev(Math.abs(netElev[index])) : '\u2014'}</td>`
+        : `<td data-l="Drop" data-s="Drop">${m.drop != null ? U.elev(m.drop) : '—'}</td>`}
       <td class="descent-row-actions">${actions}</td>
       <td class="run-break" aria-hidden="true"></td></tr>`;
   }).join('');
@@ -20071,6 +20126,7 @@ const LoamReadiness = (function () {
   /* Local calendar day key, yyyy-mm-dd: the same day the Swift side buckets readiness under
      (`HealthVitalsBuilder.dayKey` with the device calendar), and the same arithmetic as `pmcDayKey`. */
   function readinessDayKey(d) {
+    if (d == null || d === '') return null;  // new Date(null) is 1970, not "no date"
     const dt = (d instanceof Date) ? d : new Date(d);
     if (isNaN(dt)) return null;
     return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
@@ -20103,7 +20159,9 @@ const LoamReadiness = (function () {
     const groups = new Map();
     for (const r of (rides || [])) {
       const ef = readinessEfficiency(r);
-      const day = r ? readinessDayKey(r.recordedAt || r.savedAt) : null;
+      /* recordedAt only: a save time is a label, not a ride clock, and pairing a backfilled ride with
+       its SAVE day's readiness is exactly the wrong pairing (daily review 2026-09-29). */
+    const day = r ? readinessDayKey(r.recordedAt) : null;
       if (!ef || !day) continue;
       const key = `${r.sport}|${ef.kind}`;
       if (!groups.has(key)) groups.set(key, []);
@@ -23442,7 +23500,9 @@ async function renderProgressReadiness(rides) {
   await enrichRidesAvgHr(rides);
   const laps = [];
   for (const t of tags) {
-    for (const m of buildTagMembers(t, rides)) laps.push({ segmentId: t.id, date: memberDate(m), durationS: m.duration });
+    /* memberRideClock, not memberDate: the latter falls back to the save time, which is right for a
+       label and wrong for pairing a lap with that day's readiness (daily review 2026-09-29). */
+    for (const m of buildTagMembers(t, rides)) laps.push({ segmentId: t.id, date: memberRideClock(m), durationS: m.duration });
   }
   const R = LoamReadiness;
   const perDay = R.readinessPerDay([...R.readinessSegmentOutcomes(laps), ...R.readinessEfficiencyOutcomes(rides)]);
@@ -23470,7 +23530,11 @@ async function renderProgressReadiness(rides) {
   const rows = [['score', loamT('Readiness score')], ['hrv', loamT('HRV')], ['rhr', loamT('Resting HR')], ['load', loamT('Training load')]]
     .map(([k, label]) => `<tr><td>${escapeHtml(label)}</td><td ${td}>${cell(all.rho[k], all)}</td><td ${td}>${cell(c.segment.rho[k], c.segment)}</td><td ${td}>${cell(c.efficiency.rho[k], c.efficiency)}</td></tr>`).join('');
   const head = (label, block) => `${escapeHtml(label)}<br><span style="font-weight:400;">${escapeHtml(loamT('{n} days', { n: block.n }))}</span>`;
-  const bandCell = (b) => all.bands[b].n
+  /* Before READINESS_MIN_DAYS the verdict says the points are "shown, not read", so a band's mean
+     over a day or two is withheld too -- only its day count is shown (daily review 2026-09-29). */
+  const bandCell = (b) => all.bands[b].n && all.verdict === 'insufficient'
+    ? `<span style="color:var(--text-muted);">${escapeHtml(loamT('{n} days', { n: all.bands[b].n }))}</span>`
+    : all.bands[b].n
     ? `${all.bands[b].meanPct > 0 ? '+' : ''}${loamNum(all.bands[b].meanPct, 1)}% <span style="color:var(--text-muted);">· ${escapeHtml(loamT('{n} days', { n: all.bands[b].n }))}</span>`
     : '<span style="color:var(--text-muted);">-</span>';
   el.innerHTML = `
@@ -29766,7 +29830,9 @@ async function compareWithPastLaps(descent, opts = {}) {
      native Done button otherwise drops all the way out to the Sessions list). The multi-file drop
      path leaves this bar hidden because there is no single ride to return to. */
   { const b = document.getElementById('crossBackBar'); if (b) b.classList.remove('hidden'); }
-  { const b = document.getElementById('crossBackBtn'); if (b) b.innerHTML = loamT('&larr; Back to ride'); }
+  /* Names the page it returns to in that page's sport, as the segment page's Back does: a run's
+     comparison said "Back to ride" (owner report, 2026-09-29). */
+  { const b = document.getElementById('crossBackBtn'); if (b) b.textContent = '← ' + loamT('Back to {noun}', { noun: lexNounT(pageLex()) }); }
   renderCrossRide({ perRide, clusters: [cluster] });
   /* The alert above names what the RIDER should go do next, so it speaks in this recording's sport.
      This line describes the SET now on screen, so it reads the members' own sports -- the same
@@ -32187,6 +32253,41 @@ const LOAM_NB = {
   'Map unavailable; the segment keeps the full run extent.':
     'Kartet er utilgjengelig; segmentet beholder hele utstrekningen til etappen.',
   'No response received.': 'Fikk ingen svar.',
+  /* The coach panel's own chrome. The opening QUESTION is looked up at its two call sites, never in
+     coachAnalyzePrompt (drift-pinned); a Norwegian reader's first turn therefore keys a fresh cache
+     entry once, and English keys are untouched. */
+  'thinking…': 'tenker…',
+  'cached reply, no API call': 'lagret svar, ingen API-kall',
+  '…cut off here.': '…brutt her.',
+  'Connection dropped — retrying…': 'Forbindelsen falt ut — prøver igjen…',
+  'bundled key': 'innebygd nøkkel',
+  'use your own': 'bruk din egen',
+  'your API key': 'din API-nøkkel',
+  'this session only': 'bare denne økten',
+  'remembered on this device': 'husket på denne enheten',
+  'Analyze this ride and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser turen og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this run and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser løpeturen og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this walk and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser gåturen og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this swim and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser svømmeøkten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this ski day and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser skidagen og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this lift session and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser styrkeøkten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this range session and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser treningsøkten på rangen og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Write my training plan: this week in detail, the weeks after in outline, and what would change it.':
+    'Skriv treningsplanen min: denne uken i detalj, ukene etter i grove trekk, og hva som ville endret den.',
+  'Opus declined — asking Sonnet instead…': 'Opus avslo — spør Sonnet i stedet…',
+  'Claude declined to answer this one. Try rephrasing the question.':
+    'Claude ville ikke svare på denne. Prøv å formulere spørsmålet annerledes.',
+  'Claude ran out of room while thinking and wrote no answer. Try again, or pick Sonnet 5 in the model menu.':
+    'Claude brukte opp plassen på å tenke og skrev ikke noe svar. Prøv igjen, eller velg Sonnet 5 i modellmenyen.',
+  'Claude finished without writing an answer ({why}). Try again.':
+    'Claude avsluttet uten å skrive et svar ({why}). Prøv igjen.',
   'Loading\u2026': 'Laster\u2026',
   'Loading sessions\u2026': 'Laster økter\u2026',
   'No saved sessions yet.': 'Ingen lagrede økter ennå.',
@@ -32446,6 +32547,7 @@ const LOAM_NB = {
   'Marked runs': 'Merkede etapper',
   'Laps (loop)': 'Runder (sløyfe)',
   'Intervals (reps)': 'Intervaller (drag)',
+  'Elev': 'Høyde',
   'rep': 'rep',
   'hard efforts of 30 s or more between slower stretches': 'harde drag på 30 s eller mer mellom roligere partier',
   ' found from your pace': ' funnet ut fra tempoet ditt',
@@ -32460,6 +32562,8 @@ const LOAM_NB = {
   'Smooth': 'Glattet',
   'Show grade-adjusted pace: the flat-ground pace that would take the same effort.':
     'Vis stigningsjustert tempo: tempoet på flatmark som ville krevd samme innsats.',
+  'Grade-adjusted pace: the flat-ground pace that would take the same effort.':
+    'Stigningsjustert tempo: tempoet på flatmark som ville krevd samme innsats.',
   'Reduce brief spikes in timeline readings. Turn off to see raw readings.':
     'Demper korte topper i tidslinjen. Slå av for å se rådata.',
   'Watch': 'Klokke',
@@ -33236,9 +33340,10 @@ const LOAM_NB = {
   'OpenAI-compatible (Ollama, LM Studio, llama.cpp)': 'OpenAI-kompatibel (Ollama, LM Studio, llama.cpp)',
   'Anthropic-compatible': 'Anthropic-kompatibel',
   'Use Anthropic': 'Bruk Anthropic',
-  'Your session summary goes to this server instead of Anthropic. Your own API key is sent only if you set one; the shared key never is. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.':
-    'Sammendraget av økten sendes til denne serveren i stedet for Anthropic. Din egen API-nøkkel sendes bare hvis du har lagt inn en; den delte nøkkelen sendes aldri. Treneren er skrevet for Claude, så Loam har ikke kontrollert svarene fra en annen modell.',
-  'Enter a URL starting with http:// or https://, and a model name.': 'Skriv inn en adresse som starter med http:// eller https://, og et modellnavn.',
+  'Your session summary goes to this server instead of Anthropic. Only the key typed here is sent to it; your Anthropic key and the shared key never are. Use https:// unless the server is on this device or your own network. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.':
+    'Sammendraget av økten sendes til denne serveren i stedet for Anthropic. Bare nøkkelen du skriver inn her sendes dit; Anthropic-nøkkelen din og den delte nøkkelen sendes aldri. Bruk https:// med mindre serveren er på denne enheten eller ditt eget nettverk. Treneren er skrevet for Claude, så Loam har ikke kontrollert svarene fra en annen modell.',
+  'Enter a URL starting with https:// (http:// only for this device or your own network), and a model name.': 'Skriv inn en adresse som starter med https:// (http:// bare for denne enheten eller ditt eget nettverk), og et modellnavn.',
+  'API key for this server (optional)': 'API-nøkkel for denne serveren (valgfri)',
   'to your AI server at {host}, not to Anthropic.': 'til AI-serveren din på {host}, ikke til Anthropic.',
   'your metrics, turned into coaching — sent to your own AI server, only when you ask':
     'tallene dine, gjort om til coaching — sendes til din egen AI-server, kun når du ber om det',
@@ -35408,7 +35513,9 @@ function renderRunMap(loc, ride, segments) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end && r.latitude != null);
   if (!inRide.length) return;
   const latlngs = inRide.map(r => [r.latitude, r.longitude]);
-  /* Color the track by grade segment: red for downhill, green for uphill, neutral elsewhere.
+  /* Color the track by grade segment: red for a climb (the hard part), green for a descent, neutral
+     elsewhere (owner, 2026-09-29: "make climbs red and descents green on the map"). The legend, the
+     run timeline's bands and the segment table's direction labels follow the same pair.
      Merged into one polyline per same-color stretch (see drawColoredTrack). */
   const inSeg = (t) => segments.find(s => t >= s.tStart && t <= s.tEnd);
   const runPausedBrk = pausedLegBreaks(inRide.map(r => r.t), (ride && ride.pausedSpans) || []);
@@ -35416,7 +35523,7 @@ function renderRunMap(loc, ride, segments) {
     const seg = inSeg(inRide[i].t);
     /* Lift segments (GPS-only FIT rides) draw gray: transport, not riding. */
     if (seg && seg.kind === 'lift') return '#9aa2ad';
-    return seg ? (seg.dir === 'down' ? '#e0573a' : '#7fb069') : '#5b9bd5';
+    return seg ? (seg.dir === 'down' ? '#7fb069' : '#e0573a') : '#5b9bd5';
   }, null, { brokenAt: (i) => runPausedBrk.has(i) });
   /* Start/end markers. */
   L.circleMarker(latlngs[0], { radius: 6, color: '#1a202c', fillColor: '#8caa6d', fillOpacity: 1, weight: 2 }).addTo(mapInstance).bindTooltip('Start');
@@ -35728,8 +35835,8 @@ function renderRunTimeline(D) {
   const shapes = D.running.segments.map(s => ({
     type: 'rect', xref: 'x', yref: rowRef(altAxis),
     x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
-    /* Gray for detected lift rides (GPS-only FIT rides); red/green for descents/climbs. */
-    fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.22)' : s.dir === 'down' ? 'rgba(197,75,60,0.15)' : 'rgba(140,170,109,0.15)',
+    /* Gray for detected lift rides (GPS-only FIT rides); red for climbs, green for descents, as on the map. */
+    fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.22)' : s.dir === 'down' ? 'rgba(140,170,109,0.15)' : 'rgba(197,75,60,0.15)',
     line: { width: 0 }, layer: 'below'
   }));
   /* Walk breaks on a run: hatched gray bands so a fade-to-walking is visible at a glance. */
@@ -37854,6 +37961,21 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
   const range = altRange(alts);
   const anyCad = cads.some(v => v != null);
   const anyAlt = !!range && profiles.some(v => v != null);
+  /* GAP per split from the SAME net grade `runPacing` corrects its verdict with (`splitGradePct`), so
+     the column and the verdict cannot disagree about a mile. Net grade is endpoint to endpoint: a
+     mile that climbs and gives it all back reads flat here, which is what the topo beside it shows. */
+  const gaps = splits.map(sp => {
+    const mv = movingOf(sp);
+    const g = splitGradePct(sp, alts);
+    return mv > 0 && g != null ? gradeAdjustedSpeed(sp.meters / mv, g) : null;
+  });
+  const anyGap = gaps.some(v => v != null);
+  document.querySelectorAll('#runSplitsTable .split-gap-col').forEach(th => th.classList.toggle('hidden', !anyGap));
+  /* The pace unit joins the heading on a phone like the others, which is the room the GAP column
+     needs to keep a split on one line at 375px. */
+  const paceUnit = U.metric() ? '/km' : '/mi';
+  document.querySelectorAll('#runSplitsTable th.split-pace-col, #runSplitsTable th.split-gap-col')
+    .forEach(th => th.setAttribute('data-u', paceUnit));
   document.querySelectorAll('#runSplitsTable .split-cad-col').forEach(th => th.classList.toggle('hidden', !anyCad));
   document.querySelectorAll('#runSplitsTable .split-alt-col').forEach(th => th.classList.toggle('hidden', !anyAlt));
   const label = document.getElementById('runSplitsLabel');
@@ -37968,10 +38090,16 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
        of repeating it on every row -- ONE rendering, with CSS choosing where it is shown, rather
        than two row templates that can come to disagree about the number in front of it. */
     const unit = (u) => `<span class="sp-u"> ${u}</span>`;
+    const paceCell = (v) => {
+      if (!v) return '\u2014';
+      const txt = U.pace(v), k = txt.lastIndexOf('/');
+      return k > 0 ? `${txt.slice(0, k)}<span class="sp-u">${txt.slice(k)}</span>` : txt;
+    };
     const prof = profiles[i];
     return `<tr>
       <td>${sp.index}${mark}${part}${stopNote}</td>
-      <td>${mps ? U.pace(mps) : '\u2014'}</td>
+      <td>${paceCell(mps)}</td>
+      ${anyGap ? `<td class="split-gap-col">${paceCell(gaps[i])}</td>` : ''}
       ${anyHr ? `<td class="split-hr-col">${sp.avgHr != null ? sp.avgHr + unit('bpm') : '\u2014'}</td>` : ''}
       ${anyCad ? `<td class="split-cad-col">${cads[i] != null ? Math.round(cads[i]) + unit('spm') : '\u2014'}</td>` : ''}
       ${anyAlt ? `<td class="split-alt-col"${prof ? ` title="${escapeHtml(altText(sp, prof))}" aria-label="${escapeHtml(altText(sp, prof))}"` : ''}>${prof ? sparkline(prof) : '\u2014'}</td>` : ''}
@@ -38099,10 +38227,26 @@ function normalizeCoachEndpoint(raw) {
   let parsed;
   try { parsed = new URL(url); } catch (e) { return null; }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  /* Plain http only on this device or the athlete's own network: the request carries the session
+     summary, the Health vitals and any key, and cleartext across the internet exposes all three. */
+  if (parsed.protocol === 'http:' && !coachHostIsLocal(parsed.hostname)) return null;
   const format = COACH_ENDPOINT_FORMATS.indexOf(raw.format) !== -1 ? raw.format : 'openai';
   const model = typeof raw.model === 'string' ? raw.model.trim() : '';
   if (!model) return null;
-  return { url: url.replace(/\/+$/, ''), format, model };
+  const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+  return { url: url.replace(/\/+$/, ''), format, model, ...(key ? { key } : {}) };
+}
+
+/* This device or a private network: loopback, RFC 1918, link-local, IPv6 unique-local, mDNS. */
+function coachHostIsLocal(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h === '::1' || h === '0.0.0.0') return true;
+  const m = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(h);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h);
 }
 
 /* The URL a request goes to. A base URL ("http://localhost:11434", ".../v1") gets the format's path
@@ -38182,8 +38326,6 @@ function coachSetEndpoint(ep) {
   try { if (ep) localStorage.setItem(COACH_LS.endpoint, JSON.stringify(ep)); else localStorage.removeItem(COACH_LS.endpoint); }
   catch (e) { /* private mode / quota */ }
 }
-/* The athlete's OWN key, never the bundled one: this is the only key a custom server may receive. */
-function coachOwnKey() { return coachSessionKey() || coachRememberedKey(); }
 /* Whether a question can be sent at all. A custom server needs no key (a local one has none). */
 function coachCanSend() { return !!coachEndpoint() || !!coachKey(); }
 /* Why a custom server could not be reached. Inside the iOS app "localhost" is the phone, not the
@@ -38933,6 +39075,10 @@ function buildDigest(D, sport, metric) {
       moving_min: s.movingTime != null ? r1(s.movingTime / 60) : null,
       stopped_min: s.stoppedTime != null ? r1(s.stoppedTime / 60) : null,
       ...u.dist('distance', s.distance),
+      /* `distance` is the run window pace is read over; the Distance tile leads with the WHOLE
+         recording, warm-up walk included. Both, so a coach answering a runner who quotes the tile is
+         not arguing with the app (daily review 2026-09-29). Same 100 m bar as the tile's own note. */
+      ...(s.outsideDistance >= 100 ? u.dist('session_distance_incl_outside_run', s.sessionDistance) : {}),
       ...u.paceMin('avg_pace', s.movingPaceMinPerKm != null ? s.movingPaceMinPerKm : s.paceMinPerKm),
       ...u.speed('avg_speed', s.movingSpeed != null ? s.movingSpeed : s.avgSpeed),
       cadence_spm_median: r1(s.cadMedian, 0),
@@ -39508,6 +39654,12 @@ For follow-up questions, answer briefly and conversationally. Always respond dir
    same way every time, so retrying it only spends the rider's time. */
 const COACH_RETRY_DELAYS_MS = [800, 2500];
 const COACH_RETRY_STATUS = [408, 429, 500, 502, 503, 504, 529];
+/* Output ceiling, thinking INCLUDED. 8192 was measured short on Opus 5, which thinks at effort high
+   by default: a turn could spend it all thinking and stream zero text. Only tokens used are billed. */
+const COACH_MAX_TOKENS = 16000;
+/* Opus 5 runs safety classifiers that can refuse (HTTP 200, stop_reason "refusal", no text); a
+   coaching digest is a false positive, so the turn is re-asked here rather than dropped. */
+const COACH_REFUSAL_FALLBACK = 'claude-sonnet-5';
 
 /* Every network-level failure inside a WKWebView surfaces as the same opaque WebKit string, "Load
    failed", with no status, no host and no reason. On a phone on a trailhead that is almost always the
@@ -39545,9 +39697,10 @@ function coachRetryPause(ms, signal) {
    second attempt cheap. Once text has streamed, the drop is reported with the partial kept and the
    decision left to the rider, since re-asking is a paid call and half an answer is still information. */
 async function callClaude({ system, messages, onText, onDone, onError, onNotice, signal }) {
-  /* A custom server gets the athlete's OWN key or none -- never the bundled owner key. */
+  /* A custom server gets the key typed for IT, or none -- never the bundled owner key and never the
+     athlete's Anthropic key, which the key prompt promises goes only to Anthropic. */
   const ep = coachEndpoint();
-  const key = ep ? coachOwnKey() : coachKey();
+  const key = ep ? (ep.key || '') : coachKey();
   const model = coachModel();
   if (!ep && !key) { onError('No API key set.'); return; }
   const epReq = ep ? coachEndpointRequest(ep, { system, messages, key, maxTokens: 8192 }) : null;
@@ -39556,11 +39709,19 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
      think by default and write longer) that a deep MTB analysis could run out mid-bullet; the
      per-sport prompts already cap the format at a handful of bullets, so the extra headroom buys
      completeness rather than length. Streaming, so a big ceiling costs no latency. */
-  const body = epReq ? JSON.stringify(epReq.body)
-    : JSON.stringify({ model, max_tokens: 8192, stream: true, thinking: { type: 'adaptive' }, system, messages });
+  /* A body per model, because a refusal is re-asked on COACH_REFUSAL_FALLBACK (below). A custom
+     server keeps its own request shape and the 8192 ceiling it shipped with. */
+  const bodyFor = (m) => epReq ? JSON.stringify(epReq.body)
+    : JSON.stringify({ model: m, max_tokens: COACH_MAX_TOKENS, stream: true, thinking: { type: 'adaptive' }, system, messages });
+  let sendModel = model, body = bodyFor(model);
 
   for (let attempt = 0; ; attempt++) {
     let full = '';
+    /* Why the model stopped (message_delta). An HTTP 200 stream can end with NO text at all -- a
+       safety-classifier refusal, or thinking spending the whole max_tokens -- and without reading
+       this the rider got a bare "No response received." with nothing to act on (reported from the
+       app 2026-09-28, a run on Opus 5). */
+    let stopReason = null;
     /* Retryable only while this attempt has shown nothing and the rider has not stopped us. */
     const mayRetry = () => attempt < COACH_RETRY_DELAYS_MS.length && !full && !(signal && signal.aborted);
     const pause = () => coachRetryPause(COACH_RETRY_DELAYS_MS[attempt], signal);
@@ -39580,7 +39741,7 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
     } catch (e) {
       if (e.name === 'AbortError') { onDone(''); return; }
       if (mayRetry()) {
-        if (onNotice) onNotice('Connection dropped — retrying…');
+        if (onNotice) onNotice(loamT('Connection dropped — retrying…'));
         if (!await pause()) { onDone(''); return; }
         continue;
       }
@@ -39630,6 +39791,8 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
           }
           if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
             full += ev.delta.text; onText(ev.delta.text, full);
+          } else if (ev.type === 'message_delta' && ev.delta && ev.delta.stop_reason) {
+            stopReason = ev.delta.stop_reason;
           } else if (ev.type === 'error') {
             /* An error EVENT is the server ending the answer on purpose (overloaded, or the request
                was rejected after headers). Report it as-is: unlike a dropped socket it says why. */
@@ -39643,11 +39806,32 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
     }
     if (streamErr) {
       if (mayRetry()) {
-        if (onNotice) onNotice('Connection dropped — retrying…');
+        if (onNotice) onNotice(loamT('Connection dropped — retrying…'));
         if (!await pause()) { onDone(''); return; }
         continue;
       }
       onError(coachErrorText('Stream error: ' + streamErr.message)); return;
+    }
+    /* Anthropic's stream only: a custom server's formats carry no stop_reason this reads. */
+    if (!ep && !full && !(signal && signal.aborted)) {
+      /* A refusal before any text: re-ask once on the other model, which does not share Opus's
+         classifier false positives. Not counted against the network retries -- it is a different
+         failure, and nothing is on screen yet. */
+      if (stopReason === 'refusal' && sendModel !== COACH_REFUSAL_FALLBACK) {
+        sendModel = COACH_REFUSAL_FALLBACK; body = bodyFor(sendModel); attempt = -1;
+        if (onNotice) onNotice(loamT('Opus declined — asking Sonnet instead…'));
+        continue;
+      }
+      if (stopReason === 'refusal') { onError(loamT('Claude declined to answer this one. Try rephrasing the question.')); return; }
+      if (stopReason === 'max_tokens') { onError(loamT('Claude ran out of room while thinking and wrote no answer. Try again, or pick Sonnet 5 in the model menu.')); return; }
+      /* No stop reason at all: the stream closed without message_stop, i.e. the connection went. */
+      if (!stopReason && mayRetry()) {
+        if (onNotice) onNotice(loamT('Connection dropped — retrying…'));
+        if (!await pause()) { onDone(''); return; }
+        continue;
+      }
+      onError(stopReason ? loamT('Claude finished without writing an answer ({why}). Try again.', { why: stopReason })
+        : coachErrorText('Stream error: the connection closed before an answer arrived')); return;
     }
     onDone(full); return;
   }
@@ -39691,11 +39875,11 @@ function renderCoachKeyStatus() {
     /* Say which it is, so "why do I have to paste this again?" has a visible answer rather than
        reading as a bug: this session only (the default) vs remembered on this device. */
     const scope = coachKeyRemembered()
-      ? `<span class="coach-key-scope">remembered on this device</span>`
-      : `<span class="coach-key-scope">this session only</span>`;
-    el.innerHTML = `<span class="coach-key-ok">✓ your API key</span> · ${scope} · <a href="#" id="coachKeyChange">change</a>`;
+      ? `<span class="coach-key-scope">${loamT('remembered on this device')}</span>`
+      : `<span class="coach-key-scope">${loamT('this session only')}</span>`;
+    el.innerHTML = `<span class="coach-key-ok">✓ ${loamT('your API key')}</span> · ${scope} · <a href="#" id="coachKeyChange">${loamT('change')}</a>`;
   } else if (coachBundledKey()) {
-    el.innerHTML = `<span class="coach-key-ok">✓ bundled key</span> · <a href="#" id="coachKeyChange">use your own</a>`;
+    el.innerHTML = `<span class="coach-key-ok">✓ ${loamT('bundled key')}</span> · <a href="#" id="coachKeyChange">${loamT('use your own')}</a>`;
   } else {
     el.innerHTML = `<a href="#" id="coachKeyChange">${loamT('set API key')}</a>`;
   }
@@ -39714,14 +39898,15 @@ function toggleCoachEndpointForm() {
   if (!host) return;
   const open = document.getElementById('coachEndpointForm');
   if (open) { open.remove(); return; }
-  const ep = coachEndpoint() || { url: '', format: 'openai', model: '' };
+  const ep = coachEndpoint() || { url: '', format: 'openai', model: '', key: '' };
   const fmt = (v, l) => `<option value="${v}" ${ep.format === v ? 'selected' : ''}>${escapeHtml(loamT(l))}</option>`;
   host.insertAdjacentHTML('beforeend',
     `<div class="coach-endpoint" id="coachEndpointForm">` +
     `<label>${escapeHtml(loamT('Server URL'))}<input id="coachEndpointUrl" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="${(typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED) ? 'http://192.168.1.20:11434' : 'http://localhost:11434'}" value="${escapeHtml(ep.url)}"></label>` +
     `<label>${escapeHtml(loamT('API format'))}<select id="coachEndpointFormat">${fmt('openai', 'OpenAI-compatible (Ollama, LM Studio, llama.cpp)')}${fmt('anthropic', 'Anthropic-compatible')}</select></label>` +
     `<label>${escapeHtml(loamT('Model'))}<input id="coachEndpointModel" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="llama3.1" value="${escapeHtml(ep.model)}"></label>` +
-    `<div class="analysis-explanation">${escapeHtml(loamT('Your session summary goes to this server instead of Anthropic. Your own API key is sent only if you set one; the shared key never is. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.'))}</div>` +
+    `<label>${escapeHtml(loamT('API key for this server (optional)'))}<input id="coachEndpointKey" type="password" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" value="${escapeHtml(ep.key || '')}"></label>` +
+    `<div class="analysis-explanation">${escapeHtml(loamT('Your session summary goes to this server instead of Anthropic. Only the key typed here is sent to it; your Anthropic key and the shared key never are. Use https:// unless the server is on this device or your own network. The coach\'s instructions were written for Claude, so another model\'s answers are not checked by Loam.'))}</div>` +
     `<div class="coach-endpoint-actions"><button type="button" id="coachEndpointSave">${escapeHtml(loamT('Save'))}</button>` +
     `<button type="button" id="coachEndpointClear">${escapeHtml(loamT('Use Anthropic'))}</button></div>` +
     `<div id="coachEndpointMsg" class="analysis-explanation" role="status"></div></div>`);
@@ -39730,9 +39915,10 @@ function toggleCoachEndpointForm() {
       url: document.getElementById('coachEndpointUrl').value,
       format: document.getElementById('coachEndpointFormat').value,
       model: document.getElementById('coachEndpointModel').value,
+      key: document.getElementById('coachEndpointKey').value,
     });
     if (!next) {
-      document.getElementById('coachEndpointMsg').textContent = loamT('Enter a URL starting with http:// or https://, and a model name.');
+      document.getElementById('coachEndpointMsg').textContent = loamT('Enter a URL starting with https:// (http:// only for this device or your own network), and a model name.');
       return;
     }
     coachSetEndpoint(next);
@@ -40005,7 +40191,7 @@ function startCoachConversation({ focusInput }) {
   /* Not focused on the highlights path: that tap asked to READ the analysis, and focusing the input
      opens the mobile keyboard over the reply it just requested. */
   if (focusInput) { const i = document.getElementById('coachInput'); if (i) i.focus(); }
-  sendCoach(coachAnalyzePrompt(coachState.sport));
+  sendCoach(loamT(coachAnalyzePrompt(coachState.sport)));
 }
 
 /* The highlights card's CTA. Scrolls in every case, and starts the conversation only when it has not
@@ -40164,7 +40350,7 @@ async function restoreCachedCoach(state, sport) {
   if (coachState !== state || state.messages.length) return;   // panel re-rendered, or already active
   const level = coachGet('level', 'intermediate');
   const model = coachModel();
-  const text = coachAnalyzePrompt(sport);
+  const text = loamT(coachAnalyzePrompt(sport));   /* same lookup as startCoachConversation, or the cache key differs */
   let hit;
   try { hit = await getCachedCoaching(coachFirstTurnKey(state, level, model, text)); } catch (e) { return; }
   if (!hit || coachState !== state || state.messages.length) return;
@@ -40177,7 +40363,7 @@ async function restoreCachedCoach(state, sport) {
   state.messages.push({ role: 'user', content: text });
   const bubble = appendCoachBubble('assistant', '');
   bubble.innerHTML = mdToHtml(hit.text) +
-    '<div style="margin-top:8px;font-size:11px;opacity:0.55">cached reply, no API call</div>';
+    '<div style="margin-top:8px;font-size:11px;opacity:0.55">' + escapeHtml(loamT('cached reply, no API call')) + '</div>';
   state.messages.push({ role: 'assistant', content: hit.text });
   const thread = document.getElementById('coachThread');
   if (thread) thread.scrollTop = 1e9;
@@ -40231,7 +40417,7 @@ async function sendCoach(text) {
       coachState.messages.push({ role: 'user', content: text });
       const cachedBubble = appendCoachBubble('assistant', '');
       cachedBubble.innerHTML = mdToHtml(hit.text) +
-        '<div style="margin-top:8px;font-size:11px;opacity:0.55">cached reply, no API call</div>';
+        '<div style="margin-top:8px;font-size:11px;opacity:0.55">' + escapeHtml(loamT('cached reply, no API call')) + '</div>';
       coachState.messages.push({ role: 'assistant', content: hit.text });
       document.getElementById('coachThread').scrollTop = 1e9;
       coachState.streaming = false;
@@ -40249,7 +40435,7 @@ async function sendCoach(text) {
     { type: 'text', text: 'SESSION DATA (JSON):\n' + JSON.stringify(coachState.digest), cache_control: { type: 'ephemeral' } }
   ];
   const bubble = appendCoachBubble('assistant', '');
-  bubble.innerHTML = '<span class="coach-typing">thinking…</span>';
+  bubble.innerHTML = `<span class="coach-typing">${escapeHtml(loamT('thinking…'))}</span>`;
   coachAbort = new AbortController();
 
   let streamed = '';   /* what actually reached the screen, so a drop can keep it */
@@ -40271,9 +40457,9 @@ async function sendCoach(text) {
       /* Keep whatever streamed before the failure. Replacing a half-written answer with a red line
          was the worst of both: the rider loses the part that arrived AND has nothing to act on. */
       bubble.innerHTML =
-        (streamed ? mdToHtml(streamed) + '<div class="coach-cut">…cut off here.</div>' : '') +
+        (streamed ? mdToHtml(streamed) + `<div class="coach-cut">${escapeHtml(loamT('…cut off here.'))}</div>` : '') +
         `<div class="coach-err">${escapeHtml(coachErrorText(msg))}</div>` +
-        `<button type="button" class="coach-chip coach-retry">Try again</button>`;
+        `<button type="button" class="coach-chip coach-retry">${escapeHtml(loamT('Try again'))}</button>`;
       const again = bubble.querySelector('.coach-retry');
       /* The retry is the only way back to the FIRST analysis after a failure: by then the Start
          button is hidden and the chips offer follow-ups, not the opening prompt, so a dropped
@@ -42078,11 +42264,11 @@ function setMapLegend(kind, opts = {}) {
     body.innerHTML = `<span>${loamT('turn ring = speed kept:')}</span>${dot('scrub')}${loamT('scrubbed')}${dot('held')}${loamT('held')}${dot('carry')}${loamT('carried')}`
       + `<span style="opacity:0.6;">${loamT('· number = turn, L/R = side · track colour = speed · tap a run below to focus')}</span>`;
   } else {
-    /* Track colors match renderRunMap: climb green (.lg.carry), descent red (.lg.scrub), lift grey.
+    /* Track colors match renderRunMap: climb red (.lg.scrub), descent green (.lg.carry), lift grey.
        The lift swatch only appears when this ride has a detected lift/gondola segment; runs and
        lift-free rides omit it entirely. */
     const liftEntry = opts.hasLift ? `<span class="lg" style="background:#9aa2ad;"></span>${loamT('lift')}` : '';
-    body.innerHTML = `<span>${loamT('track colour = grade:')}</span>${dot('carry')}${loamT('climb')}${dot('scrub')}${loamT('descent')}${liftEntry}`
+    body.innerHTML = `<span>${loamT('track colour = grade:')}</span>${dot('scrub')}${loamT('climb')}${dot('carry')}${loamT('descent')}${liftEntry}`
       + `<span class="map-help" style="opacity:0.6;">${loamT('· start & end marked · tap a segment below to focus')}</span>`;
   }
 }
@@ -47290,7 +47476,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'a19a05e49 · 2026-09-29';
+const LOAM_BUILD = '3ddc7771e · 2026-09-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
