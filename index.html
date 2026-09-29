@@ -5300,7 +5300,7 @@ function hasBodyFrameTurns(sport) { return isMtbFamily(sport) || isSkiSport(spor
 /* The runs panel's ROW noun: the segmentation mode, not the sport (descents -> descent, laps -> lap,
    marks -> run). One function so the panel title, the subtitle, the rows, the ghost-race note and the
    play-by-play cannot pluralise or capitalise three different words for one table. */
-function runsRowNoun(mode) { return mode === 'descents' ? 'descent' : mode === 'laps' ? 'lap' : 'run'; }
+function runsRowNoun(mode) { return mode === 'descents' ? 'descent' : mode === 'laps' ? 'lap' : mode === 'intervals' ? 'rep' : 'run'; }
 /* The same noun in the reader's language. The English word stays the value passed around -- it keys
    the mode, the ids and every assertion -- and this is only its spelling on screen. It exists
    because the noun is interpolated into whole sentences ("replay a descent against your fastest
@@ -5317,7 +5317,7 @@ function rowNounT(noun, plural) { return loamT(plural ? noun + 's' : noun); }
    were left English while the runs table beside them was translated. */
 function runDisplayLabel(r) { return (r && runLabel(r.tStart)) || runDefaultLabelT(r && r.label); }
 function runDefaultLabelT(label) {
-  const m = /^(Lap|Run|Descent) (\d+)$/.exec(label || '');
+  const m = /^(Lap|Run|Descent|Rep) (\d+)$/.exec(label || '');
   if (!m) return label;
   return capitalize(rowNounT(m[1].toLowerCase())) + ' ' + m[2];
 }
@@ -7017,7 +7017,7 @@ function segmentRuns(D, mode) {
       src: best,
     };
   };
-  let chosen = mode || 'auto', lapInfo = null;
+  let chosen = mode || 'auto', lapInfo = null, intervalInfo = null;
   if (chosen === 'auto') chosen = marks.length ? 'marks' : descents.length ? 'descents' : 'laps';
   let raw = [];
   if (chosen === 'marks') raw = marks.map(inheritDescentTag);
@@ -7033,16 +7033,22 @@ function segmentRuns(D, mode) {
       raw = lapInfo.runs;
     }
   }
+  /* Opt-in only: Auto above never lands here, because on a run that was not intervals every slow
+     stretch would read as a recovery (see detectIntervals). */
+  else if (chosen === 'intervals') {
+    intervalInfo = detectIntervals(sensors.location || [], D.ride, (D.ride && D.ride.pausedSpans) || []);
+    raw = intervalInfo.runs;
+  }
   const runs = raw.map((r, i) => ({
     n: i + 1, tStart: r.tStart, tEnd: r.tEnd,
-    label: r.label || (chosen === 'laps' ? `Lap ${i + 1}` : chosen === 'marks' ? `Run ${i + 1}` : `Descent ${i + 1}`),
+    label: r.label || (chosen === 'laps' ? `Lap ${i + 1}` : chosen === 'marks' ? `Run ${i + 1}` : chosen === 'intervals' ? `Rep ${i + 1}` : `Descent ${i + 1}`),
     polyline: r.polyline || windowPolyline(sensors.location, r.tStart, r.tEnd),
     metrics: runMetrics(r, D),
     src: r.src || null,
     /* True when only the closing tap existed, so tStart was assumed (see pairRunMarks). */
     impliedStart: !!r.impliedStart,
   }));
-  return { mode: chosen, runs, lapInfo };
+  return { mode: chosen, runs, lapInfo, intervalInfo };
 }
 
 let _runsMode = 'auto';
@@ -7081,9 +7087,38 @@ async function refreshDescentTags(D) {
 function renderRunsPanel(D) {
   _runsD = D; _runsMode = 'auto';
   const sel = document.getElementById('runsMode');
+  syncIntervalsOption(sel, D);
   if (sel) { sel.value = 'auto'; sel.onchange = () => { _runsMode = sel.value; drawRuns(); }; }
   drawRuns();
   refreshDescentTags(D);
+}
+
+/* The track fit for this recording, computed once: it walks every GPS fix, and drawRuns asks per
+   redraw. null when the session is not on a 400 m track. A WeakMap rather than a field on D because
+   cacheableRender copies every top-level key, and a derived answer stored in the cache is one a
+   later fix to detectTrack would never reach. */
+const _trackFits = new WeakMap();
+function trackFor(D) {
+  if (!_trackFits.has(D)) {
+    const tr = detectTrack((D.sensors && D.sensors.location) || [], D.ride);
+    _trackFits.set(D, tr.onTrack ? tr : null);
+  }
+  return _trackFits.get(D);
+}
+
+/* "Intervals" is offered on a run only, and only as a choice: Auto never picks it (see
+   detectIntervals). Built here rather than in the markup because the same select serves every sport,
+   and an option hidden with the `hidden` attribute still shows in WebKit's native picker. */
+function syncIntervalsOption(sel, D) {
+  if (!sel) return;
+  const existing = sel.querySelector('option[value="intervals"]');
+  const offer = normalizeSport(displaySport(D)) === 'run';
+  if (offer && !existing) {
+    const o = document.createElement('option');
+    o.value = 'intervals';
+    o.textContent = loamT('Intervals (reps)');
+    sel.appendChild(o);
+  } else if (!offer && existing) existing.remove();
 }
 
 /* The runs panel folds, and it opens by DEFAULT -- the opposite of Climbs and Climb/descent
@@ -7132,10 +7167,11 @@ function drawRunsEmpty(mode) {
   if (_runsMode === 'auto') { hide('runsSection'); nav(); return; }
   show('runsSection');
   wireRunsFold();
-  const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : 'Runs';
+  const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : mode === 'intervals' ? 'Reps' : 'Runs';
   const t = document.getElementById('runsTitle'); if (t) t.textContent = loamT(nounTitle);
   const what = _runsMode === 'laps' ? loamT('repeated loops of the same ground')
     : _runsMode === 'descents' ? loamT('sustained descents')
+    : _runsMode === 'intervals' ? loamT('hard efforts of 30 s or more between slower stretches')
     : loamT('Segment Start / End taps');
   const sub = document.getElementById('runsSubtitle');
   if (sub) sub.textContent = loamT('none found \u00b7 this recording has no {what}', { what });
@@ -7158,6 +7194,219 @@ function drawRunsEmpty(mode) {
     if (el) el.classList.add('hidden');
   }
   nav();
+}
+
+/* ========== Intervals (opt-in rep detection) ===   Ported from analyzer/sports/running/intervals.js and
+   pinned to it by intervals.test.js. See that module's header for the graded session and why the
+   intensity gate is raw speed rather than grade-adjusted. */
+/** Smoothed speed at or above this is running (m/s). Walks on the graded session: <= 1.93 block mean. */
+const INT_RUN_MPS = 2.2;
+/** Longest slow patch inside one rep (s). The graded last rep has a 21 s switchback dip. */
+const INT_BRIDGE_S = 30;
+/** A bridged gap must still average this (m/s): standing still ends a rep however short. */
+const INT_BRIDGE_MIN_MPS = 1.0;
+/** Shortest rep (s). Short enough for 30 s strides, long enough to drop a jog across a gap. */
+const INT_MIN_REP_S = 30;
+/** A rep's mean speed as a fraction of the session's fastest block. See the header for the margins. */
+const INT_REP_FRACTION = 0.72;
+
+function detectIntervals(location, ride, pausedSpans) {
+  const empty = { runs: [], blocks: [], fastest: null, threshold: null };
+  if (!ride || !(ride.end > ride.start) || !location || !location.length) return empty;
+  const t0 = Math.floor(ride.start), n = Math.floor(ride.end) - t0;
+  if (n < INT_MIN_REP_S) return empty;
+  const paused = pausedSpans || [];
+  /* Per-second speed. A second with no valid reading is null, never 0 and never interpolated:
+     the native resampler repeats a fix, and a dropout is not a stop. */
+  const sum = new Float64Array(n), cnt = new Uint16Array(n);
+  for (const r of location) {
+    if (!r || !Number.isFinite(r.t) || !Number.isFinite(r.speed) || r.speed < 0 || r.speed > 12) continue;
+    const i = Math.floor(r.t) - t0;
+    if (i < 0 || i >= n) continue;
+    sum[i] += r.speed; cnt[i]++;
+  }
+  const sp = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = t0 + i + 0.5;
+    const isPaused = paused.some(p => p.start <= t && t < p.end);
+    sp[i] = isPaused ? 0 : cnt[i] ? sum[i] / cnt[i] : null;
+  }
+  const smooth = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0, c = 0;
+    for (let j = Math.max(0, i - 4); j <= Math.min(n - 1, i + 4); j++) if (sp[j] != null) { s += sp[j]; c++; }
+    smooth[i] = c ? s / c : null;
+  }
+  const mean = (a, b) => {
+    let s = 0, c = 0;
+    for (let i = a; i < b; i++) if (sp[i] != null) { s += sp[i]; c++; }
+    return c ? s / c : null;
+  };
+  /* Contiguous running spans, then bridge the slow patches that still move. */
+  const spans = [];
+  for (let i = 0; i < n;) {
+    if (smooth[i] != null && smooth[i] >= INT_RUN_MPS) {
+      let j = i;
+      while (j < n && smooth[j] != null && smooth[j] >= INT_RUN_MPS) j++;
+      spans.push([i, j]); i = j;
+    } else i++;
+  }
+  const merged = [];
+  for (const s of spans) {
+    const prev = merged[merged.length - 1];
+    if (prev && s[0] - prev[1] <= INT_BRIDGE_S) {
+      const gap = mean(prev[1], s[0]);
+      if (gap != null && gap >= INT_BRIDGE_MIN_MPS) { prev[1] = s[1]; continue; }
+    }
+    merged.push([s[0], s[1]]);
+  }
+  const blocks = merged.filter(([a, b]) => b - a >= INT_MIN_REP_S)
+    .map(([a, b]) => ({ tStart: t0 + a, tEnd: t0 + b, speed: mean(a, b) }))
+    .filter(b => b.speed != null);
+  if (!blocks.length) return empty;
+  const fastest = Math.max(...blocks.map(b => b.speed));
+  const threshold = fastest * INT_REP_FRACTION;
+  for (const b of blocks) b.rep = b.speed >= threshold;
+  const runs = blocks.filter(b => b.rep).map(b => ({ tStart: b.tStart, tEnd: b.tEnd }));
+  return { runs, blocks, fastest, threshold };
+}
+
+/* ========== Running track (400 m oval) ===   Ported from analyzer/sports/running/track.js and pinned
+   to it by track.test.js. Not graded on a real track session yet; see that module's header. */
+const TRACK_STRAIGHT_M = 84.39;
+const TRACK_RADIUS_M = 36.8;
+const TRACK_LAP_M = 2 * TRACK_STRAIGHT_M + 2 * Math.PI * TRACK_RADIUS_M;
+/** A fix within this of the lane-1 line is on the track: lane 8 is ~8.5 m out, GPS adds 3-5 m. */
+const TRACK_ON_M = 12;
+/** Doppler distance over arc distance while running near the oval (within TRACK_NEAR_M, so a block's
+    corners count). A city block of track-like size fits the oval within TRACK_ON_M -- four synthetic
+    blocks of 150-200 x 70-90 m all did -- but is 460-490 m round and reads 1.15-1.22; lane 1 reads
+    1.00, lane 6 1.10 and lane 8 1.13. So lanes 7-8 and a 160 x 70 m block are NOT separable by this,
+    and the cap sits at lane 6: a session run in lane 7 or 8 gets no track distance. Doppler is the
+    reference because it is accurate to ~1-2% on foot (decisions/validated-algorithms.md, Distance &
+    climb). A share-of-fixes-on-the-line gate was tried first and passed those blocks. */
+const TRACK_MAX_RATIO = 1.10;
+const TRACK_NEAR_M = 30;
+/** Share of the oval's 36 sectors the on-track fixes must visit: strides up and down one straight
+    fit the oval perfectly and say nothing about where the other three-quarters of it are. */
+const TRACK_MIN_COVERAGE = 0.8;
+/** Snap a measured rep to the nearest multiple of this when within TRACK_SNAP_TOL of it. */
+const TRACK_SNAP_M = 100;
+const TRACK_SNAP_TOL = 0.06;
+
+/* Signed distance from the measuring line and the arc position (0..TRACK_LAP_M) of a point in the
+   oval's own frame: x along the straights, centre at the origin. Arc 0 is the start of the +y
+   straight's far end, running counter-clockwise, which is the direction races are run. */
+function ovalLocal(x, y) {
+  const h = TRACK_STRAIGHT_M / 2, R = TRACK_RADIUS_M, S = TRACK_STRAIGHT_M, C = Math.PI * R;
+  if (x >= -h && x <= h) {
+    if (y < 0) return { d: -y - R, s: x + h };                  /* near straight, heading +x */
+    return { d: y - R, s: S + C + (h - x) };                     /* far straight, heading -x */
+  }
+  const cx = x > h ? h : -h, a = Math.atan2(y, x - cx);
+  const d = Math.hypot(x - cx, y) - R;
+  if (x > h) return { d, s: S + (a + Math.PI / 2) * R };         /* a in (-pi/2, pi/2) */
+  const b = a < 0 ? a + 2 * Math.PI : a;                         /* a in (pi/2, 3pi/2) */
+  return { d, s: 2 * S + C + (b - Math.PI / 2) * R };
+}
+
+function detectTrack(location, ride) {
+  const none = { onTrack: false };
+  if (!location || !location.length) return none;
+  const t0 = ride ? ride.start : -Infinity, t1 = ride ? ride.end : Infinity;
+  const fixes = [];
+  let lastT = -Infinity;
+  for (const r of location) {
+    if (!r || !(r.t >= t0 && r.t <= t1) || !Number.isFinite(r.latitude) || !Number.isFinite(r.longitude)) continue;
+    if (r.t - lastT < 1) continue;                                /* 1 Hz: the resampler repeats fixes */
+    if (!(Number.isFinite(r.speed) && r.speed >= 1)) continue;    /* moving fixes only */
+    fixes.push(r); lastT = r.t;
+  }
+  if (fixes.length < 60) return none;
+  const lat0 = fixes.reduce((a, r) => a + r.latitude, 0) / fixes.length;
+  const lon0 = fixes.reduce((a, r) => a + r.longitude, 0) / fixes.length;
+  const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110540;
+  const P = fixes.map(r => [(r.longitude - lon0) * kx, (r.latitude - lat0) * ky]);
+  /* A track fits in a 180 x 100 m box; a session that ranges far off it (a warm-up jog there) is
+     fine, but its centroid then lies off the oval, so seed from the densest 200 m neighbourhood. */
+  let seed = [0, 0], seedN = -1;
+  for (let i = 0; i < P.length; i += Math.max(1, Math.floor(P.length / 200))) {
+    let n = 0;
+    for (const q of P) if (Math.hypot(q[0] - P[i][0], q[1] - P[i][1]) < 100) n++;
+    if (n > seedN) { seedN = n; seed = P[i]; }
+  }
+  const near = P.filter(q => Math.hypot(q[0] - seed[0], q[1] - seed[1]) < 150);
+  const mx = near.reduce((a, q) => a + q[0], 0) / near.length, my = near.reduce((a, q) => a + q[1], 0) / near.length;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const q of near) { const dx = q[0] - mx, dy = q[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  const cost = (cx, cy, th) => {
+    const c = Math.cos(th), s = Math.sin(th);
+    let sum = 0;
+    for (const q of near) {
+      const dx = q[0] - cx, dy = q[1] - cy;
+      sum += Math.min(Math.abs(ovalLocal(dx * c + dy * s, -dx * s + dy * c).d), 20);
+    }
+    return sum / near.length;
+  };
+  let best = { cx: mx, cy: my, th: 0.5 * Math.atan2(2 * sxy, sxx - syy) };
+  best.c = cost(best.cx, best.cy, best.th);
+  for (const [step, astep] of [[8, 0.2], [4, 0.1], [2, 0.05], [1, 0.02], [0.5, 0.01]]) {
+    let improved = true;
+    while (improved) {
+      improved = false;
+      for (const [dx, dy, da] of [[step, 0, 0], [-step, 0, 0], [0, step, 0], [0, -step, 0], [0, 0, astep], [0, 0, -astep]]) {
+        const c = cost(best.cx + dx, best.cy + dy, best.th + da);
+        if (c < best.c - 1e-9) { best = { cx: best.cx + dx, cy: best.cy + dy, th: best.th + da, c }; improved = true; }
+      }
+    }
+  }
+  const c = Math.cos(best.th), s = Math.sin(best.th);
+  const local = P.map(q => {
+    const dx = q[0] - best.cx, dy = q[1] - best.cy;
+    return ovalLocal(dx * c + dy * s, -dx * s + dy * c);
+  });
+  const on = local.filter(p => Math.abs(p.d) <= TRACK_ON_M);
+  const onFraction = on.length / local.length;
+  const sectors = new Set(on.map(p => Math.floor(p.s / TRACK_LAP_M * 36) % 36));
+  const coverage = sectors.size / 36;
+  /* Net arc per unbroken running stretch near the oval, not a sum of per-fix steps: GPS jitter of a few
+     metres per fix would otherwise add up to more than the running did. */
+  let doppler = 0, arc = 0, net = 0;
+  for (let i = 1; i <= local.length; i++) {
+    const ok = i < local.length && fixes[i].t - fixes[i - 1].t <= 2 && fixes[i].speed >= 2 && fixes[i - 1].speed >= 2
+      && Math.abs(local[i].d) <= TRACK_NEAR_M && Math.abs(local[i - 1].d) <= TRACK_NEAR_M;
+    if (!ok) { arc += Math.abs(net); net = 0; continue; }
+    let ds = local[i].s - local[i - 1].s;
+    if (ds < -TRACK_LAP_M / 2) ds += TRACK_LAP_M; else if (ds > TRACK_LAP_M / 2) ds -= TRACK_LAP_M;
+    net += ds; doppler += (fixes[i].speed + fixes[i - 1].speed) / 2 * (fixes[i].t - fixes[i - 1].t);
+  }
+  const ratio = arc >= TRACK_LAP_M ? doppler / arc : null;
+  const onTrack = coverage >= TRACK_MIN_COVERAGE && ratio != null && ratio <= TRACK_MAX_RATIO;
+  if (!onTrack) return { onTrack: false, residual: best.c, onFraction, coverage, ratio };
+  return {
+    onTrack: true, residual: best.c, onFraction, coverage, ratio,
+    points: fixes.map((r, i) => ({ t: r.t, s: local[i].s, on: Math.abs(local[i].d) <= TRACK_ON_M })),
+  };
+}
+
+/* Distance run along the track between two times, following the fixes in between so whole laps
+   are counted, and the standard distance it snaps to (null when it is not close to one). Either
+   end off the oval returns null: a rep that left the track is not a track rep. */
+function trackDistance(track, tStart, tEnd) {
+  if (!track || !track.onTrack) return null;
+  const pts = track.points.filter(p => p.t >= tStart && p.t <= tEnd);
+  if (pts.length < 2 || !pts[0].on || !pts[pts.length - 1].on) return null;
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    let ds = pts[i].s - pts[i - 1].s;
+    if (ds < -TRACK_LAP_M / 2) ds += TRACK_LAP_M;
+    else if (ds > TRACK_LAP_M / 2) ds -= TRACK_LAP_M;
+    total += ds;
+  }
+  const meters = Math.abs(total);
+  const k = Math.round(meters / TRACK_SNAP_M) * TRACK_SNAP_M;
+  const snapped = k > 0 && Math.abs(meters - k) <= k * TRACK_SNAP_TOL ? k : null;
+  return { meters, snapped, laps: meters / TRACK_LAP_M };
 }
 
 /* Best five-second GPS speed for the run cards (m/s; format as pace at the UI).
@@ -7232,7 +7481,7 @@ function drawRuns() {
   /* Title and count-noun follow the segmentation MODE (the row noun), not the sport, so the panel
      never reads "N runs (descents)": descents -> Descents, laps -> Laps, marks -> Runs. */
   const nounSingular = runsRowNoun(mode);
-  const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : 'Runs';
+  const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : mode === 'intervals' ? 'Reps' : 'Runs';
   { const t = document.getElementById('runsTitle'); if (t) t.textContent = loamT(nounTitle); }
   /* Every word below that names the SPORT comes from here. The row noun above names the MODE. */
   const lex = sportLex(displaySport(D));
@@ -7273,6 +7522,17 @@ function drawRuns() {
        segment", "Tagged segments", and "your fastest lap of this segment", which all mean the
        cross-ride stretch. */
     if (mode === 'marks') s += loamT(' from your Segment Start/End taps');
+    /* Say where the reps came from and what was left out, so a warm-up that was dropped is visible
+       as a decision rather than as a missing row. */
+    if (mode === 'intervals') {
+      s += loamT(' found from your pace');
+      if (trackFor(D)) s += loamT(' · on a 400 m track, distances measured along it');
+      const info = segmentRuns(D, 'intervals').intervalInfo;
+      const skipped = info ? info.blocks.filter(b => !b.rep).length : 0;
+      if (skipped) s += loamT(skipped === 1
+        ? ' · {n} easier running stretch not counted'
+        : ' · {n} easier running stretches not counted', { n: skipped });
+    }
     /* Describe the laps actually listed, not the yaw autocorrelation behind them. The raw period
        read "~88s each, periodicity 8%" above an hour-long lap: a number about the signal, not about
        the ride, and the periodicity percentage means nothing to a rider anyway. */
@@ -7316,6 +7576,12 @@ function drawRuns() {
     } else { cta.innerHTML = ''; cta.classList.add('hidden'); }
   }
   const bestTime = Math.min(...runs.map(r => r.metrics.duration));
+  /* On a 400 m track a rep's distance is measured along the oval and snapped to the standard
+     distance it is close to (see detectTrack); GPS distance stays beside it. Intervals mode only.
+     A snapped distance is printed in metres whatever the unit setting: a track rep IS "400 m", and
+     "0.25 mi" names a distance nobody ran. */
+  const onTrack = mode === 'intervals' ? trackFor(D) : null;
+  const trackDists = runs.map(r => (onTrack ? trackDistance(onTrack, r.tStart, r.tEnd) : null));
   const bestTop = Math.max(...topSpeeds.filter(v => v != null));
   const hi = 'style="color:#7fb069;font-weight:600;"';
   /* Turns / L·R / Radius come from body-frame turn detection, which only exists for MTB. On running
@@ -7384,7 +7650,8 @@ function drawRuns() {
     const metricCells = showTurns
       ? `<td data-l="Turns" data-s="Turns">${m.nTurns}</td><td data-l="L/R" data-s="L/R">${m.leftTurns}/${m.rightTurns}</td>
          <td data-l="Radius" data-s="Rad">${m.medianRadius != null ? U.small(m.medianRadius) : '—'}</td>`
-      : `<td data-l="${avgLabel}" data-s="${avgShort}">${footSport ? U.pace(m.avgSpeed) : U.speed(m.avgSpeed)}</td>`;
+      : `<td data-l="${avgLabel}" data-s="${avgShort}">${footSport ? U.pace(trackDists[index] && m.duration > 0
+          ? (trackDists[index].snapped || trackDists[index].meters) / m.duration : m.avgSpeed) : U.speed(m.avgSpeed)}</td>`;
     /* A row drills into the dedicated segment page (focused map + corner ledger) when it is an MTB run
        with body-frame turns, matching the onclick below; those get a disclosure chevron so the "tap for
        more" is visible on touch, where there is no pointer cursor. */
@@ -7393,8 +7660,10 @@ function drawRuns() {
        data-l supplies the metric labels when the table reflows into cards. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
       <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}><span class="run-title">${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}</span><button type="button" class="run-rename" data-idx="${r.n - 1}" title="${loamT('Rename this {row}', { row: rowNounT(nounSingular) })}" aria-label="${loamT('Rename {row} {n}', { row: rowNounT(nounSingular), n: r.n })}">✎</button>${skipToggle}${opensSeg ? `<span class="run-open" title="${loamT('Open this run\'s corners')}" aria-hidden="true">›</span>` : ''}</td>
-      <td data-l="Time" data-s="${timeShort}" ${m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
-      <td data-l="Dist" data-s="${distShort}">${U.dist(m.distance)}</td>
+      <td data-l="Time" data-s="${timeShort}" ${mode !== 'intervals' && m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
+      <td data-l="Dist" data-s="${distShort}">${trackDists[index]
+        ? `${trackDists[index].snapped ? trackDists[index].snapped + ' m' : U.dist(trackDists[index].meters)} <span style="color:var(--text-muted); font-size:10px;">${loamT('(track · GPS {dist})', { dist: U.dist(m.distance) })}</span>`
+        : U.dist(m.distance)}</td>
       <td data-l="${topLabel}" data-s="${topShort}" ${topSpeeds[index] != null && topSpeeds[index] === bestTop ? hi : ''}>${footSport ? U.pace(topSpeeds[index]) : U.speed(topSpeeds[index])}</td>
       ${metricCells}
       <td data-l="Drop" data-s="Drop">${m.drop != null ? U.elev(m.drop) : '—'}</td>
@@ -7466,7 +7735,9 @@ function drawRuns() {
     };
   });
   drawRunsOverlay(runs, D);
-  drawRunsDtw(runs, D);
+  /* Reps are not laps of one course: a 90 s rep and a 6 min rep have no "time lag" to align, and the
+     shortest is not the fastest. So intervals mode draws no lag chart and highlights no best time. */
+  drawRunsDtw(mode === 'intervals' ? [] : runs, D);
   setupPlayByPlay(runs, D, nounSingular);
   setupGhostRace(runs, D, nounSingular);
   /* Run mode (Auto/Descents/Laps) can change whether a comparable lap exists, so refresh the nav's
@@ -32174,6 +32445,14 @@ const LOAM_NB = {
     'trykk på en rad for å zoome inn på den · merk et segment for å følge det på tvers av økter',
   'Marked runs': 'Merkede etapper',
   'Laps (loop)': 'Runder (sløyfe)',
+  'Intervals (reps)': 'Intervaller (drag)',
+  'rep': 'rep',
+  'hard efforts of 30 s or more between slower stretches': 'harde drag på 30 s eller mer mellom roligere partier',
+  ' found from your pace': ' funnet ut fra tempoet ditt',
+  ' · on a 400 m track, distances measured along it': ' · på en 400 m-bane, distansene målt langs den',
+  '(track · GPS {dist})': '(bane · GPS {dist})',
+  ' · {n} easier running stretch not counted': ' · {n} roligere løpeparti ikke tatt med',
+  ' · {n} easier running stretches not counted': ' · {n} roligere løpepartier ikke tatt med',
   'Top': 'Topp',
   'L/R': 'V/H',
   'Drop': 'Fall',
@@ -47011,7 +47290,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '9fb0d41e4 · 2026-09-29';
+const LOAM_BUILD = 'a19a05e49 · 2026-09-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
