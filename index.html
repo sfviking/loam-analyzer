@@ -2619,6 +2619,8 @@
   .gr-warn li + li { margin-top: 6px; }
   .golf-def { display: grid; grid-template-columns: minmax(120px, 168px) 1fr; gap: 10px 16px; padding: 15px; border: 1px solid var(--border, #e2e8f0); border-top: none; border-radius: 0 0 10px 10px; }
   @media (max-width: 560px) { .golf-def { grid-template-columns: 1fr; gap: 4px 0; } .golf-def dd { margin-bottom: 10px; } }
+  /* Readiness vs results: four columns of short numbers; the house cell padding alone overflows a 375px phone. */
+  @media (max-width: 560px) { .readiness-table th, .readiness-table td { padding: 8px 6px; letter-spacing: 0; } }
   .golf-def dt { font: 700 12px 'JetBrains Mono', monospace; color: var(--text, #1a202c); }
   .golf-def dd { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-dim, #9aa0aa); }
   .golf-def dd em { color: var(--text, #1a202c); font-style: normal; font-weight: 600; }
@@ -3403,13 +3405,17 @@
 
 <div id="progressResults" class="hidden">
   <div class="page-back-bar"><button type="button" class="prog-back" onclick="closeProgress()">&larr; Back</button></div>
-  <nav class="progress-links" aria-label="Progress sections"><button type="button" onclick="document.getElementById('progressOverview').scrollIntoView({block:'start'})">Overview</button><button type="button" onclick="document.getElementById('progressTrailsSection').scrollIntoView({block:'start'})">Comparisons</button><button type="button" onclick="document.getElementById('progressPlanSection').scrollIntoView({block:'start'})">Training plan</button></nav>
+  <nav class="progress-links" aria-label="Progress sections"><button type="button" onclick="document.getElementById('progressOverview').scrollIntoView({block:'start'})">Overview</button><button type="button" onclick="document.getElementById('progressReadinessSection').scrollIntoView({block:'start'})">Readiness</button><button type="button" onclick="document.getElementById('progressTrailsSection').scrollIntoView({block:'start'})">Comparisons</button><button type="button" onclick="document.getElementById('progressPlanSection').scrollIntoView({block:'start'})">Training plan</button></nav>
   <section id="progressOverview">
     <div class="section-title">Your progress<span class="subtitle" id="progressSubtitle"></span></div>
     <label for="progressSport">Activity</label> <select id="progressSport" onchange="renderProgress()"><option value="all">All sports</option></select>
     <div class="panel" id="progressHeadline" style="padding:20px;"></div>
   </section>
   <div id="progressCharts"></div>
+  <section id="progressReadinessSection">
+    <div class="section-title">Readiness vs results<span class="subtitle">does your morning readiness predict how the session went?</span></div>
+    <div class="panel" id="progressReadiness" style="padding:20px;"></div>
+  </section>
   <section id="progressTrailsSection">
     <div class="section-title">Trails<span class="subtitle">your tagged segments, best time and progress</span></div>
     <div class="panel" id="progressTrails" style="padding:20px;"></div>
@@ -10816,7 +10822,7 @@ function pairwiseDescentDTW(refD, otherD) {
   return { path, totalCost, delta, soft };
 }
 
-function computeRunSummary(loc, baro, ride, R, hr) {
+function computeRunSummary(loc, baro, ride, R, hr, span) {
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end);
   const speeds = inRide.map(r => r.speed).filter(s => s != null);
   const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
@@ -10861,61 +10867,80 @@ function computeRunSummary(loc, baro, ride, R, hr) {
      can, and that is what the floor reads. A hop with no reported speed (or an invalid -1) therefore
      counts as standing, which is right for the case that produces them -- a phone sitting still. */
   const MOVING_MIN_MPS = 0.5, MOVING_MAX_GAP_S = 5, MOVING_MAX_MPS = 12;
-  let distance = 0, driftDistance = 0, movingTime = 0;
   const toRad = d => d * Math.PI / 180, R_EARTH = 6371000;
-  for (let i = 1; i < inRide.length; i++) {
-    const a = inRide[i-1], b = inRide[i];
-    const dt = b.t - a.t;
-    if (!(dt > 0)) continue;
-    const havePos = a.latitude != null && a.longitude != null && b.latitude != null && b.longitude != null;
-    let d = 0;
-    if (havePos) {
-      const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
-      const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
-               + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
-      d = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
+  const walkHops = (rows) => {
+    let distance = 0, driftDistance = 0, movingTime = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i-1], b = rows[i];
+      const dt = b.t - a.t;
+      if (!(dt > 0)) continue;
+      const havePos = a.latitude != null && a.longitude != null && b.latitude != null && b.longitude != null;
+      let d = 0;
+      if (havePos) {
+        const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
+        const hv = Math.sin(dLat/2) * Math.sin(dLat/2)
+                 + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+        d = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(hv)));
+      }
+      /* A paused stretch is not a dropout, and this is the one place the difference costs distance
+         rather than bookkeeping. The branch below credits the ground a gap bridged, on the reasoning
+         that a phone hunting for a fix does not stop its owner running -- true of a dropout and false
+         of a pause, where the recording is suspended and the athlete may have gone somewhere else
+         entirely. Read as a dropout, a paused drive to the next trailhead joins the run twice over:
+         as distance, and (d/dt clears the walking floor comfortably) as moving time. */
+      if (pausedOverlapS(pausedSpans, a.t, b.t) > 0) continue;
+      /* THE FLOOR NEVER HAD A CEILING, and a jump clears it comfortably (owner report, 2026-09-06:
+         "the bad gps gave me an unrealistic pace of sub-8 min per mile", on a walk at 108 spm). A fix
+         that teleports and comes back is not ground the athlete covered: the reported walk's
+         best-effort table offered 400 m in 0:02 and a mile 44 s faster than any split, off a receiver
+         that moved several hundred metres between two consecutive fixes. The floor reads the fix's own
+         Doppler speed, which on such a hop is an ordinary walking figure, so it admits it as real
+         ground -- the two channels contradict each other and nothing was comparing them.
+         WIDE-MARGIN, not tuned: nothing on foot covers ground at 12 m/s (a sprinter's PEAK is about
+         12.4, a fast recreational run sits under 6), while the artifact that prompted this implies
+         about 200 m/s. Treated exactly as standing is -- no ground, no seconds -- because that is what
+         it is: the receiver moved and the athlete did not.
+         Deliberately only UNDER the gap limit, and that scoping is what makes this a CONTRADICTION
+         rather than an opinion about human speed: inside the limit the fix reports its OWN Doppler
+         speed, so there are two channels and they disagree flatly -- the position says 200 m/s and
+         the receiver says walking. Past the limit the bridged ground is the only evidence there is,
+         the existing floor already judges it, and raising a ceiling there would re-decide a
+         documented call (a tunnel, a lift, a blackout on a fast descent) with no report behind it. */
+      if (havePos && dt <= MOVING_MAX_GAP_S && d / dt > MOVING_MAX_MPS) { driftDistance += d; continue; }
+      if (dt > MOVING_MAX_GAP_S) {
+        /* GPS dropout. The samples are missing, so the fix cannot report its own speed and the gap has
+           to be judged by the ground it bridged: metres over seconds, against the same walking floor.
+           Skipping the gap outright looked conservative but was not, because stoppedTime is the
+           remainder: every dropout silently became "stopped". On the reference 6.53 mi run that read
+           "6m 00s stopped" when the runner actually stood still for about 79 s, and the other five
+           minutes were a phone hunting for a fix at the trailhead while its owner ran. That also drove
+           the first mile's pace to 4:51/mi once the splits started dividing by moving time. */
+        if (!havePos) continue;   // no position: nothing to judge it by, and no ground to credit
+        distance += d;            // the ground was crossed even though the fixes went missing
+        if (d / dt >= MOVING_MIN_MPS) movingTime += dt;
+        continue;
+      }
+      if (b.speed >= MOVING_MIN_MPS) { distance += d; movingTime += dt; }
+      else driftDistance += d;    // standing: the fix wandered, the athlete did not
     }
-    /* A paused stretch is not a dropout, and this is the one place the difference costs distance
-       rather than bookkeeping. The branch below credits the ground a gap bridged, on the reasoning
-       that a phone hunting for a fix does not stop its owner running -- true of a dropout and false
-       of a pause, where the recording is suspended and the athlete may have gone somewhere else
-       entirely. Read as a dropout, a paused drive to the next trailhead joins the run twice over:
-       as distance, and (d/dt clears the walking floor comfortably) as moving time. */
-    if (pausedOverlapS(pausedSpans, a.t, b.t) > 0) continue;
-    /* THE FLOOR NEVER HAD A CEILING, and a jump clears it comfortably (owner report, 2026-09-06:
-       "the bad gps gave me an unrealistic pace of sub-8 min per mile", on a walk at 108 spm). A fix
-       that teleports and comes back is not ground the athlete covered: the reported walk's
-       best-effort table offered 400 m in 0:02 and a mile 44 s faster than any split, off a receiver
-       that moved several hundred metres between two consecutive fixes. The floor reads the fix's own
-       Doppler speed, which on such a hop is an ordinary walking figure, so it admits it as real
-       ground -- the two channels contradict each other and nothing was comparing them.
-       WIDE-MARGIN, not tuned: nothing on foot covers ground at 12 m/s (a sprinter's PEAK is about
-       12.4, a fast recreational run sits under 6), while the artifact that prompted this implies
-       about 200 m/s. Treated exactly as standing is -- no ground, no seconds -- because that is what
-       it is: the receiver moved and the athlete did not.
-       Deliberately only UNDER the gap limit, and that scoping is what makes this a CONTRADICTION
-       rather than an opinion about human speed: inside the limit the fix reports its OWN Doppler
-       speed, so there are two channels and they disagree flatly -- the position says 200 m/s and
-       the receiver says walking. Past the limit the bridged ground is the only evidence there is,
-       the existing floor already judges it, and raising a ceiling there would re-decide a
-       documented call (a tunnel, a lift, a blackout on a fast descent) with no report behind it. */
-    if (havePos && dt <= MOVING_MAX_GAP_S && d / dt > MOVING_MAX_MPS) { driftDistance += d; continue; }
-    if (dt > MOVING_MAX_GAP_S) {
-      /* GPS dropout. The samples are missing, so the fix cannot report its own speed and the gap has
-         to be judged by the ground it bridged: metres over seconds, against the same walking floor.
-         Skipping the gap outright looked conservative but was not, because stoppedTime is the
-         remainder: every dropout silently became "stopped". On the reference 6.53 mi run that read
-         "6m 00s stopped" when the runner actually stood still for about 79 s, and the other five
-         minutes were a phone hunting for a fix at the trailhead while its owner ran. That also drove
-         the first mile's pace to 4:51/mi once the splits started dividing by moving time. */
-      if (!havePos) continue;   // no position: nothing to judge it by, and no ground to credit
-      distance += d;            // the ground was crossed even though the fixes went missing
-      if (d / dt >= MOVING_MIN_MPS) movingTime += dt;
-      continue;
-    }
-    if (b.speed >= MOVING_MIN_MPS) { distance += d; movingTime += dt; }
-    else driftDistance += d;    // standing: the fix wandered, the athlete did not
+    return { distance, driftDistance, movingTime };
+  };
+  const { distance, driftDistance, movingTime } = walkHops(inRide);
+  /* THE HEADLINE IS THE WHOLE RECORDING; PACE IS THE RUN (owner report, 2026-09-28: the audio coach
+     called mile 3 and Strava said 3.10 mi, and this tile said 2.89). `ride` opens at the first
+     sustained 2.0 m/s, so a warm-up walk before it -- 302 m over the first 5m14s of that run -- was
+     ground the phone's odometer, the coach and the GPX Strava sums all counted and this did not.
+     Walked under the same hop classifier, the whole recording reads 4,990 m against LiveMetrics'
+     4,978 and Strava's 4,996, so the three methods agreed all along and only the window differed.
+     The window itself is NOT moved: it is what calibration, pace, cadence and splits are read over,
+     and a warm-up walk is not the run's pace. So `distance` stays the run (and everything divided
+     by it with it), and the ground outside the window is reported beside it, never folded in. */
+  let outsideDistance = 0;
+  if (span && span.start != null && span.end != null) {
+    outsideDistance = walkHops(loc.filter(r => r.t >= span.start && r.t <= ride.start)).distance
+      + walkHops(loc.filter(r => r.t >= ride.end && r.t <= span.end)).distance;
   }
+  const sessionDistance = distance + outsideDistance;
   /* `duration` is the span of the active window, which still contains every traffic light and water
      stop inside it, so labelling that "moving time" overstated it. computeGpsSummary still uses the
      older two-way rule and drops dropout time on the floor; it integrates Doppler speed rather than
@@ -10956,6 +10981,9 @@ function computeRunSummary(loc, baro, ride, R, hr) {
        above. Reported rather than dropped so the Distance tile can say what it left out; a caller
        that ignores it still gets the honest distance. */
     distance, driftDistance, maxSpeed, avgSpeed, movingSpeed,
+    /* Ground covered before and after the run window, and the whole-recording total the Distance
+       tile leads with. Pace and splits stay on `distance`. */
+    outsideDistance, sessionDistance,
     paceMinPerKm: avgSpeed > 0 ? (1000 / avgSpeed) / 60 : null,
     movingPaceMinPerKm: movingSpeed > 0 ? (1000 / movingSpeed) / 60 : null,
     altGain, altLoss,
@@ -11377,7 +11405,7 @@ function computeBestEfforts(loc, ride, distances) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 18;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw)
+const ANALYSIS_CACHE_VERSION = 19;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -12174,6 +12202,17 @@ function descentPolyline(sensors, descent) {
    data (decimated polyline + 1Hz speed). Heavy raw IMU stays out. Also runs
    tag matching so the saved record carries autoTag hints. Returns the inserted
    ride id (Number) so the UI can refer to it for future tagging actions. */
+/* A session's mean heart rate over the ride window, stored on the library row so Progress can read
+   output per heartbeat against readiness (renderProgressReadiness) without re-opening every ride.
+   Window mean, the rule the run headline's hrAvg already uses. Thirty rows is the floor under which a
+   mean is one watch reading, not a session. ONE function for the writer and for the backfill that
+   reads older rows' cached analyses, so the two cannot disagree about what "average HR" means. */
+const LIBRARY_AVG_HR_MIN_ROWS = 30;
+function librarySessionAvgHr(sensors, ride) {
+  if (!ride || ride.start == null || ride.end == null) return null;
+  const hr = ((sensors && sensors.heartRate) || []).filter(r => r && r.bpm > 0 && r.t >= ride.start && r.t <= ride.end);
+  return hr.length >= LIBRARY_AVG_HR_MIN_ROWS ? Math.round(hr.reduce((a, r) => a + r.bpm, 0) / hr.length) : null;
+}
 async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey, turnSidesUnreliable }) {
   /* Build descent list with polylines + speed for every recording, not just
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
@@ -12283,6 +12322,7 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
       ...(summary && summary.intensityFactor != null ? { intensityFactor: summary.intensityFactor } : {}),
       ...(summary && summary.ftp != null ? { ftp: summary.ftp } : {}),
       ...(summary && summary.mmp ? { mmp: summary.mmp } : {}),
+      ...(() => { const avgHr = librarySessionAvgHr(sensors, ride); return avgHr != null ? { avgHr } : {}; })(),
     },
     turnCount: turnCount || 0,
     jumpCount: jumpCount || 0,
@@ -19709,6 +19749,232 @@ For follow-up questions, answer briefly and conversationally, and keep any edit 
   return { PLAN_HISTORY_WEEKS, PLAN_RECENT_WEEKS, PLAN_LONGEST_WEEKS, planDayKey, planWeekStart, planWeekKey, planAddDays, planEpochMs, planSportFamily, planSessions, planWeeks, planHistory, PLAN_RAMP_MAX_PCT, PLAN_RECOVERY_EVERY, PLAN_RECOVERY_FRACTION, PLAN_TAPER_WEEKS, PLAN_TAPER_FIRST_FRACTION, PLAN_TAPER_LAST_FRACTION, PLAN_EVENT_LONG_FRACTION, PLAN_LONG_MAX_SHARE, PLAN_MAX_WEEKS, PLAN_MIN_ACTIVE_WEEKS, PLAN_MIN_START_HOURS, PLAN_MIN_SESSION_HOURS, PLAN_DEFAULT_SESSION_HOURS, PLAN_MIN_SESSIONS_PER_WEEK, PLAN_MAX_SESSIONS_PER_WEEK, PLAN_GOAL_TYPES, PLAN_GOAL_SPORTS, normalizeGoal, planWeeksToGo, buildPlan, trainingDigest, trainingAnalyzePrompt, trainingChips, trainingInputPlaceholder, trainingCoachPrompt };
 })();
 
+/* ===== Readiness vs results ================================================ *
+ * Ported verbatim from analyzer/core/training/readiness-outcomes.js and pinned by
+ * analyzer/core/training/readiness-drift.test.js. The page-side join (library rides, tagged-segment
+ * laps, window.LOAM_READINESS_HISTORY) and the Progress panel are in renderProgressReadiness.
+ */
+const LoamReadiness = (function () {
+  /*
+   * Readiness vs results: does a higher morning readiness score go with a better session?
+   *
+   * The readiness score (ios/Sources/Health/ReadinessScore.swift) weights HRV 0.5, resting HR 0.3 and
+   * acute:chronic load 0.2, and bands at 66/40. Those numbers come from the published HRV-guided
+   * training method, not from this athlete's results, so this is the first place anything checks
+   * whether the score predicts anything for the person wearing the watch.
+   *
+   * WHAT COUNTS AS A RESULT, AND WHY NOT SPEED. Raw speed or time mostly measures what the athlete
+   * chose to do: on a red day they ride easy, the session is slower, and a chart of that "proves" the
+   * score while only showing that it was followed. So both outcomes here are relative to the athlete's
+   * own typical on something held fixed:
+   *   - SEGMENT PACE: a lap of a tagged segment against that segment's median lap. The course is held
+   *     fixed; effort intent is not.
+   *   - HEART-RATE EFFICIENCY: output per heartbeat (normalized or average power / avg HR where there
+   *     is power, moving speed / avg HR for a run, walk or unpowered road ride) against the median for
+   *     that sport. Holds effort intent better than speed, but not perfectly: speed/HR rises with
+   *     intensity because resting HR is an intercept, and resting HR is also a readiness input, so a
+   *     high-resting-HR day lowers both. MTB is left out: trail and terrain swamp speed/HR there.
+   *
+   * ONE POINT PER DAY. Five laps of one segment in one ride are not five independent observations of
+   * that morning's readiness; counting them as five would inflate n and the apparent significance. So
+   * every outcome is averaged per local day before it is joined.
+   *
+   * SAMPLE SIZE IS THE VERDICT'S GATE. With n days, a rank correlation below roughly 2/sqrt(n) cannot
+   * be told apart from noise. Below READINESS_MIN_DAYS nothing is claimed at all -- the points are
+   * shown and the verdict is withheld, the same posture as `turnSidesUnreliable`.
+   */
+
+  /* Days with both a readiness score and an outcome before any correlation is stated. At 20 days the
+     5% two-sided threshold on a rank correlation is about |rho| 0.46. */
+  const READINESS_MIN_DAYS = 20;
+  /* Laps of one segment before its median is a baseline: with two, the two residuals are mirror images
+     of each other and say nothing about either day. */
+  const READINESS_MIN_SEG_LAPS = 3;
+  /* Sessions of one sport (and one efficiency kind) before its median is a baseline. */
+  const READINESS_MIN_EF_SESSIONS = 5;
+  /* Shorter sessions are dominated by the HR lag at the start: HR has not caught up with the effort. */
+  const READINESS_MIN_EF_DURATION_S = 600;
+  /* Two-sided 5% critical value on the Fisher-z scale. */
+  const READINESS_Z_CRIT = 1.96;
+
+  /* Local calendar day key, yyyy-mm-dd: the same day the Swift side buckets readiness under
+     (`HealthVitalsBuilder.dayKey` with the device calendar), and the same arithmetic as `pmcDayKey`. */
+  function readinessDayKey(d) {
+    const dt = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(dt)) return null;
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  }
+
+  function readinessMedian(values) {
+    const s = values.slice().sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  /* Output per heartbeat for one library ride, or null when this ride cannot carry the read. The kind
+     is part of the answer because watts/bpm and m/s/bpm are different quantities and must never share a
+     baseline. */
+  function readinessEfficiency(ride) {
+    if (!ride || !ride.summary) return null;
+    const s = ride.summary;
+    const hr = s.avgHr;
+    if (!(hr > 0) || !(ride.duration >= READINESS_MIN_EF_DURATION_S)) return null;
+    const sport = ride.sport;
+    const watts = s.np != null ? s.np : s.avgPower;
+    if ((sport === 'road' || sport === 'ride') && watts > 0) return { kind: 'power', value: watts / hr };
+    const footOrRoad = ['run', 'running', 'walk', 'walking', 'road', 'ride'].includes(sport);
+    if (!footOrRoad || !(s.distance > 0)) return null;
+    return { kind: 'speed', value: (s.distance / ride.duration) / hr };
+  }
+
+  /* Per-ride efficiency as percent above (+) or below (-) the median for that sport and kind. */
+  function readinessEfficiencyOutcomes(rides) {
+    const groups = new Map();
+    for (const r of (rides || [])) {
+      const ef = readinessEfficiency(r);
+      const day = r ? readinessDayKey(r.recordedAt || r.savedAt) : null;
+      if (!ef || !day) continue;
+      const key = `${r.sport}|${ef.kind}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ day, value: ef.value, sport: r.sport });
+    }
+    const out = [];
+    for (const list of groups.values()) {
+      if (list.length < READINESS_MIN_EF_SESSIONS) continue;
+      const med = readinessMedian(list.map(o => o.value));
+      for (const o of list) out.push({ day: o.day, pct: (o.value / med - 1) * 100, source: 'efficiency', sport: o.sport });
+    }
+    return out;
+  }
+
+  /* Per-lap segment pace as percent faster (+) or slower (-) than that segment's median lap.
+     `laps` is [{ segmentId, date, durationS }]. Median/time rather than time/median so faster is
+     positive, the same sign as the efficiency read. */
+  function readinessSegmentOutcomes(laps) {
+    const groups = new Map();
+    for (const l of (laps || [])) {
+      const day = l ? readinessDayKey(l.date) : null;
+      if (!day || !(l.durationS > 0)) continue;
+      if (!groups.has(l.segmentId)) groups.set(l.segmentId, []);
+      groups.get(l.segmentId).push({ day, durationS: l.durationS });
+    }
+    const out = [];
+    for (const list of groups.values()) {
+      if (list.length < READINESS_MIN_SEG_LAPS) continue;
+      const med = readinessMedian(list.map(o => o.durationS));
+      for (const o of list) out.push({ day: o.day, pct: (med / o.durationS - 1) * 100, source: 'segment' });
+    }
+    return out;
+  }
+
+  /* One outcome per (day, source): the mean of that day's residuals. */
+  function readinessPerDay(outcomes) {
+    const acc = new Map();
+    for (const o of (outcomes || [])) {
+      if (!o || !o.day || !isFinite(o.pct)) continue;
+      const key = `${o.day}|${o.source}`;
+      const a = acc.get(key) || { day: o.day, source: o.source, sum: 0, n: 0 };
+      a.sum += o.pct; a.n += 1;
+      acc.set(key, a);
+    }
+    return [...acc.values()].map(a => ({ day: a.day, source: a.source, pct: a.sum / a.n, sessions: a.n }))
+      .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : (a.source < b.source ? -1 : 1)));
+  }
+
+  /* Average ranks, 1-based, ties sharing the mean of the ranks they span. */
+  function readinessRanks(values) {
+    const idx = values.map((v, i) => i).sort((a, b) => values[a] - values[b]);
+    const ranks = new Array(values.length);
+    for (let i = 0; i < idx.length;) {
+      let j = i;
+      while (j + 1 < idx.length && values[idx[j + 1]] === values[idx[i]]) j++;
+      const r = (i + j) / 2 + 1;
+      for (let k = i; k <= j; k++) ranks[idx[k]] = r;
+      i = j + 1;
+    }
+    return ranks;
+  }
+
+  /* Spearman rank correlation, or null when it is undefined (fewer than 3 pairs, or no spread). Rank
+     rather than Pearson because n is small and one wild session would otherwise decide the sign. */
+  function readinessSpearman(xs, ys) {
+    const n = Math.min(xs.length, ys.length);
+    if (n < 3) return null;
+    const rx = readinessRanks(xs.slice(0, n)), ry = readinessRanks(ys.slice(0, n));
+    const mx = rx.reduce((a, b) => a + b, 0) / n, my = ry.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = rx[i] - mx, dy = ry[i] - my;
+      sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+    }
+    if (sxx === 0 || syy === 0) return null;
+    return sxy / Math.sqrt(sxx * syy);
+  }
+
+  /* Whether a rank correlation over n pairs clears the 5% two-sided bar: Fisher z with the 1.06
+     variance correction for Spearman (Fieller, Hartley & Pearson 1957). */
+  function readinessSignificant(rho, n) {
+    if (rho == null || n < 4) return false;
+    const r = Math.max(-0.999999, Math.min(0.999999, rho));
+    const z = 0.5 * Math.log((1 + r) / (1 - r)) * Math.sqrt((n - 3) / 1.06);
+    return Math.abs(z) > READINESS_Z_CRIT;
+  }
+
+  /* The join and the read. `history` is the app's `LOAM_READINESS_HISTORY`:
+     [{ day, score, band, hrv, rhr, load }], component scores null when that input was unavailable that
+     day. `dayOutcomes` is `readinessPerDay` output. Returns one block per outcome source plus 'all',
+     each with the joined points, the rank correlation of the outcome against the score and against
+     each component, the mean outcome per band, and a verdict that is 'insufficient' below
+     READINESS_MIN_DAYS, else 'better' / 'worse' / 'none'. */
+  function readinessCorrelation(history, dayOutcomes) {
+    const byDay = new Map();
+    for (const h of (history || [])) if (h && h.day && isFinite(h.score)) byDay.set(h.day, h);
+    const read = (points) => {
+      const n = points.length;
+      const corr = (field) => {
+        const pairs = points.filter(p => p.readiness[field] != null && isFinite(p.readiness[field]));
+        if (pairs.length < READINESS_MIN_DAYS) return { rho: null, n: pairs.length, significant: false };
+        const rho = readinessSpearman(pairs.map(p => p.readiness[field]), pairs.map(p => p.pct));
+        return { rho, n: pairs.length, significant: readinessSignificant(rho, pairs.length) };
+      };
+      const bands = {};
+      for (const b of ['green', 'amber', 'red']) {
+        const inBand = points.filter(p => p.readiness.band === b);
+        bands[b] = { n: inBand.length, meanPct: inBand.length ? inBand.reduce((a, p) => a + p.pct, 0) / inBand.length : null };
+      }
+      const score = corr('score');
+      let verdict = 'insufficient';
+      if (n >= READINESS_MIN_DAYS) verdict = !score.significant ? 'none' : (score.rho > 0 ? 'better' : 'worse');
+      return {
+        n, needed: Math.max(0, READINESS_MIN_DAYS - n), verdict, points, bands,
+        rho: { score, hrv: corr('hrv'), rhr: corr('rhr'), load: corr('load') },
+      };
+    };
+    const joined = [];
+    for (const o of (dayOutcomes || [])) {
+      const h = byDay.get(o.day);
+      if (h) joined.push({ day: o.day, source: o.source, pct: o.pct, sessions: o.sessions, readiness: h });
+    }
+    /* 'all' is one point per DAY: a day with both a segment lap and an efficiency read counts once, as
+       the mean of the two, for the same reason laps are averaged per day. */
+    const allByDay = new Map();
+    for (const p of joined) {
+      const a = allByDay.get(p.day) || { day: p.day, source: 'all', sum: 0, k: 0, sessions: 0, readiness: p.readiness };
+      a.sum += p.pct; a.k += 1; a.sessions += p.sessions || 1;
+      allByDay.set(p.day, a);
+    }
+    const all = [...allByDay.values()].map(a => ({ day: a.day, source: 'all', pct: a.sum / a.k, sessions: a.sessions, readiness: a.readiness }));
+    return {
+      all: read(all),
+      segment: read(joined.filter(p => p.source === 'segment')),
+      efficiency: read(joined.filter(p => p.source === 'efficiency')),
+      historyDays: byDay.size,
+    };
+  }
+
+  return { READINESS_MIN_DAYS, READINESS_MIN_SEG_LAPS, READINESS_MIN_EF_SESSIONS, READINESS_MIN_EF_DURATION_S, READINESS_Z_CRIT, readinessDayKey, readinessEfficiency, readinessEfficiencyOutcomes, readinessSegmentOutcomes, readinessPerDay, readinessSpearman, readinessSignificant, readinessCorrelation };
+})();
+
 
 /*
  * Why a declared swim found no strokes, said in the swimmer's terms.
@@ -20635,7 +20901,7 @@ async function analyze(files) {
         climbAltSeries(sensors.baro, sensors.location, ride),
         running.cadSeries,
         sensors.heartRate || []);
-      const runSummary = computeRunSummary(sensors.location, sensors.baro, ride, running, sensors.heartRate || []);
+      const runSummary = computeRunSummary(sensors.location, sensors.baro, ride, running, sensors.heartRate || [], spanRide);
       onProgress('pairing annotation-based descents');
       const descents = pairDescentAnnotations(sensors.annotations || []);
       let comparison = null;
@@ -22800,6 +23066,7 @@ async function renderProgress() {
     sub.textContent = '';
     headline.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">${escapeHtml(loamT('No sessions saved yet. Analyze one and it starts building your progress here.'))}</p>`;
     chartsHost.innerHTML = '';
+    renderProgressReadiness(rides);
     renderProgressTrails();
     return;
   }
@@ -22866,8 +23133,116 @@ async function renderProgress() {
   progLeanNoteText(dated);
   line('progLean', dated.map(o => o.r.mechanics && o.r.mechanics.leanGapDeg != null ? o.r.mechanics.leanGapDeg : null),
     loamT('Left/right lean gap (lower = more symmetric)'), 'deg', '#a78bd9');
+  renderProgressReadiness(rides);
   renderProgressTrails();
 }
+/* Readiness vs results. The readiness score is computed in the app from Apple Health (Swift,
+   ReadinessEngine) and handed to the page as window.LOAM_READINESS_HISTORY, one entry per day; the
+   results are the library's. The join and every rule about what counts as a result live in
+   LoamReadiness (analyzer/core/training/readiness-outcomes.js), which states why raw speed is NOT one.
+   Not filtered by the Activity picker above on purpose: each outcome is already relative to its own
+   sport or segment, and splitting a library that needs 20 days to say anything by sport would push
+   every athlete back under the floor. */
+async function enrichRidesAvgHr(rides) {
+  /* Rows saved before avgHr was stored: read it from the ride's cached analysis, through the same
+     function the writer uses. In memory only, like enrichRidesMechanics; the next save writes it. */
+  await Promise.all(rides.map(async r => {
+    if (!r || !r.summary || r.summary.avgHr != null || !r.dedupKey) return;
+    if (!['run', 'running', 'walk', 'walking', 'road', 'ride'].includes(r.sport)) return;
+    try {
+      const c = await getCachedAnalysis(r.analysisKey || r.dedupKey);
+      const D = c && c.data;
+      const avgHr = D ? librarySessionAvgHr(D.sensors, D.ride) : null;
+      if (avgHr != null) r.summary.avgHr = avgHr;
+    } catch (e) {}
+  }));
+}
+async function renderProgressReadiness(rides) {
+  const el = document.getElementById('progressReadiness');
+  if (!el) return;
+  const history = Array.isArray(window.LOAM_READINESS_HISTORY) ? window.LOAM_READINESS_HISTORY : null;
+  if (!history || !history.length) {
+    el.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">${escapeHtml(loamT('Readiness comes from Apple Health in the Loam app. Open Progress from the app\'s Stats tab to see it next to your results.'))}</p>`;
+    return;
+  }
+  if (!rides) { try { rides = await listRides(); } catch (e) { rides = []; } }
+  let tags = [];
+  try { tags = await listTaggedSegments(); } catch (e) {}
+  await enrichRidesAvgHr(rides);
+  const laps = [];
+  for (const t of tags) {
+    for (const m of buildTagMembers(t, rides)) laps.push({ segmentId: t.id, date: memberDate(m), durationS: m.duration });
+  }
+  const R = LoamReadiness;
+  const perDay = R.readinessPerDay([...R.readinessSegmentOutcomes(laps), ...R.readinessEfficiencyOutcomes(rides)]);
+  const c = R.readinessCorrelation(history, perDay);
+  const all = c.all;
+  const rhoTxt = (v) => (v > 0 ? '+' : '') + loamNum(v, 2);
+  if (!all.n) {
+    el.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">${escapeHtml(loamT('No results yet on days with a readiness score. A tagged segment done three or more times, or five runs or road rides with heart rate, starts filling this in.'))}</p>`;
+    return;
+  }
+  const verdict = {
+    insufficient: loamT('{n} days so far, {needed} more before this says anything. Until then the points are shown, not read.', { n: all.n, needed: all.needed }),
+    better: loamT('On higher-readiness days you did better: rank correlation {rho} over {n} days.', { rho: rhoTxt(all.rho.score.rho), n: all.n }),
+    worse: loamT('On higher-readiness days you did worse: rank correlation {rho} over {n} days. The score is not predicting your results.', { rho: rhoTxt(all.rho.score.rho), n: all.n }),
+    none: loamT('No clear link between readiness and your results: rank correlation {rho} over {n} days.', { rho: rhoTxt(all.rho.score.rho), n: all.n }),
+  }[all.verdict];
+  /* The day count lives in the column header; a cell repeats it only when a component sat out some of
+     those days, which is the one case the header would misstate. Keeps four columns inside a phone. */
+  const cell = (r, block) => {
+    const extra = r.n !== block.n ? ` <span style="color:var(--text-muted);">(${r.n})</span>` : '';
+    if (r.rho == null) return `<span style="color:var(--text-muted);">–</span>${extra}`;
+    return `${r.significant ? '<strong>' : ''}${rhoTxt(r.rho)}${r.significant ? '</strong>' : ''}${extra}`;
+  };
+  const td = 'style="white-space:nowrap;"';
+  const rows = [['score', loamT('Readiness score')], ['hrv', loamT('HRV')], ['rhr', loamT('Resting HR')], ['load', loamT('Training load')]]
+    .map(([k, label]) => `<tr><td>${escapeHtml(label)}</td><td ${td}>${cell(all.rho[k], all)}</td><td ${td}>${cell(c.segment.rho[k], c.segment)}</td><td ${td}>${cell(c.efficiency.rho[k], c.efficiency)}</td></tr>`).join('');
+  const head = (label, block) => `${escapeHtml(label)}<br><span style="font-weight:400;">${escapeHtml(loamT('{n} days', { n: block.n }))}</span>`;
+  const bandCell = (b) => all.bands[b].n
+    ? `${all.bands[b].meanPct > 0 ? '+' : ''}${loamNum(all.bands[b].meanPct, 1)}% <span style="color:var(--text-muted);">· ${escapeHtml(loamT('{n} days', { n: all.bands[b].n }))}</span>`
+    : '<span style="color:var(--text-muted);">-</span>';
+  el.innerHTML = `
+    <p style="font-size:14px; margin:0 0 12px;"><strong>${escapeHtml(verdict)}</strong></p>
+    <div class="chart" id="progReadinessChart" style="height:300px; margin-bottom:12px;"></div>
+    <div style="overflow-x:auto;"><table class="readiness-table" style="font-size:12px;">
+      <thead><tr><th>${escapeHtml(loamT('Rank correlation with'))}</th><th>${head(loamT('All'), all)}</th><th>${head(loamT('Segment pace'), c.segment)}</th><th>${head(loamT('HR efficiency'), c.efficiency)}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div style="display:flex; flex-wrap:wrap; gap:16px; margin:12px 0 8px; font-size:12px;">
+      <div>${escapeHtml(loamT('Ready days'))}: ${bandCell('green')}</div>
+      <div>${escapeHtml(loamT('Steady days'))}: ${bandCell('amber')}</div>
+      <div>${escapeHtml(loamT('Take-it-easy days'))}: ${bandCell('red')}</div>
+    </div>
+    <p style="color:var(--text-muted); font-size:12px; margin:0;">${escapeHtml(loamT('Each result is against your own typical: a segment lap against its median lap, and output per heartbeat against your median for that sport. One point per day. A correlation is stated from {min} days and bold when it clears the 5% bar. A day you took easy because the score was low reads slower on a segment, which is your choice showing, not the score working.', { min: R.READINESS_MIN_DAYS }))}</p>`;
+  const trace = (src, name, color, symbol) => {
+    const pts = c[src].points;
+    return {
+      x: pts.map(p => p.readiness.score), y: pts.map(p => +p.pct.toFixed(1)), name, type: 'scatter', mode: 'markers',
+      marker: { color, size: 9, symbol, line: { color: '#ffffff', width: 2 } },
+      text: pts.map(p => p.day),
+      hovertemplate: '%{text}<br>' + loamT('Readiness') + ' %{x}<br>%{y:+.1f}%<extra>' + name + '</extra>',
+    };
+  };
+  const guide = (x) => ({ type: 'line', x0: x, x1: x, y0: 0, y1: 1, yref: 'paper', line: { color: '#cbd5e1', width: 1, dash: 'dot' } });
+  loamPlot('progReadinessChart', [
+    trace('segment', loamT('Segment pace'), '#2f6f9f', 'circle'),
+    trace('efficiency', loamT('HR efficiency'), '#c98a2b', 'diamond'),
+  ], {
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
+    margin: { l: 54, r: 16, t: 30, b: 56 },
+    xaxis: { title: { text: loamT('Readiness that morning'), font: { size: 11 } }, range: [0, 100], gridcolor: '#e2e8f0', zeroline: false },
+    yaxis: { title: { text: loamT('% vs your typical'), font: { size: 11 } }, gridcolor: '#e2e8f0', zeroline: true, zerolinecolor: '#94a3b8', ticksuffix: '%' },
+    shapes: [guide(40), guide(66)],
+    showlegend: true, legend: { x: 0, y: 1.12, orientation: 'h', font: { size: 11 } }, hovermode: 'closest',
+  }, PLOT_CFG);
+}
+/* The app injects the history after the page has loaded, and Progress opened from the Stats tab has
+   usually rendered by then, so the arrival re-renders the panel rather than waiting for a reload. */
+window.onLoamReadinessHistory = function () {
+  const pr = document.getElementById('progressResults');
+  if (pr && !pr.classList.contains('hidden')) renderProgressReadiness();
+};
 async function renderProgressTrails() {
   const el = document.getElementById('progressTrails');
   if (!el) return;
@@ -30177,6 +30552,29 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  'Readiness vs results': 'Dagsform mot resultater',
+  'does your morning readiness predict how the session went?': 'forutsier morgenens dagsform hvordan økten gikk?',
+  'Readiness': 'Dagsform',
+  'Readiness comes from Apple Health in the Loam app. Open Progress from the app\'s Stats tab to see it next to your results.': 'Dagsformen kommer fra Apple Helse i Loam-appen. Åpne Fremgang fra appens Statistikk-fane for å se den ved siden av resultatene dine.',
+  'No results yet on days with a readiness score. A tagged segment done three or more times, or five runs or road rides with heart rate, starts filling this in.': 'Ingen resultater ennå på dager med dagsform. Et merket segment gjennomført tre ganger eller mer, eller fem løpeturer eller landeveisturer med puls, begynner å fylle dette ut.',
+  '{n} days so far, {needed} more before this says anything. Until then the points are shown, not read.': '{n} dager så langt, {needed} til før dette sier noe. Til da vises punktene, men de tolkes ikke.',
+  'On higher-readiness days you did better: rank correlation {rho} over {n} days.': 'På dager med bedre dagsform gjorde du det bedre: rangkorrelasjon {rho} over {n} dager.',
+  'On higher-readiness days you did worse: rank correlation {rho} over {n} days. The score is not predicting your results.': 'På dager med bedre dagsform gjorde du det dårligere: rangkorrelasjon {rho} over {n} dager. Tallet forutsier ikke resultatene dine.',
+  'No clear link between readiness and your results: rank correlation {rho} over {n} days.': 'Ingen tydelig sammenheng mellom dagsform og resultatene dine: rangkorrelasjon {rho} over {n} dager.',
+  '{n} days': '{n} dager',
+  'Readiness score': 'Dagsformtall',
+  'HRV': 'HRV',
+  'Resting HR': 'Hvilepuls',
+  'Training load': 'Treningsbelastning',
+  'Rank correlation with': 'Rangkorrelasjon med',
+  'Segment pace': 'Segmenttempo',
+  'HR efficiency': 'Pulseffektivitet',
+  'Ready days': 'Klar-dager',
+  'Steady days': 'Stabil-dager',
+  'Take-it-easy days': 'Ta-det-rolig-dager',
+  'Each result is against your own typical: a segment lap against its median lap, and output per heartbeat against your median for that sport. One point per day. A correlation is stated from {min} days and bold when it clears the 5% bar. A day you took easy because the score was low reads slower on a segment, which is your choice showing, not the score working.': 'Hvert resultat måles mot ditt eget normale: en segmentrunde mot medianrunden, og ytelse per hjerteslag mot medianen din for den idretten. Ett punkt per dag. En korrelasjon oppgis fra {min} dager og er uthevet når den klarer 5 %-grensen. En dag du tok det rolig fordi tallet var lavt, blir tregere på et segment – det er ditt valg som vises, ikke tallet som virker.',
+  'Readiness that morning': 'Dagsform den morgenen',
+  '% vs your typical': '% mot ditt normale',
   'The lift ride is left out: it was carried, not pedaled.': 'Heisturen er holdt utenfor: den ble båret, ikke tråkket.',
   '{n} lift rides are left out: they were carried, not pedaled.': '{n} heisturer er holdt utenfor: de ble båret, ikke tråkket.',
   'Estimated power': 'Beregnet effekt',
@@ -32336,6 +32734,14 @@ const LOAM_NB = {
   'GPS path length': 'lengden på GPS-sporet',
   'ground covered · {dist} of drift while stopped, excluded':
     'tilbakelagt distanse · {dist} GPS-drift mens du sto stille er trukket fra',
+  'incl. {out} outside the run · pace and splits use the {run} run':
+    'inkl. {out} utenfor løpet · tempo og splitter bruker løpets {run}',
+  'incl. {out} outside the walk · pace and splits use the {run} walk':
+    'inkl. {out} utenfor turen · tempo og splitter bruker turens {run}',
+  'incl. {out} outside the run · pace and splits use the {run} run · {dist} of drift while stopped, excluded':
+    'inkl. {out} utenfor løpet · tempo og splitter bruker løpets {run} · {dist} GPS-drift mens du sto stille er trukket fra',
+  'incl. {out} outside the walk · pace and splits use the {run} walk · {dist} of drift while stopped, excluded':
+    'inkl. {out} utenfor turen · tempo og splitter bruker turens {run} · {dist} GPS-drift mens du sto stille er trukket fra',
   'cadence × moving time': 'kadens × tid i bevegelse',
   '{len} stride · counted': '{len} skrittlengde · telt',
   '{len} stride · estimated': '{len} skrittlengde · anslått',
@@ -34590,6 +34996,24 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
   const driftSub = (s.driftDistance >= 100)
     ? loamT('ground covered \u00b7 {dist} of drift while stopped, excluded', { dist: U.dist(s.driftDistance) })
     : loamT('GPS path length');
+  /* The headline is the whole recording, so it agrees with the audio coach, the Record screen and
+     Strava; pace and splits stay on the run window (see computeRunSummary). Once the ground outside
+     that window is worth a word -- the same 100 m bar as the drift -- the tile says so, or its number
+     and the splits under it disagree with nothing on the page to explain why. */
+  const outsideM = s.outsideDistance || 0;
+  const headlineM = s.sessionDistance != null ? s.sessionDistance : s.distance;
+  const walked = sport === 'walking';
+  const outsideSub = outsideM >= 100
+    ? (s.driftDistance >= 100
+        ? loamT(walked
+            ? 'incl. {out} outside the walk \u00b7 pace and splits use the {run} walk \u00b7 {dist} of drift while stopped, excluded'
+            : 'incl. {out} outside the run \u00b7 pace and splits use the {run} run \u00b7 {dist} of drift while stopped, excluded',
+            { out: U.dist(outsideM), run: U.dist(s.distance), dist: U.dist(s.driftDistance) })
+        : loamT(walked
+            ? 'incl. {out} outside the walk \u00b7 pace and splits use the {run} walk'
+            : 'incl. {out} outside the run \u00b7 pace and splits use the {run} run',
+            { out: U.dist(outsideM), run: U.dist(s.distance) }))
+    : driftSub;
   /* Steps: COUNTED from the pedometer channel when the recording carries one, and only estimated
      from cadence x moving time when it does not. The old comment here said "this pipeline has no raw
      pedometer channel", which stopped being true the moment the capture app defined its schema; the
@@ -34661,8 +35085,8 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
     </div>
     <div class="stat">
       <div class="label">${loamT('Distance')}</div>
-      <div class="value">${U.dist(s.distance)}</div>
-      <div class="sub">${driftSub}</div>
+      <div class="value">${U.dist(headlineM)}</div>
+      <div class="sub">${outsideSub}</div>
     </div>
     ${hrTile}
     <div class="stat">
@@ -41812,7 +42236,8 @@ function renderRideSignature(D, sport) {
          cut from. GPS-only foot activities (sport 'run'/'walk', below) already run on a moving
          average from computeGpsSummary, so only this branch needed it. */
       stats = [
-        { ...rsSplit(U.dist(s.distance)), label: 'DISTANCE' },
+        /* The whole recording, as the Distance tile shows it; pace stays the run's. */
+        { ...rsSplit(U.dist(s.sessionDistance != null ? s.sessionDistance : s.distance)), label: 'DISTANCE' },
         { ...rsSplit(U.pace ? U.pace(s.movingSpeed != null ? s.movingSpeed : s.avgSpeed) : null), label: 'AVG PACE' },
         { num: s.cadMedian ? Math.round(s.cadMedian) : '—', unit: 'spm', label: 'CADENCE' },
         { ...rsSplit(U.elev(s.altGain)), label: 'CLIMB' },
@@ -46586,7 +47011,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '69cfde5bd · 2026-09-28';
+const LOAM_BUILD = '9fb0d41e4 · 2026-09-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
