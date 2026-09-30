@@ -18489,8 +18489,9 @@ function normalizeRace(raw) {
   for (let i = 0; i < legs.length; i++) {
     const l = legs[i];
     if (!TRI_SPORTS.includes(l.sport)) throw new Error(`leg ${i + 1} has no sport`);
-    if (!(l.t1 > l.t0)) throw new Error(`leg ${i + 1} has no duration`);
     if (i > 0 && l.t0 < legs[i - 1].t1) l.t0 = legs[i - 1].t1;
+    /* Checked after the clamp: a leg swallowed by the one before it has no time of its own left. */
+    if (!(l.t1 > l.t0)) throw new Error(`leg ${i + 1} has no duration`);
   }
   const start = first, end = last;
   return {
@@ -18802,7 +18803,10 @@ function comparableRaces(list, rec) {
    races before it. Numbers only; the prompt below says what may be said about them. */
 function raceDigest(race, A, seam, breakdowns, others, metric = true) {
   const km = (m) => (metric ? `${r1(m / 1000)} km` : `${r1(m / 1609.344)} mi`);
-  const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+  const mmss = (s) => { const t = Math.round(s); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
+  /* The day the athlete raced, on this device's calendar -- not UTC's, which is a day off for an
+     evening start west of Greenwich. */
+  const day = (t) => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   return {
     sport: 'triathlon',
     title: race.title || null,
@@ -18815,7 +18819,7 @@ function raceDigest(race, A, seam, breakdowns, others, metric = true) {
     seam: seam ? { pattern: seam.pattern, bikeSecondHalfSlowerPct: seam.bike.fadePct,
       runLastThirdSlowerPct: seam.run.fadePct, runOpeningSlowerThanAvgPct: seam.run.openSlowerPct,
       runHrDriftBpm: seam.hrDriftRunBpm } : null,
-    previousRaces: (others || []).slice(-5).map(o => ({ title: o.title || null, date: new Date(o.start * 1000).toISOString().slice(0, 10),
+    previousRaces: (others || []).filter(o => o.start < A.raceStart).slice(-5).map(o => ({ title: o.title || null, date: day(o.start),
       total: mmss(o.totalS), transitions: o.transitions.map(mmss), legsComparable: o.legsComparable })),
     caveats: [
       'Transitions are estimated from GPS pace alone, not from timing mats.',
@@ -21112,6 +21116,11 @@ const LoamTraining = (function () {
     week.hours = Math.min(week.hours, prior.hours);
     if (week.longH != null) week.longH = Math.min(week.longH, prior.longH == null ? week.longH : prior.longH);
     candidate.sessions = candidate.sessions.filter(s => s.weekStart !== week.weekStart || ['done', 'matched'].includes(status.sessions.find(x => x.id === s.id).status));
+    /* What is already done stays done: the repeated ceilings never fall below it, or a completed
+       session longer than last week's long one fails validation and the week cannot be repeated. */
+    const kept = candidate.sessions.filter(s => s.weekStart === week.weekStart && s.state !== 'skipped');
+    week.hours = Math.max(week.hours, kept.reduce((n, s) => n + s.minutes, 0) / 60);
+    if (week.longH != null) week.longH = Math.max(week.longH, ...kept.map(s => s.minutes / 60));
     const completed = { hours: current.completedMinutes / 60, timedSessions: candidate.sessions.filter(s => s.weekStart === week.weekStart).length };
     const summary = { currentWeek: completed, bySport: { [program.goal.sport]: { currentWeek: completed } } };
     candidate.revision++;
@@ -25003,8 +25012,11 @@ function trainingStoreLoad() {
     const raw = localStorage.getItem(TRAINING_PROGRAM_KEY);
     if (!raw) return { schema: 1, goal: trainingGoalLegacy(), availability: {}, active: null, archive: [], manual: [] };
     const data = JSON.parse(raw);
+    /* "Not in the future" is an entry-time rule, not a storage one: an activity logged today in Oslo
+       is tomorrow on the same phone in California, and failing the whole store over it locked every
+       plan and goal save until the calendar caught up. */
     if (!data || data.schema !== 1 || !Array.isArray(data.archive) || !Array.isArray(data.manual)
-        || data.manual.some(a => !a || !LoamTraining.normalizeManualActivity({ day:a.day, sport:a.sport, minutes:a.durationS / 60, distanceM:a.distanceM }, LoamTraining.planDayKey(new Date())).ok)
+        || data.manual.some(a => !a || !LoamTraining.normalizeManualActivity({ day:a.day, sport:a.sport, minutes:a.durationS / 60, distanceM:a.distanceM }, '9999-12-31').ok)
         || [data.active, ...data.archive].filter(Boolean).some(p => p.schema !== 1 || !LoamTraining.normalizeGoal(p.goal).ok
           || !LoamTraining.normalizeAvailability(p.availability).ok || !LoamTraining.validateTrainingSessions(p, p.sessions).ok)) throw new Error('invalid plan');
     return data;
@@ -25220,7 +25232,7 @@ function trainingWeekHtml(st) {
     ${current.missed ? `<p class="plan-note">${loamT('Missed sessions stay missed. They are not added to your next workout.')}</p>` : ''}
     ${current.sessions.map(s => trainingSessionCard(s, st)).join('') || `<p>${loamT('No sessions scheduled this week.')}</p>`}` : `<p>${loamT('This saved schedule has ended. Revise the plan to continue.')}</p>`;
   const hc = window.LOAM_HEALTH_CONTEXT && window.LOAM_HEALTH_CONTEXT.current;
-  const readiness = hc && hc.asOf === st.summary.asOf && hc.readinessBand !== 'green'
+  const readiness = hc && hc.asOf === st.summary.asOf && ['amber', 'red'].includes(hc.readinessBand)
     ? `<p class="plan-note">${loamT('Today’s readiness: {band}. Review the next session; skip it or choose easy effort if appropriate. The saved schedule has not changed.', { band: loamT(hc.readinessBand) })}</p>` : '';
   return `<section class="plan-now" aria-label="${loamT('This week')}">${nextHtml}<h3>${loamT('This week')}</h3>${progress}${readiness}
     <div class="plan-actions"><button class="plan-btn secondary" id="planRepeatWeek">${loamT('Repeat last week within current limits')}</button><button class="plan-btn secondary" id="planRevise">${loamT('Revise from latest history')}</button></div>
@@ -30751,7 +30763,7 @@ function triHistorySection(D) {
   const nT = rec.transitions.length;
   const delta = (d) => (d == null ? '' : ` <span class="subtitle">${d > 0 ? '+' : '−'}${fmtDuration(Math.abs(d))}</span>`);
   const head = `<tr><th></th><th>${loamT('race time')}</th>${rec.transitions.map((_, i) => `<th>T${i + 1}</th>`).join('')}</tr>`;
-  const row = (r, isThis) => `<tr${isThis ? ' style="font-weight:600"' : ''}><td>${escapeHtml(isThis ? loamT('this race') : (r.title || new Date(r.start * 1000).toISOString().slice(0, 10)))}</td>
+  const row = (r, isThis) => `<tr${isThis ? ' style="font-weight:600"' : ''}><td>${escapeHtml(isThis ? loamT('this race') : (r.title || new Date(r.start * 1000).toLocaleDateString()))}</td>
       <td>${r.legsComparable || isThis ? fmtDuration(r.totalS) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
       ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? fmtDuration(r.transitions[i]) : '—'}${isThis ? '' : delta(r.transitionDeltaS && r.transitionDeltaS[i] != null && r.transitions[i] ? -r.transitionDeltaS[i] : null)}</td>`).join('')}</tr>`;
   return `<div class="section-title" style="margin-top:22px">${loamT('Against your other races')} <span class="subtitle">${loamT('same order of sports')}</span></div>
@@ -32786,6 +32798,10 @@ const LOAM_NB = {
   'Missed sessions stay missed. They are not added to your next workout.': 'Uteblitte økter forblir uteblitt. De legges ikke til neste økt.',
   'No sessions scheduled this week.': 'Ingen økter er planlagt denne uken.',
   'This saved schedule has ended. Revise the plan to continue.': 'Den lagrede planen er avsluttet. Revider planen for å fortsette.',
+  // The readiness band words, interpolated into the note above.
+  'amber': 'gul',
+  'red': 'rød',
+  'Hiking': 'Fottur',
   'Today’s readiness: {band}. Review the next session; skip it or choose easy effort if appropriate. The saved schedule has not changed.': 'Dagens dagsform: {band}. Vurder neste økt; hopp over den eller velg rolig innsats ved behov. Den lagrede planen er ikke endret.',
   'Repeat last week within current limits': 'Gjenta forrige uke innenfor gjeldende grenser',
   'Revise from latest history': 'Revider fra nyeste historikk',
@@ -48417,6 +48433,10 @@ function resetToDropzone() {
   /* Nothing is loaded, so nothing has resolved the left/right question: back to "not asked yet", or
      the next ride's ledger would be judged by the last one's body frame until renderAll ran. */
   _sidesUnreliable = null;
+  /* The last ride's activity pick is not the next file's: requestedActivity prefers a non-auto
+     selector over the file's own stored choice, so a left-over "e-MTB" analyzed the next drop as one
+     and saved it against that file for good. */
+  { const sel = document.getElementById('sportOverride'); if (sel) sel.value = 'auto'; activityChoiceChanged = false; }
   show('dropzone');
   setStatus(loamT('Awaiting data'));
   renderRecentRides();
@@ -49813,7 +49833,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'c678d27a5 · 2026-09-30';
+const LOAM_BUILD = 'ab28045e8 · 2026-09-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
