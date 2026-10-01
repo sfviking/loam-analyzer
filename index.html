@@ -9413,6 +9413,7 @@ const LoamReplay = (() => {
   }
   function wristTurn(sensors, turn) {
     const wrist = sensors.wrist || [], gravity = sensors.gravity || [];
+    if (!wrist.length) return { reason: 'No Apple Watch data in this recording' };
     const start = turn.tStart - 0.7, end = turn.tEnd + 0.5;
     const rows = wrist.slice(index(wrist, start), index(wrist, end) + 1);
     const neutral = rows.filter(r => r.t <= turn.tStart - 0.3);
@@ -11519,7 +11520,7 @@ function formFrame() {
     `<text x="22" y="46" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif" font-size="42" font-weight="800" fill="#f1f5f9">${Math.abs(lean).toFixed(0)}<tspan font-size="18" fill="#e0a458">°${sideLetter}</tspan></text>`
     /* The phase is a WORD in the hero, not a class name: it is looked up on its own so a reader sees
        "HELNING · I SVINGEN" rather than an English state on an otherwise translated panel. */
-    + `<text x="24" y="64" font-family="'JetBrains Mono',monospace" font-size="10" letter-spacing="1.5" fill="${phaseCol}">${escapeHtml(loamT('PHONE TILT') + ' · ' + loamT('phase:' + phase).toUpperCase())}</text>`
+    + `<text x="24" y="64" font-family="'JetBrains Mono',monospace" font-size="10" letter-spacing="1.5" fill="${phaseCol}">${escapeHtml(loamT('PHONE TILT') + ' · ' + loamT('phase:' + phase).replace(/^phase:/, '').toUpperCase())}</text>`
     + `<text x="${W-18}" y="30" text-anchor="end" font-family="'JetBrains Mono',monospace" font-size="10" fill="#9fb094">${tRel >= 0 ? '+' : ''}${tRel.toFixed(1)}s</text>`
     + `<text x="${W-18}" y="44" text-anchor="end" font-family="'JetBrains Mono',monospace" font-size="10" fill="#7c8b76">${escapeHtml(loamT('peak {v}°', { v: Math.abs(S.peakLean).toFixed(0) }))}</text>`;
 
@@ -11581,7 +11582,7 @@ function formFrame() {
     /* Whole-segment, lean-only: show which way the rider is leaning right now and the cornering state,
        plus the segment's biggest lean either side, instead of the per-turn commitment/gaze cards. */
     const dirNow = lean >= 2 ? 'right' : (lean <= -2 ? 'left' : 'upright');
-    cards += `<div class="form-metric"><div class="fm-label">${loamT('Leaning')}</div><div class="fm-value" style="text-transform:capitalize;">${loamT(dirNow)}</div><div class="fm-sub">${loamT('phase:' + phase)}</div></div>`;
+    cards += `<div class="form-metric"><div class="fm-label">${loamT('Leaning')}</div><div class="fm-value" style="text-transform:capitalize;">${loamT(dirNow)}</div><div class="fm-sub">${loamT('phase:' + phase).replace(/^phase:/, '')}</div></div>`;
     cards += `<div class="form-metric"><div class="fm-label">${loamT('Segment peak lean')}</div><div class="fm-value">${Math.abs(S.peakLean).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">${loamT('max either side')}</div></div>`;
     /* Ghost tiles: the live time-at-distance gap to the fastest same-segment lap
        (same math as the ghost race: how long the ghost needed to reach where you
@@ -21217,7 +21218,7 @@ const LoamTraining = (function () {
     return valid.ok ? { ok: true, program } : valid;
   }
 
-  function scheduleTrainingWeek(program, week, summary, today) {
+  function scheduleTrainingWeek(program, week, summary, today, taken = new Set()) {
     const prefs = program.availability, goal = program.goal;
     const monday = new Date(week.weekStart + 'T12:00:00');
     const make = (date, minutes, kind, distanceM = null) => ({ id: program.id + ':' + program.revision + ':' + date,
@@ -21227,7 +21228,7 @@ const LoamTraining = (function () {
     const recorded = goal.sport ? summary.bySport[goal.sport] && summary.bySport[goal.sport].currentWeek : summary.currentWeek;
     const done = current && recorded ? recorded.hours * 60 : 0;
     let remaining = Math.max(0, Math.floor(week.hours * 60 + 1e-6) - Math.ceil(done));
-    const candidates = prefs.days.map(d => ({ d, date: planDayKey(planAddDays(monday, d)) })).filter(d => d.date >= today && d.date <= goal.date);
+    const candidates = prefs.days.map(d => ({ d, date: planDayKey(planAddDays(monday, d)) })).filter(d => d.date >= today && d.date <= goal.date && !taken.has(d.date));
     // Prefer the chosen long day, then spread the other sessions across the available days.
     candidates.sort((a, b) => (b.d === prefs.longDay) - (a.d === prefs.longDay) || a.d - b.d);
     const count = Math.min(candidates.length, Math.max(0, (week.sessions || 0) - (current && recorded ? recorded.timedSessions : 0)));
@@ -21350,7 +21351,9 @@ const LoamTraining = (function () {
     const completed = { hours: current.completedMinutes / 60, timedSessions: candidate.sessions.filter(s => s.weekStart === week.weekStart).length };
     const summary = { currentWeek: completed, bySport: { [program.goal.sport]: { currentWeek: completed } } };
     candidate.revision++;
-    candidate.sessions.push(...scheduleTrainingWeek(candidate, week, summary, today));
+    // A day already holding a kept session is not a candidate, or the long day is re-picked the
+    // evening its long session was done and validation refuses the repeat (sessionDayUsed).
+    candidate.sessions.push(...scheduleTrainingWeek(candidate, week, summary, today, new Set(kept.map(s => s.date))));
     candidate.reason = 'repeat';
     candidate.created = today;
     const valid = validateTrainingSessions(candidate, candidate.sessions);
@@ -31441,7 +31444,10 @@ function renderAllGps(D) {
   renderHrZones(D);
   renderRecordingQuality(D);
   renderGeekStats(D, sport);
-  renderCoachPanel(D, sport);
+  /* A GPS-only bike file can now resolve to mtb / emtb / road (fitActivity), but the coach prompt for
+     those assumes a phone body frame or a power meter. The digest is the GPS one either way, so the
+     GPS-only ride prompt is the one that describes what the model is actually reading. */
+  renderCoachPanel(D, foot ? sport : 'ride');
   updateAttachFitVisibility(sport, true);
   buildSectionNav();
   resizeChartsSoon();
@@ -34875,6 +34881,7 @@ const LOAM_NB = {
   'Dist': 'Dist',
   'Radius': 'Radius',
   'Entry': 'Inn',
+  'Apex': 'Apex',
   'Exit': 'Ut',
   'Phone in hand detected.': 'Telefonen ser ut til å ha vært i hånden.',
   'Arm-swing energy at half cadence dominates the horizontal accel.':
@@ -44213,6 +44220,14 @@ function restoreBikeSections() {
   if (runs) runs.classList.remove('bike-compact', 'runs-expanded');
   for (const [el, marker] of bikeSectionHomes) { if (marker.parentNode) marker.replaceWith(el); }
   bikeSectionHomes.clear();
+  /* Undo arrangeBikeDashboard's fold too: a Road or ski render shows these same sections without
+     re-arranging, so a fold left from the last MTB ride hid their content until a reload. */
+  for (const id of ['radiusSection', 'cadPowerSection', 'analogSection']) {
+    const details = document.querySelector(`#${id} > details.bike-detail`);
+    if (!details) continue;
+    details.querySelector(':scope > summary').remove();
+    details.replaceWith(...details.childNodes);
+  }
 }
 function arrangeBikeDashboard() {
   const D = _lastRender && _lastRender.D;
@@ -49303,10 +49318,19 @@ function routeDroppedFiles(files) {
   if (dzVisible) { addFiles(supported); return; }
   const sensors = supported.filter(f => /(\.zip|\.csv|\.csv\.gz)$/i.test(f.name));
   const fit = supported.find(f => /\.fit$/i.test(f.name)) || null;
+  /* A NEW ride dropped over the results view never passes through resetToDropzone, so the selector
+     still holds the last ride's resolved activity, and requestedActivity prefers a non-auto selector
+     over the new file's own stored choice: ride B was analyzed (and remembered) as ride A's e-MTB.
+     A choice the athlete made on purpose before dropping is kept. */
+  const freshActivity = () => {
+    if (activityChoiceChanged) return;
+    const sel = document.getElementById('sportOverride'); if (sel) sel.value = 'auto';
+  };
   if (sensors.length) {
     /* All sensor files go through: analyze() dispatches 2+ to the cross-ride compare, matching
        what the same drop does on the landing view. */
     hide('errorBox');
+    freshActivity();
     analyze(fit ? [...sensors, fit] : sensors);
   } else if (fit) {
     /* A lone .fit attaches to a single-ride render that is backed by its own File; on the
@@ -49315,7 +49339,7 @@ function routeDroppedFiles(files) {
     const singleRideShown = !document.getElementById('results').classList.contains('hidden');
     hide('errorBox');
     if (singleRideShown && _lastSensorFile) analyze([_lastSensorFile, fit]);
-    else analyze([fit]);
+    else { freshActivity(); analyze([fit]); }
   }
 }
 
@@ -50096,7 +50120,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '2f138b8ba · 2026-09-30';
+const LOAM_BUILD = 'b7471a7fd · 2026-10-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
