@@ -643,6 +643,18 @@
   #formScrubPicks .scrub-chip:hover { background: rgba(197,75,60,0.18); border-color: rgba(197,75,60,0.65); }
   #formScrubPicks .scrub-chip.active { background: rgba(197,75,60,0.22); border-color: #b3422f; font-weight: 600; }
   #formScrubPicks .scrub-chip .sc-amt { font-family: 'JetBrains Mono', monospace; font-size: 11px; opacity: 0.85; }
+  #formReviewPicks { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; font-size:13px; }
+  #formReviewPicks button, #formReference { min-height:44px; }
+  .form-limits { display:grid; gap:4px; font-size:12px; color:var(--text-muted); margin-bottom:12px; }
+  .form-calibration-warning { color:var(--accent); padding:10px; border:1px solid var(--accent); border-radius:8px; }
+  #formComparison { margin-top:16px; font-size:13px; }
+  #formReference { max-width:100%; margin:6px 0; }
+  .form-trace { display:block; width:100%; max-width:600px; min-height:140px; }
+  .form-trace text { font:13px sans-serif; fill:var(--text); }
+  .form-comparison-table { overflow-x:auto; }
+  .form-comparison-table table { width:100%; font-size:12px; }
+  .form-comparison-table th, .form-comparison-table td { padding:8px 4px; }
+  .form-comparison-table caption { text-align:left; color:var(--text-muted); }
   /* Cross-ride: clickable per-ride rows that drill into that ride's full analysis. */
   .cross-ride-row:hover { background: var(--surface-2); }
   #crossResults section.lead-only { margin-bottom: 8px; }
@@ -3049,7 +3061,7 @@
   <section id="formReplaySection" class="hidden">
     <div class="section-title">
       Form replay
-      <span class="subtitle analysis-explanation">turns, jumps, and whole segments · compare your form or add your video</span>
+      <span class="subtitle analysis-explanation">compare a corner across laps, or replay a segment</span>
       <select id="formTurn" aria-label="Replay event" style="margin-left:auto;"></select>
     </div>
     <div class="panel" style="padding:16px;">
@@ -3066,7 +3078,10 @@
           <option value="classic">Classic</option>
         </select>
       </div>
+      <div id="formReviewPicks" class="hidden"></div>
       <div id="formScrubPicks" class="hidden"></div>
+      <div id="formLimits" class="form-limits"></div>
+      <div id="formComparison"></div>
       <div class="form-replay-grid">
         <div id="formReplaySvgWrap"><svg id="formReplaySvg" viewBox="0 0 360 300" preserveAspectRatio="xMidYMid meet"></svg></div>
         <div id="formMapWrap"><div id="formMapTiles"></div><div id="formMap"></div>
@@ -3104,8 +3119,8 @@
            inside it: swept text node by text node, "The <strong>Most scrubbed</strong> chips jump
            to..." came out with its middle translated and its two ends English. localizeStaticChrome
            replaces the whole run instead. -->
-      <div class="dim" style="font-size:12px; margin-top:6px;"><span id="formPictureLead">Turns show body lean from behind; jumps use a side-view schematic whose height and pose are illustrative. The map follows the replay. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.</span>
-        <details class="caveat-more"><summary>Every part of the picture</summary><span id="formPictureMore">On the left, the ghost needle marks this turn's peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where you are heading (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the figure on the left, while the ground stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.</span></details>
+      <div class="dim" style="font-size:12px; margin-top:6px;"><span id="formPictureLead">Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.</span>
+        <details class="caveat-more"><summary>Every part of the picture</summary><span id="formPictureMore">The figure is a schematic driven by phone tilt. The pale needle marks peak tilt change; the head needle shows relative AirPods movement with drift removed. The map locates the recording, not a precise line through the terrain. GPS speed traces and corner speeds from a FIT file may differ.</span></details>
       </div>
     </div>
   </section>
@@ -9361,11 +9376,9 @@ function fmtClock(sec) {
 }
 
 /* ========== Form replay ===
-   Animate body position through one selected turn: bike LEAN (always, from the already-computed
-   whole-ride rollSmooth), HEAD look-ahead (AirPods yaw relative to travel heading, re-zeroed per
-   turn to defeat the arbitrary CMDeviceMotion zero and slow drift), and HAND (Apple Watch wrist
-   roll, when present). Reuses the ghost-race scrubber + rAF lifecycle. Every channel degrades
-   independently and the whole build is wrapped so a data gap can never throw. */
+   Phone tilt, relative head movement and wrist roll are descriptive signals. The rider is a
+   schematic, not measured body geometry. Within-recording comparisons reuse geographic corner
+   matching; each sensor degrades independently. */
 
 /* Compact, source-labelled replay signals. Experimental wrist/torso tilt is
    orientation departure from an approach pose, never a measurement of bike lean. */
@@ -9503,7 +9516,6 @@ let _formMap = null, _formMapMarker = null, _formMapCovered = null, _formMapHead
 let _formTilesMap = null;   /* Leaflet instance providing the rotated real-tile backdrop under the SVG schematic */
 let _formObserver = null;   /* auto-plays the replay once when the section scrolls into view */
 
-const FORM_HEAD_TH = 15;   /* deg of relative head yaw that counts as "turned in" */
 const FORM_ENTRY_RATE = 25; /* deg/s body yaw that counts as the bike committing (matches TURN_PARAMS) */
 
 /* Clamped linear interpolation of ys at xq using a sorted xs (same scheme as ghostAt). */
@@ -9533,6 +9545,197 @@ function formBearingDeg(lat1, lon1, lat2, lon2) {
   const y = Math.sin(dLon) * Math.cos(lat2 * toR);
   const x = Math.cos(lat1 * toR) * Math.sin(lat2 * toR) - Math.sin(lat1 * toR) * Math.cos(lat2 * toR) * Math.cos(dLon);
   return Math.atan2(y, x) * 180 / Math.PI;
+}
+
+/* Calibration is evaluated on selection, never in the animation loop. Cached rides use the
+   surviving gravity channel, just like renderCalibNotice; dismissing that notice changes no facts. */
+function formReplayWarning(D, turn) {
+  if (bodyFrameMoved(D)) return 'The phone moved. Lean comparisons are unavailable.';
+  const c = D.calibWin || {};
+  const axes = D.sensors && D.sensors.gravity && D.R && D.ride
+    ? poseMismatchAxes(D.sensors.gravity, D.R, D.ride.start, D.ride.end) : null;
+  const total = axes ? axes.totalDeg : c.poseMismatchDeg;
+  const lateral = axes ? Math.abs(axes.lateralDeg) : Math.abs(c.poseLateralDeg);
+  if (lateral >= CALIB_POSE_LATERAL_DEG || total >= CALIB_POSE_TOTAL_DEG)
+    return 'Calibration is uncertain. Treat this animation as approximate; lean comparisons are unavailable.';
+  if (c.strategy === 'riding' || c.strategy === 'borrowed')
+    return 'Experimental calibration. Treat this animation as approximate; lean comparisons are unavailable.';
+  if (turn && formTurnRollRange(D, turn) > 65)
+    return 'Phone tilt swings too far in this corner. Lean comparisons are unavailable.';
+  return '';
+}
+
+let _formPairCache = null;
+let _formComparisonObserver = null;
+/* Match once per render/scope, not once per frame or once per corner. Only recorded trail laps
+   qualify; the existing matcher rejects ambiguous geography, reversed sides and crossing pairs. */
+function formReplayPairs(D) {
+  if (sidesUnreliableFor(D)) return [];
+  const skipped = skippedRunWindows(D), skipKey = JSON.stringify(skipped);
+  if (_formPairCache && _formPairCache.D === D && _formPairCache.scope === _formScopeRun && _formPairCache.skipKey === skipKey) return _formPairCache.pairs;
+  let runs = segmentRuns(D, 'auto').runs || [];
+  if (_formScopeRun) runs = [_formScopeRun, ...runs.filter(r => Math.min(r.tEnd, _formScopeRun.tEnd) <= Math.max(r.tStart, _formScopeRun.tStart))];
+  runs = runs.filter(r => !runIsSkipped(r, skipped));
+  const pairs = [], positioned = runs.map(r => runTurnsFromD(r, D));
+  for (let i = 0; i < runs.length; i++) for (let j = i + 1; j < runs.length; j++) {
+    const a = runs[i], b = runs[j];
+    if (Math.min(a.tEnd, b.tEnd) > Math.max(a.tStart, b.tStart) || !runsSameSegment(a, b, D)) continue;
+    for (const { indexA, indexF } of matchCornerTurns(positioned[i], positioned[j])) {
+      const turn = positioned[i][indexA], ref = positioned[j][indexF];
+      if (!pbpSpeedUsable(turn) || !pbpSpeedUsable(ref)) continue;
+      const difference = Math.max(Math.abs(turn.vPeak - ref.vPeak), Math.abs(turn.vExit - ref.vExit));
+      pairs.push({ turn, ref, run: a, peer: b, difference });
+      pairs.push({ turn: ref, ref: turn, run: b, peer: a, difference });
+    }
+  }
+  _formPairCache = { D, scope: _formScopeRun, skipKey, pairs };
+  return pairs;
+}
+
+function formReviewPicks(D, subset) {
+  const allowed = new Set((subset || formInRunTurns(D)).map(T => T.n));
+  const bestByTurn = new Map();
+  for (const p of formReplayPairs(D)) {
+    if (!allowed.has(p.turn.n) || formTurnRollRange(D, p.turn) > 65) continue;
+    const prev = bestByTurn.get(p.turn.n);
+    if (!prev || p.peer.metrics.duration < prev.peer.metrics.duration) bestByTurn.set(p.turn.n, p);
+  }
+  // Same 1 mph difference floor as the play-by-play, rather than the within-corner scrub floor.
+  return [...bestByTurn.values()].filter(p => p.difference * 2.23694 >= 1)
+    .sort((a, b) => b.difference - a.difference || a.turn.tStart - b.turn.tStart).slice(0, 6);
+}
+
+function formRenderReviewPicks(D, subset) {
+  const el = document.getElementById('formReviewPicks'); if (!el) return;
+  const picks = formReviewPicks(D, subset);
+  el.classList.toggle('hidden', !picks.length);
+  el.innerHTML = picks.length ? `<span>${loamT('Lap differences')}</span>` + picks.map(p =>
+    `<button type="button" class="ghost-btn" data-turn="${p.turn.n}">${loamT('T{n} · Δ {v}', { n: p.turn.n, v: U.speed(p.difference) })}</button>`).join('') : '';
+  el.querySelectorAll('button').forEach(b => { b.onclick = () => {
+    const p = picks.find(p => p.turn.n === +b.dataset.turn);
+    document.getElementById('formTurn').value = String(p.turn.n);
+    formMarkActiveChip(p.turn.n); formSelectTurn(D, p.turn);
+  }; });
+}
+
+/* Phase alignment preserves each detected entry/apex/exit exactly. It is not a claim that both
+   riders were at the same physical position between anchors, nor a whole-lap timing delta. */
+function formPhaseAt(T, t) {
+  if (t <= T.tPeak) return Math.max(0, Math.min(1, (t - T.tStart) / (T.tPeak - T.tStart || 1)));
+  return 1 + Math.max(0, Math.min(1, (t - T.tPeak) / (T.tEnd - T.tPeak || 1)));
+}
+function formTimeAtPhase(T, phase) {
+  return phase <= 1 ? T.tStart + (T.tPeak - T.tStart) * phase : T.tPeak + (T.tEnd - T.tPeak) * (phase - 1);
+}
+function formRecordedSpeed(S, t) {
+  if (!S.spdT || !S.spdT.length || t < S.spdT[0] || t > S.spdT[S.spdT.length - 1]) return null;
+  return formInterp(S.spdT, S.spdV, t);
+}
+
+function formSetupComparison(D, turn) {
+  const F = _form, host = document.getElementById('formComparison');
+  if (!host) return;
+  host.innerHTML = ''; F.comparison = null;
+  if (!_formComparisonObserver && typeof ResizeObserver !== 'undefined') {
+    let width = 0;
+    _formComparisonObserver = new ResizeObserver(entries => {
+      const next = Math.round(entries[0].contentRect.width);
+      if (next > 0 && next !== width) {
+        width = next;
+        if (_form && _form.comparison) { formDrawComparison(); formFrame(); }
+      }
+    });
+    _formComparisonObserver.observe(host);
+  }
+  if (!turn) return;
+  const options = formReplayPairs(D).filter(p => p.turn.n === turn.n)
+    .sort((a, b) => a.peer.metrics.duration - b.peer.metrics.duration);
+  if (!options.length) {
+    host.innerHTML = `<p class="dim">${loamT('No reliable matching corner in another lap of this recording. Speed loss alone does not identify a mistake.')}</p>`;
+    return;
+  }
+  host.innerHTML = `<label for="formReference">${loamT('Compare this corner with')}</label> <select id="formReference">`
+    + options.map((p, i) => `<option value="${i}">${escapeHtml(runDisplayLabel(p.peer))} · T${p.ref.n}</option>`).join('')
+    + `<option value="none">${loamT('No comparison')}</option></select><div id="formComparisonDetail"></div>`;
+  const select = document.getElementById('formReference');
+  select.onchange = () => {
+    const p = select.value === 'none' ? null : options[+select.value];
+    const refS = p ? formTurnSeries(D, p.ref) : null;
+    F.comparison = p && refS ? { ...p, S: refS, leanOK: !F.warning && formTurnRollRange(D, p.ref) <= 65 } : null;
+    formDrawComparison(); formFrame();
+  };
+  select.onchange();
+}
+
+function formDrawComparison() {
+  const F = _form, C = F && F.comparison, el = document.getElementById('formComparisonDetail');
+  if (!el) return;
+  el.innerHTML = ''; if (!C) return;
+  const esc = escapeHtml, t = loamT;
+  const signed = v => Math.abs(v) < 0.05 ? '0.0' : (v > 0 ? '+' : '') + v.toFixed(1);
+  const phases = [0, 1, 2], names = ['Entry', 'Apex', 'Exit'];
+  const speeds = [F.turn, C.ref].map(T => [T.vEntry, T.vPeak, T.vExit]);
+  const speed = v => typeof v === 'number' && isFinite(v) ? U.speed(v) : '—';
+  const deltaS = (F.turn.tEnd - F.turn.tStart) - (C.ref.tEnd - C.ref.tStart);
+  const rows = ['A · this lap', 'B · reference lap'].map((label, i) => `<tr><th scope="row">${t(label)}</th>`
+    + speeds[i].map(v => `<td>${speed(v)}</td>`).join('') + '</tr>').join('');
+  const chart = (key, label, unit, get, enabled) => {
+    if (!enabled) return `<p class="dim">${t('Lean comparison unavailable for this recording or reference corner.')}</p>`;
+    const points = [F, { turn: C.ref, S: C.S }].map(o => Array.from({ length: 81 }, (_, i) => {
+      const phase = i / 40; return { phase, value: get(o.S, formTimeAtPhase(o.turn, phase)) };
+    }));
+    const values = points.flat().map(p => p.value).filter(v => typeof v === 'number' && isFinite(v));
+    if (!values.length) return '';
+    const low = Math.min(0, ...values), high = Math.max(low + 1, ...values), width = Math.max(280, Math.min(600, el.clientWidth));
+    const x = phase => 40 + phase * (width - 58) / 2, y = value => 108 - (value - low) / (high - low) * 70;
+    const paths = points.map((ps, i) => {
+      let pen = false;
+      const d = ps.map(p => {
+        if (p.value == null || !isFinite(p.value)) { pen = false; return ''; }
+        const command = pen ? 'L' : 'M'; pen = true; return `${command}${x(p.phase).toFixed(1)},${y(p.value).toFixed(1)}`;
+      }).join(' ');
+      return `<path data-replay-trace="${key}-${i}" d="${d}" fill="none" stroke="${i ? '#51758c' : '#ad6b16'}" stroke-width="2.5" ${i ? 'stroke-dasharray="6 4"' : ''}/>`;
+    }).join('');
+    return `<svg class="form-trace" viewBox="0 0 ${width} 140" role="img" aria-label="${esc(t(label))}">`
+      + `<text x="8" y="17">${esc(t(label))} · ${esc(unit)}</text>`
+      + [low, high].map(v => `<text x="6" y="${y(v)}">${v.toFixed(0)}</text>`).join('')
+      + phases.map((phase, i) => `<line x1="${x(phase)}" x2="${x(phase)}" y1="30" y2="114" stroke="var(--border)"/>`
+        + `<text x="${x(phase)}" y="132" text-anchor="middle">${esc(t(names[i]))}</text>`).join('')
+      + paths + `<line class="form-trace-cursor" x1="40" x2="40" y1="28" y2="115" stroke="var(--text)" stroke-width="1.5"/></svg>`;
+  };
+  el.innerHTML = `<p class="form-comparison-key"><strong>${t('A · this lap')}</strong> · ${esc(runDisplayLabel(C.run))} / <strong>${t('B · reference lap')}</strong> · ${esc(runDisplayLabel(C.peer))}</p>`
+    + `<p class="dim">${t('Solid A, dashed B. Entry, apex and exit are aligned; time between these points is stretched to compare the motion.')}</p>`
+    + chart('speed', 'Recorded GPS speed', U.speedUnit(), (S, time) => { const v = formRecordedSpeed(S, time); return v == null ? null : U.speedNum(v); }, true)
+    + chart('lean', 'Phone lean change from entry', '°', (S, time) => formInterp(S.g, S.lean, time), C.leanOK)
+    + `<div class="form-comparison-table"><table><caption>${t('Corner speeds · FIT when available, otherwise GPS')}</caption><thead><tr><th></th>${names.map(n => `<th scope="col">${t(n)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`
+    + `<p>${t('Entry → exit duration: A {a}s · B {b}s · Δ {delta}s.', { a: (F.turn.tEnd - F.turn.tStart).toFixed(1), b: (C.ref.tEnd - C.ref.tStart).toFixed(1), delta: signed(deltaS) })}</p>`
+    + `<p class="dim">${t('The duration difference uses detected corner boundaries. It is not a whole-lap gap or proof of better technique.')}</p>`
+    + `<div id="formComparisonNow" class="dim"></div>`;
+}
+
+function formComparisonFrame(F, tNow) {
+  const C = F.comparison; if (!C) return;
+  const phase = formPhaseAt(F.turn, tNow), time = formTimeAtPhase(C.ref, phase);
+  document.querySelectorAll('#formComparison .form-trace-cursor').forEach(el => {
+    const x = 40 + phase * (el.ownerSVGElement.viewBox.baseVal.width - 58) / 2;
+    el.setAttribute('x1', x); el.setAttribute('x2', x);
+  });
+  const el = document.getElementById('formComparisonNow');
+  if (el) {
+    const v = formRecordedSpeed(C.S, time), lean = formInterp(C.S.g, C.S.lean, time);
+    el.textContent = loamT('B at this phase: {speed}', { speed: v == null ? '—' : U.speed(v) })
+      + (C.leanOK ? ' · ' + loamT('phone lean change {deg}°', { deg: lean.toFixed(0) }) : '');
+  }
+}
+
+function formRenderLimits(D, S) {
+  const el = document.getElementById('formLimits'); if (!el) return;
+  const warning = formReplayWarning(D, _form.turn);
+  _form.warning = warning;
+  el.innerHTML = (warning ? `<strong class="form-calibration-warning">${loamT(warning)}</strong>` : '')
+    + `<span>${loamT(S.segment ? 'Schematic · phone tilt relative to this segment’s median. Body position and equipment tilt are not measured.'
+      : 'Schematic · phone tilt change from corner entry. Body position and equipment tilt are not measured.')}</span>`
+    + `<span>${loamT('AirPods show relative head movement, not eye gaze. Watch roll is wrist movement, not equipment angle.')}</span>`;
 }
 
 /* Replay additions share the existing playhead. Media belongs to this recording,
@@ -9651,6 +9854,8 @@ function formSelectJump(D, J) {
     locT: loc.map(r => r.t), locLat: loc.map(r => r.latitude), locLon: loc.map(r => r.longitude),
     spdT: speed.map(r => r.t), spdV: speed.map(r => r.speed), spdMax: speed.length ? Math.max(...speed.map(r => r.speed)) : 0 };
   _form = { D, S, jump: J, tau: 0, dur, mult: +document.getElementById('formSpeedSel').value || 0.5, playing: false, raf: null, lastTs: null };
+  formSetupComparison(D, null);
+  document.getElementById('formLimits').innerHTML = '';
   formCoachSync(D, null, null);
   /* `J.source` is written by the drift-pinned LoamReplay, so it is translated here where it is drawn. */
   document.getElementById('formNote').textContent = loamT(J.source) + '. ' + loamT('Flight height, bike pitch, and body pose are schematic, not measured. Landing impact is measured at the sensor, not at the wheels.')
@@ -9738,7 +9943,7 @@ function formExtraFrame() {
   const k = Math.max(0, Math.min(F.S.n-1, lowerBound(F.S.g, F.S.w0+F.tau)));
   const note = document.getElementById('formGhostNote');
   const enabled = document.getElementById('formGhostToggle')?.checked;
-  if (note) note.textContent = F.turn ? (F.formGhost
+  if (note) note.textContent = F.warning ? loamT(F.warning) : F.turn ? (F.formGhost
     ? loamT(enabled ? 'Ghost: {lap} · T{turn} · aligned by corner distance (GPS estimate).' : 'Ghost hidden: {lap} · T{turn} · aligned by corner distance (GPS estimate).',
         { lap: F.formGhost.label, turn: F.formGhost.turn })
     : loamT('No reliable matching corner on a faster lap in this recording.'))
@@ -9748,6 +9953,7 @@ function formExtraFrame() {
   const on = document.getElementById('formWristToggle')?.checked;
   host.classList.toggle('hidden', !on);
   if (!on) return;
+  if (F.warning) { host.textContent = loamT(F.warning); return; }
   const W = F.turn && F.D.replay?.wrist?.[F.turn.n];
   const sample = W?.samples && LoamReplay.near(W.samples, F.S.w0+F.tau, 0.08);
   const intro = loamT('Experimental · neutral is your recorded approach pose. Assumes unchanged grip and a secured body-worn phone.') + ' ';
@@ -9764,6 +9970,8 @@ function formExtraFrame() {
     + ' ' + loamT('This includes grip and arm motion; it is not bike lean or a technique score.');
 }
 
+/* Build all per-turn series ONCE on turn selection. Returns null only if lean is unavailable (the
+   one hard requirement); head/hand are optional and reported as null channels when absent. */
 function formTurnSeries(D, turn) {
   try {
     if (!D.t || !D.t.length || !D.rollSmooth || !D.rollSmooth.length) return null;
@@ -9800,23 +10008,12 @@ function formTurnSeries(D, turn) {
     const lean = leanU.map(v => Math.max(-70, Math.min(70, (v - leanBase) * cornerSign)));
     const yawRate = g.map(tq => formInterp(D.t, D.yawSeg, tq));
 
-    /* Peak lean over the WHOLE replayed clip (not just the core window): it is the denominator for the
-       Commitment readout and the "peak" label, so it must be the max of what the user can actually see
-       scrubbing, otherwise a frame can exceed "peak" and Commitment can read past 100%. */
+    /* Include the padded clip in the peak label so no replayed frame exceeds its stated peak. */
     let peakLean = 0;
     for (let k = 0; k < n; k++) if (lean[k] > peakLean) peakLean = lean[k];
 
-    /* tBike: first time the yaw rate crosses the entry rate IN THIS TURN'S DIRECTION (the bike
-       committing). The direction filter and the small pre-roll stop the previous corner's opposite-
-       sign exit tail, which can sit inside the window on packed trails, from anchoring tBike early. */
-    const cornerYawSign = Math.sign(formInterp(D.t, D.yawSeg, turn.tPeak != null ? turn.tPeak : turn.tStart)) || cornerSign;
-    let tBike = null;
-    for (let k = 0; k < n; k++) {
-      if (g[k] >= turn.tStart - 0.3 && Math.abs(yawRate[k]) >= FORM_ENTRY_RATE && Math.sign(yawRate[k]) === cornerYawSign) { tBike = g[k]; break; }
-    }
-
-    const S = { g, w0, dur, n, lean, yawRate, peakLean, tBike,
-      headRel: null, tHead: null, leadTime: null, peakLook: null, headBadge: null, headStatus: 'absent',
+    const S = { g, w0, dur, n, lean, yawRate, peakLean,
+      headRel: null, peakLook: null, headBadge: null, headStatus: 'absent',
       wristRoll: null, wristRange: null };
 
     /* HEAD (optional): AirPods yaw relative to bike travel heading, re-zeroed per turn. */
@@ -9880,20 +10077,6 @@ function formTurnSeries(D, turn) {
       for (let k = 0; k < n; k++) if (g[k] >= turn.tStart - 1.0 && g[k] <= (turn.tPeak != null ? turn.tPeak + 0.5 : turn.tEnd)) { if (headRel[k] > peakLook) peakLook = headRel[k]; }
       S.peakLook = peakLook;
 
-      /* tHead: first time head crosses +TH and holds through the apex. */
-      const tApex = (turn.tPeak != null) ? turn.tPeak : turn.tEnd;
-      let tHead = null;
-      for (let k = 0; k < n; k++) {
-        if (g[k] < turn.tStart - 1.0 || g[k] > tApex) continue;
-        if (headRel[k] >= FORM_HEAD_TH) {
-          /* require it to stay turned-in through the apex */
-          let holds = true;
-          for (let j = k; j < n && g[j] <= tApex; j++) if (headRel[j] < FORM_HEAD_TH - 6) { holds = false; break; }
-          if (holds) { tHead = g[k]; break; }
-        }
-      }
-      S.tHead = tHead;
-      if (tHead != null && tBike != null) S.leadTime = tBike - tHead;   /* + => head led the bike */
       }  /* end not-saturated */
       }  /* end reliable */
     }
@@ -9909,6 +10092,7 @@ function formTurnSeries(D, turn) {
       const wMed = wBase.length ? median(wBase) : median(wRollG);
       S.wristRoll = wRollG.map(v => Math.max(-90, Math.min(90, v - wMed)));
       S.wristRange = Math.max(...S.wristRoll) - Math.min(...S.wristRoll);
+
     }
 
     /* GPS track for the parallel map: the window slice, sorted, as lat/lon arrays the frame loop
@@ -10516,6 +10700,7 @@ function renderCrashSection(D) {
    suffix) so the chips only reference corners of the descent on screen, and Back restores the
    ride-wide set. Same clean-lean gate and scrub floor as the dropdown's wave markers. */
 function formRenderScrubChips(D, subset, labelSuffix) {
+  formRenderReviewPicks(D, subset);
   const picksEl = document.getElementById('formScrubPicks');
   if (!picksEl || !D) return;
   const scrubFmt = (mph) => `${U.speedNum(mph / 2.23694).toFixed(1)} ${U.speedUnit()}`;
@@ -10623,6 +10808,7 @@ function formRestoreRideSelect(D) {
 
 function setupFormReplay(D) {
   formStop();
+  _formPairCache = null;
   formVideoSetup(D);
   const sec = document.getElementById('formReplaySection');
   if (!sec) return;
@@ -10646,9 +10832,10 @@ function setupFormReplay(D) {
     .map(T => ({ T, mph: turnScrubMph(T) }))
     .filter(o => o.mph >= FORM_SCRUB_MIN_MPH)
     .sort((a, b) => b.mph - a.mph);
-  /* Default to the most-scrubbed turn, the ride's most instructive corner, instead of the first
+  /* Default to the most-scrubbed turn, a useful review candidate, instead of the first
      chronological one (typically a trivial early bend). The dropdown stays chronological. */
-  formFillTurnSelect(D, ordered, segs, !ordered.length ? 'jump:' + formReplayJumps(D)[0].id : scrubRanked.length ? scrubRanked[0].T.n : null);
+  const reviewPicks = formReviewPicks(D);
+  formFillTurnSelect(D, ordered, segs, !ordered.length ? 'jump:' + formReplayJumps(D)[0].id : reviewPicks.length ? reviewPicks[0].turn.n : (scrubRanked.length ? scrubRanked[0].T.n : null));
   formRenderScrubChips(D);
   const pick = () => {
     const v = sel.value;
@@ -10716,25 +10903,28 @@ function formCoachFacts(D, turn, S) {
      Both names are accepted so a road corner keeps working if it is ever routed through here. */
   const apex = (turn.apexSpeed != null) ? turn.apexSpeed : (turn.vPeak != null ? turn.vPeak : null);
   const fin = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
+  const warning = formReplayWarning(D, turn);
+  const C = _form && _form.D === D && _form.turn && _form.turn.n === turn.n ? _form.comparison : null;
   return {
+    calibrationWarning: warning,
+    entrySpeed: turn.vEntry != null ? fin(U.speedNum(turn.vEntry)) : null,
+    exitSpeed: turn.vExit != null ? fin(U.speedNum(turn.vExit)) : null,
+    comparison: C ? { n: C.ref.n, label: runDisplayLabel(C.peer),
+      entrySpeed: C.ref.vEntry != null ? fin(U.speedNum(C.ref.vEntry)) : null,
+      apexSpeed: fin(U.speedNum(C.ref.vPeak)), exitSpeed: fin(U.speedNum(C.ref.vExit)),
+      durationDeltaS: (turn.tEnd - turn.tStart) - (C.ref.tEnd - C.ref.tStart) } : null,
     n: turn.n,
     direction: turn.direction,
     radius: turn.radius != null ? fin(U.smallNum(turn.radius)) : null,
     apexSpeed: apex != null ? fin(U.speedNum(apex)) : null,
     /* turnScrubMph works in mph internally, like the dropdown's scrub labels. */
     scrub: (scrubMph != null && scrubMph > 0) ? fin(U.speedNum(scrubMph / 2.23694)) : null,
-    peakLean: fin(S.peakLean != null ? Math.abs(S.peakLean) : null),
-    medLeanL: fin(S.medLeanL), medLeanR: fin(S.medLeanR),
+    peakLean: warning ? null : fin(S.peakLean != null ? Math.abs(S.peakLean) : null),
+    medLeanL: warning ? null : fin(S.medLeanL), medLeanR: warning ? null : fin(S.medLeanR),
     /* Gaze only when the channel was actually clean: a 'noisy' turn hides the needle on screen, so
        quoting its peak to the coach would coach a number the rider was deliberately not shown. */
-    peakLook: (S.headRel && S.headStatus !== 'noisy') ? fin(S.peakLook) : null,
-    leadTime: (S.headRel && S.headStatus !== 'noisy') ? fin(S.leadTime) : null,
+    peakLook: (!warning && S.headRel && S.headStatus !== 'noisy') ? fin(S.peakLook) : null,
     wristRange: S.wristRoll ? fin(S.wristRange) : null,
-    /* Bike-vs-body is a per-sample series, so "at the apex" has to name a frame. It uses the SAME
-       frame the replay parks on (formPeakIdx), which is the one the rider is looking at when the
-       button is there to be pressed -- a separation quoted from any other frame would describe a
-       picture they never saw. */
-    barInto: null,  /* wrist orientation is not bike lean; the experimental read stays descriptive */
     /* Which corners the medians above describe, and the segment this one is on. The question names
        both, so a coach reading a tight technical segment is not handed a ride-wide median as though
        it described this trail -- and when the segment was too thin for its own median, the question
@@ -10778,7 +10968,9 @@ function formSegmentCoachFacts(D, run, S) {
     .filter(o => o.mph >= FORM_SCRUB_MIN_MPH).sort((a, b) => b.mph - a.mph);
   const G = _form && _form.ghost;
   const myDur = (m.duration != null) ? m.duration : (run.tEnd - run.tStart);
+  const warning = formReplayWarning(D);
   return {
+    calibrationWarning: warning,
     label: (runDisplayLabel(run)) || null,
     durationS: fin(myDur),
     /* The segment page's own stat chips, character for character (U.dist / U.elev pick their unit by
@@ -10795,9 +10987,9 @@ function formSegmentCoachFacts(D, run, S) {
     medApexSpeed: apexes.length ? fin(U.speedNum(median(apexes))) : null,
     /* Already gated by pickLeanBaseline: null here means the segment could not support a per-side
        median, and formSegmentLines says so rather than printing the ride's in its place. */
-    medLeanL: S.leanScope === 'segment' ? fin(S.medLeanL) : null,
-    medLeanR: S.leanScope === 'segment' ? fin(S.medLeanR) : null,
-    rideMedLeanL: fin(S.rideMedLeanL), rideMedLeanR: fin(S.rideMedLeanR),
+    medLeanL: !warning && S.leanScope === 'segment' ? fin(S.medLeanL) : null,
+    medLeanR: !warning && S.leanScope === 'segment' ? fin(S.medLeanR) : null,
+    rideMedLeanL: warning ? null : fin(S.rideMedLeanL), rideMedLeanR: warning ? null : fin(S.rideMedLeanR),
     scrubbedCount: scrub.length,
     worstScrub: scrub.slice(0, 3).map(o => ({ n: o.n, direction: o.direction, amount: fin(U.speedNum(o.mph / 2.23694)) })),
     peerLabel: G ? G.peerLabel : null,
@@ -10868,6 +11060,8 @@ function formSelectTurn(D, turn) {
   const note = document.getElementById('formNote');
   if (!S) {
     _form = null;
+    document.getElementById('formComparison').innerHTML = '';
+    document.getElementById('formLimits').innerHTML = '';
     document.getElementById('formReplaySvg').innerHTML = '';
     document.getElementById('formMetrics').innerHTML = '';
     if (note) note.textContent = loamT('Not enough motion data for this turn.');
@@ -10877,12 +11071,14 @@ function formSelectTurn(D, turn) {
   }
   formCoachSync(D, turn, null);
   _form = { D, turn, S, tau: 0, dur: S.dur, mult: +(document.getElementById('formSpeedSel').value || 0.5), playing: false, raf: null, lastTs: null };
-  try { _form.formGhost = isMtbFamily(D.sport) ? formTurnGhost(D, turn, S) : null; }
+  formRenderLimits(D, S);
+  formSetupComparison(D, turn);
+  try { _form.formGhost = !_form.warning && isMtbFamily(D.sport) ? formTurnGhost(D, turn, S) : null; }
   catch (e) { _form.formGhost = null; }
   formSetPlaying(false);
   formParkAtPeak();
   const bits = [];
-  if (S.headStatus === 'noisy') bits.push(loamT('AirPods head tracking was too noisy on this turn (vibration); gaze hidden.'));
+  if (S.headStatus === 'noisy') bits.push(loamT('AirPods head tracking was too noisy on this turn; head movement hidden.'));
   else if (S.headStatus === 'absent') bits.push(loamT('No AirPods head data for this turn.'));
   if (!S.wristRoll) bits.push(loamT('No Apple Watch wrist data this turn.'));
   if (note) {
@@ -10892,9 +11088,9 @@ function formSelectTurn(D, turn) {
     const dot = (col) => `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col};margin-right:5px;vertical-align:middle;"></span>`;
     const chip = (label, on, col) => `<span style="margin-right:14px;white-space:nowrap;opacity:${on ? 1 : 0.5};">${dot(on ? col : '#5b6b7a')}${loamT(label)}${on ? '' : loamT(' · off')}</span>`;
     const legend = `<div style="margin-bottom:4px;font-size:12px;">`
-      + chip('Lean · phone', true, '#e0a458')
-      + chip('Gaze · AirPods', !!S.headRel, '#7fb069')
-      + chip('Hand · Watch', !!S.wristRoll, '#7fb0d0')
+      + chip('Tilt · phone', true, '#e0a458')
+      + chip('Head · AirPods', !!S.headRel, '#7fb069')
+      + chip('Wrist · Watch', !!S.wristRoll, '#7fb0d0')
       + `</div>`;
     note.innerHTML = legend + (bits.length ? `<span class="dim">${bits.join(' ')}</span>` : '');
   }
@@ -10922,8 +11118,8 @@ function formSegmentSeries(D, run) {
     const lean = rollU.map(v => Math.max(-70, Math.min(70, v - base)));
     const yawRate = g.map(tq => formInterp(D.t, D.yawSeg, tq));
     let peakLean = 0; for (let k = 0; k < n; k++) { const a = Math.abs(lean[k]); if (a > peakLean) peakLean = a; }
-    const S = { g, w0, dur, n, lean, yawRate, peakLean, segment: true, tBike: null,
-      headRel: null, tHead: null, leadTime: null, peakLook: null, headBadge: null, headStatus: 'absent',
+    const S = { g, w0, dur, n, lean, yawRate, peakLean, segment: true,
+      headRel: null, peakLook: null, headBadge: null, headStatus: 'absent',
       wristRoll: null, wristRange: null };
 
     /* Hand (optional): raw signed wrist roll over the run, baselined to the run median (no per-turn
@@ -11011,6 +11207,8 @@ function formSelectSegment(D, run) {
   const note = document.getElementById('formNote');
   if (!S) {
     _form = null;
+    document.getElementById('formComparison').innerHTML = '';
+    document.getElementById('formLimits').innerHTML = '';
     document.getElementById('formReplaySvg').innerHTML = '';
     document.getElementById('formMetrics').innerHTML = '';
     if (note) note.textContent = loamT('Not enough motion data for this segment.');
@@ -11019,6 +11217,8 @@ function formSelectSegment(D, run) {
     return;
   }
   _form = { D, turn: null, run, S, tau: 0, dur: S.dur, mult: +(document.getElementById('formSpeedSel').value || 0.5), playing: false, raf: null, lastTs: null };
+  formRenderLimits(D, S);
+  formSetupComparison(D, null);
   _form.ghost = formGhostContext(D, run);
   formParkAtPeak();
   if (note) {
@@ -11032,10 +11232,10 @@ function formSelectSegment(D, run) {
         { peer: escapeHtml(G.peerLabel), dur: fmtDuration(G.peer.metrics.duration) })
       : '';
     note.innerHTML = `<div style="margin-bottom:4px;font-size:12px;">`
-      + chip('Lean · phone', true, '#e0a458') + chip('Hand · Watch', !!S.wristRoll, '#7fb0d0') + `</div>`
+      + chip('Tilt · phone', true, '#e0a458') + chip('Wrist · Watch', !!S.wristRoll, '#7fb0d0') + `</div>`
       + `<span class="dim">`
       + loamT(S.turnCount === 1 ? 'Whole-segment replay: signed left/right lean through {n} turn.' : 'Whole-segment replay: signed left/right lean through {n} turns.', { n: S.turnCount })
-      + `${ghostLine} ` + loamT('Per-turn gaze is shown when you pick a single turn.') + `</span>`;
+      + `${ghostLine} ` + loamT('Relative head movement is shown when you pick a single turn.') + `</span>`;
   }
   const btn = document.getElementById('formPlay'); if (btn) btn.textContent = loamT('▶ Play segment');
   formInitMap(S);
@@ -11108,6 +11308,11 @@ function formTick(ts) {
 function formStopAnim() { if (_form && _form.raf) cancelAnimationFrame(_form.raf); if (_form) { _form.raf = null; _form.playing = false; } document.getElementById('formVideo')?.pause(); }
 function formStop() {
   formStopAnim();
+  _formPairCache = null;
+  if (_formComparisonObserver) { _formComparisonObserver.disconnect(); _formComparisonObserver = null; }
+  for (const id of ['formComparison', 'formLimits', 'formReviewPicks']) {
+    const el = document.getElementById(id); if (el) el.innerHTML = '';
+  }
   if (_formObserver) { _formObserver.disconnect(); _formObserver = null; }
   if (_formTilesMap) { try { _formTilesMap.remove(); } catch (e) {} _formTilesMap = null; }
   if (_formMap) { try { _formMap.remove(); } catch (e) {} _formMap = null; _formMapMarker = null; _formMapCovered = null; _formMapHeading = null; }
@@ -11179,18 +11384,13 @@ function formFrame() {
   const look = headOn ? Math.max(-72, Math.min(72, headRel * visualSign)) : 0;
   /* "Trailing" only counts as a warning once the corner has begun; before turn-in it is the normal
      state, and painting the resting/approach frame amber read as a problem where none exists. */
-  const gazeCol = !headOn ? '#5b6b7a' : (headRel >= 8 ? '#7fb069' : (headRel <= -8 && phase !== 'approach' ? '#e0a458' : '#d6dde4'));
+  const gazeCol = headOn ? '#9fc0d8' : '#5b6b7a';
   const helmetCy = 86, helmetR = 17;
   const nA = rad(look - 90);
   const nx = cx + Math.cos(nA) * (helmetR + 13), ny = helmetCy + Math.sin(nA) * (helmetR + 13);
 
-  /* handlebar tilt (Apple Watch wrist roll). Drawn as a true rear view: the bar's middle passes BEHIND
-     the torso (so it is occluded by the body) and only the grips + hands show, poking out either side.
-     That is what sells "hands holding the bars" instead of a pole laid across the rider. The bar sits at
-     mid-torso height so the body actually covers its centre, and the visual tilt is capped tighter than
-     the raw wrist roll so a hard lean does not turn the exposed grips into a steep diagonal. */
-  const wristOn = wristRoll != null;
-  const wr = wristOn ? Math.max(-18, Math.min(18, wristRoll)) : 0;
+  /* Fixed schematic grips: wrist articulation does not measure handlebar angle. */
+  const wr = 0; // Wrist articulation does not measure handlebar angle.
   const ha = rad(wr), handHalf = 31, handY = 145;
   const gxL = cx - Math.cos(ha) * handHalf, gyL = handY - Math.sin(ha) * handHalf;
   const gxR = cx + Math.cos(ha) * handHalf, gyR = handY + Math.sin(ha) * handHalf;
@@ -11198,7 +11398,7 @@ function formFrame() {
   const gipL = handHalf - 9;
   const gixL = cx - Math.cos(ha) * gipL, giyL = handY - Math.sin(ha) * gipL;
   const gixR = cx + Math.cos(ha) * gipL, giyR = handY + Math.sin(ha) * gipL;
-  const barCol = wristOn ? '#7fb0d0' : '#566472';
+  const barCol = '#566472';
 
   /* Rear-view rider on an e-MTB, built from anatomy anchors so it still pivots about the contact
      patch by the measured lean and the hands still follow the watch wrist roll. Drawn back-to-front:
@@ -11304,7 +11504,10 @@ function formFrame() {
   const sweep = lc >= 0 ? 1 : 0;
   const arc = Math.abs(lc) < 0.5 ? '' : `<path d="M ${cx} ${vy} A ${pr} ${pr} 0 0 ${sweep} ${g(lx)} ${g(ly)}" fill="none" stroke="${phaseCol}" stroke-width="2.5" opacity="0.85"/>`;
   const ghost = Math.abs(pk) < 0.5 ? '' : needle(pk, pr + 3, '#6b7a86', 2, 0.55);
-  const protractor = ticks + ghost + arc + needle(lc, pr, '#e0a458', 3, 0.9);
+  const comparisonLean = F.comparison && F.comparison.leanOK
+    ? formInterp(F.comparison.S.g, F.comparison.S.lean, formTimeAtPhase(F.comparison.ref, formPhaseAt(F.turn, tNow))) : null;
+  const referenceNeedle = comparisonLean == null ? '' : needle(Math.max(-58, Math.min(58, comparisonLean * visualSign)), pr + 14, '#9fc0d8', 2, 0.9).replace('<line ', '<line data-reference-needle="true" stroke-dasharray="4 3" ');
+  const protractor = ticks + ghost + arc + needle(lc, pr, '#e0a458', 3, 0.9) + referenceNeedle;
 
   /* Side letter: segment lean is signed right-positive, but turn lean is corner-ward positive, so
      there the letter comes from the turn's direction (flipped when counter-leaning). The old
@@ -11316,7 +11519,7 @@ function formFrame() {
     `<text x="22" y="46" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif" font-size="42" font-weight="800" fill="#f1f5f9">${Math.abs(lean).toFixed(0)}<tspan font-size="18" fill="#e0a458">°${sideLetter}</tspan></text>`
     /* The phase is a WORD in the hero, not a class name: it is looked up on its own so a reader sees
        "HELNING · I SVINGEN" rather than an English state on an otherwise translated panel. */
-    + `<text x="24" y="64" font-family="'JetBrains Mono',monospace" font-size="10" letter-spacing="1.5" fill="${phaseCol}">${escapeHtml(loamT('LEAN') + ' · ' + loamT('phase:' + phase).toUpperCase())}</text>`
+    + `<text x="24" y="64" font-family="'JetBrains Mono',monospace" font-size="10" letter-spacing="1.5" fill="${phaseCol}">${escapeHtml(loamT('PHONE TILT') + ' · ' + loamT('phase:' + phase).toUpperCase())}</text>`
     + `<text x="${W-18}" y="30" text-anchor="end" font-family="'JetBrains Mono',monospace" font-size="10" fill="#9fb094">${tRel >= 0 ? '+' : ''}${tRel.toFixed(1)}s</text>`
     + `<text x="${W-18}" y="44" text-anchor="end" font-family="'JetBrains Mono',monospace" font-size="10" fill="#7c8b76">${escapeHtml(loamT('peak {v}°', { v: Math.abs(S.peakLean).toFixed(0) }))}</text>`;
 
@@ -11359,34 +11562,21 @@ function formFrame() {
   const svg = defs
     + `<rect width="${W}" height="${H}" fill="url(#frBg)"/><rect width="${W}" height="${H}" fill="url(#frHalo)"/>`
     + `<line x1="24" y1="${ground}" x2="${W-24}" y2="${ground}" stroke="#2b3526" stroke-width="2"/>`
-    + shadow + protractor + ghostBody + rider + hero + strip;
+    + shadow + protractor + ghostBody + rider + hero + strip
+    + (F.comparison && F.comparison.leanOK ? `<text x="340" y="77" text-anchor="end" fill="#9fc0d8" font-size="12">${escapeHtml(loamT('B · phone Δ {deg}°', { deg: formInterp(F.comparison.S.g, F.comparison.S.lean, formTimeAtPhase(F.comparison.ref, formPhaseAt(F.turn, tNow))).toFixed(0) }))}</text>` : '');
   const svgEl = document.getElementById('formReplaySvg');
   if (svgEl) svgEl.innerHTML = svg;
 
   /* ---- Metric strip ---- */
-  const speedNow = (S.spdT && S.spdT.length) ? formInterp(S.spdT, S.spdV, tNow) : null;
+  const speedNow = formRecordedSpeed(S, tNow);
   const speedCard = speedNow == null ? '' : `<div class="form-metric"><div class="fm-label">${loamT('Speed')}</div><div class="fm-value">${U.speedNum(speedNow).toFixed(1)}<span class="fm-unit">${U.speedUnit()}</span></div><div class="fm-sub">${loamT('at this point')}</div></div>`;
-  const leanCard = `<div class="form-metric"><div class="fm-label">${loamT(seg ? 'Lean now' : 'Lean into turn')}</div><div class="fm-value">${Math.abs(lean).toFixed(0)}<span class="fm-unit">° ${loamT(sideLetter)}</span></div><div class="fm-sub">${loamT(seg ? 'peak {deg}° this segment' : 'peak {deg}° this turn', { deg: Math.abs(S.peakLean).toFixed(0) })}</div></div>`;
+  const leanCard = `<div class="form-metric"><div class="fm-label">${loamT(seg ? 'Phone tilt change' : 'Phone lean change')}</div><div class="fm-value">${Math.abs(lean).toFixed(0)}<span class="fm-unit">° ${loamT(sideLetter)}</span></div><div class="fm-sub">${loamT(seg ? 'peak {deg}° this segment' : 'peak {deg}° this turn', { deg: Math.abs(S.peakLean).toFixed(0) })}</div></div>`;
   let cards = speedCard + leanCard;
   let ghostCornerTile = '';   /* built in the segment branch, appended last so it never reflows its neighbors */
   if (S.headRel) {
-    const intoCls = headRel >= 8 ? 'into' : (headRel <= -8 && phase !== 'approach' ? 'late' : '');
-    const lead = S.leadTime;
-    const leadCls = lead == null ? '' : (lead >= 0 ? 'into' : 'late');
-    /* No lead means the head never sustained a turn-in through the apex, so there is nothing to time
-       (this is a single per-turn verdict, not a live value, so it never animates either way). A bare
-       "—" read as a broken/empty metric; say what happened and why instead. */
-    const leadTile = lead == null
-      ? `<div class="form-metric"><div class="fm-label">${loamT('Head turn-in lead')}</div>`
-        + `<div class="fm-value" style="font-size:13px;color:var(--text-muted);font-weight:500;line-height:1.4;">${loamT('No sustained turn-in')}</div>`
-        + `<div class="fm-sub">${loamT('gaze didn\'t hold {deg}&deg;+ into this corner', { deg: FORM_HEAD_TH })}</div></div>`
-      : `<div class="form-metric"><div class="fm-label">${loamT('Head turn-in lead')}</div>`
-        + `<div class="fm-value ${leadCls}">${lead >= 0 ? loamT('{v}s early', { v: lead.toFixed(2) }) : loamT('{v}s late', { v: Math.abs(lead).toFixed(2) })}</div>`
-        + `<div class="fm-sub">${loamT('head vs bike committing')}</div></div>`;
-    cards += `<div class="form-metric"><div class="fm-label">${loamT('Look-ahead now')}${S.headBadge ? `<span class="form-badge">${escapeHtml(loamT(S.headBadge))}</span>` : ''}</div>`
-      + `<div class="fm-value ${intoCls}">${headRel >= 0 ? '+' : ''}${headRel.toFixed(0)}<span class="fm-unit">° ${loamT(headRel >= 8 ? 'into turn' : (headRel <= -8 ? 'trailing' : 'centered'))}</span></div>`
-      + `<div class="fm-sub">${loamT('peak {v}°', { v: S.peakLook != null ? S.peakLook.toFixed(0) : '—' })}</div></div>`
-      + leadTile;
+    cards += `<div class="form-metric"><div class="fm-label">${loamT('Relative head turn')}${S.headBadge ? `<span class="form-badge">${escapeHtml(loamT(S.headBadge))}</span>` : ''}</div>`
+      + `<div class="fm-value">${headRel >= 0 ? '+' : ''}${headRel.toFixed(0)}<span class="fm-unit">° ${loamT(headRel >= 8 ? 'into turn' : (headRel <= -8 ? 'opposite' : 'centered'))}</span></div>`
+      + `<div class="fm-sub">${loamT('peak {v}°', { v: S.peakLook != null ? S.peakLook.toFixed(0) : '—' })}</div></div>`;
   } else if (seg) {
     /* Whole-segment, lean-only: show which way the rider is leaning right now and the cornering state,
        plus the segment's biggest lean either side, instead of the per-turn commitment/gaze cards. */
@@ -11428,17 +11618,12 @@ function formFrame() {
   } else {
     /* Lean-only: make lean the whole story instead of two empty dashes. */
     const dir = F.turn.direction === 'L' ? 'left' : 'right';
-    /* Commitment = how far the current corner-ward lean has built toward the turn's peak. Clamp to
-       0-100: the approach can carry a small counter-lean (negative), and peak is the clip max, so the
-       ratio is meaningful only in [0,100]. */
-    const buildPct = Math.max(0, Math.min(100, S.peakLean ? Math.round(Math.max(0, lean) / Math.max(1, S.peakLean) * 100) : 0));
-    cards += `<div class="form-metric"><div class="fm-label">${loamT('Commitment')}</div><div class="fm-value">${buildPct}<span class="fm-unit">%</span></div><div class="fm-sub">${loamT(dir === 'left' ? 'of your peak left lean, right now' : 'of your peak right lean, right now')}</div></div>`;
-    const chip = S.headStatus === 'noisy' ? loamT('Lean only · AirPods gaze too noisy this turn')
-      : loamT('Lean only · no AirPods on this {noun}', { noun: lexNounT(sportLex(displaySport(F.D))) });
-    cards += `<div class="form-metric"><div class="fm-label">${loamT('Gaze')}</div><div class="fm-value" style="font-size:13px;color:var(--text-muted);font-weight:500;line-height:1.4;">${chip}</div></div>`;
+    const chip = S.headStatus === 'noisy' ? loamT('Phone only · AirPods movement too noisy this turn')
+      : loamT('Phone only · no AirPods on this {noun}', { noun: lexNounT(sportLex(displaySport(F.D))) });
+    cards += `<div class="form-metric"><div class="fm-label">${loamT('Head movement')}</div><div class="fm-value" style="font-size:13px;color:var(--text-muted);font-weight:500;line-height:1.4;">${chip}</div></div>`;
   }
   if (S.wristRoll) {
-    cards += `<div class="form-metric"><div class="fm-label">${loamT('Hand (wrist roll)')}</div><div class="fm-value">${wristRoll >= 0 ? '+' : ''}${(wristRoll || 0).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">${loamT(seg ? 'range {v}° this segment' : 'range {v}° this turn', { v: S.wristRange != null ? S.wristRange.toFixed(0) : '—' })}</div></div>`;
+    cards += `<div class="form-metric"><div class="fm-label">${loamT('Wrist roll change')}</div><div class="fm-value">${wristRoll >= 0 ? '+' : ''}${(wristRoll || 0).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">${loamT(seg ? 'range {v}° this segment' : 'range {v}° this turn', { v: S.wristRange != null ? S.wristRange.toFixed(0) : '—' })}</div></div>`;
   }
   /* Sides: your median peak lean left vs right, flagging the weaker side. The current turn's side is
      highlighted so you can read this turn against your other-side norm.
@@ -11447,7 +11632,7 @@ function formFrame() {
      falls back to the whole ride. Those are different claims, the fallback is invisible otherwise, and
      the coach question quotes these same two numbers -- so whichever one is in play has to be legible
      here or the question would cite a comparison the rider never saw. */
-  if (S.medLeanL != null && S.medLeanR != null) {
+  if (!F.warning && S.medLeanL != null && S.medLeanR != null) {
     const here = seg ? (lean >= 0 ? 'R' : 'L') : F.turn.direction;
     /* Same funnel the coach and the notice use. The magnitudes are gravity roll and survive a
        fore-aft pose error, so they stay; it is the WHICH-SIDE verdict a laterally tilted body frame
@@ -11461,7 +11646,7 @@ function formFrame() {
     const fNoun = lexNoun(sportLex(displaySport(F.D)));
     const weaker = sidesBad
       ? loamT('which side is which is unreliable on this {noun}', { noun: lexNounT(sportLex(displaySport(F.D))) })
-      : (Math.abs(S.medLeanL - S.medLeanR) < 3 ? loamT('balanced') : loamT(S.medLeanL < S.medLeanR ? 'left leans less' : 'right leans less'));
+      : loamT('different corners; not a technique score');
     const hl = (on) => on ? 'color:#e0a458;' : '';
     const scope = S.leanScope === 'segment' ? loamT('this segment')
       : loamT('whole {noun}', { noun: lexNounT(sportLex(displaySport(F.D))) });
@@ -11473,6 +11658,7 @@ function formFrame() {
 
   /* Advance the parallel map marker to this frame's GPS position. */
   formUpdateMap(S, tNow);
+  formComparisonFrame(F, tNow);
 
   /* Keep the scrubber thumb in sync with playback (but not while the user is dragging it). */
   const sc = document.getElementById('formScrub');
@@ -15190,6 +15376,44 @@ function liftHistoryReference(trend) {
    the wording IS the behaviour, so a reworded copy that still produced a plausible question would
    pass an output comparison while the two halves said different things to the coach). */
 const LoamFormCoach = (function () {
+/*
+ * Form-replay coaching: the questions the Form Replay asks the AI coach -- about ONE corner, or
+ * about the WHOLE SEGMENT it sits on.
+ *
+ * WHY A SEGMENT QUESTION EXISTS, AND WHY IT IS NOT THE CORNER QUESTION WITH MORE NUMBERS. The coach's
+ * digest describes the RIDE: turn counts, a median apex radius, left/right lean medians, all pooled
+ * across everything ridden that day. Read a corner on a tight technical trail against that pool and
+ * the comparison is wrong in a way that sounds authoritative -- the day's median radius is inflated
+ * by the mellow flow trail and the fireroad, so a genuinely well-ridden tight corner reads as
+ * "tighter and slower than your usual" when it was neither. A rider who laps one segment wants that
+ * segment judged on its own terms. So the segment question carries the segment's OWN medians, the
+ * ride-wide ones beside them for contrast, and an explicit instruction about which is which.
+ *
+ * The same reasoning reaches the corner question through `pickLeanBaseline`: a corner inside a
+ * segment is compared to that segment's corners when there are enough of them to have a median, and
+ * says so when there are not.
+ *
+ * The Form Replay draws a rider leaning through a turn and a strip of tiles under it (speed, lean,
+ * look-ahead, head turn-in lead, hand roll, bike-vs-body, left/right medians). Every one of those is
+ * a measurement with a legend, and a legend explains what a number IS, not what it means for the
+ * rider. This builds the bridge: a question carrying exactly the numbers on screen, so the coach
+ * explains the corner the rider is looking at rather than the ride in general.
+ *
+ * WHY A QUESTION AND NOT A NEW API CALL PER TURN. The coach's digest already rides on `system` with
+ * every turn of the conversation, so a corner question needs no new context plumbing -- only the
+ * corner's own numbers, which are small. Asking as an ordinary conversation turn means one paid call
+ * when the rider ASKS, none while they scrub. A per-turn auto-explanation would have turned stepping
+ * through corners into a per-corner billing event, on a key that is bundled into the build.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO. It states measurements and asks for a reading; it never asserts
+ * a cause. Nothing in the pipeline saw the trail, the bike, the tyres, the surface or the rider's
+ * intent, so "you braked because you were late" is not a claim this data can support. The wording
+ * pushes the coach toward describing what the numbers show and what would be worth trying, and the
+ * jump-card rule applies here too: no telling anyone to carry more speed into anything.
+ *
+ * Units are pre-converted by the caller and their labels ride along, because the athlete's Units
+ * toggle governs the whole page and the coach prompt already forbids converting away from it.
+ */
 
 /** Present if the value is a finite number. Absent channels (no AirPods, no Watch) stay absent. */
 function has(v) {
@@ -15251,29 +15475,26 @@ function formTurnLines(facts) {
   if (has(f.radius)) lines.push(`Apex radius: ${num(f.radius, f.smallUnit)}`);
   if (has(f.apexSpeed)) lines.push(`Apex speed: ${num(f.apexSpeed, f.speedUnit)}`);
   if (has(f.scrub)) lines.push(`Speed scrubbed mid-corner: ${num(f.scrub, f.speedUnit)}`);
-  if (has(f.peakLean)) lines.push(`Peak lean into the corner: ${num(f.peakLean, 'degrees', 0)}`);
-  if (has(f.medLeanL) && has(f.medLeanR)) {
+  if (!f.calibrationWarning && has(f.peakLean)) lines.push(`Peak phone lean change from entry: ${num(f.peakLean, 'degrees', 0)}`);
+  if (!f.calibrationWarning && has(f.medLeanL) && has(f.medLeanR)) {
     /* Names the baseline it actually used. The tile above the button shows these same two numbers and
        carries the same label, so the question can never quote a comparison the rider is not looking
        at -- which is the whole reason `pickLeanBaseline` returns its scope rather than just numbers. */
     const where = (f.leanScope === 'segment' && f.segLabel)
       ? `on ${f.segLabel}, the segment this corner is on`
       : 'across the whole ride';
-    lines.push(`My median peak lean ${where}: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
+    lines.push(`My median phone lean change ${where}: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
   }
-  if (has(f.peakLook)) lines.push(`Peak look-ahead (head vs bike direction, AirPods): ${num(f.peakLook, 'degrees', 0)}`);
-  if (has(f.leadTime)) {
-    lines.push(f.leadTime >= 0
-      ? `Head turn-in lead: my head committed ${num(f.leadTime, 'seconds', 2)} BEFORE the bike`
-      : `Head turn-in lead: my head committed ${num(Math.abs(f.leadTime), 'seconds', 2)} AFTER the bike`);
-  }
-  if (has(f.wristRange)) lines.push(`Wrist roll range through the corner (Watch, a rough proxy for the bars): ${num(f.wristRange, 'degrees', 0)}`);
-  if (has(f.barInto)) {
-    /* Bike-vs-body separation, signed the way the tile reads it. */
-    const who = f.barInto > 3 ? 'bike leaned over more than my body'
-      : f.barInto < -3 ? 'my body leaned more than the bike'
-        : 'bike and body about even';
-    lines.push(`Bike vs body at the apex: ${num(Math.abs(f.barInto), 'degrees', 0)}, ${who}`);
+  if (!f.calibrationWarning && has(f.peakLook)) lines.push(`Peak relative head turn (AirPods, drift removed; not eye gaze): ${num(f.peakLook, 'degrees', 0)}`);
+  if (has(f.wristRange)) lines.push(`Wrist roll range through the corner (Watch; not bike lean): ${num(f.wristRange, 'degrees', 0)}`);
+  if (f.calibrationWarning) lines.push(`Measurement limit: ${f.calibrationWarning} Do not infer technique, turn-side weakness or head timing from these motion channels.`);
+  const c = f.comparison;
+  if (c) {
+    lines.push(`Matched corner: T${c.n} on ${c.label}, another lap in this recording. Aligned at detected entry, apex and exit; not at equal elapsed time.`);
+    for (const [label, a, b] of [['Entry', f.entrySpeed, c.entrySpeed], ['Apex', f.apexSpeed, c.apexSpeed], ['Exit', f.exitSpeed, c.exitSpeed]]) {
+      if (has(a) && has(b)) lines.push(`${label} speed, this lap vs reference: ${num(a, f.speedUnit)} vs ${num(b, f.speedUnit)}`);
+    }
+    if (has(c.durationDeltaS)) lines.push(`Entry-to-exit duration difference: ${num(c.durationDeltaS, 'seconds')} (positive means this corner took longer; detected boundaries, not a whole-lap gap).`);
   }
   return lines;
 }
@@ -15287,14 +15508,14 @@ function formTurnQuestion(facts) {
   const label = f.n != null ? `T${f.n}` : 'this turn';
   const lines = formTurnLines(f);
   const missing = [];
-  if (!has(f.peakLook) && !has(f.leadTime)) missing.push('no AirPods gaze data on this corner');
+  if (!has(f.peakLook)) missing.push('no usable AirPods head movement on this corner');
   if (!has(f.wristRange)) missing.push('no Apple Watch wrist data on this corner');
   const gap = missing.length ? `\n\nNot measured here: ${missing.join('; ')}. Do not guess at them.` : '';
   /* Which corners this one should be read against. The session data on `system` describes the whole
      ride, so left to itself the coach compares a corner on a tight technical segment to a median that
      also contains the mellow trail and the fireroad -- and reports the difference as though it were
      about how the corner was ridden. */
-  const scope = !f.segLabel ? ''
+  const scope = f.calibrationWarning || !f.segLabel ? ''
     : f.leanScope === 'segment'
       ? `\n\nRead this corner against the other corners on ${f.segLabel} -- the medians above are that `
         + `segment's, not the ride's. The session data you were given pools every trail I rode today, `
@@ -15304,9 +15525,12 @@ function formTurnQuestion(facts) {
         + `its own lean median, so the medians above are ride-wide and pool every trail I rode today. `
         + `Do not read a left/right asymmetry out of this single corner against them.`;
   return `I am watching the Form Replay for corner ${label} -- the animated rider and the tiles under it. `
-    + `Explain what it is showing me.\n\n${lines.join('\n')}${gap}${scope}\n\n`
+    + `Explain the observed differences if a matched corner is provided; otherwise describe this corner.\n\n${lines.join('\n')}${gap}${scope}\n\n`
     + `Tell me what these numbers say about how I rode this one corner, and one thing worth trying next time. `
-    + `Read only these numbers: nothing here saw the trail, the surface, my line, or what the bike was doing, `
+    + `Phone lean is a change from entry, not an absolute body angle. Head motion is not eye gaze and `
+    + `wrist roll is not bike lean. More lean or less speed loss is not automatically better; left/right `
+    + `medians describe different corners, not a rider weakness. Read only these numbers: nothing here `
+    + `saw the trail, the surface, my line, or what the bike was doing, `
     + `so describe what was measured rather than asserting why it happened.`;
 }
 
@@ -15318,6 +15542,7 @@ function formTurnQuestion(facts) {
 function formSegmentLines(facts) {
   const f = facts || {};
   const lines = [];
+  if (f.calibrationWarning) lines.push(`Measurement limit: ${f.calibrationWarning} Do not infer technique or turn-side weakness from motion channels.`);
   if (has(f.durationS)) lines.push(`Time: ${mmss(f.durationS)}`);
   /* Distance and drop arrive PRE-FORMATTED, unlike every other figure here, because their unit is
      chosen by magnitude (km vs m, mi vs ft) rather than fixed -- and because these exact strings are
@@ -15340,13 +15565,13 @@ function formSegmentLines(facts) {
   }
   if (has(f.tightestRadius)) lines.push(`Tightest corner on this segment: ${num(f.tightestRadius, f.smallUnit)}`);
   if (has(f.medApexSpeed)) lines.push(`Median apex speed on this segment: ${num(f.medApexSpeed, f.speedUnit)}`);
-  if (has(f.medLeanL) && has(f.medLeanR)) {
-    lines.push(`My median peak lean on this segment: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
-  } else if (has(f.turnCount)) {
+  if (!f.calibrationWarning && has(f.medLeanL) && has(f.medLeanR)) {
+    lines.push(`My median phone lean change on this segment: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
+  } else if (!f.calibrationWarning && has(f.turnCount)) {
     lines.push(`Too few corners per side on this segment for a per-side lean median, so there is no left/right asymmetry to read here.`);
   }
-  if (has(f.rideMedLeanL) && has(f.rideMedLeanR)) {
-    lines.push(`For contrast only, my median peak lean across the whole ride: ${num(f.rideMedLeanL, 'degrees', 0)} left, ${num(f.rideMedLeanR, 'degrees', 0)} right`);
+  if (!f.calibrationWarning && has(f.rideMedLeanL) && has(f.rideMedLeanR)) {
+    lines.push(`For contrast only, my median phone lean change across the whole ride: ${num(f.rideMedLeanL, 'degrees', 0)} left, ${num(f.rideMedLeanR, 'degrees', 0)} right`);
   }
   if (has(f.scrubbedCount)) {
     const worst = (f.worstScrub || []).map(o => `T${o.n} ${o.direction === 'L' ? 'left' : 'right'} (-${num(o.amount, f.speedUnit)})`);
@@ -15369,7 +15594,7 @@ function formSegmentQuestion(facts) {
   const label = f.label ? `"${f.label}"` : 'this segment';
   const lines = formSegmentLines(f);
   const missing = [];
-  if (!f.hasGaze) missing.push('no AirPods gaze data on this segment');
+  if (!f.hasGaze) missing.push('no AirPods head movement on this segment');
   if (!f.hasWrist) missing.push('no Apple Watch wrist data on this segment');
   const gap = missing.length ? `\n\nNot measured here: ${missing.join('; ')}. Do not guess at them.` : '';
   return `I am watching the whole-segment Form Replay for ${label} -- my lean, left and right, through `
@@ -15382,7 +15607,8 @@ function formSegmentQuestion(facts) {
     + `this trail. Tell me what these numbers say about how I rode this segment, and one thing worth `
     + `trying on my next lap of it. Read only these numbers: nothing here saw the trail, the surface, `
     + `my line, or what the bike was doing, so describe what was measured rather than asserting why it `
-    + `happened.`;
+    + `happened. Phone tilt is relative to this segment’s median, not an absolute body angle. More lean `
+    + `or less speed loss is not automatically better; different left/right corners do not establish a rider weakness.`;
 }
 
 return { formTurnLines, formTurnQuestion, formSegmentLines, formSegmentQuestion, pickLeanBaseline, LEAN_BASE_MIN_PER_SIDE };
@@ -32696,6 +32922,46 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  /* Corner replay measurements and lap comparison. */
+  'Phone tilt swings too far in this corner. Lean comparisons are unavailable.': 'Telefonhelningen svinger for mye i denne svingen. Sammenligning av helning er ikke tilgjengelig.',
+  'The phone moved. Lean comparisons are unavailable.': 'Telefonen flyttet seg. Sammenligning av helning er ikke tilgjengelig.',
+  'Calibration is uncertain. Treat this animation as approximate; lean comparisons are unavailable.': 'Kalibreringen er usikker. Animasjonen er omtrentlig; sammenligning av helning er ikke tilgjengelig.',
+  'Experimental calibration. Treat this animation as approximate; lean comparisons are unavailable.': 'Eksperimentell kalibrering. Animasjonen er omtrentlig; sammenligning av helning er ikke tilgjengelig.',
+  'Lap differences': 'Forskjeller mellom runder',
+  'T{n} · Δ {v}': 'Sving {n} · forskjell {v}',
+  'No reliable matching corner in another lap of this recording. Speed loss alone does not identify a mistake.': 'Ingen pålitelig samsvarende sving i en annen runde i opptaket. Fartstap alene viser ikke at noe ble gjort feil.',
+  'Compare this corner with': 'Sammenlign denne svingen med',
+  'No comparison': 'Ingen sammenligning',
+  'A · this lap': 'A · denne runden',
+  'B · reference lap': 'B · referanserunden',
+  'Solid A, dashed B. Entry, apex and exit are aligned; time between these points is stretched to compare the motion.': 'Heltrukken A, stiplet B. Inngang, svingtopp og utgang er stilt opp mot hverandre; tiden mellom punktene strekkes for å sammenligne bevegelsen.',
+  'Lean comparison unavailable for this recording or reference corner.': 'Sammenligning av helning er ikke tilgjengelig for dette opptaket eller referansesvingen.',
+  'Recorded GPS speed': 'Registrert GPS-fart',
+  'Phone lean change from entry': 'Endring i telefonhelning fra inngangen',
+  'Corner speeds · FIT when available, otherwise GPS': 'Fart i svingen · FIT når tilgjengelig, ellers GPS',
+  'Entry → exit duration: A {a}s · B {b}s · Δ {delta}s.': 'Tid fra inngang til utgang: A {a}s · B {b}s · forskjell {delta}s.',
+  'The duration difference uses detected corner boundaries. It is not a whole-lap gap or proof of better technique.': 'Tidsforskjellen bruker de registrerte svinggrensene. Den er ikke en tidsluke for hele runden eller et bevis på bedre teknikk.',
+  'B at this phase: {speed}': 'B i denne fasen: {speed}',
+  'phone lean change {deg}°': 'endring i telefonhelning {deg}°',
+  'B · phone Δ {deg}°': 'B · telefonendring {deg}°',
+  'Schematic · phone tilt relative to this segment’s median. Body position and equipment tilt are not measured.': 'Skjematisk · telefonhelning relativt til medianen for dette segmentet. Kroppsstilling og utstyrets helning er ikke målt.',
+  'Schematic · phone tilt change from corner entry. Body position and equipment tilt are not measured.': 'Skjematisk · endring i telefonhelning fra svinginngangen. Kroppsstilling og utstyrets helning er ikke målt.',
+  'AirPods show relative head movement, not eye gaze. Watch roll is wrist movement, not equipment angle.': 'AirPods viser relativ hodebevegelse, ikke blikkretning. Klokkens rulling er håndleddsbevegelse, ikke utstyrets vinkel.',
+  'Relative head turn': 'Relativ hodedreining',
+  'opposite': 'motsatt',
+  'Phone lean change': 'Endring i telefonhelning',
+  'Phone tilt change': 'Endring i telefonvinkel',
+  'Wrist roll change': 'Endring i håndleddsrulling',
+  'Tilt · phone': 'Helning · telefon',
+  'Head · AirPods': 'Hode · AirPods',
+  'Wrist · Watch': 'Håndledd · Watch',
+  'Phone only · AirPods movement too noisy this turn': 'Kun telefon · for mye støy i AirPods-bevegelsen i denne svingen',
+  'Phone only · no AirPods on this {noun}': 'Kun telefon · ingen AirPods på denne {noun}',
+  'AirPods head tracking was too noisy on this turn; head movement hidden.': 'AirPods-sporingen hadde for mye støy i denne svingen; hodebevegelsen er skjult.',
+  'Relative head movement is shown when you pick a single turn.': 'Relativ hodebevegelse vises når du velger én sving.',
+  'different corners; not a technique score': 'ulike svinger; ingen teknikkvurdering',
+  'Head movement': 'Hodebevegelse',
+  'PHONE TILT': 'TELEFONHELNING',
   'Use a limit no higher than your current volume, or choose Build weekly hours.': 'Bruk en grense som ikke overstiger dagens volum, eller velg Øk ukentlige timer.',
   'Strength': 'Styrke',
   'Hiking opens the Walking recorder.': 'Fottur åpner opptak for gåtur.',
@@ -34979,10 +35245,8 @@ const LOAM_NB = {
     'AirPods-sporingen av hodet var for urolig i denne svingen (vibrasjon); blikket er skjult.',
   'No AirPods head data for this turn.': 'Ingen AirPods-data om hodet i denne svingen.',
   'No Apple Watch wrist data this turn.': 'Ingen Apple Watch-data fra håndleddet i denne svingen.',
-  'Turns show body lean from behind; jumps use a side-view schematic whose height and pose are illustrative. The map follows the replay. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.':
-    'Svinger viser kroppens helning bakfra; hopp vises som en skisse fra siden der høyde og positur bare er illustrasjon. Kartet følger avspillingen. Knappene under <strong>Mest fartstap</strong> hopper til svingene der du mistet mest fart.',
-  'On the left, the ghost needle marks this turn\'s peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where you are heading (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the figure on the left, while the ground stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.':
-    'Til venstre markerer spøkelsesnåla den største helningen i denne svingen, og buen og fargen går fra grå (innkjøring) til grønn (i svingen) og gul (utgang). Når AirPods gir rene data, viser blikknåla hvor du ser i forhold til der du er på vei (grønt = inn i svingen). Til høyre betyr «alltid oppover» at en venstresving bøyer til venstre her også, i samsvar med figuren til venstre, samtidig som terrenget er til å kjenne igjen; markøren beveger seg langs sporet i takt med avspillingen, og det lille kompasset viser hvor nord havnet.',
+  'Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.': 'Bruk Forskjeller mellom runder for å sammenligne samme sving mellom runder i dette opptaket. Mest fartstap fremhever fartstap i én sving; det betyr ikke at noe ble gjort feil.',
+  'The figure is a schematic driven by phone tilt. The pale needle marks peak tilt change; the head needle shows relative AirPods movement with drift removed. The map locates the recording, not a precise line through the terrain. GPS speed traces and corner speeds from a FIT file may differ.': 'Figuren er skjematisk og styres av telefonhelning. Den lyse nålen markerer størst endring; hodenålen viser relativ AirPods-bevegelse med drift fjernet. Kartet plasserer opptaket, ikke et presist sporvalg. GPS-fart og svingfart fra en FIT-fil kan avvike.',
   'Lean now': 'Helning nå',
   'Lean into turn': 'Helning inn i svingen',
   'peak {deg}° this turn': 'topp {deg}° i denne svingen',
@@ -36204,8 +36468,7 @@ const LOAM_NB = {
     'de to lengste nedkjøringene markert med annoteringer · z-normalisert [fart, kadens], Sakoe-Chiba-bånd 30 %',
   'how far behind/ahead the second descent runs at each point of the first':
     'hvor langt bak/foran den andre nedkjøringen ligger i hvert punkt av den første',
-  'replay one critical turn (lean, gaze, hand) or a whole segment end to end':
-    'spill av én kritisk sving (lening, blikk, hånd) eller et helt segment fra ende til ende',
+  'compare a corner across laps, or replay a segment': 'sammenlign en sving mellom runder, eller spill av et segment',
   'hang + takeoff from Levo/Specialized FIT · landing measured by phone or wrist':
     'svevetid + utgangsfart fra Levo/Specialized-FIT · landing målt av telefon eller håndledd',
   'estimated from phone freefall + landing · attach a Specialized FIT for exact hang':
@@ -36717,8 +36980,8 @@ function localizeStaticChrome() {
   /* Fragmented by its own <strong>Loam Capture</strong>, so it is replaced whole for the same reason
      the two either side of it are. */
   html('#roadUpsellStaticCta', 'Next ride: start <strong>Loam Capture</strong> on your phone (jersey pocket is fine) with AirPods in, ride as usual, then attach this bike\'s FIT to the session. Add your Apple Watch for heart rate and handlebar lean. Power stays from the meter; everything above is added from motion.');
-  html('#formPictureLead', 'Turns show body lean from behind; jumps use a side-view schematic whose height and pose are illustrative. The map follows the replay. The <strong>Most scrubbed</strong> chips jump to the turns where you bled the most speed.');
-  text('#formPictureMore', 'On the left, the ghost needle marks this turn\'s peak lean, and the arc and tint go grey (approach), green (cornering), amber (exit). When AirPods are clean, the gaze needle shows where you are looking relative to where you are heading (green = into the corner). On the right, heading-up means a left turn bends left here too, matching the figure on the left, while the ground stays recognizable; the marker advances along the track in step with the replay, and the small compass shows where north ended up.');
+  html('#formPictureLead', 'Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.');
+  text('#formPictureMore', 'The figure is a schematic driven by phone tilt. The pale needle marks peak tilt change; the head needle shows relative AirPods movement with drift removed. The map locates the recording, not a precise line through the terrain. GPS speed traces and corner speeds from a FIT file may differ.');
   text('#backToCompareBtn', 'Back to comparison');
   title('#backToCompareBtn', 'Return to the cross-session comparison');
   selectLabel('#analysisView', 'View');
@@ -49833,7 +50096,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'ab28045e8 · 2026-09-30';
+const LOAM_BUILD = '2f138b8ba · 2026-09-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
