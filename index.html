@@ -1404,6 +1404,12 @@
   /* The jump drawn to scale under the hero number (jumpArcSVG). Full width of the hero box, so the
      arc reads as a length rather than as an icon. */
   .jump-hero .jump-arc { flex: 1 1 100%; width: 100%; max-width: 460px; height: auto; display: block; margin-top: 6px; }
+  #jumpSummary .jump-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+  #jumpSummary .jump-arc { grid-column: 1 / -1; justify-self: center; }
+  #jumpReplayLongest { grid-column: 1 / -1; justify-self: center; min-height: 44px; padding: 8px 18px; }
+  @media (max-width: 700px) {
+    #jumpSummary .jump-hero .meta { grid-column: 1 / -1; margin-left: 0; text-align: left; }
+  }
   .jump-hero .lbl { font-family: 'JetBrains Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--text-muted); }
   .jump-hero .meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-left: auto; text-align: right; }
   .jumps-details { padding: 0; margin-top: 14px; }
@@ -9864,41 +9870,94 @@ function formSelectJump(D, J) {
     + (J.fitHang != null && J.timingMeasured ? ' ' + loamT('FIT hang: {hang} s; the replay clock uses the local phone freefall.', { hang: loamNum(J.fitHang, 2) }) : '');
   formInitMap(S); formSetPlaying(false); formFrame();
 }
+/* Presentation only: the clock is recorded, the path and rider pose are illustrative. */
+function jumpReplayPose(J, t) {
+  const u = Math.max(0, Math.min(1, (t - J.tStart) / J.hang));
+  const approach = Math.max(0, Math.min(1, t - J.tStart + 1));
+  const exit = Math.max(0, Math.min(1, t - J.tEnd));
+  const air = t >= J.tStart && t < J.tEnd;
+  const load = t < J.tStart ? Math.sin(Math.PI * Math.max(0, 1 + (t - J.tStart) / 0.35)) : 0;
+  const settle = t >= J.tEnd && exit < 0.4 ? Math.sin(Math.PI * exit / 0.4) * Math.exp(-3 * exit) : 0;
+  return { x: t < J.tStart ? 58 + 50 * approach : air ? 108 + 144 * u : 252 + 50 * exit,
+    y: 190 - (air ? 44 * 4 * u * (1-u) : 0), pitch: air ? -12 * Math.sin(2 * Math.PI * u) : 0,
+    crouch: 6 * load + 12 * settle, u };
+}
+function formJumpScene(F) {
+  const J = F.jump, x = t => 28 + (t - F.S.w0) / F.dur * 308;
+  const valid = (J.force || []).filter(p => Number.isFinite(p.g));
+  const ceiling = Math.max(3, Math.ceil(Math.max(0, ...valid.map(p => p.g))));
+  let pen = false, prev = null;
+  const trace = (J.force || []).map(p => {
+    if (!Number.isFinite(p.g)) { pen = false; prev = null; return ''; }
+    const cmd = pen && p.t - prev <= 0.06 ? 'L' : 'M'; pen = true; prev = p.t;
+    return cmd + x(p.t).toFixed(2) + ',' + (272 - Math.max(0, p.g) / ceiling * 34).toFixed(2);
+  }).join(' ');
+  const takeoff = x(J.tStart), landing = x(J.tEnd);
+  const txt = (v) => escapeHtml(loamT(v));
+  return `<defs><linearGradient id="jumpSky" x2="0" y2="1"><stop stop-color="#1d2a2b"/><stop offset="1" stop-color="#101b1b"/></linearGradient></defs>
+    <rect width="360" height="300" fill="#101a1b"/>
+    <rect width="360" height="204" fill="url(#jumpSky)"/>
+    <text data-jump-phase x="18" y="29" fill="#f3f4ed" font-size="20" font-weight="600"></text>
+    <text data-jump-clock x="342" y="28" text-anchor="end" fill="#ebbd7a" font-size="13" font-family="monospace"></text>
+    <text x="18" y="47" fill="#a5b6b2" font-size="10">${txt('SIDE VIEW · SCHEMATIC FLIGHT')}</text>
+    <path d="M0 173 Q65 158 117 168 T240 161 T360 167 V204 H0Z" fill="#243331" opacity=".5"/>
+    <path d="M0 190 H360 V204 H0Z" fill="#35423b"/>
+    <path d="M0 190 H360" stroke="#768577" stroke-width="1"/>
+    <path d="M108 190 Q180 102 252 190" fill="none" stroke="#e8b16c" stroke-width="1.5" opacity=".32"/>
+    <path data-jump-trail fill="none" stroke="#e8b16c" stroke-width="2"/>
+    <g fill="#ebbd7a"><circle cx="108" cy="190" r="3"/><circle cx="252" cy="190" r="3"/></g>
+    <ellipse data-jump-shadow cy="191" rx="47" ry="4" fill="#050b0d" opacity=".3"/>
+    <g data-jump-rider>${jumpBikeSVG(avatarPref() === 'classic')}</g>
+    <path d="M0 204 H360" stroke="#3e514c"/>
+    <text x="18" y="223" fill="#a5b6b2" font-size="11">${txt('Phone force')}</text>
+    <text data-jump-force x="342" y="223" text-anchor="end" fill="#eaf1e5" font-size="12" font-family="monospace"></text>
+    <rect x="${takeoff}" y="234" width="${landing-takeoff}" height="42" fill="#e8b16c" opacity=".09"/>
+    ${valid.length ? `<path d="M28 238 H336 M28 272 H336" stroke="#30433e"/>
+      <text x="22" y="241" fill="#a5b6b2" font-size="9" text-anchor="end">${ceiling}g</text>
+      <text x="22" y="275" fill="#a5b6b2" font-size="9" text-anchor="end">0</text>
+      <path data-jump-force-trace d="${trace}" fill="none" stroke="#95c5a8" stroke-width="1.6" stroke-linejoin="round"/>`
+      : `<text x="180" y="259" fill="#a5b6b2" font-size="12" text-anchor="middle">${txt('No phone force recorded')}</text>`}
+    <path d="M${takeoff} 234 V278 M${landing} 234 V278" stroke="#ba945f" stroke-width="1"/>
+    <text x="${takeoff-5}" y="291" text-anchor="end" fill="#b9c8c1" font-size="10">${txt('Takeoff')}</text>
+    <text x="${landing+5}" y="291" fill="#b9c8c1" font-size="10">${txt('Landing')}</text>
+    <path data-jump-cursor d="M0 234 V278" stroke="#f3f4ed" stroke-width="1.5"/>`;
+}
 function formJumpFrame() {
   const F = _form, J = F.jump, t = F.S.w0 + F.tau;
-  const phase = LoamReplay.jumpPhase(J, t), airborne = t >= J.tStart && t < J.tEnd;
-  const u = Math.max(0, Math.min(1, (t - J.tStart) / J.hang));
-  const lift = airborne ? 65 * 4 * u * (1 - u) : 0;
-  const pulse = phase === 'Landing' ? Math.max(0, 1 - (t - J.tEnd) / 0.2) : 0;
-  const force = LoamReplay.near(J.force || [], t, 0.04);
-  let pen = false;
-  const trace = (J.force || []).map(p => {
-    if (p.g == null) { pen = false; return ''; }
-    const cmd = pen ? 'L' : 'M'; pen = true;
-    return cmd + ((p.t-F.S.w0)/F.dur*300+30).toFixed(1) + ',' + (282-Math.min(10,p.g)*3).toFixed(1);
-  }).join(' ');
-  document.getElementById('formReplaySvg').innerHTML = '<rect width="360" height="300" fill="#10170e"/>'
-    + '<text x="20" y="30" fill="#f1f5f9" font-size="20">' + loamT(phase) + '</text>'
-    + '<text x="20" y="49" fill="#9fb094" font-size="11">' + loamT('SIDE VIEW · SCHEMATIC FLIGHT') + '</text>'
-    + '<line x1="24" y1="234" x2="336" y2="234" stroke="#58684e" stroke-width="2"/>'
-    + '<ellipse cx="180" cy="236" rx="' + (35 + pulse * 40) + '" ry="6" fill="#e0a458" opacity="' + (0.2 + pulse * 0.6) + '"/>'
-    + '<g transform="translate(0 ' + (-lift).toFixed(1) + ')" fill="none" stroke="#e0a458" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">'
-    + '<circle cx="125" cy="210" r="23"/><circle cx="233" cy="210" r="23"/>'
-    + '<path d="M125 210 L160 167 L190 210 Z M160 167 L218 164 L190 210 M233 210 L214 154 L227 152"/>'
-    + '<path d="M159 166 L173 138 L199 128 L216 153 M172 139 L189 171 L185 207" stroke="#d6dde4" stroke-width="7"/>'
-    + '<circle cx="205" cy="115" r="11" stroke="#d6dde4"/></g>'
-    + '<path d="' + trace + '" fill="none" stroke="#7fb069" stroke-width="1.5"/>'
-    + '<text x="' + (30+(J.tStart-F.S.w0)/F.dur*300).toFixed(1) + '" y="252" fill="#9fb094" font-size="9" text-anchor="end">' + loamT('Takeoff') + '</text>'
-    + '<text x="' + (30+(J.tEnd-F.S.w0)/F.dur*300).toFixed(1) + '" y="252" fill="#9fb094" font-size="9">' + loamT('Landing') + '</text>'
-    + '<line x1="' + (30 + F.tau / F.dur * 300).toFixed(1) + '" y1="251" x2="' + (30 + F.tau / F.dur * 300).toFixed(1) + '" y2="287" stroke="#fff"/>'
-    + '<text x="22" y="298" fill="#9fb094" font-size="10">' + loamT('PHONE FORCE · 0–10 g DISPLAY') + '</text>';
+  const svg = document.getElementById('formReplaySvg'), kit = avatarPref();
+  // Keep the scene and force trace mounted; only the moving parts change each frame.
+  if (F.jumpScene !== svg.firstElementChild || F.jumpKit !== kit) {
+    svg.innerHTML = formJumpScene(F); F.jumpScene = svg.firstElementChild; F.jumpKit = kit;
+  }
+  const pose = jumpReplayPose(J, t), force = LoamReplay.near(J.force || [], t, 0.04);
+  const node = name => svg.querySelector('[data-jump-' + name + ']');
+  node('phase').textContent = loamT(LoamReplay.jumpPhase(J, t));
+  node('clock').textContent = (t < J.tStart ? '−' : '+') + loamNum(Math.abs(t - J.tStart), 2) + ' s';
+  node('rider').setAttribute('transform', `translate(${pose.x} ${pose.y}) rotate(${pose.pitch}) scale(.76)`);
+  const c = pose.crouch;
+  node('body').setAttribute('transform', `translate(0 ${c})`);
+  node('leg').setAttribute('d', `M-16 ${-67+c} L${8+c/3} ${-47+c/2} L0 -27`);
+  node('far-leg').setAttribute('d', `M-20 ${-67+c} L${-2+c/3} ${-48+c/2} L-10 -25`);
+  node('arm').setAttribute('d', `M6 ${-89+c} L${20+c/3} ${-74+c/2} L32 -66`);
+  for (const wheel of svg.querySelectorAll('[data-jump-wheel]')) {
+    wheel.setAttribute('transform', `rotate(${(pose.x-58)/(.76*20)*180/Math.PI} ${wheel.dataset.jumpWheel} -20)`);
+  }
+  node('shadow').setAttribute('cx', pose.x);
+  node('shadow').setAttribute('rx', 47 - (190-pose.y)*0.3);
+  node('shadow').setAttribute('opacity', 0.3 - (190-pose.y)*0.003);
+  const u = pose.u;
+  node('trail').setAttribute('d', `M108 190 Q${108+72*u} ${190-88*u} ${108+144*u} ${190-176*u*(1-u)}`);
+  node('cursor').setAttribute('transform', `translate(${28+F.tau/F.dur*308} 0)`);
+  node('force').textContent = force && force.g != null ? loamNum(force.g, 1) + ' g' : '—';
   const card = (label, value) => '<div class="form-metric"><div class="fm-label">' + label + '</div><div class="fm-value">' + value + '</div></div>';
-  const speedNow = F.S.spdT.length ? formInterp(F.S.spdT,F.S.spdV,t) : null;
-  document.getElementById('formMetrics').innerHTML = card(loamT(J.timingMeasured ? 'Air time · phone estimate' : 'Air time · FIT'), loamNum(J.hang, 2) + ' s')
+  const speedNow = formRecordedSpeed(F.S, t);
+  const metrics = card(loamT(J.timingMeasured ? 'Air time · phone estimate' : 'Air time · FIT'), loamNum(J.hang, 2) + ' s')
     + (J.speed != null ? card(loamT('Takeoff speed · FIT'), U.speed(J.speed)) : '')
     + (speedNow != null ? card(loamT('Speed now · GPS'), U.speed(speedNow)) : '')
     + (force && force.g != null ? card(loamT('Phone force now'), loamNum(force.g, 1) + ' g') : '')
     + (J.landingG != null ? card(loamT(J.landingSource === 'Watch' ? 'Landing peak · Watch' : 'Landing peak · Phone'), loamNum(J.landingG, 1) + ' g') : '');
+  const strip = document.getElementById('formMetrics');
+  if (strip.innerHTML !== metrics) strip.innerHTML = metrics;
   formUpdateMap(F.S, t);
   document.getElementById('formScrub').value = Math.round(F.tau / F.dur * 1000);
   formExtraFrame();
@@ -35135,6 +35194,10 @@ const LOAM_NB = {
   'Takeoff': 'Avsats',
   'Airborne': 'I lufta',
   'SIDE VIEW · SCHEMATIC FLIGHT': 'SETT FRA SIDEN · SKISSERT SVEV',
+  'Phone force': 'Kraft i telefonen',
+  'No phone force recorded': 'Ingen kraftdata fra telefonen',
+  'Replay longest jump': 'Spill av det lengste hoppet',
+  'Illustrated level landing': 'Illustrert landing på flatt underlag',
   'PHONE FORCE · 0–10 g DISPLAY': 'KRAFT I TELEFONEN · VIST 0–10 g',
   'Air time · phone estimate': 'Svevetid · anslag fra telefon',
   'Air time · FIT': 'Svevetid · FIT',
@@ -46167,7 +46230,7 @@ async function shareJumpStats(D) {
         });
       } catch (e) { art = null; }
     }
-    const ART_H = art ? 300 : 0;
+    const ART_H = art ? 580 : 0;
     const canvas = document.createElement('canvas');
     canvas.width = 1080; canvas.height = 1200 + ART_H;
     const ctx = canvas.getContext('2d');
@@ -46183,7 +46246,7 @@ async function shareJumpStats(D) {
     text(m.maxDist != null ? 'LONGEST JUMP' : 'BIGGEST AIR', 60, 260, 26, '#afbaa7');
     text(m.maxDist != null ? U.small(m.maxDist) : `${m.heroMs ?? '—'} ms`, 60, 360, 86, '#e0a458');
     if (m.maxDist != null) text(`${U.speed(m.longest.speed_mps)} takeoff × ${Math.round(m.longest.hang * 1000)} ms hang`, 60, 411, 28);
-    if (art) ctx.drawImage(art, 40, 440, 1000, 1000 * 132 / 340);
+    if (art) ctx.drawImage(art, 40, 440, 1000, 1000 * 196 / 340);
     const o = ART_H;
     text(`${m.n} jump${m.n === 1 ? '' : 's'}${m.nBig ? ` · ${m.nBig} over ${U.small(JUMP_BIG_M)}` : ''}`, 60, 474 + o, 32);
     const stats = [
@@ -46210,87 +46273,70 @@ async function shareJumpStats(D) {
   } catch (e) { console.warn('jump stats export failed', e); loamCardShareFailed(); }
 }
 
-/* THE LONGEST JUMP, DRAWN TO SCALE (owner, 2026-09-20: "can we get cooler illustrations for the jump
-   card? maybe indicate how long that longest jump was?"). The top jumps as arcs over one ground line,
-   the longest in the accent colour with a dimension line under it and bike lengths ticked along the
-   ground, so "20 ft" is something the eye can size rather than a number to take on trust.
-
-   EVERY PIXEL IS ONE SCALE, HORIZONTAL AND VERTICAL ALIKE, and the arc's height is not a new claim:
-   on the level ground the distance already assumes (`dist = takeoff x hang`, see the jump reads in
-   CLAUDE.md), a projectile airborne for `hang` seconds peaks at g*hang^2/8 above its takeoff, so the
-   shape follows from the two numbers the card already shows. The peak is NOT labelled -- it would be
-   a third figure that reads as measured and is not -- and the card's own caveat about level ground
-   covers the drawing exactly as it covers the distance.
-
-   A bike length is a SCALE REFERENCE, not a measurement: ~1.8 m is a typical trail bike's
-   tyre-to-tyre length, and the label says "about". Pure string output with explicit colours, so the
-   share card can rasterize the same drawing (an SVG with no CSS variables and no foreignObject draws
-   into a canvas without tainting it). */
+/* The distance and level-ground arc share one scale. Height is inferred from hang time,
+   never reported as measured. The bike's 1.8 m tyre-to-tyre length is a scale reference. */
 const JUMP_BIKE_LENGTH_M = 1.8;
-/* The page's own tokens as literal colours, so the on-page drawing follows light/dark and the winter
-   palette while the SVG stays self-contained. */
+/* Shared side-profile art; local coordinates put both tyre contact patches at y=0. */
+function jumpBikeSVG(classic = false) {
+  const wheels = [-48, 48].map(x => `<circle cx="${x}" cy="-20" r="20" fill="#142024" stroke="#0a1013" stroke-width="5"/>
+    <circle cx="${x}" cy="-20" r="18" fill="none" stroke="#98aaa8" stroke-width="1.2"/>
+    <g data-jump-wheel="${x}" stroke="#617879" stroke-width=".8"><path d="M${x-17} -20 h34 M${x} -37 v34 M${x-12} -32 l24 24 M${x-12} -8 l24 -24"/></g>
+    <circle cx="${x}" cy="-20" r="3" fill="#c5d2ce"/>`).join('');
+  return `<g stroke-linecap="round" stroke-linejoin="round">${wheels}
+    <path data-jump-far-leg="" d="M-20 -67 L-2 -48 L-10 -25" fill="none" stroke="#243b4c" stroke-width="9"/>
+    <path d="M-14 -27 L-10 -21 H-1" fill="none" stroke="#101c22" stroke-width="6"/>
+    <path d="M-48 -20 L-18 -53 L0 -22 Z M-18 -53 L30 -56 L0 -22 M48 -20 L28 -65 L38 -67" fill="none" stroke="#db9a56" stroke-width="4"/>
+    <path d="M33 -52 L45 -25 M-17 -49 L2 -39" stroke="#d6e1d8" stroke-width="3"/>
+    <path d="M-21 -52 L-23 -61 M-30 -61 H-14" stroke="#161e22" stroke-width="4"/>
+    <circle cx="0" cy="-22" r="5" fill="#18282b" stroke="#cbd4cf" stroke-width="1.5"/>
+    <path d="M0 -22 L10 -19 H16" fill="none" stroke="#cbd4cf" stroke-width="2"/>
+    <path data-jump-leg="" d="M-16 -67 L8 -47 L0 -27" fill="none" stroke="#477594" stroke-width="10"/>
+    <path d="M-3 -28 L0 -21 L11 -20" fill="none" stroke="#101c22" stroke-width="6"/>
+    <g data-jump-body="">
+      <path d="M-21 -68 Q-27 -76 -17 -84 L2 -97 Q9 -96 14 -86 L-5 -65Z" fill="${classic ? '#cb7342' : '#26373e'}" stroke="#728a8b" stroke-width="1.2"/>
+      <path d="M-20 -82 L-26 -78 L-25 -67" fill="none" stroke="#101c22" stroke-width="7"/>
+      <path d="M9 -92 L13 -99" stroke="#c6a183" stroke-width="7"/>
+      <path d="M6 -104 Q8 -118 23 -115 Q34 -111 30 -100 L19 -96 L10 -98Z" fill="#eef0e6" stroke="#b8c7bf" stroke-width="1"/>
+      <path d="M7 -108 Q19 -115 28 -107 L34 -106" fill="none" stroke="#e48243" stroke-width="4"/>
+      <path d="M22 -102 L30 -103 M12 -101 L19 -96" stroke="#27383e" stroke-width="3"/>
+    </g>
+    <path data-jump-arm="" d="M6 -89 L20 -74 L32 -66" fill="none" stroke="${classic ? '#df9058' : '#465c63'}" stroke-width="7"/>
+    <path d="M28 -67 L36 -67" stroke="#101c22" stroke-width="6"/>
+    </g>`;
+}
+/* The page follows live theme tokens; shareJumpStats supplies literal export colours. */
 function jumpArcPalette() {
-  try {
-    const css = getComputedStyle(document.documentElement);
-    const v = (n, d) => (css.getPropertyValue(n) || '').trim() || d;
-    return { ground: v('--border', '#5b6352'), accent: v('--accent-4', '#e0a458'), ink: v('--text', '#e8ecdf'),
-      dim: v('--text-muted', '#9aa391'), bike: v('--text', '#e8ecdf'), bg: v('--surface', '#151a11'),
-      faint: 'rgba(214,158,46,0.40)' };
-  } catch (e) { return {}; }
+  return { ground: 'var(--border)', accent: 'var(--accent-4)', ink: 'var(--text)',
+    dim: 'var(--text-muted)', bg: 'var(--surface)' };
 }
 function jumpArcSVG(jumps, pal) {
-  const js = (jumps || []).filter(j => j && j.dist != null && j.hang != null && j.dist > 0).slice(0, 3);
-  if (!js.length) return '';
-  const c = Object.assign({ ground: '#5b6352', faint: 'rgba(224,164,88,0.38)', accent: '#e0a458',
-    ink: '#e8ecdf', dim: '#9aa391', bike: '#e8ecdf' }, pal || {});
-  const W = 340, H = 132, x0 = 22, groundY = 96, span = W - x0 - 22;
-  const longest = js[0];
-  const g = 9.81;
-  const peakOf = (j) => g * j.hang * j.hang / 8;
-  /* One scale for both axes; shrink it only if a very floaty jump would leave the top of the box. */
-  let pxPerM = span / longest.dist;
-  const maxPeak = Math.max(...js.map(peakOf));
-  if (maxPeak * pxPerM > groundY - 18) pxPerM = (groundY - 18) / maxPeak;
-  const arc = (j) => {
-    const x1 = x0 + j.dist * pxPerM, peak = peakOf(j) * pxPerM;
-    /* A quadratic whose control point sits at twice the peak height passes through the peak at its
-       midpoint, which is a parabola -- the flight path, not an approximation of one. */
-    return { x1, d: `M ${x0} ${groundY} Q ${(x0 + x1) / 2} ${groundY - 2 * peak} ${x1} ${groundY}`, peak };
-  };
-  const esc = (t) => String(t).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
-  const parts = [];
-  /* Ground, with a tick every bike length from the takeoff. */
-  parts.push(`<line x1="4" y1="${groundY}" x2="${W - 4}" y2="${groundY}" stroke="${c.ground}" stroke-width="1.5"/>`);
+  const longest = (jumps || []).filter(j => Number.isFinite(j?.dist) && j.dist > 0 && Number.isFinite(j.hang) && j.hang > 0)
+    .sort((a,b) => b.dist-a.dist)[0];
+  if (!longest) return '';
+  const c = Object.assign({ ground: '#5b6352', accent: '#e0a458', ink: '#e8ecdf', dim: '#9aa391', bg: '#151a11' }, pal || {});
+  const esc = t => String(t).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+  const W = 340, H = 196, groundY = 124, peak = 9.81 * longest.hang * longest.hang / 8;
+  const scale = Math.min(284 / longest.dist, 88 / (peak + 1.65));
+  const span = longest.dist * scale, x0 = (W-span)/2, x1 = x0+span, mid = W/2;
+  const path = `M ${x0} ${groundY} Q ${mid} ${groundY-2*peak*scale} ${x1} ${groundY}`;
   const bikes = longest.dist / JUMP_BIKE_LENGTH_M;
-  for (let k = 1; k * JUMP_BIKE_LENGTH_M * pxPerM <= span + 0.5; k++) {
-    const x = x0 + k * JUMP_BIKE_LENGTH_M * pxPerM;
-    parts.push(`<line x1="${x.toFixed(1)}" y1="${groundY}" x2="${x.toFixed(1)}" y2="${groundY + 5}" stroke="${c.ground}" stroke-width="1.2"/>`);
+  const ticks = [];
+  for (let k=1; k < bikes && k < 100; k++) {
+    const x = x0+k*JUMP_BIKE_LENGTH_M*scale;
+    ticks.push(`<path d="M${x} ${groundY} v5" stroke="${c.ground}"/>`);
   }
-  /* The takeoff lip. */
-  parts.push(`<path d="M ${x0 - 16} ${groundY} Q ${x0 - 4} ${groundY - 1} ${x0} ${groundY - 7} L ${x0} ${groundY}" fill="${c.ground}"/>`);
-  /* The runners-up first, faint (solid, like every chart line), so the longest draws over them. */
-  for (const j of js.slice(1).reverse()) {
-    parts.push(`<path d="${arc(j).d}" fill="none" stroke="${c.faint}" stroke-width="1.6"/>`);
-  }
-  const L = arc(longest);
-  parts.push(`<path d="${L.d}" fill="none" stroke="${c.accent}" stroke-width="2.6" stroke-linecap="round"/>`);
-  parts.push(`<circle cx="${L.x1.toFixed(1)}" cy="${groundY}" r="3.2" fill="${c.accent}"/>`);
-  /* A small bike at the top of the flight, level, riding left to right. */
-  const bx = (x0 + L.x1) / 2, by = groundY - L.peak - 9;
-  parts.push(`<g transform="translate(${bx.toFixed(1)} ${by.toFixed(1)})" stroke="${c.bike}" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">`
-    + `<circle cx="-7" cy="0" r="4.6"/><circle cx="7" cy="0" r="4.6"/>`
-    + `<path d="M -7 0 L -2 -6 L 5 -6 L 7 0 M -2 -6 L 0 0 L -7 0 M 4 -9 L 5 -6 M 2.5 -9 L 6 -9 M -3 -8 L -1 -8"/></g>`);
-  /* Dimension line under the longest: |<- 20.0 ft ->|. */
-  const dy = groundY + 16;
-  parts.push(`<path d="M ${x0} ${dy - 4} V ${dy + 4} M ${L.x1.toFixed(1)} ${dy - 4} V ${dy + 4} M ${x0} ${dy} H ${L.x1.toFixed(1)}" stroke="${c.dim}" stroke-width="1"/>`);
-  const mid = (x0 + L.x1) / 2;
-  const label = `${U.small(longest.dist)} · ${loamT('about {n} bike lengths', { n: bikes.toFixed(1) })}`;
-  const lw = label.length * 6.1 + 10;
-  parts.push(`<rect x="${(mid - lw / 2).toFixed(1)}" y="${dy - 8}" width="${lw.toFixed(1)}" height="16" rx="3" fill="${c.bg || 'rgba(16,23,15,0.92)'}"/>`);
-  parts.push(`<text x="${mid.toFixed(1)}" y="${dy + 4}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="${c.ink}">${esc(label)}</text>`);
-  /* The air time beside the apex. */
-  parts.push(`<text x="${(bx + 16).toFixed(1)}" y="${(by - 2).toFixed(1)}" font-family="JetBrains Mono, monospace" font-size="10" fill="${c.dim}">${esc(loamT('{ms} ms air', { ms: Math.round(longest.hang * 1000) }))}</text>`);
-  return `<svg class="jump-arc" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${esc(loamT('The longest jump drawn to scale: {d}, about {n} bike lengths', { d: U.small(longest.dist), n: bikes.toFixed(1) }))}">${parts.join('')}</svg>`;
+  return `<svg class="jump-arc" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${esc(loamT('The longest jump drawn to scale: {d}, about {n} bike lengths', { d: U.small(longest.dist), n: bikes.toFixed(1) }))}" font-family="system-ui, sans-serif">
+    <text x="170" y="17" text-anchor="middle" font-size="11" fill="${c.dim}">${esc(loamT('Illustrated level landing'))}</text>
+    <path d="${path} Z" fill="${c.accent}" opacity=".08"/>
+    <path d="M14 ${groundY} H326" stroke="${c.ground}"/>${ticks.join('')}
+    <path d="${path}" fill="none" stroke="${c.accent}" stroke-width="2"/>
+    <g fill="${c.accent}"><circle cx="${x0}" cy="${groundY}" r="3"/><circle cx="${x1}" cy="${groundY}" r="3"/></g>
+    <g transform="translate(${mid} ${groundY-peak*scale}) scale(${JUMP_BIKE_LENGTH_M*scale/141})">${jumpBikeSVG()}</g>
+    <text x="18" y="143" font-size="11" fill="${c.dim}">${esc(loamT('Takeoff'))}</text>
+    <text x="322" y="143" text-anchor="end" font-size="11" fill="${c.dim}">${esc(loamT('Landing'))}</text>
+    <path d="M${x0} 153 v8 m0 -4 H${x1} m0 -4 v8" fill="none" stroke="${c.dim}"/>
+    <text x="170" y="182" text-anchor="middle" font-size="12" fill="${c.ink}">${esc(U.small(longest.dist))} · ${esc(loamT('about {n} bike lengths', { n: bikes.toFixed(1) }))}</text>
+  </svg>`;
 }
 
 /* Headline strip above the jumps table: the ride's LONGEST jump as the hero, shown as the
@@ -46310,6 +46356,8 @@ function renderJumpSummary(D) {
   if (!m) { el.innerHTML = ''; el.style.display = 'none'; return; }
   el.style.display = '';
   const { n, totalAir, maxSpeed, top, longest, maxDist, heroMs, avgMs, nBig, nLanded } = m;
+  const replayId = longest ? 'fit:' + ((D.ridingJumps || []).indexOf(longest) + 1) : null;
+  const replay = formReplayJumps(D).find(j => j.id === replayId);
   const dup = D.jumpDupsRemoved
     ? loamT(D.jumpDupsRemoved > 1 ? ' · {n} duplicates merged' : ' · {n} duplicate merged', { n: D.jumpDupsRemoved })
     : '';
@@ -46336,6 +46384,7 @@ function renderJumpSummary(D) {
       <div>${heroBlock}</div>
       <div class="meta">${loamT(n > 1 ? '{n} jumps' : '{n} jump', { n })}${dup}${nBig ? '<br>' + loamT('{n} over {bar}', { n: nBig, bar: U.small(JUMP_BIG_M) }) : ''}${nLanded ? '<br>' + loamT('{n} with a measured landing', { n: nLanded }) : ''}</div>
       ${maxDist != null ? jumpArcSVG(top, jumpArcPalette()) : ''}
+      ${replay ? `<button type="button" id="jumpReplayLongest" class="ghost-btn">▶ ${loamT('Replay longest jump')}</button>` : ''}
     </div>
     <div class="stat accent4">
       <div class="label">${loamT('Total airtime')}</div>
@@ -46362,6 +46411,8 @@ function renderJumpSummary(D) {
       + loamT('Distance is your bike computer\'s <strong>takeoff speed × hang time</strong>, not a measured landing point, so it assumes level ground: a downhill landing clears more than this and a step-up less.')
       + (nLanded ? ' ' + loamT('Landing g is measured by the phone (or the bar-locked wrist), which the FIT does not record.') : '')
       + `</div>` : ''}`;
+  const play = document.getElementById('jumpReplayLongest');
+  if (play) play.onclick = () => formOpenJump(replay.id);
   const tog = document.getElementById('jumpsTableToggle');
   if (tog) tog.textContent = loamT('All {n} jumps', { n });
 }
@@ -50381,7 +50432,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'f348a4226 · 2026-10-02';
+const LOAM_BUILD = '88131e785 · 2026-10-01';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
