@@ -2932,6 +2932,7 @@
         <label class="smooth-lbl hidden" data-chan="osc" title="Estimated from the phone or AirPods, not measured: treat it as a trend, not a number."><input id="timelineChOsc" type="checkbox" data-chan="osc" onchange="onTimelineChanToggle(this)"> Oscillation</label>
       </div>
       <label class="smooth-lbl tl-smooth" title="Reduce brief spikes in timeline readings. Turn off to see raw readings."><input id="timelineSmooth" type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> Smooth</label>
+      <label class="smooth-lbl hidden" title="Cut stops and pauses out of the time axis, like Strava's moving time."><input id="timelineMoving" type="checkbox" onchange="onTimelineMovingToggle(this)"> Moving time</label>
     </div>
     <div class="chart" id="timelineChart"></div>
     <div id="timelineFootnote" class="dim hidden" style="font-size:12px; margin-top:6px;"></div>
@@ -10216,7 +10217,7 @@ function formInitMap(S) {
           doubleClickZoom: false, scrollWheelZoom: false, touchZoom: false, keyboard: false, tap: false, zoomSnap: 0,
           fadeAnimation: false, inertia: false, zoomAnimation: false });
         try { _formTilesMap.attributionControl.setPrefix(false); } catch (e) {}
-        L.tileLayer(loamTileUrl(bm.url), Object.assign({}, bm.opts, { maxNativeZoom: maxNative, maxZoom: maxZ })).addTo(_formTilesMap);
+        L.tileLayer(basemapTileUrl(bm), Object.assign({}, bm.opts, { maxNativeZoom: maxNative, maxZoom: maxZ })).addTo(_formTilesMap);
         try { _formTilesMap.attributionControl.setPrefix(false); } catch (e) {}
         _formTilesMap.setView([centerLat, centerLon], zoom, { animate: false });
         setTimeout(() => { try { if (_formTilesMap) { _formTilesMap.invalidateSize(false); _formTilesMap.setView([centerLat, centerLon], zoom, { animate: false }); } } catch (e) {} }, 0);
@@ -11797,7 +11798,7 @@ function drawRunsOverlay(runs, D) {
     });
     if (x.length) connectors.push({
       x, y, type: 'scatter', mode: 'lines', connectgaps: false,
-      line: { color: trace.line.color, width: trace.line.width, dash: 'dash' },
+      line: { color: trace.line.color, width: trace.line.width }, opacity: 0.4,
       legendgroup: trace.legendgroup, showlegend: false, hoverinfo: 'skip',
     });
   });
@@ -11808,7 +11809,7 @@ function drawRunsOverlay(runs, D) {
     title: { text: loamT(traces.length > 1
         ? (showPace ? 'Pace vs distance, runs overlaid' : 'Speed vs distance, runs overlaid')
         : (showPace ? 'Pace vs distance into run' : 'Speed vs distance into run'))
-      + (connectors.length ? '<br><sup>' + loamT('Dashed = gap in measured pace') + '</sup>' : ''), font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
+      + (connectors.length ? '<br><sup>' + loamT('Faded = gap in measured pace') + '</sup>' : ''), font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
     margin: { l: 48, r: 14, t: connectors.length ? 48 : 32, b: 62 },
     xaxis: { title: { text: loamT('distance ({u})', { u: U.smallUnit() }), font: { size: 11 } }, gridcolor: '#e2e8f0' },
     yaxis: showPace ? {
@@ -24169,16 +24170,17 @@ function renderCrossRide({ perRide, clusters }) {
        13-lap segment the PR and the ninth-fastest lap drew the SAME red when both were ticked (owner
        report), and its amber/sage pair was 3.5 dE apart under protanopia. The two laps the charts open
        on (PR and its comparison) take the first two slots so the default pair is always blue vs orange;
-       a lap past the eighth reuses a hue with a DASHED line, so no two laps ever draw identically. */
+       a lap past the eighth reuses a hue at a different line WIDTH, so no two laps ever draw identically.
+       Width, not dashes: every chart line is solid (owner, 2026-09-30). */
     const CMP_COLORS = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];
-    const CMP_DASHES = ['solid', 'dash', 'dot'];
+    const CMP_WIDTHS = [2, 1, 3.5];
     const dateLabels = memberDateLabels(members);
     const partner = cmp === pr ? ref : cmp;
     const slotOrder = [pr, ...(partner && partner !== pr ? [partner] : []),
                        ...members.filter(m => m !== pr && m !== partner)];
     slotOrder.forEach((m, slot) => {
       m.color = CMP_COLORS[slot % CMP_COLORS.length];
-      m.dash = CMP_DASHES[Math.floor(slot / CMP_COLORS.length) % CMP_DASHES.length];
+      m.lineW = CMP_WIDTHS[Math.floor(slot / CMP_COLORS.length) % CMP_WIDTHS.length];
     });
     members.forEach((m, i) => {
       m._mi = i;
@@ -24374,7 +24376,7 @@ function renderCrossRide({ perRide, clusters }) {
           hovertemplate: `%{text} ${paceUnit}<extra>%{fullData.name}</extra>`,
         } : {}),
         type: 'scatter', mode: 'lines',
-        line: { color: m.color, width: 2, dash: m.dash },
+        line: { color: m.color, width: m.lineW || 2 },
         name: m.tag,
       }));
       const paceTicks = paceComparison ? chartPaceTicks(speedTraces.flatMap(t => t.y)) : [];
@@ -24403,7 +24405,7 @@ function renderCrossRide({ perRide, clusters }) {
         dtwTraces.push({
           x, y: result.delta,
           type: 'scatter', mode: 'lines',
-          line: { color: m.color, width: 2, dash: m.dash },
+          line: { color: m.color, width: m.lineW || 2 },
           name: m.tag,
         });
       }
@@ -24456,7 +24458,7 @@ function renderCrossRide({ perRide, clusters }) {
               return pbpSpeedUsable(t) ? U.speedNum(t.vPeak) : null;
             }),
             type: 'scatter', mode: 'lines+markers', connectgaps: false,
-            line: { color: m.color, width: 2, dash: m.dash }, marker: { size: 6 }, name: m.tag,
+            line: { color: m.color, width: m.lineW || 2 }, marker: { size: 6 }, name: m.tag,
           };
         });
         const turnNote = note + `<br><span style="font-size:11px">${loamT('reference corner numbers; gaps mean no reliable match with usable speeds')}</span>`;
@@ -24572,7 +24574,7 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTa
     const map = L.map(mapDiv, { zoomControl: true, attributionControl: true });
     _crossDeltaMaps.push(map);
     const bm = (typeof formBasemapDef === 'function') ? formBasemapDef() : BASEMAPS[basemapPref()];
-    if (bm) { L.tileLayer(bm.url, bm.opts).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
+    if (bm) { L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
     const track = [];
     for (let i = 0; i < refLat.length; i++) if (refLat[i] != null && refLon[i] != null) track.push([refLat[i], refLon[i]]);
     if (track.length > 1) {
@@ -25171,7 +25173,7 @@ async function renderProgressReadiness(rides) {
       hovertemplate: '%{text}<br>' + loamT('Readiness') + ' %{x}<br>%{y:+.1f}%<extra>' + name + '</extra>',
     };
   };
-  const guide = (x) => ({ type: 'line', x0: x, x1: x, y0: 0, y1: 1, yref: 'paper', line: { color: '#cbd5e1', width: 1, dash: 'dot' } });
+  const guide = (x) => ({ type: 'line', x0: x, x1: x, y0: 0, y1: 1, yref: 'paper', line: { color: '#cbd5e1', width: 1 } });
   loamPlot('progReadinessChart', [
     trace('segment', loamT('Segment pace'), '#2f6f9f', 'circle'),
     trace('efficiency', loamT('HR efficiency'), '#c98a2b', 'diamond'),
@@ -29064,7 +29066,7 @@ function renderSkiIndoor(D) {
     ${section('What the sensors saw', 'the three signals the legs were read from')}
     <div class="panel">
       <div id="skiSignalsChart" class="chart" style="height:${sig.load && sig.load.length ? 420 : 300}px"></div>
-      <div class="strength-tablenote analysis-explanation">${T('Top: the vertical rate the detector placed the legs from, with the dashed lines at the rates that open a descent ({fall} m/s) and a ride up ({rise} m/s). Middle: how much the phone was turning each second, with the line at the rate that counts a second as active; a chairlift sits under it, a descent over it, a conveyor somewhere between. {load}', {
+      <div class="strength-tablenote analysis-explanation">${T('Top: the vertical rate the detector placed the legs from, with the grey lines at the rates that open a descent ({fall} m/s) and a ride up ({rise} m/s). Middle: how much the phone was turning each second, with the line at the rate that counts a second as active; a chairlift sits under it, a descent over it, a conveyor somewhere between. {load}', {
         fall: LoamSki.SKI_FALL_ENTER_MPS, rise: LoamSki.SKI_RISE_ENTER_MPS,
         load: sig.load && sig.load.length
           ? T('Bottom: the sideways force the body carried each second, in g &mdash; the turn\'s own load, and the one channel here that has nothing to do with the barometer.')
@@ -29103,7 +29105,7 @@ function renderSkiIndoor(D) {
     ${section('Turn by turn', 'the turning rate through each run, right turns up, left turns down')}
     <div class="panel">
       <div id="skiTurnsChart" class="chart" style="height:${Math.max(220, 70 + 95 * sig.yaw.length)}px"></div>
-      <div class="strength-tablenote analysis-explanation">${T('The gyroscope projected on gravity, smoothed over {s} s &mdash; the exact signal the edge changes were counted in. A regular wave is linked turns; each crossing of the centre line is one edge change. Positive is a right-hand turn about the vertical (clockwise seen from above), and that sign is physical rather than a guess about how the phone sat. The dashed lines are the rate under which a swing does not count ({bar}&deg;/s).', { s: LoamSki.SKI_TRACE_SMOOTH_S, bar: Math.round(LoamSki.SKI_EDGE_MIN_PEAK_RADS * 180 / Math.PI) })}</div>
+      <div class="strength-tablenote analysis-explanation">${T('The gyroscope projected on gravity, smoothed over {s} s &mdash; the exact signal the edge changes were counted in. A regular wave is linked turns; each crossing of the centre line is one edge change. Positive is a right-hand turn about the vertical (clockwise seen from above), and that sign is physical rather than a guess about how the phone sat. The grey lines are the rate under which a swing does not count ({bar}&deg;/s).', { s: LoamSki.SKI_TRACE_SMOOTH_S, bar: Math.round(LoamSki.SKI_EDGE_MIN_PEAK_RADS * 180 / Math.PI) })}</div>
     </div>` : ''}
 
     ${edgesInRuns >= LoamSki.SKI_RHYTHM_MIN_EDGES ? `
@@ -29423,8 +29425,8 @@ function drawSkiSignals(sig, legs) {
   });
   const gap = 0.06, h = (1 - gap * (rows - 1)) / rows;
   const dom = (i) => [1 - (i + 1) * h - i * gap, 1 - i * h - i * gap];
-  const line = (yref, y, dash) => ({ type: 'line', xref: 'paper', yref, x0: 0, x1: 1, y0: y, y1: y,
-    line: { color: '#94a3b8', width: 1, dash: dash || 'dash' } });
+  const line = (yref, y) => ({ type: 'line', xref: 'paper', yref, x0: 0, x1: 1, y0: y, y1: y,
+    line: { color: '#94a3b8', width: 1 } });
   const shapes = [
     ...skiLegShapes(legs),
     line('y', -LoamSki.SKI_FALL_ENTER_MPS), line('y', LoamSki.SKI_RISE_ENTER_MPS),
@@ -29503,7 +29505,7 @@ function drawSkiRuns(profile, descents) {
 }
 
 /* The turning rate through each run, one row per run, sharing the seconds-into-the-run axis. Right
-   turns positive. The dashed lines are the peak under which a swing is not counted as an edge. */
+   turns positive. The grey lines are the peak under which a swing is not counted as an edge. */
 function drawSkiTurns(sig, descents) {
   const el = document.getElementById('skiTurnsChart');
   if (!el || typeof Plotly === 'undefined') return;
@@ -29529,7 +29531,7 @@ function drawSkiTurns(sig, descents) {
     const domain = [1 - (i + 1) * h - i * gap, 1 - i * h - i * gap];
     layout['yaxis' + (i === 0 ? '' : i + 1)] = { title: name, domain, fixedrange: true, zeroline: true, ticksuffix: '°/s' };
     for (const s of [bar, -bar]) shapes.push({ type: 'line', xref: 'paper', yref: ax, x0: 0, x1: 1, y0: s, y1: s,
-      line: { color: '#94a3b8', width: 1, dash: 'dot' } });
+      line: { color: '#94a3b8', width: 1 } });
   });
   layout.shapes = shapes;
   loamPlot(el, traces, layout, { displayModeBar: false, responsive: true });
@@ -29568,7 +29570,7 @@ function drawSkiRhythm(byDescent) {
     margin: { l: 44, r: 12, t: 8, b: 42 },
     xaxis: { title: loamT('seconds between edge changes'), fixedrange: true, range: [0, 6] },
     yaxis: { title: loamT('turns'), fixedrange: true },
-    shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: med, x1: med, y0: 0, y1: 1, line: { color: '#c14e2e', width: 1.5, dash: 'dash' } }],
+    shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: med, x1: med, y0: 0, y1: 1, line: { color: '#c14e2e', width: 1.5 } }],
     annotations: [{ x: med, y: 1, xref: 'x', yref: 'paper', text: loamT('median {s} s', { s: med.toFixed(2) }), showarrow: false, yanchor: 'bottom', xanchor: 'left', font: { size: 11, color: '#c14e2e' } }],
     showlegend: false, bargap: 0.05,
   }, { displayModeBar: false, responsive: true });
@@ -29589,7 +29591,7 @@ function drawSkiLoadShape(turnLoad) {
     margin: { l: 44, r: 12, t: 8, b: 42 },
     xaxis: { title: loamT('% of the way through the turn'), fixedrange: true, range: [0, 100] },
     yaxis: { title: loamT('sideways load, share of peak'), fixedrange: true, range: [0, 1.05] },
-    shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: turnLoad.centroid * 100, x1: turnLoad.centroid * 100, y0: 0, y1: 1, line: { color: '#475569', width: 1, dash: 'dash' } }],
+    shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: turnLoad.centroid * 100, x1: turnLoad.centroid * 100, y0: 0, y1: 1, line: { color: '#475569', width: 1 } }],
     annotations: [{ x: turnLoad.centroid * 100, y: 1, xref: 'x', yref: 'paper', text: loamT('load centred at {pct}%', { pct: Math.round(turnLoad.centroid * 100) }), showarrow: false, yanchor: 'bottom', xanchor: 'left', font: { size: 11 } }],
     showlegend: false,
   }, { displayModeBar: false, responsive: true });
@@ -30312,7 +30314,7 @@ function drawSwimRouteMap(R) {
   try {
     const map = L.map(el, { zoomControl: true, attributionControl: false });
     const bm = BASEMAPS[basemapPref()] || BASEMAPS.satellite;
-    L.tileLayer(bm.url, bm.opts).addTo(map);
+    L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map);
     const pts = route.map(p => [p.lat, p.lon]);
     /* One polyline per window so each stretch carries its own colour. Windows overlap at their
        endpoints, which is what keeps the line continuous. */
@@ -30604,7 +30606,7 @@ function drawSwimDecomp(R, unit) {
        explained rather than a third independent signal, and it is styled to read that way. */
     x, y: all.map(l => pct(l.pace100S, base && base.pace100S)),
     name: loamT('pace (slower up)'), type: 'scatter', mode: 'lines',
-    line: { color: '#7a808c', width: 1, dash: 'dot' }, connectgaps: false,
+    line: { color: '#7a808c', width: 1 }, connectgaps: false,
     hovertemplate: loamT('length') + ' %{x}<br>' + loamT('pace') + ' %{y:+.1f}%<extra></extra>',
   }];
 
@@ -31106,7 +31108,7 @@ function drawTriMap(D) {
   try {
     const map = L.map(el, { zoomControl: true, attributionControl: false });
     const bm = BASEMAPS[basemapPref()] || BASEMAPS.satellite;
-    L.tileLayer(bm.url, bm.opts).addTo(map);
+    L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map);
     const all = [];
     for (const e of LoamTri.raceTimeline(A)) {
       if (e.none) continue;
@@ -31680,7 +31682,7 @@ function openSegmentTrim({ title, name, polyline, clipStart, clipEnd, coreStartI
       map = L.map(mapHost, { zoomControl: true, attributionControl: true });
       _segTrimMap = map;
       const bm = (typeof formBasemapDef === 'function') ? formBasemapDef() : BASEMAPS[basemapPref()];
-      if (bm) { L.tileLayer(bm.url, bm.opts).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
+      if (bm) { L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
       L.polyline(polyline, { color: '#0a0d07', weight: 5, opacity: 0.3 }).addTo(map);
       L.polyline(polyline, { color: '#ffffff', weight: 2, opacity: 0.55 }).addTo(map);
       seg = L.polyline(polyline.slice(i0, i1 + 1), { color: '#e0573a', weight: 4, opacity: 0.95 }).addTo(map);
@@ -32693,6 +32695,117 @@ function runPaceSamples(rows, pausedSpans = []) {
   }
   return out;
 }
+/* "Moving time" on the timeline (owner, 2026-09-30: "timeline without pauses ... the way Strava does
+   it"). Per browser, off by default, so the elapsed-time axis every existing read and E2E assumes is
+   unchanged until the athlete asks. */
+function loamTimelineMoving() { try { return localStorage.getItem('loam_tl_moving') === '1'; } catch (e) { return false; } }
+/* The box is offered only when the recording has something to cut, and the axis says which clock
+   it is on, so a moving-time chart cannot pass for elapsed time beside the elapsed stats. */
+function syncTimelineMovingToggle(clock) {
+  const cb = document.getElementById('timelineMoving');
+  if (!cb) return;
+  cb.checked = loamTimelineMoving();
+  const lbl = cb.closest('label');
+  if (lbl) lbl.classList.toggle('hidden', !clock.hasCuts);
+}
+function timelineAxisTitle(clock, noun) {
+  return clock.moving ? loamT('moving time in {noun}', { noun }) : loamT('time in {noun}', { noun });
+}
+function onTimelineMovingToggle(el) {
+  try { localStorage.setItem('loam_tl_moving', el.checked ? '1' : '0'); } catch (e) {}
+  rerenderUnits(el);
+}
+/* The stretches a moving-time axis cuts out, as [start, end] seconds from ride.start, merged and
+   sorted. THE SAME HOP CLASSIFICATION AS computeStats' walkHops, deliberately: a hop that is not
+   moving time there (paused, standing below 0.5 m/s, a teleport under the 5 s gap limit, a dropout
+   whose bridged ground implies standing) is cut here, so the axis ends at the Moving time the stats
+   tile prints rather than at a second answer to the same question. The rules are restated rather
+   than shared because walkHops is inlined for its drift guard. */
+function timelineStopSpans(loc, ride) {
+  const paused = (ride && ride.pausedSpans) || [];
+  const rows = (loc || []).filter(r => r.t >= ride.start && r.t <= ride.end);
+  const toRad = d => d * Math.PI / 180;
+  const cut = [];
+  const add = (a, b) => {
+    const last = cut[cut.length - 1];
+    if (last && a <= last[1] + 1e-6) last[1] = Math.max(last[1], b); else cut.push([a, b]);
+  };
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1], b = rows[i], dt = b.t - a.t;
+    if (!(dt > 0)) continue;
+    const havePos = a.latitude != null && a.longitude != null && b.latitude != null && b.longitude != null;
+    let d = 0;
+    if (havePos) {
+      const dLat = toRad(b.latitude - a.latitude), dLon = toRad(b.longitude - a.longitude);
+      const hv = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLon / 2) ** 2;
+      d = 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(hv)));
+    }
+    const moving = pausedOverlapS(paused, a.t, b.t) > 0 ? false
+      : dt > 5 ? (havePos && d / dt >= 0.5)
+      : !(havePos && d / dt > 12) && b.speed >= 0.5;
+    if (!moving) add(a.t - ride.start, b.t - ride.start);
+  }
+  /* A pause with no fix on either side of it is still a pause. */
+  for (const p of paused) {
+    const a = Math.max(p.start, ride.start) - ride.start, b = Math.min(p.end, ride.end) - ride.start;
+    if (b > a) cut.push([a, b]);
+  }
+  cut.sort((x, y) => x[0] - y[0]);
+  const merged = [];
+  for (const s of cut) {
+    const last = merged[merged.length - 1];
+    if (last && s[0] <= last[1] + 1e-6) last[1] = Math.max(last[1], s[1]); else merged.push([s[0], s[1]]);
+  }
+  return merged;
+}
+/* The timeline's x axis as a function of seconds-from-ride.start. Elapsed (identity) unless the
+   Moving time box is ticked and there is something to cut. `x` drops a point inside a cut (null);
+   `xc` clamps it to the seam instead, for band edges and marks; `inv` maps an axis position back to
+   ride seconds, for the linked map cursor and a segment focus. */
+function timelineClock(D, on = loamTimelineMoving()) {
+  const ride = D.ride, full = Math.max(0, ride.end - ride.start);
+  const cuts = timelineStopSpans((D.sensors && D.sensors.location) || [], ride);
+  if (!on || !cuts.length) {
+    return { moving: false, hasCuts: cuts.length > 0, span: full, x: (t) => t, xc: (t) => t, inv: (x) => x };
+  }
+  const before = [];   // seconds cut before cuts[i]
+  let acc = 0;
+  for (const [a, b] of cuts) { before.push(acc); acc += b - a; }
+  const find = (t) => { let lo = 0, hi = cuts.length - 1, k = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (cuts[m][0] <= t) { k = m; lo = m + 1; } else hi = m - 1; } return k; };
+  const xc = (t) => {
+    if (!Number.isFinite(t)) return t;
+    const k = find(t);
+    if (k < 0) return t;
+    const [a, b] = cuts[k];
+    return t < b ? a - before[k] : t - before[k] - (b - a);
+  };
+  const x = (t) => {
+    if (!Number.isFinite(t)) return t;
+    const k = find(t);
+    return (k >= 0 && t > cuts[k][0] && t < cuts[k][1]) ? null : xc(t);
+  };
+  const seams = cuts.map(([a], i) => a - before[i]);
+  const inv = (xq) => {
+    let k = -1;
+    for (let lo = 0, hi = seams.length - 1; lo <= hi;) { const m = (lo + hi) >> 1; if (seams[m] <= xq) { k = m; lo = m + 1; } else hi = m - 1; }
+    return k < 0 ? xq : xq + before[k] + (cuts[k][1] - cuts[k][0]);
+  };
+  return { moving: true, hasCuts: true, span: Math.max(0, full - acc), x, xc, inv };
+}
+/* A line trace re-laid on the clock: points inside a cut are dropped rather than stacked on the
+   seam, and the line is joined across the seam, which is what moving time means. Any break still
+   left is a dropout or a slow shuffle, and is joined too, as Strava draws it: with the stops gone, a
+   break in the line would only be a hole to read around. */
+function timelineClockTrace(trace, clock) {
+  if (!clock.moving || !Array.isArray(trace.x)) return trace;
+  const x = [], y = [], text = Array.isArray(trace.text) ? [] : null;
+  trace.x.forEach((xv, i) => {
+    const m = xv == null ? null : clock.x(xv);
+    if (xv != null && m == null) return;
+    x.push(m); y.push(trace.y[i]); if (text) text.push(trace.text[i]);
+  });
+  return { ...trace, x, y, ...(text ? { text } : {}), ...(trace.mode === 'lines' ? { connectgaps: true } : {}) };
+}
 /* Time-based pace smoothing keeps the same window for phone and sparse GPS recordings.
    Missing readings remain gaps. Sustained slower running is retained; only short deviations
    are suppressed, and raw readings remain available through the toggle. */
@@ -33325,8 +33438,8 @@ const LOAM_NB = {
     'Høyde over det laveste punktet barometeret registrerte, glattet over {s} s &mdash; den samme serien nedkjøringsdetektoren leser, så bildet og tabellen under kan ikke være uenige. Skravert blått der en nedkjøring ble medregnet, grått på vei opp igjen, rødt der et fall ble funnet og ikke nådde grensene. Tell tennene mot ditt eget minne om dagen: det er kontrollen denne siden helst vil at du gjør.',
   'What the sensors saw': 'Hva sensorene så',
   'the three signals the legs were read from': 'de tre signalene etappene ble lest fra',
-  'Top: the vertical rate the detector placed the legs from, with the dashed lines at the rates that open a descent ({fall} m/s) and a ride up ({rise} m/s). Middle: how much the phone was turning each second, with the line at the rate that counts a second as active; a chairlift sits under it, a descent over it, a conveyor somewhere between. {load}':
-    'Øverst: den vertikale raten detektoren plasserte etappene fra, med stiplede linjer ved ratene som åpner en nedkjøring ({fall} m/s) og en tur opp ({rise} m/s). I midten: hvor mye telefonen roterte hvert sekund, med linjen ved raten som regner et sekund som aktivt; en stolheis ligger under den, en nedkjøring over, et transportbånd et sted imellom. {load}',
+  'Top: the vertical rate the detector placed the legs from, with the grey lines at the rates that open a descent ({fall} m/s) and a ride up ({rise} m/s). Middle: how much the phone was turning each second, with the line at the rate that counts a second as active; a chairlift sits under it, a descent over it, a conveyor somewhere between. {load}':
+    'Øverst: den vertikale raten detektoren plasserte etappene fra, med grå linjer ved ratene som åpner en nedkjøring ({fall} m/s) og en tur opp ({rise} m/s). I midten: hvor mye telefonen roterte hvert sekund, med linjen ved raten som regner et sekund som aktivt; en stolheis ligger under den, en nedkjøring over, et transportbånd et sted imellom. {load}',
   'Bottom: the sideways force the body carried each second, in g &mdash; the turn\'s own load, and the one channel here that has nothing to do with the barometer.':
     'Nederst: sidekraften kroppen bar hvert sekund, i g &mdash; svingens egen belastning, og den ene kanalen her som ikke har noe med barometeret å gjøre.',
   'No accelerometer in this recording, so no load trace.': 'Ingen akselerometer i dette opptaket, så ingen belastningskurve.',
@@ -33379,8 +33492,8 @@ const LOAM_NB = {
   'Heart rate is from the watch.': 'Pulsen kommer fra klokken.',
   'Turn by turn': 'Sving for sving',
   'the turning rate through each run, right turns up, left turns down': 'svingraten gjennom hver nedkjøring, høyresvinger opp, venstresvinger ned',
-  'The gyroscope projected on gravity, smoothed over {s} s &mdash; the exact signal the edge changes were counted in. A regular wave is linked turns; each crossing of the centre line is one edge change. Positive is a right-hand turn about the vertical (clockwise seen from above), and that sign is physical rather than a guess about how the phone sat. The dashed lines are the rate under which a swing does not count ({bar}&deg;/s).':
-    'Gyroskopet projisert på tyngdekraften, glattet over {s} s &mdash; nøyaktig det signalet kantskiftene ble telt i. En jevn bølge er sammenhengende svinger; hver kryssing av midtlinjen er ett kantskifte. Positivt er en høyresving om loddlinjen (med klokken sett ovenfra), og det fortegnet er fysisk og ikke en gjetning om hvordan telefonen lå. De stiplede linjene er raten en sving må over for å telle ({bar}&deg;/s).',
+  'The gyroscope projected on gravity, smoothed over {s} s &mdash; the exact signal the edge changes were counted in. A regular wave is linked turns; each crossing of the centre line is one edge change. Positive is a right-hand turn about the vertical (clockwise seen from above), and that sign is physical rather than a guess about how the phone sat. The grey lines are the rate under which a swing does not count ({bar}&deg;/s).':
+    'Gyroskopet projisert på tyngdekraften, glattet over {s} s &mdash; nøyaktig det signalet kantskiftene ble telt i. En jevn bølge er sammenhengende svinger; hver kryssing av midtlinjen er ett kantskifte. Positivt er en høyresving om loddlinjen (med klokken sett ovenfra), og det fortegnet er fysisk og ikke en gjetning om hvordan telefonen lå. De grå linjene er raten en sving må over for å telle ({bar}&deg;/s).',
   'Rhythm': 'Rytme',
   'time between edge changes, all counted runs': 'tid mellom kantskifter, alle medregnede nedkjøringer',
   'How long each turn lasted, as a distribution over every edge change inside a counted run. A tight cluster is a rhythm held; a long tail is traverses and stops. Nothing here says which rhythm is right &mdash; a slalom skier and a giant-slalom skier would sit in different places on this axis, and telling them apart would need a recording of each.':
@@ -34816,6 +34929,9 @@ const LOAM_NB = {
   'Drop': 'Fall',
   'smooth': 'glattet',
   'Smooth': 'Glattet',
+  'Cut stops and pauses out of the time axis, like Strava\'s moving time.':
+    'Fjerner stopp og pauser fra tidsaksen, som tid i bevegelse i Strava.',
+  'moving time in {noun}': 'tid i bevegelse i {noun}',
   'Show grade-adjusted pace: the flat-ground pace that would take the same effort.':
     'Vis stigningsjustert tempo: tempoet på flatmark som ville krevd samme innsats.',
   'Grade-adjusted pace: the flat-ground pace that would take the same effort.':
@@ -35622,7 +35738,7 @@ const LOAM_NB = {
   'Speed vs distance into run': 'Fart mot distanse inn i etappen',
   'Pace vs distance, runs overlaid': 'Tempo mot distanse, etappene lagt oppå hverandre',
   'Speed vs distance, runs overlaid': 'Fart mot distanse, etappene lagt oppå hverandre',
-  'Dashed = gap in measured pace': 'Stiplet = hull i målt tempo',
+  'Faded = gap in measured pace': 'Blek = hull i målt tempo',
   'Time lag vs fastest run (#{n}, positive = slower)': 'Tidsforskjell mot raskeste etappe (#{n}, positivt = tregere)',
   'seconds into fastest run': 'sekunder inn i raskeste etappe',
   'Not enough data to align runs.': 'Ikke nok data til å stille opp etappene mot hverandre.',
@@ -35707,6 +35823,12 @@ const LOAM_NB = {
   'decoupling': 'frakobling',
   'first half': 'første halvdel',
   'second half': 'andre halvdel',
+  'first half GAP': 'første halvdel GAP',
+  'second half GAP': 'andre halvdel GAP',
+  'Pace is grade-adjusted (GAP), so a climb in one half is not read as a fade. Descents steeper than {floor}% get no more credit than {floor}%, because on real trail running downhill saves less than the treadmill model says.':
+    'Tempoet er justert for stigning (GAP), så en motbakke i den ene halvdelen leses ikke som et fall. Nedoverbakker brattere enn {floor} % får ikke mer uttelling enn {floor} %, fordi løping nedover i ekte terreng sparer mindre enn tredemølle-modellen sier.',
+  'Even adjusted for gradient, the two halves climbed too differently ({a} vs {b} m per km) for the number to be about you rather than about the adjustment, which is least certain on descents. Read this on a flatter effort or a repeated loop instead.':
+    'Selv justert for stigning klatret de to halvdelene for ulikt ({a} mot {b} høydemeter per km) til at tallet sier noe om deg snarere enn om justeringen, som er mest usikker i nedoverbakker. Les dette på en flatere økt eller en gjentatt runde i stedet.',
   'hr avg': 'snittpuls',
   'not comparable': 'ikke sammenlignbart',
   'faded': 'falt av',
@@ -37564,6 +37686,26 @@ function loamThemeValue(v, M) {
   }
   return v;
 }
+/* EVERY CHART LINE IS SOLID (owner, 2026-09-30, asked twice: "all lines solid, they are hard to
+   read, especially when they are not continuous"). Enforced here, on the copies loamPlot draws,
+   rather than trusted to each chart, because the second request came from dashes that survived the
+   first one in charts nobody re-read. A series that needs telling apart gets a colour, a width or an
+   opacity instead. */
+function loamSolidLines(traces, layout) {
+  const strip = (o) => { if (o && typeof o === 'object' && 'dash' in o) delete o.dash; };
+  for (const t of traces || []) { if (!t) continue; strip(t.line); if (t.marker) strip(t.marker.line); }
+  if (!layout) return;
+  for (const sh of layout.shapes || []) if (sh) strip(sh.line);
+  /* Unified hover draws its own x spike, dotted by default, even on an axis that never asked for one. */
+  const unified = /unified/.test(String(layout.hovermode || ''));
+  if (unified && !layout.xaxis) layout.xaxis = {};
+  for (const k of Object.keys(layout)) {
+    const ax = layout[k];
+    if (unified && /^xaxis\d*$/.test(k) && ax && typeof ax === 'object') { ax.spikedash = 'solid'; continue; }
+    /* Plotly's own default spike line is DASHED, so a spike is made solid whether or not it was styled. */
+    if (/^[xy]axis\d*$/.test(k) && ax && typeof ax === 'object' && (ax.showspikes || 'spikedash' in ax)) ax.spikedash = 'solid';
+  }
+}
 function loamPlot(el, traces, layout, cfg) {
   const touch = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
     || (window.matchMedia && window.matchMedia('(hover: none)').matches);
@@ -37571,6 +37713,7 @@ function loamPlot(el, traces, layout, cfg) {
   const M = loamChartTheme(state);
   const themedTraces = loamThemeValue(traces, M);
   const themedLayout = loamThemeValue(layout, M);
+  loamSolidLines(themedTraces, themedLayout);
   const node = typeof el === 'string' ? document.getElementById(el) : el;
   if (node) node._loamChartTheme = state;
   return Plotly.newPlot(el, themedTraces, touch ? { ...themedLayout, dragmode: false } : themedLayout, cfg);
@@ -38009,6 +38152,8 @@ function renderRunTimeline(D) {
   syncSmoothToggles();
   const smooth = loamSmooth();
   const ride = D.ride;
+  const clock = timelineClock(D);
+  syncTimelineMovingToggle(clock);
   let loc = D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end);
   /* Foot activities read in pace (min/mi or /km), not riding speed; bikes keep speed. */
   const sport = normalizeSport(D.gpsSport || D.sport || '');
@@ -38026,7 +38171,7 @@ function renderRunTimeline(D) {
      `chans` is that stack, top to bottom, and it is also what the single-plot path lists -- the two
      paths differ in the LAYOUT they build from it, not in the traces. The bike path (a GPS-only
      FIT, footSport false) keeps the overlaid altitude axis it has always had: it draws one channel
-     and a dotted altitude line, and was never the crowded case.
+     and an overlaid altitude line, and was never the crowded case.
      Heart rate joins as a third row when the recording carries it. It is the channel a runner reads
      pace against ("why did that split cost so much") and this page had it nowhere over time -- the
      splits table has a column, the zones panel has totals, and neither answers "when". */
@@ -38064,7 +38209,7 @@ function renderRunTimeline(D) {
     if (gapOn) {
       const gap = smooth ? smoothRunPace(t, gapY) : gapY;
       traces.push({ x: t, y: gap, type: 'scatter', mode: 'lines',
-        line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: '6px,2px' },
+        line: { color: '#b899db', width: smooth ? 2.5 : 1.5 },
         name: `GAP (${U.metric() ? 'min/km' : 'min/mi'})`, yaxis: paceAxis, connectgaps: false,
         text: gap.map(fmtPace), hovertemplate: 'GAP %{text}<extra></extra>' });
     }
@@ -38081,8 +38226,8 @@ function renderRunTimeline(D) {
     chans.push({ key: 'speed', axis: nextAxis(), label: loamT('speed'), title: loamT('speed ({u})', { u: U.speedUnit() }), color: '#6da7c4' });
   }
   /* Altitude. On its own row it is a profile and is drawn as one (filled, solid); overlaid on the
-     bike's single plot it stays the faint dotted line it has always been, because there it is a
-     second quantity crossing the first and has to read as the background one.
+     bike's single plot it is a thinner line, because there it is a second quantity crossing the
+     first and has to read as the background one. Never dotted (owner, 2026-09-30).
 
      THE SERIES IS `climbAltSeries`, NOT THE BAROMETER (2026-09-17), so a recording made with no
      barometer gets a profile instead of nothing. This row used to read `D.sensors.baro` alone while
@@ -38115,7 +38260,7 @@ function renderRunTimeline(D) {
       x: altPts.map(a => a.t - ride.start),
       y: altPts.map(a => U.smallNum(a.alt - baseAlt)),
       type: 'scatter', mode: 'lines',
-      line: { color: '#d4a574', width: altRow ? 1.4 : 1.2, ...(altRow ? {} : { dash: 'dot' }) },
+      line: { color: '#d4a574', width: altRow ? 1.4 : 1.2 },
       ...(altRow ? { fill: 'tozeroy', fillcolor: 'rgba(160,111,36,0.26)' } : {}),
       name: altFromGps ? loamT('Δ altitude ({u}), GPS', { u: su }) : loamT('Δ altitude ({u})', { u: su }),
       yaxis: altAxisId
@@ -38194,6 +38339,8 @@ function renderRunTimeline(D) {
          to fill the row -- the auto-range of a near-flat series tick-labels its float jitter. */
       range: [0, Math.max(10, Math.ceil(Math.max(...oscRows.map(o => o.oscCm)) * 1.1))] });
   }
+  /* Moving time: every channel re-laid on the clock at once, before the marks join them. */
+  for (let i = 0; i < traces.length; i++) traces[i] = timelineClockTrace(traces[i], clock);
   /* The channel boxes: shown only for what this recording can draw, and ticked from the stored
      preference, on every render so a units or smooth re-render cannot leave them stale. */
   { const box = document.getElementById('timelineChans');
@@ -38238,7 +38385,7 @@ function renderRunTimeline(D) {
   const altAxis = (chans.find(c => c.key === 'alt') || chans[0]).axis;
   const shapes = D.running.segments.map(s => ({
     type: 'rect', xref: 'x', yref: rowRef(altAxis),
-    x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
+    x0: clock.xc(s.tStart - ride.start), x1: clock.xc(s.tEnd - ride.start), y0: 0, y1: 1,
     /* Gray for detected lift rides (GPS-only FIT rides); red for climbs, green for descents, as on the map. */
     fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.22)' : s.dir === 'down' ? 'rgba(140,170,109,0.15)' : 'rgba(197,75,60,0.15)',
     line: { width: 0 }, layer: 'below'
@@ -38249,7 +38396,7 @@ function renderRunTimeline(D) {
     for (const b of D.gait.breaks) {
       shapes.push({
         type: 'rect', xref: 'x', yref: rowRef((paceRow || chans[0]).axis),
-        x0: b.t0 - ride.start, x1: b.t1 - ride.start, y0: 0, y1: 1,
+        x0: clock.xc(b.t0 - ride.start), x1: clock.xc(b.t1 - ride.start), y0: 0, y1: 1,
         fillcolor: 'rgba(100,108,120,0.20)', line: { width: 0 }, layer: 'below',
       });
     }
@@ -38266,15 +38413,17 @@ function renderRunTimeline(D) {
       });
     }
   }
-  /* Annotation marks: a dotted line each, a label on the lane above the plot (thinned to what fits,
-     see thinTimelineLabels), and a marker at the top of the line that carries the text into the
-     hover box -- so a mark whose label did not fit still names itself on a tap or hover. */
+  /* Annotation marks: a thin solid line each, a label on the lane above the plot (thinned to what
+     fits, see thinTimelineLabels), and a marker at the top of the line that carries the text into the
+     hover box -- so a mark whose label did not fit still names itself on a tap or hover. On a
+     moving-time axis a mark inside a stop sits on the seam where the stop was cut out. */
   const annotations = (D.sensors.annotations || []).filter(a => a.t >= ride.start && a.t <= ride.end);
+  const markX = (a) => clock.xc(a.t - ride.start);
   for (const a of annotations) {
     shapes.push({
       type: 'line', xref: 'x', yref: 'paper',
-      x0: a.t - ride.start, x1: a.t - ride.start, y0: 0, y1: 1,
-      line: { color: '#d4a574', width: 1, dash: 'dot' },
+      x0: markX(a), x1: markX(a), y0: 0, y1: 1,
+      line: { color: '#d4a574', width: 1 },
     });
   }
   if (annotations.length) subtitle += ' · ' + loamT('annotations marked');
@@ -38285,7 +38434,7 @@ function renderRunTimeline(D) {
   const markFont = { family: 'JetBrains Mono', size: 9, color: '#d4a574' };
   const markLabels = annotations.map(a => {
     const text = a.text.length > 28 ? a.text.slice(0, 26) + '…' : a.text;
-    return { x: a.t - ride.start, text, widthPx: tlLabelWidthPx(text, markFont.size, markFont.family, 3) };
+    return { x: markX(a), text, widthPx: tlLabelWidthPx(text, markFont.size, markFont.family, 3) };
   });
   const markAnnos = (lo, hi) => thinTimelineLabels(markLabels, lo, hi, tlPlotWidthPx('timelineChart', margin))
     .map(l => ({ ...tlLaneAnno(0), x: l.x, text: l.text, font: markFont, bgcolor: 'rgba(20,23,27,0.85)', borderpad: 3 }));
@@ -38297,12 +38446,12 @@ function renderRunTimeline(D) {
   markAxes.forEach((id, i) => {
     /* ONE PER ROW, because a hover names a mark only on the subplot it is drawn on, and the whole
        point of these markers is that a mark whose LABEL was thinned away can still be tapped. With
-       a single trace on the top row, a tap on the elevation or heart-rate row -- where the dotted
+       a single trace on the top row, a tap on the elevation or heart-rate row -- where the mark's
        line is just as visible -- would have named nothing. Only the top row draws the triangle; the
        rest are hover targets on a line that is already there, so the stack does not grow a row of
        decorations it cannot explain. */
     traces.push({
-      x: annotations.map(a => a.t - ride.start), y: annotations.map(() => (i === 0 ? 0.98 : 0.5)), yaxis: id,
+      x: annotations.map(markX), y: annotations.map(() => (i === 0 ? 0.98 : 0.5)), yaxis: id,
       type: 'scatter', mode: 'markers',
       marker: i === 0 ? { symbol: 'triangle-down', size: 8, color: '#d4a574' }
                       : { symbol: 'triangle-down', size: 10, color: 'rgba(0,0,0,0)' },
@@ -38329,14 +38478,14 @@ function renderRunTimeline(D) {
     margin,
     /* "time in walk" / "time in ride": this axis serves the walk and the GPS-only bike import as well
        as the run, and it said "time in run" over all three. */
-    xaxis: { title: { text: loamT('time in {noun}', { noun: sportNounT(displaySport(D)) }), font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, ride.end - ride.start),
+    xaxis: { title: { text: timelineAxisTitle(clock, sportNounT(displaySport(D))), font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'array', ...loamTimeTicks(0, clock.span),
       /* Anchored to the BOTTOM row, so the one x axis is drawn under the stack rather than under the
          first row, and its cursor spikes across every row -- the synced read that makes a stack of
          channels one picture instead of three charts. */
       ...(stacked ? { anchor: chans[chans.length - 1].axis, showspikes: true, spikemode: 'across',
-                      spikesnap: 'cursor', spikethickness: 1, spikedash: 'dot', spikecolor: '#94a3b8' } : {}) },
+                      spikesnap: 'cursor', spikethickness: 1, spikecolor: '#94a3b8' } : {}) },
     showlegend: true, legend: timelineLegend(hostPx, margin, 1),
-    shapes, annotations: markAnnos(0, ride.end - ride.start), hovermode: 'x unified'
+    shapes, annotations: markAnnos(0, clock.span), hovermode: 'x unified'
   };
   /* Foot: pace axis, reversed so faster is up. Bike: speed axis as before. */
   chans.forEach((c, i) => {
@@ -38360,12 +38509,12 @@ function renderRunTimeline(D) {
     host.style.height = hostPx + 'px'; }
   loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
     /* Re-lay the mark labels and the m:ss ticks on zoom, pan and resize (see loamTimeTicks). */
-    wireTimelineRelayout(document.getElementById('timelineChart'), 0, ride.end - ride.start, (lo, hi) => {
+    wireTimelineRelayout(document.getElementById('timelineChart'), 0, clock.span, (lo, hi) => {
       const tk = loamTimeTicks(lo, hi);
       return { annotations: markAnnos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
     });
   }).catch(() => {});
-  linkTimelineToMap(D.sensors.location, ride);
+  linkTimelineToMap(D.sensors.location, ride, clock);
 }
 
 /* The overlay chart: the foot channels on ONE plot, each on its own y axis overlaid on the first.
@@ -38427,7 +38576,7 @@ function renderRunOverlay(D) {
   const gapY = timelineGapSpeeds(loc, altPts).map(v => Number.isFinite(v) && v > 0 ? perUnit / v / 60 : null);
   if (gapY.some(p => p != null)) {
     const y = smooth ? smoothRunPace(t, gapY) : gapY;
-    ch.gap = { traces: [{ x: t, y, type: 'scatter', mode: 'lines', line: { color: '#b899db', width: smooth ? 2.5 : 1.5, dash: '6px,2px' },
+    ch.gap = { traces: [{ x: t, y, type: 'scatter', mode: 'lines', line: { color: '#b899db', width: smooth ? 2.5 : 1.5 },
       name: `GAP (${unitPace})`, connectgaps: false, text: y.map(fmtPace), hovertemplate: 'GAP %{text}<extra></extra>' }],
       color: '#b899db', title: `GAP (${unitPace})`, reversed: true, shareWith: 'pace' };
   }
@@ -38441,9 +38590,10 @@ function renderRunOverlay(D) {
   if (altPts.length > 1) {
     const altFromGps = climbAltSeries(baroRows, [], ride).length === 0;
     const su = U.smallUnit(), base = altPts[0].alt;
-    /* A background line, dotted, as on the bike's single plot: here it crosses other quantities. */
+    /* A background line, thin, as on the bike's single plot: here it crosses other quantities. Solid,
+       like every chart line (owner, 2026-09-30: dotted lines are hard to read). */
     ch.alt = { traces: [{ x: altPts.map(a => X(a.t)), y: altPts.map(a => U.smallNum(a.alt - base)), type: 'scatter', mode: 'lines',
-      line: { color: '#d4a574', width: 1.4, dash: 'dot' },
+      line: { color: '#d4a574', width: 1.4 },
       name: altFromGps ? loamT('Δ altitude ({u}), GPS', { u: su }) : loamT('Δ altitude ({u})', { u: su }) }],
       color: '#d4a574', title: altFromGps ? loamT('Δ alt ({u}), GPS', { u: su }) : loamT('Δ alt ({u})', { u: su }) };
   }
@@ -39028,8 +39178,11 @@ const MOD_COPY_SHAPES = [
     'Efficiency slipped {pct}%, inside the ~{bar}% that is normal for a steady effort of this length.', ['pct', 'bar']],
   [/^You finished ([\d.]+)% MORE efficient than you started, which usually means the opening was harder than the pace suggested and your body settled into it\.$/,
     'You finished {pct}% MORE efficient than you started, which usually means the opening was harder than the pace suggested and your body settled into it.', ['pct']],
-  [/^The two halves of this effort had different gradients \(([\d.]+) vs ([\d.]+) m of climb per km\), and speed per heartbeat follows the hill far more strongly than it follows fatigue\. Read this on a flat effort or a repeated loop instead\.$/,
+  [/^The two halves of this effort had different gradients \((-?[\d.]+) vs (-?[\d.]+) m of climb per km\), and speed per heartbeat follows the hill far more strongly than it follows fatigue\. Read this on a flat effort or a repeated loop instead\.$/,
     'The two halves of this effort had different gradients ({a} vs {b} m of climb per km), and speed per heartbeat follows the hill far more strongly than it follows fatigue. Read this on a flat effort or a repeated loop instead.',
+    ['a', 'b']],
+  [/^Even adjusted for gradient, the two halves climbed too differently \((-?[\d.]+) vs (-?[\d.]+) m per km\) for the number to be about you rather than about the adjustment, which is least certain on descents\. Read this on a flatter effort or a repeated loop instead\.$/,
+    'Even adjusted for gradient, the two halves climbed too differently ({a} vs {b} m per km) for the number to be about you rather than about the adjustment, which is least certain on descents. Read this on a flatter effort or a repeated loop instead.',
     ['a', 'b']],
   /* The swim set card's reason for declining a trend, written by `analyzeSwim` (drift-pinned, so the
      sentence is assembled there and cannot be translated at source). Same arrangement as the two
@@ -39292,7 +39445,7 @@ function renderRunDecoupling(D) {
   const body = document.getElementById('runDecouplingBody');
   if (!sec || !body) return;
   let r;
-  try { r = aerobicDecoupling(runDecouplingSamples(D)); }
+  try { r = aerobicDecoupling(runDecouplingSamples(D), { gradeCost: runningGradeCost }); }
   catch (e) { console.warn('decoupling failed', e); sec.classList.add('hidden'); return; }
 
   /* A refusal is shown, not hidden: "this run is too short to read" is information, and silently
@@ -39305,18 +39458,23 @@ function renderRunDecoupling(D) {
   const pace = (v) => U.pace ? U.pace(v) : (v.toFixed(2) + ' m/s');
   const sign = r.decouplingPct > 0 ? '+' : '';
   const tone = r.verdict.key === 'decoupled' ? 'var(--accent)' : 'var(--text)';
+  /* With altitude the halves are compared on grade-adjusted pace, so the tiles show the pace the
+     ratio was actually computed from; a raw pace beside a GAP percentage would not add up. */
+  const gap = r.first.gapSpeedMps != null && r.second.gapSpeedMps != null;
+  const s1 = gap ? r.first.gapSpeedMps : r.first.speedMps, s2 = gap ? r.second.gapSpeedMps : r.second.speedMps;
   body.innerHTML = `
     <div class="swim-tiles stiles-4">
       <div><div class="stile-v" style="color:${tone}">${sign}${r.decouplingPct.toFixed(1)}%</div><div class="stile-l">${loamT('decoupling')}</div></div>
-      <div><div class="stile-v">${escapeHtml(pace(r.first.speedMps))}</div><div class="stile-l">${loamT('first half')}</div></div>
-      <div><div class="stile-v">${escapeHtml(pace(r.second.speedMps))}</div><div class="stile-l">${loamT('second half')}</div></div>
+      <div><div class="stile-v">${escapeHtml(pace(s1))}</div><div class="stile-l">${gap ? loamT('first half GAP') : loamT('first half')}</div></div>
+      <div><div class="stile-v">${escapeHtml(pace(s2))}</div><div class="stile-l">${gap ? loamT('second half GAP') : loamT('second half')}</div></div>
       <div><div class="stile-v">${Math.round(r.first.hrAvg)} &rarr; ${Math.round(r.second.hrAvg)}</div><div class="stile-l">${loamT('hr avg')}</div></div>
     </div>
     <div class="strength-tablenote analysis-explanation"><strong>${escapeHtml(modCopyT(r.verdict.label))}.</strong> ${escapeHtml(modCopyT(r.verdict.note))}</div>
     ${leadNote(
       loamT('Speed per heartbeat over the {min} minutes after the warmup, split in half by time. A read on endurance, not on pace, and only trustworthy on a steady, continuous effort.',
         { min: Math.round(r.durationS / 60) }),
-      loamT('Slowing while your heart rate falls just as far is not a fade &mdash; that is the whole reason this is a ratio rather than a pace comparison. Standing time is excluded from the distance but not from the heart-rate average.'),
+      loamT('Slowing while your heart rate falls just as far is not a fade &mdash; that is the whole reason this is a ratio rather than a pace comparison. Standing time is excluded from the distance but not from the heart-rate average.')
+        + (gap ? ' ' + loamT('Pace is grade-adjusted (GAP), so a climb in one half is not read as a fade. Descents steeper than {floor}% get no more credit than {floor}%, because on real trail running downhill saves less than the treadmill model says.', { floor: Math.abs(GAP_DOWNHILL_FLOOR_PCT) }) : ''),
       'strength-caveat', loamT('How to read it'), loamT('Steady, continuous efforts only · Warmup excluded'))}`;
   sec.classList.remove('hidden');
 }
@@ -39428,13 +39586,69 @@ function timeInHrZones(rows, opts = {}) {
 /* ---------- ported from analyzer/core/endurance/decoupling.js ----------
    Aerobic decoupling: how much speed-per-heartbeat was lost between the halves of a steady effort.
    Pinned to the module by the drift guard in decoupling.test.js -- edit both or neither. */
+/** Positive decoupling means efficiency was LOST. Above this it is worth remarking on. */
 const DECOUPLE_FLAG_PCT = 5;
+
+/** Per-km elevation difference between halves above which terrain, not fatigue, is driving it. */
 const TERRAIN_SKEW_M_PER_KM = 8;
 
+/** Grade is read across this much distance, centred. GPS altitude wanders a few metres, which over
+ *  200 m is ~1.5% of grade -- small, and the same in both halves -- where 50 m would make it 6%. */
+const GAP_GRADE_WINDOW_M = 200;
+
+/** Descents steeper than this earn no more credit than this grade (see the header). */
+const GAP_DOWNHILL_FLOOR_PCT = -10;
+
+/** With grade adjustment, the halves' adjustment factors may differ by this much before the model,
+ *  not the athlete, is supplying the answer. A 4% climb against flat is ~0.24; the same climb out
+ *  and back down is ~0.43 and is refused. Judgment, not measured. */
+const GAP_MAX_ADJUST_SKEW = 0.25;
+
+/** Flat-equivalent distance per metre travelled at `gradePct`, with the downhill floor applied. */
+function gapFactor(gradePct, gradeCost) {
+  const flat = gradeCost(0);
+  const c = gradeCost(Math.max(GAP_DOWNHILL_FLOOR_PCT, gradePct || 0));
+  return flat > 0 && c > 0 ? c / flat : 1;
+}
+
+/* Grade (%) at each row, from altitude read GAP_GRADE_WINDOW_M apart along the distance, or null
+   when the rows carry too little altitude to grade. Interpolated on distance rather than time so a
+   stop does not flatten the hill around it. */
+function rowGrades(rows) {
+  const pts = rows.filter(r => Number.isFinite(r.altitudeM));
+  if (pts.length < 2) return null;
+  const D = pts.map(r => r.distanceM), A = pts.map(r => r.altitudeM);
+  const lo = D[0], hi = D[D.length - 1];
+  if (!(hi - lo >= GAP_GRADE_WINDOW_M)) return null;
+  const altAt = (d) => {
+    if (d <= lo) return A[0];
+    if (d >= hi) return A[A.length - 1];
+    let a = 0, b = D.length - 1;
+    while (b - a > 1) { const m = (a + b) >> 1; if (D[m] < d) a = m; else b = m; }
+    const span = D[b] - D[a];
+    return span > 0 ? A[a] + (A[b] - A[a]) * (d - D[a]) / span : A[b];
+  };
+  const w = GAP_GRADE_WINDOW_M / 2;
+  return rows.map(r => {
+    const d1 = Math.max(lo, r.distanceM - w), d2 = Math.min(hi, r.distanceM + w);
+    return d2 - d1 > 0 ? (altAt(d2) - altAt(d1)) / (d2 - d1) * 100 : 0;
+  });
+}
+
+/**
+ * @param samples [{ t (s), distanceM (cumulative), hr (bpm), altitudeM? }]
+ * @param opts    { warmupS, minEffortS, minHrCoverage, gradeCost? }
+ *                `gradeCost(gradePct)` is a cost-of-transport curve (J/kg/m); passing one turns on
+ *                grade adjustment whenever the rows carry altitude.
+ * @returns { decouplingPct, verdict, first, second, durationS, terrain, reason }
+ *          `decouplingPct` is null whenever the effort cannot support the read; `reason` says why
+ *          in words meant for the athlete, matching how the swim module reports a missing trend.
+ */
 function aerobicDecoupling(samples, opts = {}) {
   const warmupS = opts.warmupS ?? 300;
   const minEffortS = opts.minEffortS ?? 1200;
   const minHrCoverage = opts.minHrCoverage ?? 0.8;
+  const gradeCost = typeof opts.gradeCost === 'function' ? opts.gradeCost : null;
 
   const rows = (samples || [])
     .filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.distanceM))
@@ -39464,6 +39678,9 @@ function aerobicDecoupling(samples, opts = {}) {
   /* Split by TIME, not by distance or sample count: the halves have to represent equal amounts of
      work-in-time for the heart-rate comparison to be fair. A distance split hands the slower half
      more minutes and therefore more drift. */
+  const grades = gradeCost ? rowGrades(body) : null;
+  const gradeOf = grades ? new Map(body.map((r, i) => [r, grades[i]])) : null;
+
   const mid = body[0].t + durationS / 2;
   const firstRows = body.filter(r => r.t <= mid);
   const secondRows = body.filter(r => r.t >= mid);
@@ -39491,8 +39708,27 @@ function aerobicDecoupling(samples, opts = {}) {
     if (!(dt > 0) || !(dd > 0)) return null;
     const speedMps = dd / dt;
     const hrAvg = rs.reduce((a, r) => a + r.hr, 0) / rs.length;
-    return { speedMps: +speedMps.toFixed(3), hrAvg: +hrAvg.toFixed(1),
-             ef: +(speedMps / hrAvg).toFixed(5), distanceM: +dd.toFixed(1), durationS: +dt.toFixed(1) };
+    /* The adjustment is a distance-weighted mean of each step's factor over the same steps the
+       speed was taken from, so GAP speed is the raw speed repriced -- never a mean of per-sample
+       GAP speeds, which would weight a slow climb's samples by time rather than by ground. */
+    let factor = null;
+    if (gradeOf) {
+      let raw = 0, adj = 0;
+      for (let i = 1; i < rs.length; i++) {
+        if (hasMoving && (!rs[i].moving || !rs[i - 1].moving)) continue;
+        const sdd = rs[i].distanceM - rs[i - 1].distanceM;
+        if (!(rs[i].t - rs[i - 1].t > 0) || !(sdd >= 0)) continue;
+        raw += sdd;
+        adj += sdd * gapFactor(gradeOf.get(rs[i]), gradeCost);
+      }
+      factor = raw > 0 ? adj / raw : 1;
+    }
+    const effSpeed = factor != null ? speedMps * factor : speedMps;
+    return { speedMps: +speedMps.toFixed(3),
+             gapSpeedMps: factor != null ? +effSpeed.toFixed(3) : null,
+             gradeFactor: factor != null ? +factor.toFixed(4) : null,
+             hrAvg: +hrAvg.toFixed(1),
+             ef: +(effSpeed / hrAvg).toFixed(5), distanceM: +dd.toFixed(1), durationS: +dt.toFixed(1) };
   };
   const first = half(firstRows), second = half(secondRows);
   if (!first || !second) return none('this effort has a stretch with no forward progress');
@@ -39511,6 +39747,10 @@ function aerobicDecoupling(samples, opts = {}) {
   };
 }
 
+/* Net climb per km in each half. Two halves of a flat loop match; a there-and-back-up-a-hill does
+   not, and that difference is what would otherwise be reported as a fitness finding.
+   When the halves were grade-adjusted, comparability is judged on how differently the model
+   repriced them instead: net climb is still reported, because it is what the athlete recognises. */
 function halfTerrain(firstRows, secondRows, first, second) {
   const climb = (rs) => {
     const alts = rs.map(r => r.altitudeM).filter(v => Number.isFinite(v));
@@ -39522,17 +39762,30 @@ function halfTerrain(firstRows, secondRows, first, second) {
   }
   const perKm1 = c1 / (first.distanceM / 1000), perKm2 = c2 / (second.distanceM / 1000);
   const skew = Math.abs(perKm1 - perKm2);
+  const adjusted = first.gradeFactor != null && second.gradeFactor != null;
+  const adjustSkew = adjusted ? Math.abs(first.gradeFactor - second.gradeFactor) : null;
   return {
     known: true,
     firstMPerKm: +perKm1.toFixed(1),
     secondMPerKm: +perKm2.toFixed(1),
     skewMPerKm: +skew.toFixed(1),
-    comparable: skew <= TERRAIN_SKEW_M_PER_KM,
+    adjusted,
+    adjustSkew: adjusted ? +adjustSkew.toFixed(3) : null,
+    comparable: adjusted ? adjustSkew <= GAP_MAX_ADJUST_SKEW : skew <= TERRAIN_SKEW_M_PER_KM,
   };
 }
 
+/* Plain language, hedged. Lives here rather than in a view so the coach and the panel cannot
+   disagree about what a number means -- the same rule the swim module follows. */
 function decouplingVerdict(pct, terrain) {
   if (pct == null) return null;
+  if (terrain && terrain.known && terrain.comparable === false && terrain.adjusted) {
+    return {
+      key: 'terrain',
+      label: 'not comparable',
+      note: `Even adjusted for gradient, the two halves climbed too differently (${terrain.firstMPerKm} vs ${terrain.secondMPerKm} m per km) for the number to be about you rather than about the adjustment, which is least certain on descents. Read this on a flatter effort or a repeated loop instead.`,
+    };
+  }
   if (terrain && terrain.known && terrain.comparable === false) {
     return {
       key: 'terrain',
@@ -44511,8 +44764,9 @@ function focusSegment(descent, ride) {
      time-relative-to-ride.start on the x-axis, so we offset accordingly. */
   const chart = document.getElementById('timelineChart');
   if (chart && window.Plotly) {
+    const xc = (window._tlClock && window._tlClock.xc) || ((t) => t);
     Plotly.relayout(chart, {
-      'xaxis.range': [descent.tStart - ride.start, descent.tEnd - ride.start]
+      'xaxis.range': [xc(descent.tStart - ride.start), xc(descent.tEnd - ride.start)]
     }).catch(() => {});
   }
   /* Redraw the map showing JUST this segment: its track and every turn inside it (placed at the
@@ -44811,7 +45065,10 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
    reset whenever a map is rebuilt. */
 let _linkCursor = null;
 let _linkPinned = false;   /* a tapped (vs hovered) timeline marker, kept until the map is tapped to clear */
-function linkTimelineToMap(loc, ride) {
+function linkTimelineToMap(loc, ride, clock) {
+  /* The clock the chart was drawn on, so a segment focus and the map cursor read its axis. */
+  window._tlClock = clock || null;
+  const toRide = (x) => (clock ? clock.inv(x) : x);
   try {
     const chart = document.getElementById('timelineChart');
     if (!chart || !chart.on || !ride) return;
@@ -44843,7 +45100,7 @@ function linkTimelineToMap(loc, ride) {
     };
     chart.on('plotly_hover', (ev) => {
       if (!ev || !ev.points || !ev.points.length) return;
-      place(ev.points[0].x);
+      place(toRide(ev.points[0].x));
     });
     chart.on('plotly_unhover', () => {
       /* On touch a tap fires hover then unhover, which would wipe the marker instantly; a pinned tap
@@ -44855,7 +45112,7 @@ function linkTimelineToMap(loc, ride) {
        map into view so the dropped point is visible on a single-column phone layout. */
     chart.on('plotly_click', (ev) => {
       if (!ev || !ev.points || !ev.points.length) return;
-      place(ev.points[0].x);
+      place(toRide(ev.points[0].x));
       if (isTouch) {
         _linkPinned = true;
         const el = document.getElementById('map');
@@ -45686,6 +45943,9 @@ function renderBikeTimeline(D) {
   const ridingJumps = D.ridingJumps || [];
   const crashes = D.crashes || [];
   syncSmoothToggles();
+  const clock = timelineClock(D);
+  syncTimelineMovingToggle(clock);
+  const X = (t) => clock.xc(t - ride.start);
   const rows = bikeTimelineRows(D);
   const axisOf = (i) => (i === 0 ? 'y' : 'y' + (i + 1));
   const rowAxis = {};
@@ -45695,7 +45955,8 @@ function renderBikeTimeline(D) {
   for (const r of rows) {
     const lines = r.traces.map(tr => ({ type: 'scatter', mode: 'lines', yaxis: r.axis, ...tr }));
     // Elevation remains the profile used by the descent detector; smooth the measured signals.
-    traces.push(...(r.key === 'elevation' ? lines : smoothTimelineTraces(lines, r.key === 'turning' ? 0.5 : 3)));
+    traces.push(...(r.key === 'elevation' ? lines : smoothTimelineTraces(lines, r.key === 'turning' ? 0.5 : 3))
+      .map(tr => timelineClockTrace(tr, clock)));
   }
 
   /* Bands, each on the row that explains it. */
@@ -45703,7 +45964,7 @@ function renderBikeTimeline(D) {
   if (rowAxis.turning) {
     for (const T of turns) {
       shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.turning + ' domain',
-        x0: T.tStart - ride.start, x1: T.tEnd - ride.start, y0: 0, y1: 1,
+        x0: X(T.tStart), x1: X(T.tEnd), y0: 0, y1: 1,
         fillcolor: T.direction === 'R' ? 'rgba(193,78,46,0.16)' : 'rgba(31,123,166,0.16)',
         line: { width: 0 }, layer: 'below' });
     }
@@ -45716,7 +45977,7 @@ function renderBikeTimeline(D) {
     for (const s of segs) {
       if (!(s.tEnd > s.tStart)) continue;
       shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.elevation + ' domain',
-        x0: s.tStart - ride.start, x1: s.tEnd - ride.start, y0: 0, y1: 1,
+        x0: X(s.tStart), x1: X(s.tEnd), y0: 0, y1: 1,
         fillcolor: s.kind === 'lift' ? 'rgba(148,163,184,0.20)' : 'rgba(197,75,60,0.13)',
         line: { width: 0 }, layer: 'below' });
     }
@@ -45725,7 +45986,7 @@ function renderBikeTimeline(D) {
      is a hairline on every row, and six rows of hairlines were the clutter this layout removes. */
   for (const J of ridingJumps) {
     const tLand = J.t_phone - ride.start, tLift = tLand - (J.hang || 0);
-    shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.speed ? rowAxis.speed + ' domain' : 'paper', x0: tLift, x1: tLand, y0: 0, y1: 1,
+    shapes.push({ type: 'rect', xref: 'x', yref: rowAxis.speed ? rowAxis.speed + ' domain' : 'paper', x0: clock.xc(tLift), x1: clock.xc(tLand), y0: 0, y1: 1,
       fillcolor: 'rgba(212,165,116,0.40)', line: { width: 0 }, layer: 'below' });
   }
 
@@ -45736,24 +45997,24 @@ function renderBikeTimeline(D) {
   const markFont = { family: 'JetBrains Mono', size: 9, color: '#d4a574' };
   const laneLabels = rowAxis.turning ? turns.map(T => {
     const text = String(T.n);
-    return { x: (T.tStart + T.tEnd) / 2 - ride.start, text, widthPx: tlLabelWidthPx(text, numFont.size, numFont.family, 0) };
+    return { x: X((T.tStart + T.tEnd) / 2), text, widthPx: tlLabelWidthPx(text, numFont.size, numFont.family, 0) };
   }) : [];
   const marks = rowAxis.turning ? []
     : ((D.sensors && D.sensors.annotations) || []).filter(a => a.t >= ride.start && a.t <= ride.end && a.text);
   for (const a of marks) {
-    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: a.t - ride.start, x1: a.t - ride.start, y0: 0, y1: 1,
-      line: { color: '#d4a574', width: 1, dash: 'dot' } });
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: X(a.t), x1: X(a.t), y0: 0, y1: 1,
+      line: { color: '#d4a574', width: 1 } });
     const text = a.text.length > 28 ? a.text.slice(0, 26) + '…' : a.text;
-    laneLabels.push({ x: a.t - ride.start, text, mark: true, widthPx: tlLabelWidthPx(text, markFont.size, markFont.family, 3) });
+    laneLabels.push({ x: X(a.t), text, mark: true, widthPx: tlLabelWidthPx(text, markFont.size, markFont.family, 3) });
   }
   const crashAnnos = [];
   for (const c of crashes) {
-    const xA = c.anchor - ride.start;
+    const xA = X(c.anchor);
     shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xA, x1: xA, y0: 0, y1: 1, line: { color: '#c14e2e', width: 2 } });
     if (c.stopped) {
-      const xT = c.t - ride.start;
+      const xT = X(c.t);
       shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: xT, x1: xT, y0: 0, y1: 1,
-        line: { color: '#c14e2e', width: 1, dash: 'dot' } });
+        line: { color: '#c14e2e', width: 1 }, opacity: 0.6 });
       laneLabels.push({ x: xT, text: 'tap', tap: true, pinned: true, widthPx: tlLabelWidthPx('tap', tapFont.size, tapFont.family, 0) });
     }
     crashAnnos.push({ ...tlLaneAnno(1), x: xA, text: 'CRASH',
@@ -45780,7 +46041,7 @@ function renderBikeTimeline(D) {
   const jumpY = rowAxis.speed ? domains[rows.findIndex(r => r.key === 'speed')][0] : 0;
   const jumpLabels = ridingJumps.map((J, i) => {
     const text = `J${i + 1}`;
-    return { x: J.t_phone - ride.start - (J.hang || 0) / 2, text, widthPx: tlLabelWidthPx(text, jumpFont.size, jumpFont.family, 0) };
+    return { x: clock.xc(J.t_phone - ride.start - (J.hang || 0) / 2), text, widthPx: tlLabelWidthPx(text, jumpFont.size, jumpFont.family, 0) };
   });
 
   /* The power row's in-row key, top right of the row, since there is no legend to name two lines. */
@@ -45792,7 +46053,7 @@ function renderBikeTimeline(D) {
       yshift: 1, showarrow: false, text: txt, font: { family: 'IBM Plex Sans', size: 10, color: '#475569' } });
   });
 
-  let fullLo = 0, fullHi = Math.max(1, ride.end - ride.start);
+  let fullLo = 0, fullHi = Math.max(1, clock.span);
   const annos = (lo, hi) => {
     const w = tlPlotWidthPx('timelineChart', margin);
     const lane = thinTimelineLabels(laneLabels, lo, hi, w).map(l => (l.tap
@@ -45809,10 +46070,10 @@ function renderBikeTimeline(D) {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin,
-    xaxis: { title: { text: loamT('time in {noun}', { noun: lexNounT(pageLex()) }), font: { size: 11 } },
+    xaxis: { title: { text: timelineAxisTitle(clock, lexNounT(pageLex())), font: { size: 11 } },
       gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0', hoverformat: '.0f', tickmode: 'array', ...loamTimeTicks(fullLo, fullHi),
       anchor: lastAxis, showspikes: true, spikemode: 'across', spikesnap: 'cursor',
-      spikethickness: 1, spikedash: 'dot', spikecolor: '#94a3b8' },
+      spikethickness: 1, spikecolor: '#94a3b8' },
     showlegend: false,
     shapes, annotations: annos(fullLo, fullHi), hovermode: 'x unified',
   };
@@ -45860,7 +46121,7 @@ function renderBikeTimeline(D) {
       return { annotations: annos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
     });
   }).catch(() => {});
-  linkTimelineToMap((D.sensors && D.sensors.location) || [], ride);
+  linkTimelineToMap((D.sensors && D.sensors.location) || [], ride, clock);
 }
 
 /* One model for the on-screen summary and its exported image. */
@@ -46007,9 +46268,9 @@ function jumpArcSVG(jumps, pal) {
   }
   /* The takeoff lip. */
   parts.push(`<path d="M ${x0 - 16} ${groundY} Q ${x0 - 4} ${groundY - 1} ${x0} ${groundY - 7} L ${x0} ${groundY}" fill="${c.ground}"/>`);
-  /* The runners-up first, faint and dashed, so the longest draws over them. */
+  /* The runners-up first, faint (solid, like every chart line), so the longest draws over them. */
   for (const j of js.slice(1).reverse()) {
-    parts.push(`<path d="${arc(j).d}" fill="none" stroke="${c.faint}" stroke-width="1.6" stroke-dasharray="4 4"/>`);
+    parts.push(`<path d="${arc(j).d}" fill="none" stroke="${c.faint}" stroke-width="1.6"/>`);
   }
   const L = arc(longest);
   parts.push(`<path d="${L.d}" fill="none" stroke="${c.accent}" stroke-width="2.6" stroke-linecap="round"/>`);
@@ -46631,7 +46892,7 @@ function renderRadiusChart(turns) {
   const data = turns.filter(T => !isNaN(T.radius));
   /* Radius = apex speed / yaw rate, so its confidence rides entirely on the speed source. With a FIT
      the apex speed is measured wheel speed (solid bars); without one it is interpolated from GPS
-     (estimated, drawn faded with a dashed outline and a ~ on each label) so an estimate never reads
+     (estimated, drawn faded with a grey outline and a ~ on each label) so an estimate never reads
      like ground truth. */
   const measured = data.some(T => T.speedSource === 'fit');
   /* Bars, labels, hover, and the axis follow the Units toggle (previously hardcoded meters). */
@@ -46644,7 +46905,7 @@ function renderRadiusChart(turns) {
          green/orange, which deutan riders cannot tell apart. */
       color: data.map(T => T.direction === 'R' ? '#c14e2e' : '#1f7ba6'),
       opacity: measured ? 1 : 0.55,
-      line: measured ? { width: 0 } : { color: '#94a3b8', width: 1, dash: 'dot' },
+      line: measured ? { width: 0 } : { color: '#94a3b8', width: 1 },
     },
     text: data.map(T => (measured ? '' : '~') + rVal(T.radius).toFixed(1) + ' ' + rUnit), textposition: 'outside',
     textfont: { family: 'JetBrains Mono', size: 10, color: '#475569' },
@@ -47438,7 +47699,7 @@ function renderGhostChart(chartId, g) {
     if (!sd) return;
     traces.push({
       x, y: sd.map(v => +U.speedNum(v).toFixed(1)), type: 'scatter', mode: 'lines',
-      line: a.isToday ? { color: '#c54b3c', width: 2.5 } : { color: '#94a3b8', width: 1, dash: 'dot' },
+      line: a.isToday ? { color: '#c54b3c', width: 2.5 } : { color: '#94a3b8', width: 1 },
       opacity: a.isToday ? 1 : 0.7, name: a.isToday ? 'Today' : a.date,
     });
   });
@@ -47461,7 +47722,7 @@ function renderRoadPowerCurve(D) {
     const env = D.powerEnvelope.filter(e => e.watts != null);
     traces.push({
       x: env.map(e => e.duration), y: env.map(e => e.watts),
-      type: 'scatter', mode: 'lines', line: { color: '#94a3b8', width: 1.5, dash: 'dot' },
+      type: 'scatter', mode: 'lines', line: { color: '#94a3b8', width: 1.5 },
       name: loamT('best ever'), text: env.map(e => fmtDur(e.duration)), hovertemplate: loamT('best-ever') + ' %{text}: %{y} W<extra></extra>',
     });
   }
@@ -47484,7 +47745,7 @@ function renderRoadPowerCurve(D) {
   const ftp = D.metrics && D.metrics.ftp;
   if (ftp) {
     layout.shapes = [{ type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: ftp, y1: ftp,
-      line: { color: '#8caa6d', width: 1, dash: 'dot' } }];
+      line: { color: '#8caa6d', width: 1 } }];
     layout.annotations = [{ xref: 'paper', yref: 'y', x: 1, y: ftp, xanchor: 'right', yanchor: 'bottom',
       showarrow: false, text: `FTP ${ftp} W`, font: { size: 10, color: '#8caa6d' } }];
   }
@@ -48014,8 +48275,8 @@ function renderRoadQuadrant(D) {
     xaxis: { title: { text: loamT('cadence (rpm)'), font: { size: 11 } }, gridcolor: '#e2e8f0', range: [Math.max(0, Math.min(...xs) - 5), Math.max(...xs) + 5] },
     yaxis: { title: { text: loamT('power (W)'), font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
     shapes: [
-      { type: 'line', x0: q.cadSplit, x1: q.cadSplit, yref: 'paper', y0: 0, y1: 1, line: { color: '#94a3b8', width: 1, dash: 'dot' } },
-      { type: 'line', yref: 'y', y0: q.powerSplit, y1: q.powerSplit, xref: 'paper', x0: 0, x1: 1, line: { color: '#8caa6d', width: 1, dash: 'dot' } },
+      { type: 'line', x0: q.cadSplit, x1: q.cadSplit, yref: 'paper', y0: 0, y1: 1, line: { color: '#94a3b8', width: 1 } },
+      { type: 'line', yref: 'y', y0: q.powerSplit, y1: q.powerSplit, xref: 'paper', x0: 0, x1: 1, line: { color: '#8caa6d', width: 1 } },
     ],
     annotations: [
       { x: 0.02, y: 0.98, xref: 'paper', yref: 'paper', text: loamT('grind'), showarrow: false, font: { size: 11, color: '#b45f2b' } },
@@ -50120,7 +50381,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'b7471a7fd · 2026-10-01';
+const LOAM_BUILD = 'f348a4226 · 2026-10-02';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
@@ -50372,20 +50633,37 @@ localizeStaticChrome();
    trees, features) is worth more than a clean background, and the track's dark casing (drawColoredTrack)
    keeps it readable over imagery (the Form Replay map already defaults to satellite). Minimal
    (clean, label-free) / Streets / Topo remain in the selector. Persisted in localStorage; swapped
-   live. All sources are key-free; attribution is shown per their terms (see addBasemap).
+   live. Attribution is shown per each provider's terms (see addBasemap). CARTO watermarks anonymous
+   tiles, so its two styles need a client key (window.LOAM_CARTO_BASEMAP_API_KEY, injected by the app
+   from a build secret); without one they are unavailable and a saved CARTO choice reads as Satellite.
    Whichever is picked is also published to CSS by markBasemap, because the tile-pane filter that
    makes imagery sit in a dark page does the wrong thing to Topo's coloured linework. */
 let baseTileLayer = null;
 const BASEMAPS = {
-  minimal:   { name: 'Minimal',   url: 'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
-  streets:   { name: 'Streets',   url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
+  minimal:   { name: 'Minimal',   carto: true, url: 'https://{s}.basemaps.cartocdn.com/rastertiles/light_nolabels/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
+  streets:   { name: 'Streets',   carto: true, url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
   satellite: { name: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', opts: { maxZoom: 19, attribution: 'Imagery © Esri' } },
   topo:      { name: 'Topo',      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', opts: { maxZoom: 17, subdomains: 'abc', attribution: '© OpenStreetMap · © OpenTopoMap (CC-BY-SA)' } },
 };
 function basemapPref() {
   const v = (typeof localStorage !== 'undefined' && localStorage.getItem('loam_basemap'))
     || (typeof window !== 'undefined' && window.LOAM_BASEMAP) || 'satellite';
-  return BASEMAPS[v] ? v : 'satellite';
+  if (!BASEMAPS[v]) return 'satellite';
+  /* Not rewritten in storage: a later build that carries the key restores the saved choice. */
+  return BASEMAPS[v].carto && !cartoBasemapKey() ? 'satellite' : v;
+}
+function cartoBasemapKey() {
+  return (typeof window !== 'undefined' && window.LOAM_CARTO_BASEMAP_API_KEY)
+    ? String(window.LOAM_CARTO_BASEMAP_API_KEY).trim() : '';
+}
+/* A client credential by design (extractable from the page), so it is restricted by bundle ID or
+   referrer in CARTO rather than kept secret. Only CARTO URLs carry it. */
+function basemapTileUrl(basemap) {
+  if (!basemap || !basemap.url) return '';
+  let url = basemap.url;
+  const key = basemap.carto ? cartoBasemapKey() : '';
+  if (key) url += (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key);
+  return loamTileUrl(url);
 }
 /* In the embedded app the page is served from a loam://app custom-scheme origin, and some iOS
    versions refuse to load https tile images cross-origin from such a document, so the map stays a
@@ -50408,22 +50686,32 @@ function markBasemap() {
 function addBasemap(map) {
   const b = BASEMAPS[basemapPref()];
   markBasemap();
-  baseTileLayer = L.tileLayer(loamTileUrl(b.url), b.opts).addTo(map);
+  baseTileLayer = L.tileLayer(basemapTileUrl(b), b.opts).addTo(map);
   try { map.attributionControl.setPrefix(false); } catch (e) {}
   return baseTileLayer;
 }
 function setBasemap(v) {
   try { localStorage.setItem('loam_basemap', v); } catch (e) {}
-  const sel = document.getElementById('basemapSel'); if (sel) sel.value = v;
+  const effective = basemapPref();
+  const sel = document.getElementById('basemapSel'); if (sel) sel.value = effective;
   markBasemap();
   if (mapInstance) {
     if (baseTileLayer) { try { mapInstance.removeLayer(baseTileLayer); } catch (e) {} }
-    const b = BASEMAPS[basemapPref()];
-    baseTileLayer = L.tileLayer(loamTileUrl(b.url), b.opts).addTo(mapInstance);
+    const b = BASEMAPS[effective];
+    baseTileLayer = L.tileLayer(basemapTileUrl(b), b.opts).addTo(mapInstance);
     baseTileLayer.bringToBack();
   }
 }
-(function initBasemapSel() { const sel = document.getElementById('basemapSel'); if (sel) sel.value = basemapPref(); markBasemap(); })();
+(function initBasemapSel() {
+  const sel = document.getElementById('basemapSel');
+  if (sel) {
+    /* Disabled rather than removed, so the choice is visibly unavailable instead of snapping back. */
+    const keyless = !cartoBasemapKey();
+    for (const o of sel.options) if (BASEMAPS[o.value] && BASEMAPS[o.value].carto) o.disabled = keyless;
+    sel.value = basemapPref();
+  }
+  markBasemap();
+})();
 
 /* Show the landing list of recent rides on first paint (no-op when the library is empty). */
 renderRecentRides();
