@@ -10937,11 +10937,14 @@ function setupFormReplay(D) {
 
 /* Auto-play the current replay once when the section next scrolls into view, so the lean + map come
    alive without the user hunting for Play. Re-armed on each setup and each time the section moves
-   onto the segment page; never loops. */
+   onto the segment page; never loops. Not under reduced motion: Swing Cam already waits for Play
+   there, and since the jump replay this autoplay also spins wheels and flies a rider across the
+   section the moment it scrolls in. */
 function formArmAutoplay() {
   if (_formObserver) { try { _formObserver.disconnect(); } catch (e) {} _formObserver = null; }
   const sec = document.getElementById('formReplaySection');
   if (!sec || !('IntersectionObserver' in window)) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   let played = false;
   _formObserver = new IntersectionObserver((entries) => {
     for (const en of entries) {
@@ -32779,8 +32782,13 @@ function onTimelineMovingToggle(el) {
    moving time there (paused, standing below 0.5 m/s, a teleport under the 5 s gap limit, a dropout
    whose bridged ground implies standing) is cut here, so the axis ends at the Moving time the stats
    tile prints rather than at a second answer to the same question. The rules are restated rather
-   than shared because walkHops is inlined for its drift guard. */
-function timelineStopSpans(loc, ride) {
+   than shared because walkHops is inlined for its drift guard.
+   The 12 m/s teleport ceiling is walkHops' FOOT rule and applies only with `foot`: a bike descends
+   faster than that, and with it applied a road ride or an MTB descent read as one long stop and the
+   whole axis collapsed. Seconds before the first fix and after the last are cut too, since walkHops
+   never counts them as moving. The bike tiles use their own moving-time loops, so on a bike the axis
+   is close to the tile rather than equal to it. */
+function timelineStopSpans(loc, ride, { foot = true } = {}) {
   const paused = (ride && ride.pausedSpans) || [];
   const rows = (loc || []).filter(r => r.t >= ride.start && r.t <= ride.end);
   const toRad = d => d * Math.PI / 180;
@@ -32801,8 +32809,13 @@ function timelineStopSpans(loc, ride) {
     }
     const moving = pausedOverlapS(paused, a.t, b.t) > 0 ? false
       : dt > 5 ? (havePos && d / dt >= 0.5)
-      : !(havePos && d / dt > 12) && b.speed >= 0.5;
+      : !(foot && havePos && d / dt > 12) && b.speed >= 0.5;
     if (!moving) add(a.t - ride.start, b.t - ride.start);
+  }
+  if (rows.length) {
+    const first = rows[0].t - ride.start, last = rows[rows.length - 1].t - ride.start, full = ride.end - ride.start;
+    if (first > 1) cut.push([0, first]);   // a sub-second edge is sampling, not a stop worth a toggle
+    if (full - last > 1) cut.push([last, full]);
   }
   /* A pause with no fix on either side of it is still a pause. */
   for (const p of paused) {
@@ -32821,9 +32834,9 @@ function timelineStopSpans(loc, ride) {
    Moving time box is ticked and there is something to cut. `x` drops a point inside a cut (null);
    `xc` clamps it to the seam instead, for band edges and marks; `inv` maps an axis position back to
    ride seconds, for the linked map cursor and a segment focus. */
-function timelineClock(D, on = loamTimelineMoving()) {
+function timelineClock(D, on = loamTimelineMoving(), { foot = true } = {}) {
   const ride = D.ride, full = Math.max(0, ride.end - ride.start);
-  const cuts = timelineStopSpans((D.sensors && D.sensors.location) || [], ride);
+  const cuts = timelineStopSpans((D.sensors && D.sensors.location) || [], ride, { foot });
   if (!on || !cuts.length) {
     return { moving: false, hasCuts: cuts.length > 0, span: full, x: (t) => t, xc: (t) => t, inv: (x) => x };
   }
@@ -35198,7 +35211,6 @@ const LOAM_NB = {
   'No phone force recorded': 'Ingen kraftdata fra telefonen',
   'Replay longest jump': 'Spill av det lengste hoppet',
   'Illustrated level landing': 'Illustrert landing på flatt underlag',
-  'PHONE FORCE · 0–10 g DISPLAY': 'KRAFT I TELEFONEN · VIST 0–10 g',
   'Air time · phone estimate': 'Svevetid · anslag fra telefon',
   'Air time · FIT': 'Svevetid · FIT',
   'Takeoff speed · FIT': 'Utgangsfart · FIT',
@@ -46006,7 +46018,7 @@ function renderBikeTimeline(D) {
   const ridingJumps = D.ridingJumps || [];
   const crashes = D.crashes || [];
   syncSmoothToggles();
-  const clock = timelineClock(D);
+  const clock = timelineClock(D, undefined, { foot: false });
   syncTimelineMovingToggle(clock);
   const X = (t) => clock.xc(t - ride.start);
   const rows = bikeTimelineRows(D);
@@ -50432,7 +50444,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '88131e785 · 2026-10-01';
+const LOAM_BUILD = '9197f85dc · 2026-10-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
