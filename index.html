@@ -1879,6 +1879,20 @@
   .road-climb dt { font-size:12px; color:var(--text-dim); }
   .road-climb dd { margin:3px 0 0; font-size:17px; }
   .road-climb button, .road-reset { min-height:44px; padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--text); font:inherit; cursor:pointer; }
+  .road-climbs { align-items:start; }
+  .road-climb { min-width:0; }
+  .road-profile { margin-top:16px; border-top:1px solid var(--border); }
+  .road-profile > summary { padding:14px 0; cursor:pointer; min-height:44px; box-sizing:border-box; }
+  .road-profile label { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:13px; }
+  .road-profile select { max-width:100%; min-height:44px; font-size:16px; }
+  .road-profile svg { display:block; width:100%; height:150px; color:var(--text); margin:8px 0; }
+  .road-profile-axis { display:flex; justify-content:space-between; gap:8px; font-size:12px; color:var(--text-dim); }
+  .road-profile-best { font-size:14px; line-height:1.5; }
+  .road-grade-list { list-style:none; padding:0; margin:12px 0; display:grid; gap:6px; }
+  .road-grade-list .road-grade-row { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,.8fr); gap:10px; width:100%; text-align:left; font-size:14px; line-height:1.4; }
+  .road-grade-row small { display:block; font-size:12px; color:var(--text-dim); font-weight:normal; overflow-wrap:anywhere; }
+  .road-grade-row[aria-pressed="true"] { border-color:var(--sky); background:var(--surface-2); }
+  .road-profile button:focus-visible, .road-profile summary:focus-visible { outline:2px solid var(--sky); outline-offset:3px; }
   .road-reset { margin:0 0 12px; }
   .road-details { margin-top:16px; }
   .road-details > summary { min-height:44px; padding:12px 0; cursor:pointer; }
@@ -33219,6 +33233,26 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  'Showing {section} · Show full ride': 'Viser {section} · Vis hele turen',
+  'Profile & gradients': 'Profil og stigningsprosent',
+  'A climb profile needs both recorded speed and elevation. This recording does not have enough overlapping samples.': 'En stigningsprofil trenger både registrert fart og høyde. Dette opptaket har ikke nok samtidige målinger.',
+  'Elevation profile for Climb {n}': 'Høydeprofil for stigning {n}',
+  'Phone barometer profile': 'Profil fra telefonens barometer',
+  'FIT elevation profile': 'Høydeprofil fra FIT-filen',
+  'GPS elevation profile': 'Høydeprofil fra GPS',
+  'distance from recorded speed': 'distanse fra registrert fart',
+  'Section length': 'Lengde på delstrekning',
+  'Relative elevation': 'Relativ høyde',
+  'Distance from climb start. Darker shading marks steeper sections.': 'Distanse fra starten av stigningen. Mørkere farge viser brattere delstrekninger.',
+  'Steepest full section: {grade}% over {distance}.': 'Bratteste hele delstrekning: {grade} % over {distance}.',
+  'Select a section to show it on the map and timeline.': 'Velg en delstrekning for å vise den på kartet og tidslinjen.',
+  'Section {n}': 'Delstrekning {n}',
+  'Short final section': 'Kort siste delstrekning',
+  'Unmeasured': 'Ikke målt',
+  '{rise} net rise': '{rise} netto høydeendring',
+  'Elapsed': 'Forløpt tid',
+  'Grade is net elevation change divided by section distance. Relative elevation starts at the first available sample. These sections do not change climb detection or the ride elevation total.': 'Stigningsprosent er netto høydeendring delt på delstrekningens distanse. Relativ høyde starter ved første tilgjengelige måling. Delstrekningene endrer ikke påviste stigninger eller turens samlede høydestigning.',
+  'Gaps or pauses interrupt this profile. Sections crossing them have no grade; hatched areas are unmeasured.': 'Hull eller pauser bryter denne profilen. Delstrekninger over disse har ingen stigningsprosent; skraverte områder er ikke målt.',
   'MOVING TIME': 'TID I BEVEGELSE',
   'FIT speed': 'FIT-fart',
   'One climb detected, gaining {gain} over {distance} at {grade}% average grade.': 'Én stigning funnet, med {gain} høydestigning over {distance} og {grade} % snittstigning.',
@@ -38333,7 +38367,7 @@ let runFocusLayer = null;
  *
  * Returns false when there is no run map or too few fixes to bound, so the caller can fall through.
  */
-function focusRunSegment(win, label) {
+function focusRunSegment(win, label, animate = true) {
   const D = window._runMapData;
   if (!mapInstance || !D) return false;
   clearRunFocus();
@@ -38363,7 +38397,7 @@ function focusRunSegment(win, label) {
   L.circleMarker(fit[fit.length - 1], { radius: 6, color: '#1a202c', fillColor: '#e0573a', fillOpacity: 1, weight: 2 })
     .addTo(runFocusLayer)
     .bindTooltip(label ? `${escapeHtml(label)} ends here` : 'ends here');
-  mapInstance.fitBounds(fit, { padding: [40, 40] });
+  mapInstance.fitBounds(fit, { padding: [40, 40], animate });
   return true;
 }
 
@@ -44987,7 +45021,7 @@ function renderAll(D) {
   buildSectionNav();
 }
 
-function focusSegment(descent, ride) {
+function focusSegment(descent, ride, animate = true) {
   /* Zoom Plotly timeline to the descent window. The existing chart uses
      time-relative-to-ride.start on the x-axis, so we offset accordingly. */
   const chart = document.getElementById('timelineChart');
@@ -45005,17 +45039,17 @@ function focusSegment(descent, ride) {
     const latlngs = drawRideOverlay(D.loc, D.turns, D.ride || ride, D.ridingJumps, { start: descent.tStart, end: descent.tEnd }, D.crashes);
     const fit = (latlngs && latlngs.length >= 2) ? latlngs
               : (descent.polyline && descent.polyline.length >= 2 ? descent.polyline : null);
-    if (fit) mapInstance.fitBounds(fit, { padding: [40, 40] });
+    if (fit) mapInstance.fitBounds(fit, { padding: [40, 40], animate });
   } else {
     /* The run map draws itself (grade-coloured, no turns) and so populates _runMapData instead of
        _mapData. Without this branch the whole map half of "focus" was skipped on every foot
        activity and GPS-only ride: the tag read "showing Descent 3 · show full ride" beside a map
        that had not moved, which is worse than doing nothing because it claims otherwise. */
-    focusRunSegment(descent, descent.label);
+    focusRunSegment(descent, descent.label, animate);
   }
 }
 
-function resetSegmentFocus(ride) {
+function resetSegmentFocus(ride, animate = true) {
   const chart = document.getElementById('timelineChart');
   if (chart && window.Plotly) {
     Plotly.relayout(chart, { 'xaxis.autorange': true }).catch(() => {});
@@ -45024,13 +45058,13 @@ function resetSegmentFocus(ride) {
   const D = window._mapData;
   if (mapInstance && D) {
     const latlngs = drawRideOverlay(D.loc, D.turns, D.ride || ride, D.ridingJumps, null, D.crashes);
-    if (latlngs && latlngs.length) mapInstance.fitBounds(latlngs, { padding: [40, 40] });
-    else if (window._fullRideBounds) mapInstance.fitBounds(window._fullRideBounds, { padding: [40, 40] });
+    if (latlngs && latlngs.length) mapInstance.fitBounds(latlngs, { padding: [40, 40], animate });
+    else if (window._fullRideBounds) mapInstance.fitBounds(window._fullRideBounds, { padding: [40, 40], animate });
   } else if (mapInstance) {
     /* Run map: lift the highlight and pull back to the whole track. "show full ride" was as dead as
        the focus it was offering to undo. */
     clearRunFocus();
-    if (window._fullRideBounds) mapInstance.fitBounds(window._fullRideBounds, { padding: [40, 40] });
+    if (window._fullRideBounds) mapInstance.fitBounds(window._fullRideBounds, { padding: [40, 40], animate });
   }
 }
 
@@ -47832,6 +47866,59 @@ function roadDistanceAxis(loc, ride, metersPerUnit = 1000) {
   return { distance: true, moving: true, span: ds[ds.length - 1], hasCuts: false,
     x: t => interpolate(ts, ds, t), xc: t => interpolate(ts, ds, t), inv: d => interpolate(ds, ts, d) };
 }
+
+/* Fixed-distance sections are presentation, not new climb boundaries. Use the same
+   speed-distance and 5 s gap policy as the ride axis; never grade across missing ground. */
+function roadClimbProfile(climb, location, elevation, pauses = [], sectionMeters = 100) {
+  const empty = { points: [], sections: [], distance: 0, hasGaps: false, steepest: null };
+  if (!(climb.tEnd > climb.tStart) || !(sectionMeters > 0) || !Number.isFinite(sectionMeters)) return empty;
+  const times = [climb.tStart, ...(location || []).filter(p => p.t > climb.tStart && p.t < climb.tEnd).map(p => p.t), climb.tEnd];
+  const points = [];
+  let distance = 0, hasGaps = false;
+  for (const t of times) {
+    const speed = roadSampleAt(location, t, 'speed');
+    const alt = roadSampleAt(elevation, t, 'alt');
+    const a = points[points.length - 1];
+    if (a && t <= a.t) continue;
+    const dt = a ? t - a.t : 0;
+    const ground = !!a && dt <= 5 && Number.isFinite(speed) && Number.isFinite(a.speed)
+      && speed >= 0 && a.speed >= 0 && !pauses.some(p => p.start < t && p.end > a.t);
+    if (ground) distance += (a.speed + speed) / 2 * dt;
+    const continuous = ground && Number.isFinite(a.alt) && Number.isFinite(alt);
+    if (a && !continuous) hasGaps = true;
+    points.push({ t, distance, alt, speed, continuous });
+  }
+  if (!(distance > 0)) return { ...empty, hasGaps };
+  // At a standstill, an ending section uses arrival and a starting section uses departure.
+  const atDistance = (d, starting) => {
+    let lo = 0, hi = points.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].distance < d) lo = mid + 1; else hi = mid;
+    }
+    let b = points[Math.min(lo, points.length - 1)];
+    if (b.distance === d) {
+      if (starting) while (lo + 1 < points.length && points[lo + 1].distance === d) b = points[++lo];
+      return b;
+    }
+    const a = points[lo - 1], fraction = (d - a.distance) / (b.distance - a.distance);
+    return { t: a.t + fraction * (b.t - a.t), distance: d,
+      alt: b.continuous ? a.alt + fraction * (b.alt - a.alt) : null };
+  };
+  const sections = [];
+  for (let from = 0; from < distance - 1e-6; from += sectionMeters) {
+    const to = Math.min(distance, from + sectionMeters);
+    const a = atDistance(from, true), b = atDistance(to, false);
+    const gap = points.some((p, i) => i > 0 && !p.continuous && points[i - 1].t < b.t && p.t > a.t);
+    const rise = !gap && Number.isFinite(a.alt) && Number.isFinite(b.alt) ? b.alt - a.alt : null;
+    sections.push({ from, to, tStart: a.t, tEnd: b.t, duration: b.t - a.t,
+      rise, grade: rise == null ? null : 100 * rise / (to - from),
+      partial: to - from < sectionMeters - 1e-6 });
+  }
+  const steepest = sections.reduce((best, s, i) => s.partial || s.grade == null ? best
+    : best == null || s.grade > sections[best].grade ? i : best, null);
+  return { points, sections, distance, hasGaps, steepest };
+}
 /* ROAD_EXPERIENCE_END */
 
 /* Road uses one presentation for phone, companion-FIT and standalone-FIT input. */
@@ -47892,6 +47979,77 @@ function renderRoadTakeaway(D) {
     <button type="button" class="ch-cta" onclick="openRunEvidence('coachSection')">${loamT('Ask about this ride')}</button></div>`;
   show('coachHighlights');
 }
+function focusRoadClimbPart(D, part, label, button) {
+  document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+  if (button) button.setAttribute('aria-pressed', 'true');
+  // Section navigation can immediately rerender the map on a units change. A pending
+  // Leaflet zoom transition otherwise tries to move the already-removed map pane.
+  focusSegment({ ...part, label }, D.ride, false);
+  const reset = document.getElementById('roadClimbReset');
+  reset.hidden = false;
+  reset.textContent = loamT('Showing {section} · Show full ride', { section: label });
+  reset.onclick = () => {
+    resetSegmentFocus(D.ride, false); reset.hidden = true;
+    document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+  };
+  document.getElementById('overviewSection').scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+function renderRoadClimbProfile(host, D, climb, sizeIndex = 0) {
+  const sizes = U.metric() ? [100, 250, 500] : [160.9344, 402.336, 804.672];
+  const sizeLabels = U.metric() ? ['100 m', '250 m', '500 m'] : ['0.1 mi', '0.25 mi', '0.5 mi'];
+  const profile = roadClimbProfile(climb, D.sensors.location || [],
+    climbAltSeries(D.sensors.baro || [], D.sensors.location || [], D.ride), D.ride.pausedSpans || [], sizes[sizeIndex]);
+  const finite = profile.points.filter(p => Number.isFinite(p.alt));
+  if (!finite.length || !profile.sections.length) {
+    host.innerHTML = `<p class="rp-note">${loamT('A climb profile needs both recorded speed and elevation. This recording does not have enough overlapping samples.')}</p>`;
+    return;
+  }
+  const low = finite.reduce((a, p) => Math.min(a, p.alt), Infinity), high = finite.reduce((a, p) => Math.max(a, p.alt), -Infinity);
+  const x = d => 480 * d / profile.distance;
+  const y = a => 144 - 132 * (a - low) / Math.max(1, high - low);
+  let path = '', prior = false;
+  for (const p of profile.points) {
+    if (!Number.isFinite(p.alt)) { prior = false; continue; }
+    path += `${p.continuous && prior ? 'L' : 'M'}${x(p.distance).toFixed(2)},${y(p.alt).toFixed(2)} `;
+    prior = true;
+  }
+  const best = profile.steepest == null ? null : profile.sections[profile.steepest];
+  const title = loamT('Elevation profile for Climb {n}', { n: climb.index });
+  const pattern = `road-profile-gap-${climb.index}`;
+  const source = (D.sensors.baro || []).length > 10 ? 'Phone barometer profile' : D.session || D.gpsOnly ? 'FIT elevation profile' : 'GPS elevation profile';
+  const distanceLabel = meters => U.metric() ? `${Math.round(meters)} m` : `${(meters / 1609.344).toFixed(2)} mi`;
+  const sizeId = `road-profile-size-${climb.index}`;
+  host.innerHTML = `<label for="${sizeId}">${loamT('Section length')}<select id="${sizeId}" data-road-profile-size>
+    ${sizes.map((size, i) => `<option value="${i}"${i === sizeIndex ? ' selected' : ''}>${sizeLabels[i]}</option>`).join('')}</select></label>
+    <p class="rp-note">${loamT(source)} · ${loamT('distance from recorded speed')}</p>
+    <div class="road-profile-axis"><span>${loamT('Relative elevation')}</span><span>${U.elev(low - finite[0].alt)} – ${U.elev(high - finite[0].alt)}</span></div>
+    <svg viewBox="0 0 480 156" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(title)}">
+      <title>${escapeHtml(title)}</title><defs><pattern id="${pattern}" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0,8 L8,0" stroke="currentColor" opacity=".2" /></pattern></defs>
+      ${profile.sections.map(s => `<rect x="${x(s.from)}" y="0" width="${x(s.to - s.from)}" height="156" fill="${s.grade == null ? `url(#${pattern})` : s.grade < 0 ? 'var(--sky)' : 'var(--clay)'}" opacity="${s.grade == null ? 1 : .08 + Math.min(Math.abs(s.grade), 20) / 20 * .4}"/>`).join('')}
+      <path class="road-profile-line" d="${path}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke" />
+    </svg>
+    <div class="road-profile-axis"><span>${distanceLabel(0)}</span><span>${distanceLabel(profile.distance)}</span></div>
+    <p class="rp-note">${loamT('Distance from climb start. Darker shading marks steeper sections.')}</p>
+    ${best ? `<p class="road-profile-best">${loamT('Steepest full section: {grade}% over {distance}.', { grade: best.grade.toFixed(1), distance: sizeLabels[sizeIndex] })}</p>` : ''}
+    <p class="rp-note">${loamT('Select a section to show it on the map and timeline.')}</p>
+    <ol class="road-grade-list">${profile.sections.map((s, i) => `<li><button type="button" class="road-grade-row" data-road-profile-section="${i}" aria-pressed="false">
+      <span>${loamT('Section {n}', { n: i + 1 })}<small>${distanceLabel(s.from)} – ${distanceLabel(s.to)}</small>${s.partial ? `<small>${loamT('Short final section')}</small>` : ''}</span>
+      <span><strong>${s.grade == null ? '—' : s.grade.toFixed(1) + '%'}</strong><small>${s.rise == null ? loamT('Unmeasured') : loamT('{rise} net rise', { rise: (s.rise > 0 ? '+' : '') + U.elev(s.rise) })}</small></span>
+      <span>${fmtDuration(s.duration)}<small>${loamT('Elapsed')}</small></span>
+    </button></li>`).join('')}</ol>
+    <p class="rp-note">${loamT('Grade is net elevation change divided by section distance. Relative elevation starts at the first available sample. These sections do not change climb detection or the ride elevation total.')}</p>
+    ${profile.hasGaps ? `<p class="rp-note road-profile-gap-note">${loamT('Gaps or pauses interrupt this profile. Sections crossing them have no grade; hatched areas are unmeasured.')}</p>` : ''}`;
+  host.querySelector('select').onchange = e => {
+    const reset = document.getElementById('roadClimbReset');
+    if (!reset.hidden) reset.click();
+    renderRoadClimbProfile(host, D, climb, +e.target.value);
+    host.querySelector('select').focus({ preventScroll: true });
+  };
+  host.querySelectorAll('[data-road-profile-section]').forEach(button => button.onclick = () => {
+    const i = +button.dataset.roadProfileSection;
+    focusRoadClimbPart(D, profile.sections[i], loamT('Climb {n}', { n: climb.index }) + ' · ' + loamT('Section {n}', { n: i + 1 }), button);
+  });
+}
 function renderRoadExperience(D) {
   if (!isRoadAnalysis(D)) return;
   const s = D.summary, m = D.metrics || {};
@@ -47908,6 +48066,9 @@ function renderRoadExperience(D) {
   ].join('');
   renderRoadClimbsAndBalance({ ...D, climbs: D.roadClimbs });
   const list = document.getElementById('roadClimbCards');
+  const openProfiles = list._roadProfileRide === (D.libraryRideId ?? D)
+    ? new Map([...list.querySelectorAll('[data-road-profile][open]')].map(el => [el.dataset.roadProfile, +(el.querySelector('select')?.value || 0)])) : new Map();
+  list._roadProfileRide = D.libraryRideId ?? D;
   const format = (v, f) => v == null ? '—' : f(v);
   list.innerHTML = D.roadClimbs.map((c, i) => `<article class="road-climb">
     <h3>${loamT('Climb {n}', { n: c.index })}</h3><dl>
@@ -47917,15 +48078,18 @@ function renderRoadExperience(D) {
        ...(c.avgHr != null ? [['Avg heart rate', Math.round(c.avgHr) + ' bpm']] : []),
        ...(c.avgCadence != null ? [['Pedaling cadence', Math.round(c.avgCadence) + ' rpm']] : [])]
       .map(([label, value]) => `<div><dt>${loamT(label)}</dt><dd>${value}</dd></div>`).join('')}</dl>
-    <button type="button" data-road-climb="${i}">${loamT('Show on map and profile')}</button></article>`).join('')
+    <button type="button" data-road-climb="${i}">${loamT('Show on map and profile')}</button>
+    <details class="road-profile" data-road-profile="${i}" data-detailed-stay-closed="1"><summary>${loamT('Profile & gradients')}</summary><div class="road-profile-body"></div></details></article>`).join('')
     || `<p>${loamT(s.altGain == null ? 'No usable elevation data was recorded.' : 'No sustained climbs detected. Short rises still contribute to elevation gain.')}</p>`;
   list.querySelectorAll('[data-road-climb]').forEach(btn => btn.onclick = () => {
     const c = D.roadClimbs[+btn.dataset.roadClimb];
-    focusSegment({ ...c, label: loamT('Climb {n}', { n: c.index }) }, D.ride);
-    const reset = document.getElementById('roadClimbReset'); reset.hidden = false;
-    reset.textContent = loamT('Climb {n} selected · Show full ride', { n: c.index });
-    reset.onclick = () => { resetSegmentFocus(D.ride); reset.hidden = true; };
-    document.getElementById('overviewSection').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    focusRoadClimbPart(D, c, loamT('Climb {n}', { n: c.index }));
+  });
+  list.querySelectorAll('[data-road-profile]').forEach(details => {
+    const host = details.querySelector('.road-profile-body');
+    const render = size => renderRoadClimbProfile(host, D, D.roadClimbs[+details.dataset.roadProfile], size);
+    details.addEventListener('toggle', () => { if (details.open && !host.childElementCount) render(0); });
+    if (openProfiles.has(details.dataset.roadProfile)) { details.open = true; render(openProfiles.get(details.dataset.roadProfile)); }
   });
   document.getElementById('roadElevationNote').textContent = roadElevationNote(D);
   show('roadSection');
@@ -50831,7 +50995,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '26a073b77 · 2026-10-04';
+const LOAM_BUILD = '1976e7ea5 · 2026-10-03';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
