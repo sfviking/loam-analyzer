@@ -10449,11 +10449,25 @@ function formTurnRollRange(D, turn) {
   return hi - lo;
 }
 
-/* Turns worth replaying: time order (mirrors the turn table), filtered to those whose lean signal is
-   physically plausible (roll range within ~65deg). On a clean, well-mounted ride that is nearly all
-   turns; on a jostly pocket-mount ride it drops the ones whose roll is garbage. */
+/* Corners on a DESCENT, minus any the rider marked "not a trail". The replay is for studying a line,
+   and a turn onto the main road or into the car park is not one (owner, 2026-10-03). Deliberately no
+   fallback to the whole ride when no descent was found, unlike descentScopedTurns: that fallback
+   keeps a headline COUNT honest, while here it would put the road corners straight back. */
+function formOnDescent(D, turns) {
+  const downs = (D.gradeSegments || []).filter(s => s.dir === 'down' && s.kind !== 'lift');
+  if (!downs.length) return [];
+  const wins = skippedRunWindows(D);
+  return (turns || []).filter(T => {
+    const t = T.tPeak != null ? T.tPeak : T.tStart;
+    return downs.some(s => t >= s.tStart && t <= s.tEnd) && !wins.some(w => t >= w.tStart && t <= w.tEnd);
+  });
+}
+
+/* Turns worth replaying: time order (mirrors the turn table), on a descent, filtered to those whose
+   lean signal is physically plausible (roll range within ~65deg). On a clean, well-mounted ride that
+   is nearly all descent turns; on a jostly pocket-mount ride it drops the ones whose roll is garbage. */
 function formCriticalTurns(D) {
-  return (D.turns || []).slice()
+  return formOnDescent(D, D.turns).slice()
     .sort((a, b) => a.tStart - b.tStart)
     .filter(T => formTurnRollRange(D, T) <= 65);
 }
@@ -10500,7 +10514,7 @@ function formMarkActiveChip(v) {
 function formInRunTurns(D) {
   try {
     const { runs } = segmentRuns(D, 'auto');
-    if (!runs || !runs.length) return D.turns || [];
+    if (!runs || !runs.length) return formOnDescent(D, D.turns);
     /* Runs the rider marked "not a trail" drop out too: grade segmentation cannot tell a canyon
        road home from a descent, so the label is the only thing that can. Resolved as WINDOWS
        (skippedRunWindows) rather than by matching each auto run's tStart against a stored key: the
@@ -10519,8 +10533,8 @@ function formInRunTurns(D) {
       return keep.some(r => t >= r.tStart && t <= r.tEnd)
         && !wins.some(w => t >= w.tStart && t <= w.tEnd);
     };
-    return (D.turns || []).filter(inAny);
-  } catch (e) { return D.turns || []; }
+    return formOnDescent(D, (D.turns || []).filter(inAny));
+  } catch (e) { return formOnDescent(D, D.turns); }
 }
 /* Every turn EXCEPT those sitting inside a run the rider marked "not a trail".
 
@@ -50774,7 +50788,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'f3f9dc401 · 2026-10-03';
+const LOAM_BUILD = 'af928ed6b · 2026-10-04';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
