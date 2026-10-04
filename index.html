@@ -8510,7 +8510,7 @@ function showTurnsForRun(r, D) {
   const label = runDisplayLabel(r);
   focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline, label }, D.ride);
   const mapTag = document.getElementById('mapFocusTag');
-  if (mapTag) {
+  if (mapTag && !isRoadAnalysis(D)) {
     /* "show full run" / "show full walk": this tag is reached from every sport's runs panel. */
     mapTag.innerHTML = loamT('showing <strong>{label}</strong>', { label: escapeHtml(label) })
       + ` · <a id="mapFocusReset">${escapeHtml(loamT('show full {noun}', { noun: sportNounT(displaySport(D), { definite: true }) }))}</a>`;
@@ -25814,6 +25814,13 @@ let turnMarkers = {};
 let jumpMarkers = {};
 
 function hideAllSections() {
+  _roadSelection = null;
+  const timeline = document.getElementById('timelineChart');
+  if (timeline) {
+    timeline._bikeTimelineRender = null;
+    if (timeline._roadSelectionReset) timeline.removeListener('plotly_relayout', timeline._roadSelectionReset);
+    timeline._roadSelectionReset = null;
+  }
   document.body.classList.remove('running-analysis', 'road-analysis');
   restoreRoadSections();
   hide('roadTimelineAxisLabel');
@@ -33262,6 +33269,7 @@ function setLoamAthlete(patch) {
    match its English key's. */
 const LOAM_NB = {
   'Showing {section} · Show full ride': 'Viser {section} · Vis hele turen',
+  'Timeline point · {time} elapsed': 'Punkt på tidslinjen · {time} forløpt',
   'Downhill': 'Nedover',
   'No climbs reach this minimum.': 'Ingen stigninger når minimumslengden.',
   'Hide climbs': 'Skjul stigninger',
@@ -37510,6 +37518,8 @@ const U = {
 };
 /* Remember the last render so the units toggle can re-render in place. */
 let _lastRender = null;
+// Selection is an elapsed-time window owned by this render, never an axis coordinate.
+let _roadSelection = null;
 /* `anchor` is the control that asked for the re-render. A full render starts with hideAllSections(),
    which collapses the page for a moment; the browser clamps scrollY to the shrunken height and it is
    never given back, so a checkbox tapped halfway down a run threw the reader ~760 px up the page (to
@@ -37519,7 +37529,9 @@ let _lastRender = null;
 function rerenderUnits(anchor) {
   if (!_lastRender) return;
   const top = anchor && anchor.isConnected ? anchor.getBoundingClientRect().top : null;
+  const selection = _roadSelection;
   _lastRender.fn(_lastRender.D);
+  if (selection && selection.D === _lastRender.D) focusSegment(selection.part, selection.D.ride, false);
   if (top == null) return;
   const hold = () => {
     if (!anchor.isConnected || !anchor.getClientRects().length) return;
@@ -38363,7 +38375,7 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
 }
 
 function renderRunMap(loc, ride, segments) {
-  _linkCursor = null;
+  clearTimelineCursor();
   /* Only advertise "lift" in the legend when this ride actually has a detected lift/gondola segment.
      Runs (and any lift-free ride) have none, so the swatch would be noise. */
   const hasLift = Array.isArray(segments) && segments.some(s => s.kind === 'lift');
@@ -38379,6 +38391,7 @@ function renderRunMap(loc, ride, segments) {
   mapInstance = L.map('map', { zoomControl: true, attributionControl: true });
   try { mapInstance.attributionControl.setPrefix(false); } catch (e) {}
   addBasemap(mapInstance);
+  mapInstance.on('click', clearTimelineCursor);
   const inRide = loc.filter(r => r.t >= ride.start && r.t <= ride.end && r.latitude != null);
   if (!inRide.length) return;
   const latlngs = inRide.map(r => [r.latitude, r.longitude]);
@@ -45083,6 +45096,18 @@ function renderAll(D) {
 }
 
 function focusSegment(descent, ride, animate = true) {
+  const RD = _lastRender && _lastRender.D;
+  if (RD && isRoadAnalysis(RD) && document.body.classList.contains('road-analysis')) {
+    _roadSelection = { D: RD, part: { ...descent } };
+    clearTimelineCursor();
+    document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    const reset = document.getElementById('roadClimbReset');
+    reset.hidden = false;
+    reset.textContent = loamT('Showing {section} · Show full ride', { section: descent.label || loamT('Selection') });
+    reset.onclick = () => clearTurnFilter(RD);
+    hide('mapFocusTag');
+    animate = false;
+  }
   /* Zoom Plotly timeline to the descent window. The existing chart uses
      time-relative-to-ride.start on the x-axis, so we offset accordingly. */
   const chart = document.getElementById('timelineChart');
@@ -45108,11 +45133,15 @@ function focusSegment(descent, ride, animate = true) {
        that had not moved, which is worse than doing nothing because it claims otherwise. */
     focusRunSegment(descent, descent.label, animate);
   }
-  const RD = _lastRender && _lastRender.D;
   if (RD && isRoadAnalysis(RD) && document.body.classList.contains('road-analysis')) renderRoadStats(RD, descent);
 }
 
 function resetSegmentFocus(ride, animate = true) {
+  if (_roadSelection) animate = false;
+  _roadSelection = null;
+  clearTimelineCursor();
+  document.getElementById('roadClimbReset').hidden = true;
+  document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
   const chart = document.getElementById('timelineChart');
   if (chart && window.Plotly) {
     Plotly.relayout(chart, { 'xaxis.autorange': true }).catch(() => {});
@@ -45392,6 +45421,11 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
    reset whenever a map is rebuilt. */
 let _linkCursor = null;
 let _linkPinned = false;   /* a tapped (vs hovered) timeline marker, kept until the map is tapped to clear */
+function clearTimelineCursor() {
+  if (_linkCursor) _linkCursor.remove();
+  _linkCursor = null;
+  _linkPinned = false;
+}
 function linkTimelineToMap(loc, ride, clock) {
   /* The clock the chart was drawn on, so a segment focus and the map cursor read its axis. */
   window._tlClock = clock || null;
@@ -45412,8 +45446,9 @@ function linkTimelineToMap(loc, ride, clock) {
       const f = (xq - pts[lo].x) / (pts[hi].x - pts[lo].x || 1);
       return [pts[lo].lat + f * (pts[hi].lat - pts[lo].lat), pts[lo].lon + f * (pts[hi].lon - pts[lo].lon)];
     };
-    const isTouch = !!(window.matchMedia && window.matchMedia('(hover: none)').matches);
-    const place = (x) => {
+    const isTouch = (typeof LOAM_EMBEDDED !== 'undefined' && LOAM_EMBEDDED)
+      || !!(window.matchMedia && window.matchMedia('(hover: none)').matches);
+    const place = (x, pinned = false) => {
       if (!mapInstance) return;
       const ll = latlngAt(x);
       if (_linkCursor && _linkCursor._map && _linkCursor._map !== mapInstance) { try { _linkCursor.remove(); } catch (e) {} _linkCursor = null; }
@@ -45424,8 +45459,15 @@ function linkTimelineToMap(loc, ride, clock) {
         _linkCursor.setLatLng(ll);
         if (!mapInstance.hasLayer(_linkCursor)) _linkCursor.addTo(mapInstance);
       }
+      _linkCursor.bringToFront();
+      if (pinned) {
+        _linkCursor.bindTooltip(escapeHtml(loamT('Timeline point · {time} elapsed', { time: fmtClock(x) })),
+          { permanent: true, direction: 'top', offset: [0, -8] }).openTooltip();
+        mapInstance.panTo(ll, { animate: false });
+      }
     };
     chart.on('plotly_hover', (ev) => {
+      if (_linkPinned) return;
       if (!ev || !ev.points || !ev.points.length) return;
       place(toRide(ev.points[0].x));
     });
@@ -45439,9 +45481,9 @@ function linkTimelineToMap(loc, ride, clock) {
        map into view so the dropped point is visible on a single-column phone layout. */
     chart.on('plotly_click', (ev) => {
       if (!ev || !ev.points || !ev.points.length) return;
-      place(toRide(ev.points[0].x));
+      _linkPinned = true;
+      place(toRide(ev.points[0].x), true);
       if (isTouch) {
-        _linkPinned = true;
         const el = document.getElementById('map');
         if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
@@ -45633,7 +45675,7 @@ function wireTimelineRelayout(chart, fullLo, fullHi, patchFor) {
 }
 
 function renderMap(loc, turns, ride, ridingJumps, crashes) {
-  _linkCursor = null; _linkPinned = false;
+  clearTimelineCursor();
   setMapLegend('turns');
   if (mapInstance) { mapInstance.remove(); mapInstance = null; mapOverlay = null; }
   /* Mirror of what renderRunMap does to _mapData: a stale run-focus handle would send focusSegment
@@ -45648,10 +45690,7 @@ function renderMap(loc, turns, ride, ridingJumps, crashes) {
      draw time has nothing to measure. */
   mapInstance.on('zoomend moveend', updateTurnMarkerDensity);
   /* Tap the map to dismiss a pinned timeline marker (touch has no "hover out"). */
-  mapInstance.on('click', () => {
-    _linkPinned = false;
-    if (_linkCursor && mapInstance.hasLayer(_linkCursor)) mapInstance.removeLayer(_linkCursor);
-  });
+  mapInstance.on('click', clearTimelineCursor);
   /* Cache the full data so the segment picker can redraw a scoped or full view without re-analysis. */
   window._mapData = { loc, turns, ride, ridingJumps, crashes };
   const latlngs = drawRideOverlay(loc, turns, ride, ridingJumps, null, crashes);
@@ -46452,14 +46491,29 @@ function renderBikeTimeline(D) {
      with every box unticked to a ride left that sentence under the bike chart. */
   if (!host.data) host.innerHTML = '';
   host.style.height = hostPx + 'px';
-  loamPlot('timelineChart', traces, layout, PLOT_CFG).then(() => {
+  const renderToken = {};
+  host._bikeTimelineRender = renderToken;
+  if (host._roadSelectionReset) host.removeListener('plotly_relayout', host._roadSelectionReset);
+  window._tlClock = clock;
+  loamPlot('timelineChart', traces, layout, isRoadAnalysis(D) ? { ...PLOT_CFG, doubleClick: false } : PLOT_CFG).then(async () => {
+    if (host._bikeTimelineRender !== renderToken) return;
+    if (_roadSelection && _roadSelection.D === D) {
+      const part = _roadSelection.part;
+      await Plotly.relayout(host, { 'xaxis.range': [X(part.tStart), X(part.tEnd)], 'xaxis.autorange': false }).catch(() => {});
+    }
+    if (host._bikeTimelineRender !== renderToken) return;
     wireTimelineRelayout(host, fullLo, fullHi, (lo, hi) => {
       if (distance) return { annotations: annos(lo, hi) };
       const tk = loamTimeTicks(lo, hi);
       return { annotations: annos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
     });
+    linkTimelineToMap((D.sensors && D.sensors.location) || [], ride, clock);
+    // An explicit Plotly reset must also restore the map and the stats' scope.
+    host._roadSelectionReset = ev => {
+      if (ev['xaxis.autorange'] === true && _roadSelection && _roadSelection.D === D) clearTurnFilter(D);
+    };
+    host.on('plotly_relayout', host._roadSelectionReset);
   }).catch(() => {});
-  linkTimelineToMap((D.sensors && D.sensors.location) || [], ride, clock);
 }
 
 /* One model for the on-screen summary and its exported image. */
@@ -48147,18 +48201,8 @@ function renderRoadStats(D, sel) {
   panel.innerHTML = `<div class="stats-scope${sel ? ' selected' : ''}">${scope}</div>` + tiles.join('');
 }
 function focusRoadClimbPart(D, part, label, button) {
-  document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
-  if (button) button.setAttribute('aria-pressed', 'true');
-  // Section navigation can immediately rerender the map on a units change. A pending
-  // Leaflet zoom transition otherwise tries to move the already-removed map pane.
   focusSegment({ ...part, label }, D.ride, false);
-  const reset = document.getElementById('roadClimbReset');
-  reset.hidden = false;
-  reset.textContent = loamT('Showing {section} · Show full ride', { section: label });
-  reset.onclick = () => {
-    resetSegmentFocus(D.ride, false); reset.hidden = true;
-    document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
-  };
+  if (button) button.setAttribute('aria-pressed', 'true');
   document.getElementById('overviewSection').scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 function renderRoadClimbProfile(host, D, climb, sizeIndex = 0) {
@@ -51183,7 +51227,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'bdccee1a8 · 2026-10-04';
+const LOAM_BUILD = '29739a898 · 2026-10-04';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
