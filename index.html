@@ -13157,6 +13157,9 @@ function estimateStoredRenderBytes(data) {
 
 async function putCachedAnalysis(hash, sport, rawData) {
   if (!hash) return;
+  /* An app-driven library backfill re-analyzes old runs only to re-save their rows. Caching each of
+     them would evict the 25 renders the athlete actually opened recently. */
+  if (window.LOAM_LIBRARY_BACKFILL) return;
   /* Projected HERE rather than at the seven call sites, so no sport can ship a render whose cached
      copy drops a channel its own view reads -- which is the bug this replaced. */
   const data = packRenderCache(cacheableRender(rawData));
@@ -25056,7 +25059,9 @@ function renderRunningProgress(rides, dated) {
   host.innerHTML = `<p class="dim">${loamT('Runs saved on this device. Pace varies with route, conditions and workout intent; this is not a fitness score.')}</p>
     <div class="chart" id="progRunWeeks" style="height:280px"></div>
     <div class="chart" id="progRunPace" style="height:280px"></div>
-    <div class="chart" id="progRunHr" style="height:280px"></div>`;
+    <p class="dim" id="progRunPaceNote" style="font-size:12px"></p>
+    <div class="chart" id="progRunHr" style="height:280px"></div>
+    <p class="dim" id="progRunHrNote" style="font-size:12px"></p>`;
   const onlyDay = dated.length === 1 ? dated[0].d.getTime() : null;
   const layout = (title, ytitle) => ({ title: { text: title, font: { size: 14 } },
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans, sans-serif', color: '#475569', size: 12 },
@@ -25083,6 +25088,29 @@ function renderRunningProgress(rides, dated) {
   if (hr.some(v => v != null)) loamPlot('progRunHr', [{ x, y: hr, type: 'scatter', mode: 'markers', marker: { color: '#e87b3d', size: 8 } }],
     layout(loamT('Average heart rate per run'), 'bpm'), PLOT_CFG);
   else document.getElementById('progRunHr').innerHTML = `<p>${loamT('Heart-rate trends appear for runs recorded with heart rate.')}</p>`;
+  /* Say how many runs each chart actually holds. Library rows store moving pace only since 2026-09-29
+     and heart rate since 2026-09-28; an older run is recoverable only from its cached analysis, and
+     that cache keeps 25. Without a count, one dot over five months of weekly volume reads as a
+     complete chart (owner report, 2026-10-04). */
+  const missing = dated.filter(o => !(o.r.summary && o.r.summary.movingSpeed > 0));
+  const nPace = dated.length - missing.length, nHr = hr.filter(v => v != null).length;
+  const app = LOAM_EMBEDDED ? ' ' + loamT('The app fills in the ones still on this phone after you close this screen.') : '';
+  document.getElementById('progRunPaceNote').textContent = missing.length
+    ? loamT('Moving pace for {n} of {total} runs. Runs saved before pace was stored appear once reopened.', { n: nPace, total: dated.length }) + app : '';
+  document.getElementById('progRunHrNote').textContent = nHr < dated.length
+    ? loamT('Heart rate for {n} of {total} runs: older runs appear once reopened, and runs recorded without heart rate never do.', { n: nHr, total: dated.length }) : '';
+  requestRunBackfill(missing.map(o => o.r));
+}
+
+/* Ask the app to re-analyze runs whose library rows predate the stored pace and heart rate. The
+   app resolves each name to a recording still on the phone and runs it through this page, off
+   screen, after Progress closes; the analysis re-saves the row exactly as reopening it would.
+   Phone captures only: a FIT run ('run') stores its own pace at save and has no CSV to re-read. */
+function requestRunBackfill(rows) {
+  if (!LOAM_EMBEDDED || window.LOAM_LIBRARY_BACKFILL) return;
+  const sessions = [...new Set(rows.filter(r => r.sport === 'running' && /\.csv$/i.test(r.filename || '')).map(r => r.filename))];
+  if (!sessions.length) return;
+  try { window.webkit.messageHandlers.loam.postMessage({ type: 'backfillRunSummaries', sessions }); } catch (e) {}
 }
 
 async function renderProgress() {
@@ -25100,6 +25128,9 @@ async function renderProgress() {
   sportSelect.value = sports.includes(selectedSport) ? selectedSport : 'all';
   const runningTrends = ['run', 'running'].includes(sportSelect.value);
   const trendRides = rides.filter(r => sportSelect.value === 'all' || (runningTrends ? ['run', 'running'].includes(r.sport) : r.sport === sportSelect.value));
+  /* The same scope for the Trails table: a runner who picks Running should not be shown a bike
+     descent's lap count and PR under it. Null means every sport. */
+  const trailSports = sportSelect.value === 'all' ? null : (runningTrends ? ['run', 'running'] : [sportSelect.value]);
   const cornerTrends = ['mtb','emtb'].includes(sportSelect.value);
   const dated = trendRides.filter(r => sessionRecordedDate(r)).map(r => ({ r, d: new Date(sessionRecordedDate(r)) }))
     .filter(o => !isNaN(o.d.getTime())).sort((a, b) => a.d - b.d);
@@ -25112,7 +25143,7 @@ async function renderProgress() {
     headline.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">${escapeHtml(loamT('No sessions saved yet. Analyze one and it starts building your progress here.'))}</p>`;
     chartsHost.innerHTML = '';
     renderProgressReadiness(rides);
-    renderProgressTrails();
+    renderProgressTrails(trailSports);
     return;
   }
   const num = (r, f) => { const v = f(r); return (v == null || isNaN(v)) ? 0 : v; };
@@ -25147,7 +25178,7 @@ async function renderProgress() {
     await enrichRidesAvgHr(trendRides);
     renderRunningProgress(trendRides, dated);
     renderProgressReadiness(rides);
-    renderProgressTrails();
+    renderProgressTrails(trailSports);
     return;
   }
   if (pmc.length) renderFitnessDashboard(pmc);
@@ -25187,7 +25218,7 @@ async function renderProgress() {
   line('progLean', dated.map(o => o.r.mechanics && o.r.mechanics.leanGapDeg != null ? o.r.mechanics.leanGapDeg : null),
     loamT('Left/right lean gap (lower = more symmetric)'), 'deg', '#a78bd9');
   renderProgressReadiness(rides);
-  renderProgressTrails();
+  renderProgressTrails(trailSports);
 }
 /* Readiness vs results. The readiness score is computed in the app from Apple Health (Swift,
    ReadinessEngine) and handed to the page as window.LOAM_READINESS_HISTORY, one entry per day; the
@@ -25302,14 +25333,18 @@ window.onLoamReadinessHistory = function () {
   const pr = document.getElementById('progressResults');
   if (pr && !pr.classList.contains('hidden')) renderProgressReadiness();
 };
-async function renderProgressTrails() {
+async function renderProgressTrails(sports = null) {
   const el = document.getElementById('progressTrails');
   if (!el) return;
   let tags = [], rides = [];
   try { [tags, rides] = await Promise.all([listTaggedSegments(), listRides()]); } catch (e) {}
   if (!tags.length) { el.innerHTML = `<p style="color:var(--text-muted); font-size:12px;">${escapeHtml(loamT('No tagged segments yet. Tag a descent (from a session\'s Runs panel) to track a segment\'s times over time.'))}</p>`; return; }
-  const rows = tags.map(t => {
-    const prog = tagProgression(t, rides);
+  /* Scoped to the Progress sport picker: laps, best and progress count only that sport's sessions,
+     and a trail it has never covered is left out rather than listed at zero. */
+  if (sports) rides = rides.filter(r => sports.includes(r.sport));
+  const scoped = tags.map(t => ({ t, prog: tagProgression(t, rides) })).filter(o => !sports || o.prog.laps > 0);
+  if (!scoped.length) { el.innerHTML = `<p style="color:var(--text-muted); font-size:12px;">${escapeHtml(loamT('None of your tagged trails has a session of this sport yet.'))}</p>`; return; }
+  const rows = scoped.map(({ t, prog }) => {
     let progCell = '<span style="color:var(--text-muted);">-</span>';
     if (prog.laps >= 2 && prog.improvedSec != null) {
       if (prog.improvedSec >= 0.5) progCell = `<span style="color:#6b9e5f; font-weight:600;">&#9660; ${escapeHtml(loamT('{s}s faster', { s: prog.improvedSec.toFixed(1) }))}</span>`;
@@ -25330,7 +25365,7 @@ async function renderProgressTrails() {
   /* Unlike the Library modal, Progress is a page in its own right. Carry that origin into the
      shared comparison surface so its Back button can return here instead of disappearing. */
   el.querySelectorAll('.prog-lead').forEach(b => {
-    b.onclick = () => renderSegmentLeaderboard(+b.dataset.id, { returnTo: 'progress' });
+    b.onclick = () => renderSegmentLeaderboard(+b.dataset.id, { returnTo: 'progress', sports });
   });
 }
 /* ---------- Training plan (Progress page) ----------
@@ -32513,7 +32548,8 @@ async function renderSegmentLeaderboard(tagId, opts = {}) {
   const [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]);
   const tag = allTags.find(t => t.id === tagId);
   if (!tag) { alert(loamT('That tagged segment no longer exists.')); return; }
-  const members = buildTagMembers(tag, allRides);
+  /* Progress opens this scoped to its sport picker, so the board ranks the laps its row counted. */
+  const members = buildTagMembers(tag, opts.sports ? allRides.filter(r => opts.sports.includes(r.sport)) : allRides);
   /* Opened from the Library with no loaded recording, so the noun comes from the segment's own
      history: the sports it has been covered on, falling back to the ride it was tagged from when
      nothing matches it yet. */
@@ -37140,6 +37176,10 @@ const LOAM_NB = {
   'Reopen an older run to include its moving pace here.': 'Åpne en eldre løpetur igjen for å ta med tempoet i bevegelse her.',
   'Average heart rate per run': 'Gjennomsnittspuls per løpetur',
   'Heart-rate trends appear for runs recorded with heart rate.': 'Pulstrender vises for løpeturer tatt opp med puls.',
+  'Moving pace for {n} of {total} runs. Runs saved before pace was stored appear once reopened.': 'Tempo i bevegelse for {n} av {total} løpeturer. Løpeturer lagret før tempoet ble lagret, vises når du åpner dem igjen.',
+  'Heart rate for {n} of {total} runs: older runs appear once reopened, and runs recorded without heart rate never do.': 'Puls for {n} av {total} løpeturer: eldre løpeturer vises når du åpner dem igjen, og løpeturer tatt opp uten puls vises aldri.',
+  'The app fills in the ones still on this phone after you close this screen.': 'Appen fyller inn de som fortsatt ligger på denne telefonen etter at du lukker denne skjermen.',
+  'None of your tagged trails has a session of this sport yet.': 'Ingen av de merkede stiene dine har en økt i denne sporten ennå.',
   'How did my pacing change?': 'Hvordan endret fartsholdningen min seg?',
   'How did terrain affect this run?': 'Hvordan påvirket terrenget denne løpeturen?',
   'Climb': 'Stigning',
@@ -46032,8 +46072,11 @@ function bikeTimelineRows(D) {
   const has = (key) => fit.filter(r => r[key] != null).length > 1;
   const rows = [];
 
-  /* Turning: the IMU path's yaw rate, decimated 100 Hz -> 20 Hz as it always was. */
-  if (D.t && D.yawSeg && D.t.length) {
+  /* Turning: the IMU path's yaw rate, decimated 100 Hz -> 20 Hz as it always was. NOT on a road
+     ride (owner report, 2026-10-04: "turning metrics appear useless for road bike"): over a 28 mi
+     ride the row is a flat line with a spike at each junction, and the corners a road ride does
+     have are read in their own table under the map, so the row only cost height. */
+  if (D.t && D.yawSeg && D.t.length && !isRoadAnalysis(D)) {
     const x = [], y = [];
     for (let i = 0; i < D.t.length; i += 5) {
       if (D.t[i] >= ride.start - 5 && D.t[i] <= ride.end + 5) { x.push(D.t[i] - ride.start); y.push(D.yawSeg[i]); }
@@ -46112,7 +46155,7 @@ function bikeTimelineRows(D) {
       traces: [{ x: gapX, y: gapY, line: { color: '#8caa6d', width: 1.2 },
         name: loamT('Cadence'), connectgaps: false, hovertemplate: '%{y:.0f} rpm' }] });
   }
-  if (isRoadAnalysis(D)) rows.sort((a, b) => ['speed', 'elevation', 'hr', 'power', 'cadence', 'turning'].indexOf(a.key) - ['speed', 'elevation', 'hr', 'power', 'cadence', 'turning'].indexOf(b.key));
+  if (isRoadAnalysis(D)) rows.sort((a, b) => ['speed', 'elevation', 'hr', 'power', 'cadence'].indexOf(a.key) - ['speed', 'elevation', 'hr', 'power', 'cadence'].indexOf(b.key));
   return rows;
 }
 
@@ -50788,7 +50831,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'af928ed6b · 2026-10-04';
+const LOAM_BUILD = '26a073b77 · 2026-10-04';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
