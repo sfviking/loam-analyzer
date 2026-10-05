@@ -1915,7 +1915,7 @@
   .road-details > summary { min-height:44px; padding:12px 0; cursor:pointer; }
   body.road-analysis .rp-note { color:var(--text-dim); font-size:13px; line-height:1.5; }
   .run-story-actions { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; }
-  .run-story-actions button { min-height:44px; padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--text); font:inherit; font-size:14px; cursor:pointer; }
+  .run-story-actions button, .road-speed-actions button { min-height:44px; padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--text); font:inherit; font-size:14px; cursor:pointer; }
   .run-story-actions .ch-cta { margin:0; color:var(--text); font-size:14px; }
   body.running-analysis :is(.subtitle, .map-legend, .rp-note, .be-foot) { color:var(--text-dim); }
   body.running-analysis :is(.subtitle, .map-legend) { font-size:12px; letter-spacing:0.02em; }
@@ -1929,6 +1929,9 @@
     body:is(.running-analysis,.road-analysis) #sectionNav > button { display:none; }
     body:is(.running-analysis,.road-analysis) .session-facts strong { font-size:26px; }
   }
+  .road-speed-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .road-speed-actions button { padding:6px 10px; min-height:44px; font-size:13px; }
+  .road-speed-note { display:block; margin-top:6px; color:var(--text-dim); font-size:12px; }
   .session-facts { display:flex; gap:32px; flex-wrap:wrap; margin-top:20px; }
   .session-facts strong { display:block; font-size:26px; font-variant-numeric:tabular-nums; }
   .session-facts span { display:block; color:var(--text-dim); font-size:14px; margin-top:4px; }
@@ -25815,9 +25818,13 @@ let jumpMarkers = {};
 
 function hideAllSections() {
   _roadSelection = null;
+  if (_roadSpeedMarker) _roadSpeedMarker.remove();
+  _roadSpeedMarker = null;
   const timeline = document.getElementById('timelineChart');
   if (timeline) {
     timeline._bikeTimelineRender = null;
+    timeline._roadSpeedReady = null;
+    timeline._roadYAxes = null;
     if (timeline._roadSelectionReset) timeline.removeListener('plotly_relayout', timeline._roadSelectionReset);
     timeline._roadSelectionReset = null;
   }
@@ -33269,6 +33276,12 @@ function setLoamAthlete(patch) {
    match its English key's. */
 const LOAM_NB = {
   'Showing {section} · Show full ride': 'Viser {section} · Vis hele turen',
+  'Show top speed on map': 'Vis toppfart på kartet',
+  'Show top speed on timeline': 'Vis toppfart på tidslinjen',
+  'Top speed timestamp unavailable.': 'Tidspunkt for toppfart er ikke tilgjengelig.',
+  'GPS unavailable at top speed.': 'GPS er ikke tilgjengelig ved toppfart.',
+  'Top speed · {speed}': 'Toppfart · {speed}',
+  'Top speed · {speed} · {time} elapsed': 'Toppfart · {speed} · {time} forløpt',
   'Timeline point · {time} elapsed': 'Punkt på tidslinjen · {time} forløpt',
   'Downhill': 'Nedover',
   'No climbs reach this minimum.': 'Ingen stigninger når minimumslengden.',
@@ -37520,6 +37533,7 @@ const U = {
 let _lastRender = null;
 // Selection is an elapsed-time window owned by this render, never an axis coordinate.
 let _roadSelection = null;
+let _roadSpeedMarker = null;
 /* `anchor` is the control that asked for the re-render. A full render starts with hideAllSections(),
    which collapses the page for a moment; the browser clamps scrollY to the shrunken height and it is
    never given back, so a checkbox tapped halfway down a run threw the reader ~760 px up the page (to
@@ -38380,7 +38394,7 @@ function renderRunMap(loc, ride, segments) {
      Runs (and any lift-free ride) have none, so the swatch would be noise. */
   const hasLift = Array.isArray(segments) && segments.some(s => s.kind === 'lift');
   setMapLegend('grade', { hasLift });
-  if (mapInstance) { mapInstance.remove(); mapInstance = null; }
+  removeAnalysisMap();
   /* Drop the previous ride's MTB map state: mapOverlay belongs to the map just destroyed, and a
      stale _mapData would let focusSegment/showTurnsForRun draw the old ride onto this one. */
   mapOverlay = null;
@@ -45421,6 +45435,14 @@ function drawRideOverlay(loc, turns, ride, ridingJumps, win, crashes) {
    reset whenever a map is rebuilt. */
 let _linkCursor = null;
 let _linkPinned = false;   /* a tapped (vs hovered) timeline marker, kept until the map is tapped to clear */
+function removeAnalysisMap() {
+  if (!mapInstance) return;
+  // Removing a path requests a canvas redraw. Detach paths before destroying their renderers.
+  mapInstance.eachLayer(layer => { if (layer instanceof L.Path) mapInstance.removeLayer(layer); });
+  mapInstance.remove();
+  mapInstance = null;
+  mapOverlay = null;
+}
 function clearTimelineCursor() {
   if (_linkCursor) _linkCursor.remove();
   _linkCursor = null;
@@ -45481,6 +45503,10 @@ function linkTimelineToMap(loc, ride, clock) {
        map into view so the dropped point is visible on a single-column phone layout. */
     chart.on('plotly_click', (ev) => {
       if (!ev || !ev.points || !ev.points.length) return;
+      if (ev.points.some(p => p.data?.meta === 'road-top-speed')) {
+        showRoadTopSpeed('map', _roadSelection ? 'selection' : 'whole');
+        return;
+      }
       _linkPinned = true;
       place(toRide(ev.points[0].x), true);
       if (isTouch) {
@@ -45677,7 +45703,7 @@ function wireTimelineRelayout(chart, fullLo, fullHi, patchFor) {
 function renderMap(loc, turns, ride, ridingJumps, crashes) {
   clearTimelineCursor();
   setMapLegend('turns');
-  if (mapInstance) { mapInstance.remove(); mapInstance = null; mapOverlay = null; }
+  removeAnalysisMap();
   /* Mirror of what renderRunMap does to _mapData: a stale run-focus handle would send focusSegment
      down the run branch on a ride that has a full MTB overlay to redraw. */
   runFocusLayer = null;
@@ -45804,7 +45830,7 @@ function renderSessionOverview(D, sport) {
     ? new Date(date).toLocaleDateString(loamLang() === 'en' ? undefined : loamLang()) : '';
   const unreliable = sidesUnreliableFor(D);
   const shifted = !!(D.calibWin && D.calibWin.mountShift);
-  const tile = (value, label) => `<div><strong>${escapeHtml(value)}</strong><span>${escapeHtml(loamT(label))}</span></div>`;
+  const tile = (value, label) => `<div><strong>${escapeHtml(value)}</strong><span>${escapeHtml(loamT(label))}</span>${road && label === 'Top speed' ? roadTopSpeedActions(D) : ''}</div>`;
   host.innerHTML = `<div class="session-heading"><div><h1 class="activity-title" tabindex="-1">${activityIcon(sport)}<span>${escapeHtml(title)}</span></h1>
       <p>${escapeHtml([sessionSportLabel(sport), when].filter(Boolean).join(' · '))}</p></div>
       <button type="button" class="session-share card-share" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
@@ -46333,6 +46359,11 @@ function renderBikeTimeline(D) {
       .map(tr => timelineClockTrace(tr, clock)));
   }
 
+  if (isRoadAnalysis(D) && rowAxis.speed) traces.push({ type: 'scatter', mode: 'markers+text',
+    meta: 'road-top-speed', x: [], y: [], yaxis: rowAxis.speed, cliponaxis: false, name: loamT('Top speed'),
+    marker: { size: 11, symbol: 'diamond', color: '#f4c45e', line: { color: '#1c211c', width: 1.5 } },
+    textfont: { size: 11 }, hovertemplate: `${loamT('Top speed')}: %{y:.1f} ${U.speedUnit()}<extra></extra>` });
+
   /* Bands, each on the row that explains it. */
   const shapes = [];
   if (rowAxis.turning) {
@@ -46493,6 +46524,12 @@ function renderBikeTimeline(D) {
   host.style.height = hostPx + 'px';
   const renderToken = {};
   host._bikeTimelineRender = renderToken;
+  host._roadSpeedReady = null;
+  const minSpans = { speed: U.speedNum(2), elevation: U.smallNum(10), hr: 10, power: 50, cadence: 10 };
+  host._roadYAxes = isRoadAnalysis(D) ? Object.fromEntries(rows.map(r => [r.axis, {
+    minSpan: minSpans[r.key], nonnegative: r.key !== 'elevation',
+    fromZero: ['speed', 'power', 'cadence'].includes(r.key),
+  }])) : null;
   if (host._roadSelectionReset) host.removeListener('plotly_relayout', host._roadSelectionReset);
   window._tlClock = clock;
   loamPlot('timelineChart', traces, layout, isRoadAnalysis(D) ? { ...PLOT_CFG, doubleClick: false } : PLOT_CFG).then(async () => {
@@ -46508,6 +46545,8 @@ function renderBikeTimeline(D) {
       return { annotations: annos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
     });
     linkTimelineToMap((D.sensors && D.sensors.location) || [], ride, clock);
+    host._roadSpeedReady = D;
+    updateRoadTopSpeed(D);
     // An explicit Plotly reset must also restore the map and the stats' scope.
     host._roadSelectionReset = ev => {
       if (ev['xaxis.autorange'] === true && _roadSelection && _roadSelection.D === D) clearTurnFilter(D);
@@ -47890,6 +47929,42 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
 /* ROAD_EXPERIENCE_START */
 /* Presentation facts shared by Road captures and FIT imports. Re-derived on reopen. */
 
+/* Fit displayed lines and markers, including interpolated window edges, without bridging gaps. */
+function roadTimelineYRanges(traces, range, axes) {
+  if (!range || !range.every(Number.isFinite) || range[1] < range[0]) return {};
+  const extents = {};
+  for (const trace of traces || []) {
+    const axis = trace.yaxis || 'y';
+    if (!axes[axis] || trace.visible === false || trace.visible === 'legendonly') continue;
+    const add = value => {
+      const e = extents[axis] || (extents[axis] = { low: Infinity, high: -Infinity });
+      e.low = Math.min(e.low, value); e.high = Math.max(e.high, value);
+    };
+    let previous = null;
+    for (let i = 0; i < (trace.x || []).length; i++) {
+      const x = trace.x[i], y = trace.y?.[i];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) { previous = null; continue; }
+      if (x >= range[0] && x <= range[1]) add(y);
+      if (previous && x !== previous.x && (trace.mode || 'lines').includes('lines')) {
+        for (const edge of range) {
+          if (edge > Math.min(previous.x, x) && edge < Math.max(previous.x, x)) {
+            add(previous.y + (y - previous.y) * (edge - previous.x) / (x - previous.x));
+          }
+        }
+      }
+      previous = { x, y };
+    }
+  }
+  const result = {};
+  for (const [axis, { low, high }] of Object.entries(extents)) {
+    const span = Math.max((high - low) * 1.2, axes[axis].minSpan || 1);
+    const middle = (low + high) / 2;
+    const bottom = axes[axis].nonnegative && low >= 0 ? Math.max(0, middle - span / 2) : middle - span / 2;
+    result[axis] = [bottom, bottom + span];
+  }
+  return result;
+}
+
 function roadElevationTotals(points, pauses = []) {
   let gain = 0, loss = 0, up = null, down = null, previous = null, hops = 0;
   for (const p of points || []) {
@@ -47954,6 +48029,29 @@ function roadSummary(D, movingTime) {
       : elevation.gain == null && elevation.loss == null ? 'missing' : D.gpsOnly || D.session ? 'fit' : baro.length > 10 ? 'barometer' : 'gps',
     roadSummaryVersion: 1,
   };
+}
+
+/* Locate the displayed maximum, never substitute a nearby speed for a device-only total.
+   A section's stats use location speed; the whole ride may use a FIT device total. */
+function roadTopSpeedPoint(D, win = null) {
+  const ride = D.ride, loc = D.sensors?.location || [];
+  const start = Math.max(ride.start, win?.tStart ?? ride.start), end = Math.min(ride.end, win?.tEnd ?? ride.end);
+  const gps = loc.filter(r => r.t >= start && r.t <= end && Number.isFinite(r.speed) && r.speed >= 0);
+  const fit = (D.fitInRide || D.timelineFit || []).map(r => ({ ...r, t: r.t_phone }))
+    .filter(r => r.t >= start && r.t <= end && Number.isFinite(r.speed) && r.speed >= 0);
+  const target = win ? gps.reduce((v, r) => Math.max(v, r.speed), 0) : D.summary?.maxSpeed;
+  if (!(target > 0)) return null;
+  const device = (D.session || D.roadSession)?.maxSpeed;
+  const sources = win ? [gps] : device != null && fit.length ? [fit] : [gps, fit];
+  for (const rows of sources) {
+    const sample = rows.reduce((best, r) => Math.abs(r.speed - target) < 1e-6 && (!best || r.t < best.t) ? r : best, null);
+    if (!sample) continue;
+    const latitude = sample.latitude ?? sample.lat ?? roadSampleAt(loc, sample.t, 'latitude');
+    const longitude = sample.longitude ?? sample.lon ?? roadSampleAt(loc, sample.t, 'longitude');
+    const mapped = Number.isFinite(latitude) && Math.abs(latitude) <= 90 && Number.isFinite(longitude) && Math.abs(longitude) <= 180;
+    return { t: sample.t, speed: target, latitude: mapped ? latitude : null, longitude: mapped ? longitude : null };
+  }
+  return null;
 }
 
 /* A distance axis over the speed samples. Gaps and pauses are not invented as ground.
@@ -48158,6 +48256,74 @@ function renderRoadTakeaway(D) {
     <button type="button" class="ch-cta" onclick="openRunEvidence('coachSection')">${loamT('Ask about this ride')}</button></div>`;
   show('coachHighlights');
 }
+function roadTopSpeedActions(D, win = null) {
+  const point = roadTopSpeedPoint(D, win), scope = win ? 'selection' : 'whole';
+  if (!point) return `<small class="road-speed-note">${loamT('Top speed timestamp unavailable.')}</small>`;
+  return `<div class="road-speed-actions">
+    <button type="button" data-road-speed="map" data-speed-scope="${scope}" ${point.latitude == null ? 'disabled' : ''}
+      aria-label="${loamT('Show top speed on map')}" onclick="showRoadTopSpeed('map', '${scope}')">${loamT('Map')}</button>
+    <button type="button" data-road-speed="timeline" data-speed-scope="${scope}"
+      aria-label="${loamT('Show top speed on timeline')}" onclick="showRoadTopSpeed('timeline', '${scope}')">${loamT('Timeline')}</button></div>
+    ${point.latitude == null ? `<small class="road-speed-note">${loamT('GPS unavailable at top speed.')}</small>` : ''}`;
+}
+function updateRoadTopSpeed(D) {
+  if (!isRoadAnalysis(D)) return;
+  const win = _roadSelection?.D === D ? _roadSelection.part : null;
+  const point = roadTopSpeedPoint(D, win);
+  if (_roadSpeedMarker) _roadSpeedMarker.remove();
+  _roadSpeedMarker = null;
+  if (point?.latitude != null && mapInstance) {
+    _roadSpeedMarker = L.circleMarker([point.latitude, point.longitude], {
+      pane: 'markerPane', className: 'road-speed-map-marker',
+      radius: 7, weight: 2, color: '#1c211c', fillColor: '#f4c45e', fillOpacity: 1,
+    }).addTo(mapInstance).bindTooltip(escapeHtml(loamT('Top speed · {speed}', { speed: U.speed(point.speed) })), { permanent: true, direction: 'top', offset: [0, -6] });
+    _roadSpeedMarker.on('click', () => showRoadTopSpeed('timeline', win ? 'selection' : 'whole'));
+  }
+  const chart = document.getElementById('timelineChart');
+  if (chart._roadSpeedReady !== D) return;
+  const index = chart.data.findIndex(tr => tr.meta === 'road-top-speed');
+  const x = point ? window._tlClock.xc(point.t - D.ride.start) : null;
+  const middle = ((win?.tStart ?? D.ride.start) + (win?.tEnd ?? D.ride.end)) / 2;
+  if (index >= 0) Plotly.restyle(chart, { x: [point ? [x] : []], y: [point ? [U.speedNum(point.speed)] : []],
+    text: [point ? [loamT('Top speed')] : []], textposition: point?.t > middle ? 'bottom left' : 'bottom right' }, [index]).catch(() => {});
+  const shapes = (chart.layout.shapes || []).filter(s => s.name !== 'road-top-speed');
+  if (point && index >= 0) shapes.push({ name: 'road-top-speed', type: 'line', xref: 'x', yref: 'paper', x0: x, x1: x, y0: 0, y1: 1,
+    line: { color: '#b27c17', width: 1.5, dash: 'dot' } });
+  // The peak is unsmoothed; include it explicitly instead of the previous selection's marker.
+  const rangeTraces = chart.data.filter(tr => tr.meta !== 'road-top-speed');
+  if (point && index >= 0) rangeTraces.push({ mode: 'markers', yaxis: chart.data[index].yaxis, x: [x], y: [U.speedNum(point.speed)] });
+  const axes = chart._roadYAxes || {};
+  const ranges = win ? roadTimelineYRanges(rangeTraces,
+    [window._tlClock.xc(win.tStart - D.ride.start), window._tlClock.xc(win.tEnd - D.ride.start)], axes) : {};
+  const update = { shapes };
+  for (const [axis, options] of Object.entries(axes)) {
+    const key = axis.replace('y', 'yaxis'), range = ranges[axis];
+    update[key + '.range'] = range || null;
+    update[key + '.autorange'] = !range;
+    update[key + '.rangemode'] = range ? 'normal' : options.fromZero ? 'tozero' : 'normal';
+  }
+  Plotly.relayout(chart, update).catch(() => {});
+}
+function showRoadTopSpeed(target, scope = 'whole') {
+  const D = _lastRender?.D;
+  if (!D || !isRoadAnalysis(D)) return;
+  if (scope === 'whole' && _roadSelection) clearTurnFilter(D);
+  const win = _roadSelection?.D === D ? _roadSelection.part : null, point = roadTopSpeedPoint(D, win);
+  if (!point) return;
+  clearTimelineCursor();
+  if (target === 'map') {
+    if (point.latitude == null || !_roadSpeedMarker) return;
+    mapInstance.panTo([point.latitude, point.longitude], { animate: false });
+    _roadSpeedMarker.bringToFront().setTooltipContent(escapeHtml(loamT('Top speed · {speed} · {time} elapsed', {
+      speed: U.speed(point.speed), time: fmtClock(point.t - D.ride.start),
+    }))).openTooltip();
+    document.getElementById('map').scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } else {
+    const xc = window._tlClock.xc, ride = D.ride;
+    Plotly.relayout('timelineChart', { 'xaxis.range': [xc((win?.tStart ?? ride.start) - ride.start), xc((win?.tEnd ?? ride.end) - ride.start)] }).catch(() => {});
+    document.getElementById('timelineSection').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+}
 /* The tiles under the map follow whatever the map is showing (owner report, 2026-10-04: a
    selected climb framed on the map over whole-ride numbers read as the climb's). Whole ride: the
    facts the headline does not already carry. A selection: its own distance, time, speed and
@@ -48177,7 +48343,7 @@ function renderRoadStats(D, sel) {
       tile('Distance', w.distance != null ? U.dist(w.distance) : '—'),
       tile('Moving time', fmtDuration(w.movingTime)),
       tile('Avg speed (moving)', w.avgSpeed != null ? U.speed(w.avgSpeed) : '—'),
-      tile('Top speed', w.maxSpeed != null ? U.speed(w.maxSpeed) : '—'),
+      tile('Top speed', w.maxSpeed != null ? U.speed(w.maxSpeed) : '—', roadTopSpeedActions(D, sel)),
       tile('Elevation gain', w.altGain != null ? U.elev(w.altGain) : '—'),
       tile('Elevation loss', w.altLoss != null ? U.elev(w.altLoss) : '—'),
       ...opt(w.avgHr, 'Avg heart rate', v => Math.round(v) + ' bpm'),
@@ -48199,6 +48365,7 @@ function renderRoadStats(D, sel) {
   }
   const scope = sel ? escapeHtml(sel.label || loamT('Selection')) : escapeHtml(loamT('Whole ride'));
   panel.innerHTML = `<div class="stats-scope${sel ? ' selected' : ''}">${scope}</div>` + tiles.join('');
+  updateRoadTopSpeed(D);
 }
 function focusRoadClimbPart(D, part, label, button) {
   focusSegment({ ...part, label }, D.ride, false);
@@ -51227,7 +51394,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '29739a898 · 2026-10-04';
+const LOAM_BUILD = '42ae87359 · 2026-10-04';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
