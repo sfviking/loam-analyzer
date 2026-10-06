@@ -2393,6 +2393,14 @@
 </div>
 <div id="strengthResults" class="hidden"></div>
 <div id="golfResults" class="hidden"></div>
+<!-- Shown over a leg opened from a race (openTriLeg), so the race is one tap away. Outside the
+     results containers because the leg renders into whichever one its sport uses. -->
+<div class="page-back-bar hidden" id="triBackBar">
+  <button type="button" id="triBackBtn" onclick="backToTriRace()"
+    style="display:inline-flex; align-items:center; gap:6px; padding:9px 15px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--accent); font-size:14px; font-weight:600; cursor:pointer;">
+    &larr; Back to the race
+  </button>
+</div>
 <div id="swimResults" class="hidden"></div>
 <div id="triResults" class="hidden"></div>
 <div id="skiResults" class="hidden"></div>
@@ -10721,7 +10729,10 @@ function renderCrashSection(D) {
   const crashes = (D && D.crashes) || [];
   if (!crashes.length) { sec.classList.add('hidden'); host.innerHTML = ''; return; }
   const ride = D.ride;
-  const replayable = new Set(formCriticalTurns(D).map(T => T.n));
+  /* Not formCriticalTurns: that list is scoped to descents, and a crash the rider marked is worth
+     replaying wherever it happened -- a washout on a flat or climbing corner included. Only the
+     implausible-lean gate applies. */
+  const replayable = new Set((D.turns || []).filter(T => formTurnRollRange(D, T) <= 65).map(T => T.n));
 
   host.innerHTML = crashes.map((c, i) => {
     const T = c.turn;
@@ -10827,6 +10838,13 @@ function renderCrashSection(D) {
       const T = (D.turns || []).find(x => x.n === +b.dataset.turn);
       if (!T) return;
       const sel = document.getElementById('formTurn');
+      /* A crash corner off the descents is not in the ride-wide list; add it, as the segment page
+         does for a pinned corner, so the dropdown names what the replay is showing. */
+      if (sel && !Array.from(sel.options).some(o => o.value === String(T.n))) {
+        let segs = [];
+        try { segs = segmentRuns(D, 'auto').runs || []; } catch (e) { segs = []; }
+        formFillTurnSelect(D, formCriticalTurns(D).concat(T).sort((a, b) => a.tStart - b.tStart), segs, T.n);
+      }
       if (sel) sel.value = String(T.n);
       formMarkActiveChip(T.n);
       formSelectTurn(D, T);
@@ -14228,14 +14246,14 @@ function fitJumpsInWindow(jumps, base, ride) {
   }
   return { jumps: out, duplicates };
 }
-async function analyzeFitOnly(fitFile, onProgress, superseded, activity) {
+async function analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg = null) {
   /* No sensor recording backs this render: the calibration selector must not re-run it and the
      Attach FIT button must not offer to attach a FIT to a FIT. */
   _lastSensorFile = null; _lastFitFile = fitFile; _lastHadFit = true;
   onProgress('parsing FIT file');
   const buf = await fitFile.arrayBuffer();
   if (superseded()) return;
-  const messages = parseFIT(buf);
+  const messages = triLeg ? LoamTri.fitLegMessages(parseFIT(buf), triLeg) : parseFIT(buf);
   const { records, jumps } = extractFitData(messages);
   /* The watch's own laps. Read here rather than re-derived from the track, because nothing in a GPS
      trace says which press was an interval rep. `foot` is not known until fitDeclaredSport runs a few
@@ -14248,6 +14266,8 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity) {
      crop has to be applied before anything reads the track. */
   let contentHash = null;
   try { contentHash = await analysisCacheKeyForFile(fitFile); } catch (e) { console.warn('FIT hash failed', e); }
+  /* A leg keys its crop and labels apart from the race it came from. */
+  if (contentHash && triLeg) contentHash += ':leg' + triLeg.index;
   if (superseded()) return;
   /* run | walk | ride, from the FIT's own declared sport. Drives foot vs bike framing below. */
   const gpsSport = activity.sport;
@@ -14345,12 +14365,14 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity) {
      (owner report, 2026-09-07). Same lesson the standalone-FIT import entry already records one
      layer down: identity, and here the DATE, come from the file's CONTENT, never from its name. */
   const fitRecordedAt = startFitSec != null ? new Date((startFitSec + FIT_EPOCH_UNIX) * 1000).toISOString() : null;
-  const saved = await saveRideToLibrary({
+  /* A leg is not saved: the library re-opens a row by re-analyzing its stored file, and this file
+     opens as the race, so a leg row would be a door to the wrong room. */
+  const saved = triLeg ? null : await saveRideToLibrary({
     filename: fitFile.name, sport: gpsSport, sensors, ride, summary, jumpCount: ridingJumps.length, contentKey: contentHash,
     recordedAt: fitRecordedAt,
   });
   /* Keep the FIT bytes so the ride re-opens from the library forever (Open re-analyzes). */
-  await putRideSource(contentHash, fitFile.name, buf);
+  if (!triLeg) await putRideSource(contentHash, fitFile.name, buf);
   if (superseded()) return;
   onProgress('rendering');
   hide('loading'); show('results');
@@ -18815,7 +18837,8 @@ const LoamTri = (function () {
  * same rule then works for a duathlon or an aquabike without knowing the order of sports.
  *
  * Every number here is an estimate from GPS pace alone. Nothing claims to know where the timing
- * mats were; a modern multisport FIT carries its own transition markers and would supersede this.
+ * mats were. A multisport FIT carries its own leg boundaries, and a race read from one
+ * (`transitionsFrom: 'file'`, see fit.js) takes them as given instead of searching.
  *
  * Ported verbatim into loam-mtb-analyzer.html (the `LoamTri` block); drift.test.js pins the copies.
  */
@@ -18874,6 +18897,9 @@ function normalizeRace(raw) {
     id: typeof raw.id === 'string' && raw.id ? raw.id : `race-${Math.round(start)}-${Math.round(end)}`,
     title: typeof raw.title === 'string' ? raw.title : '',
     source: typeof raw.source === 'string' ? raw.source : 'gpx',
+    /* 'file' when the legs came from a multisport FIT's own sessions (fit.js): the boundaries are
+       the watch's, and nothing between them is searched for. */
+    transitionsFrom: raw.transitionsFrom === 'file' ? 'file' : 'pace',
     start, end, legs, route,
   };
 }
@@ -18964,6 +18990,14 @@ function analyzeRace(race) {
   let floorT = route[0].t;
   for (let k = 0; k + 1 < legs.length; k++) {
     const A = legs[k], B = legs[k + 1];
+    if (race.transitionsFrom === 'file') {
+      const t0 = A.t1, t1 = Math.max(A.t1, B.t0);
+      transitions.push(t1 - t0 >= TRI_MIN_TRANSITION_S
+        ? { index: transitions.length + 1, after: k, from: A.sport, to: B.sport, ...raceSpanStats(route, t0, t1) }
+        : { index: transitions.length + 1, after: k, from: A.sport, to: B.sport, none: true, ...raceSpanStats(route, t1, t1) });
+      floorT = t1;
+      continue;
+    }
     const tb = B.t0;
     const searchLo = Math.max(A.t0, floorT, tb - TRI_ENTRY_BEFORE_S);
     const entryRun = sustainedRuns(route, speed, meds[k + 1], searchLo, B.t1)
@@ -19076,16 +19110,20 @@ const r1 = (x) => (x == null || !Number.isFinite(x) ? null : Math.round(x * 10) 
    raceSpeedSeries(route, TRI_BREAKDOWN_WINDOW_S), computed once by the caller. */
 function transitionBreakdown(route, speed, tr) {
   if (!tr || tr.none) return null;
-  let standing = 0, moving = 0;
+  let standing = 0, moving = 0, unrecorded = 0;
+  /* A gap between fixes is neither: nothing is known inside it. A file's transition can span one
+     (a watch stopped between T2 and the run), and before this it was all filed as whatever the
+     first fix after it happened to be doing. */
   for (let i = 1; i < route.length; i++) {
     const a = route[i - 1], b = route[i];
     if (b.t <= tr.t0 || a.t >= tr.t1) continue;
     const dt = Math.min(b.t, tr.t1) - Math.max(a.t, tr.t0);
     if (dt <= 0) continue;
-    if (speed[i] < TRI_STANDING_MPS) standing += dt; else moving += dt;
+    if (b.t - a.t > TRI_MAX_GAP_S) unrecorded += dt;
+    else if (speed[i] < TRI_STANDING_MPS) standing += dt; else moving += dt;
   }
   return { label: `T${tr.index}`, from: tr.from, to: tr.to, durationS: tr.durationS, distanceM: tr.distanceM,
-    standingS: standing, movingS: moving };
+    standingS: standing, movingS: moving, unrecordedS: unrecorded };
 }
 
 /* One leg cut into `n` equal-time pieces, with each piece's pace and heart rate. */
@@ -19191,14 +19229,17 @@ function raceDigest(race, A, seam, breakdowns, others, metric = true) {
     legs: A.legs.map(l => ({ sport: l.sport, time: mmss(l.durationS), distance: km(l.distanceM),
       avgSpeedKmh: r1(l.avgSpeedMps * 3.6), hrAvg: l.hrAvg, climbM: l.elevGainM })),
     transitions: (breakdowns || []).filter(Boolean).map(b => ({ label: b.label, time: mmss(b.durationS),
-      standing: mmss(b.standingS), moving: mmss(b.movingS), distanceM: Math.round(b.distanceM) })),
+      standing: mmss(b.standingS), moving: mmss(b.movingS), distanceM: Math.round(b.distanceM),
+      ...(b.unrecordedS >= 1 ? { notRecorded: mmss(b.unrecordedS) } : {}) })),
     seam: seam ? { pattern: seam.pattern, bikeSecondHalfSlowerPct: seam.bike.fadePct,
       runLastThirdSlowerPct: seam.run.fadePct, runOpeningSlowerThanAvgPct: seam.run.openSlowerPct,
       runHrDriftBpm: seam.hrDriftRunBpm } : null,
     previousRaces: (others || []).filter(o => o.start < A.raceStart).slice(-5).map(o => ({ title: o.title || null, date: day(o.start),
       total: mmss(o.totalS), transitions: o.transitions.map(mmss), legsComparable: o.legsComparable })),
     caveats: [
-      'Transitions are estimated from GPS pace alone, not from timing mats.',
+      race.transitionsFrom === 'file'
+        ? 'Legs and transitions are the file\'s own boundaries (a watch\'s multisport sessions, or track segments the athlete named), not timing mats; a transition includes any time the watch was not recording.'
+        : 'Transitions are estimated from GPS pace alone, not from timing mats.',
       'A swim leg\'s GPS distance runs long (33% over the course on the one real race measured).',
       'Triathlon is exploratory in Loam; the transition rule has been checked on one real race.',
     ],
@@ -19234,7 +19275,95 @@ function raceInputPlaceholder() {
   return 'e.g. How do I get through T1 faster?';
 }
   /* ---- end seam.js ---- */
-  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder };
+  /* ---- ported from analyzer/sports/triathlon/fit.js ---- */
+/*
+ * A multisport FIT read as ONE race: the payload `normalizeRace` takes, with the legs the WATCH
+ * declared rather than ones the athlete named from a pace split.
+ *
+ * A multisport FIT carries one session message (18) per leg, the transitions included as sessions
+ * of sport 3. Read as a single activity it was routed by its first declared sport, so a triathlon
+ * opened as its swim and the bike and run were dropped without a word (tester report, 2026-10-05:
+ * a stitched Santa Cruz 70.3 from an Apple Watch, which rendered as a 1478 m, 50-minute swim). The
+ * page asks this BEFORE the swim probe for that reason.
+ *
+ * The file's boundaries are taken as given, so `transitionsFrom: 'file'` tells `analyzeRace` not to
+ * search for transitions by pace: everything between one leg's end and the next leg's start is
+ * transition, including any time the watch was not recording. On a stitched file that time is real
+ * (3:37 between T2 and the run on the Santa Cruz file) and it belongs to the race clock.
+ */
+
+
+/* FIT sport enum -> the race vocabulary (TRI_SPORTS). 3 is `transition`. */
+const TRI_FIT_SPORTS = { 5: 'swim', 2: 'bike', 1: 'run' };
+const TRI_FIT_TRANSITION = 3;
+
+/* The race in a multisport FIT, or null when the file is not one: fewer than two legs, only one
+   sport across them, or a leg in a sport the race view cannot read (left to the single-sport path,
+   which reads that sport properly). */
+function fitMultisportRace(messages, title = '') {
+  const msgs = messages || [];
+  const sessions = msgs.filter(m => m.gm === 18 && m.fields[2] != null).map(m => {
+    const f = m.fields;
+    const t0 = f[2] + FIT_EPOCH_UNIX;
+    /* total_elapsed_time, not the message timestamp: the timestamp is when the session was
+       written, which a stitcher may set to anything. */
+    const t1 = f[7] != null ? t0 + f[7] / 1000 : (f[253] != null ? f[253] + FIT_EPOCH_UNIX : null);
+    return { sport: f[5], t0, t1 };
+  }).filter(s => s.t1 != null && s.t1 > s.t0).sort((a, b) => a.t0 - b.t0);
+
+  const legs = [];
+  for (const s of sessions) {
+    if (s.sport === TRI_FIT_TRANSITION) continue;
+    const sport = TRI_FIT_SPORTS[s.sport];
+    if (!sport) return null;
+    legs.push({ sport, t0: s.t0, t1: s.t1 });
+  }
+  if (legs.length < 2 || new Set(legs.map(l => l.sport)).size < 2) return null;
+
+  const route = extractFitData(msgs).records
+    .filter(r => r.lat != null && r.lon != null)
+    .map(r => ({ t: r.ts + FIT_EPOCH_UNIX, lat: r.lat, lon: r.lon, ele: r.altitude, hr: r.hr }));
+  const start = route.length ? route[0].t : legs[0].t0;
+  const end = route.length ? route[route.length - 1].t : legs[legs.length - 1].t1;
+  return {
+    source: 'fit', transitionsFrom: 'file',
+    id: `race-${Math.round(start)}-${Math.round(end)}`,
+    title: title || '', start, end, legs, route,
+  };
+}
+
+/* One leg of a multisport FIT as if it were its own file, so the single-sport readers (the swim
+   import, the GPS ride/run path, the road path) can open it unchanged. `leg` is a race leg in Unix
+   seconds ({ sport, t0, t1 }). Timestamped messages are kept only inside the leg; the leg's own
+   session is the only session; and the sport messages -- which carry no timestamp, so cannot be
+   matched to a leg by time -- are replaced by one declaring the leg's sport, because every reader
+   asks the sport message first. Untimestamped housekeeping (file id, developer field definitions)
+   is kept. */
+function fitLegMessages(messages, leg) {
+  const msgs = messages || [];
+  const lo = leg.t0 - FIT_EPOCH_UNIX, hi = leg.t1 - FIT_EPOCH_UNIX;
+  const enumOf = Object.keys(TRI_FIT_SPORTS).find(k => TRI_FIT_SPORTS[k] === leg.sport);
+  const session = msgs.find(m => m.gm === 18 && m.fields[2] != null
+    && String(m.fields[5]) === enumOf && Math.abs(m.fields[2] - lo) < 1);
+  const out = [];
+  let sportPlaced = false;
+  for (const m of msgs) {
+    if (m.gm === 12) continue;
+    if (m.gm === 18) {
+      if (m !== session) continue;
+      if (!sportPlaced) { out.push({ gm: 12, fields: { 0: +enumOf, 1: session.fields[6] != null ? session.fields[6] : 0 } }); sportPlaced = true; }
+      out.push(m);
+      continue;
+    }
+    const ts = m.fields && m.fields[253];
+    if (ts == null) { out.push(m); continue; }
+    if (ts >= lo && ts <= hi) out.push(m);
+  }
+  if (!sportPlaced) out.unshift({ gm: 12, fields: { 0: +enumOf, 1: 0 } });
+  return out;
+}
+  /* ---- end fit.js ---- */
+  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages };
 })();
 
 /* ===== Ski SK1: the indoor (dome) read ====================================== *
@@ -22378,6 +22507,8 @@ async function analyze(files) {
   }
   /* A fresh analysis clears any cross-ride drill-in context; drillIntoRide re-shows the button after. */
   { const b = document.getElementById('backToCompareBtn'); if (b) b.classList.add('hidden'); }
+  /* Likewise the race a leg was opened from, unless this IS that leg (openTriLeg). */
+  if (!_triLegRequest) { hide('triBackBar'); _triFitSource = null; }
   /* Expand any Loam backup zip into its per-session recordings before dispatching, so dropping a
      backup (one ride or many) analyzes the sessions inside it instead of one empty "no moving window"
      ride. Show the loader first since reading a large backup takes a moment. */
@@ -22409,11 +22540,25 @@ async function analyze(files) {
     if (!sensorFile && fitFile) {
       const probeBuf = await fitFile.arrayBuffer();
       if (superseded()) return;
-      const probeMsgs = parseFIT(probeBuf);
+      /* One leg of a multisport FIT, opened from the race view (openTriLeg): read as if the file held
+         only that leg, so it takes the same single-sport path a standalone file of that sport does. */
+      const triLeg = _triLegRequest; _triLegRequest = null;
+      const probeMsgs = triLeg ? LoamTri.fitLegMessages(parseFIT(probeBuf), triLeg) : parseFIT(probeBuf);
       /* A swim is asked about BEFORE power and GPS: a pool swim has neither, so it fell through to
          the GPS-only path and failed "no usable GPS track", and an open-water one has GPS and
          rendered as a ride. The watch's length messages are the same ground truth the Health
          import reads, so it goes through that import's renderer (tester report, 2026-09-28). */
+      /* A multisport FIT is one race, and it is asked BEFORE the swim: a triathlon declares swim
+         first, so it opened as its swim with the bike and run dropped (tester report, 2026-10-05). */
+      /* In the app the File is named after the session (loamAnalyzeFitURL), whose fallback "ride" is
+         not a race title. */
+      const fitTitle = fitFile.name.replace(/\.fit$/i, '');
+      const multisport = triLeg ? null : LoamTri.fitMultisportRace(probeMsgs, fitTitle === 'ride' ? '' : fitTitle);
+      if (multisport) {
+        _triFitSource = fitFile;
+        window.onTriathlonImport(multisport);
+        return;
+      }
       if (LoamSwim.fitIsSwim(probeMsgs)) {
         window.onSwimImport(LoamSwim.swimPayloadFromFit(probeMsgs));
         return;
@@ -22433,11 +22578,13 @@ async function analyze(files) {
          head unit logs no motor channel at all. */
       const key = await analysisCacheKeyForFile(fitFile);
       if (superseded()) return;
-      const userSport = requestedActivity(key);
-      rememberActivity(key, userSport);
+      /* A leg's sport is the one its session declares; an activity remembered for the whole file
+         (or the picker's current choice) describes the race, not this leg. */
+      const userSport = triLeg ? 'auto' : requestedActivity(key);
+      if (!triLeg) rememberActivity(key, userSport);
       const activity = fitActivity(probeMsgs, probe.records, userSport, prefersEmtbRides());
-      if (activity.road) await analyzeRoadFit(fitFile, onProgress, superseded);
-      else await analyzeFitOnly(fitFile, onProgress, superseded, activity);
+      if (activity.road) await analyzeRoadFit(fitFile, onProgress, superseded, triLeg);
+      else await analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg);
       return;
     }
     if (!sensorFile) throw new Error('Need a sensor file (.zip or .csv)');
@@ -26088,84 +26235,45 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf, opts = {}) 
   return { markup: out, bar: Ba };
 }
 
-/* The lift's "signature" line: every rep as a dip in the bar path, laid out set by set (packed, not
-   real-time, so the rests do not swallow the reps), colored teal for high bar / amber for low bar,
-   dip depth scaled by full vs parallel. The lifting analog of the GPS track. */
-function liftWaveformSVG(sets, bx, by, bw, bh) {
-  const HB = '#79c9a6', LB = '#e0a458', UN = '#9aa0aa';
-  const colOf = p => p === 'low' ? LB : p === 'high' ? HB : UN;
-  const totalReps = Math.max(1, sets.reduce((s, x) => s + Math.max(1, x.reps), 0));
-  const gap = 12, usableW = Math.max(1, bw - gap * Math.max(0, sets.length - 1));
-  const baseY = by + bh * 0.30;
-  let x = bx, out = '';
-  const labels = [];
-  for (const set of sets) {
-    const r = Math.max(1, set.reps);
-    const slotW = usableW * (r / totalReps);
-    const amp = bh * 0.56 * (set.depthTarget === 'parallel' ? 0.6 : 1);
-    const col = colOf(set.barPosition);
-    const N = r * 20; const pts = [];
-    for (let i = 0; i <= N; i++) { const fr = i / N; pts.push([x + fr * slotW, baseY + amp * (1 - Math.cos(2 * Math.PI * r * fr)) / 2]); }
-    const line = 'M ' + pts.map(p => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' L ');
-    const area = line + ` L ${(x + slotW).toFixed(1)} ${baseY.toFixed(1)} L ${x.toFixed(1)} ${baseY.toFixed(1)} Z`;
-    out += `<path d="${area}" fill="${col}" fill-opacity="0.10"/>`
-      + `<path d="${line}" fill="none" stroke="${col}" stroke-width="10" stroke-opacity="0.22" stroke-linecap="round" filter="url(#lsBlur)"/>`
-      + `<path d="${line}" fill="none" stroke="${col}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`
-      + `<circle cx="${x.toFixed(1)}" cy="${baseY.toFixed(1)}" r="2.5" fill="${col}"/>`;
-    labels.push(`<text x="${(x + slotW / 2).toFixed(1)}" y="${(by + bh + 2).toFixed(1)}" text-anchor="middle" font-size="10" letter-spacing="1" fill="${col}" font-family="'JetBrains Mono',monospace">${r}×</text>`);
-    x += slotW + gap;
-  }
-  out += `<line x1="${bx}" y1="${baseY.toFixed(1)}" x2="${(bx + bw).toFixed(1)}" y2="${baseY.toFixed(1)}" stroke="#ffffff" stroke-opacity="0.06"/>`;
-  return out + labels.join('');
-}
-
-/* No character on the card, deliberately: this is the shareable poster (waveform + four stats), and
-   the mannequin belongs to the Spotter Cam, which animates one rep and has its own picker. The
-   parameter and the `_liftSigChar` state behind it were left over from an earlier draft where the
-   card drew an avatar; neither had selected anything for some time, and a `setLiftChar` nothing
-   could call read as a picker somebody forgot to wire up rather than as a decision. */
-/* DELIBERATELY NOT TRANSLATED, and this is the one Lift-view surface that is not. The poster's
-   stencilled mono caps ('SETS', 'LIFT SIGNATURE', 'BETA · ESTIMATED') and its share caption are the
-   same design the ride, run, ski, swim, jump and golf cards carry, all of them English; translating
-   one of six would make the lift card the odd one out rather than make the set Norwegian. Its
-   siblings' turn is the change that should move it. */
+/* Logged loads and corrected rep counts describe the workout. Column height encodes load only;
+   missing weights stay blank rather than inventing a motion trace or a complete session volume. */
 function liftSignatureSVG(D) {
-  const sum = D.summary, sets = D.strength.sets, W = 800, H = 460;
-  const bx = 36, by = 108, bw = W - 72, bh = H - 108 - 100;
-  const wave = liftWaveformSVG(sets, bx, by, bw, bh);
-  const f = (x, d = 2) => (x == null || isNaN(x)) ? '—' : (+x).toFixed(d);
-  const volKg = liftVolumeKg(D);
-  const stats = [
-    { num: String(sum.nSets), unit: '', label: 'SETS' },
-    { num: String(sum.nReps), unit: '', label: 'REPS' },
-    volKg > 0
-      ? { num: Math.round(liftUnit() === 'kg' ? volKg : volKg / KG_PER_LB).toLocaleString(), unit: liftUnit().toUpperCase(), label: 'VOLUME' }
-      : (sum.hasBarSpeed ? { num: f(sum.meanBarSpeedMps), unit: 'M/S', label: 'BAR SPEED' } : { num: sum.medianTempoS != null ? f(sum.medianTempoS, 1) : '—', unit: 'S', label: 'TEMPO' }),
-    { num: (sum.nHighBarSets || 0) + '/' + (sum.nLowBarSets || 0), unit: '', label: 'HIGH/LOW' },
-  ];
-  const durMin = Math.max(1, Math.floor((sum.duration || 0) / 60));
-  const liftWord = loamT(sportLex('lift').signature);
-  const subtitle = `${liftWord} · ${durMin} MIN${D.title ? ' · ' + escapeHtml(rsLabel(D.title)) : ''}`;
-  const statCols = stats.map((st, i) => {
-    const cx = 40 + i * ((W - 80) / stats.length);
-    return `<text x="${cx}" y="${H - 44}" font-size="30" font-weight="700" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">${st.num}<tspan font-size="14" font-weight="500" fill="#cbd5e1"> ${st.unit || ''}</tspan></text>`
-      + `<text x="${cx}" y="${H - 24}" font-size="11" letter-spacing="1.5" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${loamT(st.label)}</text>`
-      + (i > 0 ? `<line x1="${cx - 14}" y1="${H - 62}" x2="${cx - 14}" y2="${H - 20}" stroke="#ffffff" stroke-opacity="0.08"/>` : '');
-  }).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
-    <defs>
-      <linearGradient id="lsBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#20291b"/><stop offset="52%" stop-color="#141a10"/><stop offset="100%" stop-color="#0a0d07"/></linearGradient>
-      <radialGradient id="lsHalo" cx="50%" cy="46%" r="60%"><stop offset="0%" stop-color="#7fb069" stop-opacity="0.18"/><stop offset="100%" stop-color="#7fb069" stop-opacity="0"/></radialGradient>
-      <filter id="lsBlur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="4"/></filter>
-    </defs>
-    <rect width="${W}" height="${H}" fill="url(#lsBg)"/>
-    <rect width="${W}" height="${H}" fill="url(#lsHalo)"/>
-    ${wave}
-    <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="#e0a458">A</tspan>M</text>
-    <text x="38" y="72" font-size="11" letter-spacing="2.5" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${subtitle}</text>
-    <text x="${W - 38}" y="50" text-anchor="end" font-size="11" letter-spacing="2" fill="#7c8b76" font-family="'JetBrains Mono',monospace">${loamT('{word} SIGNATURE', { word: liftWord })}</text>
-    <text x="${W - 38}" y="68" text-anchor="end" font-size="10" letter-spacing="1.5" fill="#e0a458" font-family="'JetBrains Mono',monospace">${loamT('BETA · ESTIMATED')}</text>
-    ${statCols}
+  const sets = D.strength.sets || [], sum = D.summary;
+  const weights = liftWeightsKg(D.key || '');
+  const loaded = sets.map((set, i) => ({ set, i, kg: weights[i] }))
+    .filter(x => Number.isFinite(x.kg) && x.kg > 0);
+  const top = loaded.reduce((best, x) => !best || x.kg > best.kg ? x : best, null);
+  const lifts = [...new Set(sets.map(set => set.lift || 'unlabeled'))];
+  const name = lifts.length === 1 && lifts[0] !== 'unlabeled' ? liftNameCap(lifts[0]) : loamT('Weightlifting');
+  const W = 480, rows = Math.max(1, Math.ceil(sets.length / 4)), H = 226 + rows * 190;
+  const text = (x, y, value, size = 16, color = '#a5b39c', anchor = 'start') =>
+    `<text x="${x}" y="${y}" fill="${color}" font-size="${size}" text-anchor="${anchor}" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">${escapeHtml(String(value))}</text>`;
+  const headline = top ? `${kgToDisp(top.kg)} ${liftUnit()} × ${top.set.reps}` : `${sum.nSets} ${loamT('sets')} · ${sum.nReps} ${loamT('reps')}`;
+  let columns = '';
+  for (let i = 0; i < sets.length; i++) {
+    const set = sets[i], row = Math.floor(i / 4), col = i % 4;
+    const n = Math.min(4, sets.length - row * 4), slot = (W - 48) / n;
+    const x = 24 + slot * col, cx = x + slot / 2, y = 186 + row * 190;
+    const kg = weights[i], hasWeight = Number.isFinite(kg) && kg > 0;
+    const height = hasWeight ? 96 * kg / top.kg : 0;
+    columns += text(cx, y, hasWeight ? `${kgToDisp(kg)} ${liftUnit()}` : '—', 18, '#f1f5e9', 'middle');
+    if (hasWeight) columns += `<rect x="${x + 12}" y="${y + 112 - height}" width="${slot - 24}" height="${height}" rx="4" fill="#9fbd82" opacity="${i === top.i ? 1 : 0.65}"/>`;
+    columns += text(cx, y + 138, `${set.reps} ${loamT('reps')}`, 17, '#f1f5e9', 'middle')
+      + text(cx, y + 161, loamT('Set {n}', { n: i + 1 }), 16, '#a5b39c', 'middle');
+    if (lifts.length > 1) {
+      const label = liftNameCap(set.lift) || loamT('Unlabeled');
+      columns += `<g><title>${escapeHtml(label)}</title>` + text(cx, y + 181, label.length > 12 ? label.slice(0, 11) + '…' : label, 14, '#a5b39c', 'middle') + '</g>';
+    }
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeHtml(name + ': ' + headline)}">
+    <rect width="${W}" height="${H}" rx="12" fill="#141a10"/>
+    ${text(24, 36, 'LOAM', 23, '#f1f5e9')}${text(W - 24, 36, loamT('BETA'), 15, '#a5b39c', 'end')}
+    ${text(24, 76, name, 24, '#f1f5e9')}
+    ${text(24, 128, headline, 42, '#f1f5e9')}
+    ${text(24, 152, top ? loamT('Heaviest logged set') + (lifts.length > 1 ? ' · ' + (liftNameCap(top.set.lift) || loamT('Unlabeled')) : '') : loamT('Session totals'), 16)}
+    ${columns}
+    <line x1="24" y1="${H - 45}" x2="${W - 24}" y2="${H - 45}" stroke="#35412e"/>
+    ${text(24, H - 18, `${sum.nSets} ${loamT('sets')} · ${sum.nReps} ${loamT('reps')} · ${Math.round((sum.duration || 0) / 60)} min`, 17)}
   </svg>`;
 }
 
@@ -26374,7 +26482,7 @@ function onLiftWeight(i, val) {
   try { localStorage.setItem('loam.liftW.' + key, JSON.stringify(w)); } catch (e) { /* private mode / quota; the value still drives this render */ }
   const volKg = liftVolumeKg(_liftDc);   // corrected reps drive volume
   const el = document.getElementById('liftVolTile'); if (el) el.textContent = volKg > 0 ? fmtVol(volKg) : '—';
-  renderLiftSignature(_liftDc);   // refresh the card's VOLUME stat (with corrected reps)
+  renderLiftSignature(_liftDc);   // refresh logged loads and corrected reps on the card
   /* And the stored history row, which is the whole reason the loads are typed. Unlike onLiftReps
      this handler deliberately does NOT re-render (a full re-render rebuilds the table and takes the
      focus out of the cell being typed into, which makes entering six weights in a row unusable), so
@@ -28839,7 +28947,7 @@ function renderStrength(D) {
     <div class="sig-frame"><div id="liftSignature" class="lift-sig"></div>
       <button type="button" class="card-share on-card" onclick="saveLiftSignature()" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
     <div class="lift-sig-bar">
-      <span class="lift-sig-cap">${loamT('Your session as a rep trace — teal high bar, amber low bar. Share it.')}</span>
+      <span class="lift-sig-cap">${loamT('Your session, set by set. Column height shows logged weight; reps reflect your corrections.')}</span>
       <span class="lift-unit-toggle" title="${escapeHtml(loamT('Weight units'))}">
         <button class="${liftUnit() === 'lb' ? 'on' : ''}" onclick="setLiftUnitPref('lb')">lb</button><button class="${liftUnit() === 'kg' ? 'on' : ''}" onclick="setLiftUnitPref('kg')">kg</button>
       </span>
@@ -29948,6 +30056,15 @@ function renderSwim(D) {
         loamT('How far apart the two run depends on the stroke: your watch reports both arms for freestyle and backstroke, where they alternate, but not for breaststroke or butterfly, where they move together. Nothing in this data can tell freestyle from breaststroke, which is why there is no stroke type here and no conversion offered. It all comes from the Apple Watch on your wrist, with your phone on the pool deck.')
           + (R.hasLengths ? ' ' + loamT('Pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.') : ''),
         'strength-scope', 'Where these numbers come from', loamT('Beta · One-arm strokes · SWOLF not comparable with watch SWOLF'))
+      /* A swim read from a .fit (a watch export, or one leg of a multisport file) said "Imported from
+         Apple Health" -- a claim about where the data came from that was simply untrue. */
+      : (D.session && D.session.source) === 'fit' ? leadNote(
+        loamT(R.hasLengths
+          ? '<strong>Read from your watch\'s FIT file, not recorded by Loam.</strong> Your watch\'s lengths, strokes and stroke type are taken as given, and Loam adds the part the watch does not show. Everything below is an estimate (BETA) pending swim ground truth.'
+          : '<strong>Read from your watch\'s FIT file, not recorded by Loam.</strong> Your watch\'s distance, strokes and GPS track are taken as given, and Loam adds the part the watch does not show. Everything below is an estimate (BETA) pending swim ground truth.'),
+        loamT('Your watch counts those better than a phone in a locker ever could, so re-deriving them would only make them worse.')
+          + (R.hasLengths ? ' ' + loamT('What Loam adds is the decomposition: pace is distance-per-stroke times stroke rate, and holding pace by taking a better hold of the water is a different session from holding it by spinning your arms faster.') : ''),
+        'strength-scope', 'Where these numbers come from', loamT(R.hasLengths ? 'FIT file · Watch lengths and strokes · Estimated trends' : 'FIT file · GPS distance and watch strokes · Estimated trends'))
       : leadNote(
         loamT(R.hasLengths
           ? '<strong>Imported from Apple Health, not recorded by Loam.</strong> Your watch\'s lengths, strokes and stroke type are taken as given, and Loam adds the part Apple does not show. Everything below is an estimate (BETA) pending swim ground truth.'
@@ -31166,7 +31283,7 @@ function triSeamSection(D) {
     <div class="swim-tablewrap"><table class="strength-table tri-table">
       <thead><tr><th></th><th>${loamT('time')}</th><th>${loamT('standing')}</th><th>${loamT('moving')}</th><th>${loamT('distance')}</th></tr></thead>
       <tbody>${tRows}</tbody></table></div>
-    <div class="strength-tablenote">${loamT('Standing is under 0.8 m/s: at the rack, out of the wetsuit, into the shoes. Moving is the run up the beach and the jog with the bike.')}</div>` : '';
+    <div class="strength-tablenote">${loamT('Standing is under 0.8 m/s: at the rack, out of the wetsuit, into the shoes. Moving is the run up the beach and the jog with the bike.')}${bd.filter(b => b.unrecordedS >= 1).map(b => ' ' + escapeHtml(loamT('{t} of {label} was not recorded, so it counts as neither.', { t: fmtDuration(b.unrecordedS), label: b.label }))).join('')}</div>` : '';
   if (!seam) return tTable;
   const sent = LoamTri.seamSentence(seam);
   const pace = (sport, v) => triPaceLabel(sport, v);
@@ -31210,6 +31327,7 @@ function renderTriathlon(D) {
   _lastRender = { fn: renderTriathlon, D };
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
   const A = D.analysis;
+  const fromFile = D.race.transitionsFrom === 'file';
   const tl = LoamTri.raceTimeline(A);
   const el = document.getElementById('triResults');
   const tileOf = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${escapeHtml(l)}</div></div>`;
@@ -31240,6 +31358,13 @@ function renderTriathlon(D) {
       <td>${e.elevGainM != null ? U.elev(e.elevGainM) : '—'}</td></tr>`;
   }).join('');
 
+  /* Each leg in its own sport's analysis, read out of the same file. Only for a race read from a
+     FIT: a GPX race's legs import from the phone's leg picker instead. */
+  const legButtons = D.race.source === 'fit' && _triFitSource ? `<div class="strength-tablenote tri-leg-open" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px">
+      <span>${loamT('Open a leg in its own analysis:')}</span>
+      ${A.legs.map((l, k) => `<button type="button" class="tri-leg-btn" data-leg="${k}" onclick="openTriLeg(${k})"
+        style="padding:8px 14px; min-height:44px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--accent); font-weight:600; cursor:pointer;">${escapeHtml(triSportLabel(l.sport))} &rsaquo;</button>`).join('')}
+    </div>` : '';
   const trimmed = [
     A.preStartS >= 30 ? loamT('{t} before the start', { t: fmtDuration(A.preStartS) }) : '',
     A.postFinishS >= 30 ? loamT('{t} after the finish', { t: fmtDuration(A.postFinishS) }) : '',
@@ -31247,7 +31372,12 @@ function renderTriathlon(D) {
 
   el.innerHTML = `
     <div class="section-title"><span class="activity-title">${activityIcon('run')}<span>${escapeHtml(D.race.title || loamT('Triathlon'))}</span></span> <span class="beta-badge">${loamT('EXPERIMENTAL')}</span></div>
-    ${leadNote(
+    ${fromFile ? leadNote(
+      D.race.source === 'fit'
+        ? loamT('<strong>One race, read from your watch\'s multisport file.</strong> The legs and the transitions are the ones your watch recorded; Loam reads the time between the legs.')
+        : loamT('<strong>One race, read from the segments you named.</strong> The legs and the transitions are your file\'s own segments; Loam reads the time between the legs.'),
+      loamT('A transition here runs from the end of one leg to the start of the next, exactly as the file marks them. Any time the watch was not recording between two legs counts as transition time, because the race clock kept running through it.'),
+      'strength-scope', 'Where the transitions come from') : leadNote(
       loamT('<strong>One race, read from one GPS track.</strong> You named the legs; Loam found the transitions between them, where your pace left one leg and settled into the next.'),
       loamT('A transition here starts at the last sustained minute at the previous leg\'s own pace and ends at the first sustained minute at the next one\'s, so a run up the beach, a wetsuit strip and a jog with the bike all count as T1. It is an estimate from GPS pace alone: nothing here knows where the timing mats were.'),
       'strength-scope', 'How the transitions are found')}
@@ -31258,15 +31388,18 @@ function renderTriathlon(D) {
       <thead><tr><th></th><th>${loamT('time')}</th><th>${loamT('share')}</th><th>${loamT('distance')}</th><th>${loamT('pace')}</th><th>${loamT('HR')}</th><th>${loamT('climb')}</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
+    ${legButtons}
     <div id="triSeam"></div>
     <div class="section-title" style="margin-top:22px">${loamT('The whole race')} <span class="subtitle">${loamT('speed, with each leg and transition shaded')}</span></div>
     <div class="panel"><div id="triSpeedChart" class="chart" style="height:280px"></div></div>
     <div class="section-title" style="margin-top:22px">${loamT('The course')}</div>
     <div class="panel"><div id="triMap" style="height:360px;border-radius:10px;overflow:hidden"></div></div>
     <div id="triHistory"></div>
-    ${betaCaveat(
+    ${fromFile ? betaCaveat(
+      loamT('triathlon is exploratory in Loam. The leg and transition times are your file\'s; a swim\'s GPS distance runs long (33% over the course on the one race measured), so read the swim distance as an upper bound.'),
+      loamT('A sprint race, where the legs are short and the transitions a bigger share, has not been tested.')) : betaCaveat(
       loamT('triathlon is exploratory in Loam. The transition rule was built on one real race (a 2011 half-iron GPX) and synthetic races, and a swim\'s GPS distance runs long (33% over the course on that race), so read the swim distance as an upper bound.'),
-      loamT('A modern multisport FIT carries its own transition markers and would replace this estimate; reading one is not built yet. A sprint race, where the legs are short and the transitions a bigger share, has not been tested.'))}`;
+      loamT('A multisport FIT from your watch carries its own leg boundaries and is read with those instead. A sprint race, where the legs are short and the transitions a bigger share, has not been tested.'))}`;
   const seamHost = document.getElementById('triSeam');
   if (seamHost) seamHost.innerHTML = triSeamSection(D);
   const histHost = document.getElementById('triHistory');
@@ -31330,9 +31463,38 @@ function drawTriMap(D) {
   } catch (e) { dbg('[tri map]', e); }
 }
 
+/* A leg of a FIT race opens in that sport's own analysis. `_triFitSource` is the file the race was
+   read from -- null for a GPX race, whose legs have no file of their own to open -- and
+   `_triLegRequest` tells the FIT routing in analyze() which leg to read. */
+let _triLastRace = null, _triFitSource = null, _triLegRequest = null;
+async function openTriLeg(k) {
+  const leg = _triLastRace && _triLastRace.legs && _triLastRace.legs[k];
+  if (!leg || !_triFitSource) return;
+  _triLegRequest = { sport: leg.sport, t0: leg.t0, t1: leg.t1, index: k };
+  const gen = _analyzeGen + 1;
+  await analyze([_triFitSource]);
+  /* Shown even when the leg could not be read, so an error is never a dead end -- but not when
+     another file has been opened since. */
+  if (_analyzeGen === gen) showTriBackBar();
+  window.scrollTo(0, 0);
+}
+function showTriBackBar() {
+  const b = document.getElementById('triBackBtn');
+  if (b) b.textContent = '← ' + loamT('Back to the race');
+  show('triBackBar');
+}
+function backToTriRace() {
+  hide('triBackBar');
+  if (_triLastRace) window.onTriathlonImport(_triLastRace);
+  window.scrollTo(0, 0);
+}
+
 window.onTriathlonImport = function (payload) {
   try {
     const raw = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    _triLastRace = raw;
+    if (raw && raw.source !== 'fit') _triFitSource = null;
+    hide('triBackBar');
     const race = LoamTri.normalizeRace(raw);
     const analysis = LoamTri.analyzeRace(race);
     const fine = LoamTri.raceSpeedSeries(race.route, LoamTri.TRI_BREAKDOWN_WINDOW_S);
@@ -33899,7 +34061,10 @@ const LOAM_NB = {
   'depth {list}': 'dybde {list}',
 
   /* The card bar and the Coach's read heading. */
-  'Your session as a rep trace — teal high bar, amber low bar. Share it.': 'Økten din som et repetisjonsspor — turkis for høy stang, ravgult for lav stang. Del det.',
+  'Your session, set by set. Column height shows logged weight; reps reflect your corrections.': 'Økten din, sett for sett. Søylehøyden viser registrert vekt; repetisjonene følger korrigeringene dine.',
+  'Heaviest logged set': 'Tyngste registrerte sett',
+  'Session totals': 'Totalt for økten',
+  'Unlabeled': 'Umerket',
   'Weight units': 'Vektenheter',
   'Coach\'s read': 'Trenerens lesning',
 
@@ -34412,6 +34577,12 @@ const LOAM_NB = {
   'Steady, continuous efforts only · Warmup excluded': 'Kun jevn, sammenhengende innsats · Oppvarming utelatt',
   'Schematic · Only angle and timing are measured': 'Skjematisk · Kun vinkel og timing er målt',
   'Apple Health import · GPS distance and watch strokes · Estimated trends': 'Import fra Apple Helse · GPS-distanse og tak fra klokken · Anslåtte trender',
+  'FIT file · Watch lengths and strokes · Estimated trends': 'FIT-fil · Lengder og tak fra klokken · Anslåtte trender',
+  'FIT file · GPS distance and watch strokes · Estimated trends': 'FIT-fil · GPS-distanse og tak fra klokken · Anslåtte trender',
+  '<strong>Read from your watch\'s FIT file, not recorded by Loam.</strong> Your watch\'s lengths, strokes and stroke type are taken as given, and Loam adds the part the watch does not show. Everything below is an estimate (BETA) pending swim ground truth.':
+    '<strong>Lest fra klokkens FIT-fil, ikke tatt opp av Loam.</strong> Klokkens lengder, armtak og svømmeart tas som gitt, og Loam legger til den delen klokken ikke viser. Alt under er et anslag (BETA) i påvente av fasit for svømming.',
+  '<strong>Read from your watch\'s FIT file, not recorded by Loam.</strong> Your watch\'s distance, strokes and GPS track are taken as given, and Loam adds the part the watch does not show. Everything below is an estimate (BETA) pending swim ground truth.':
+    '<strong>Lest fra klokkens FIT-fil, ikke tatt opp av Loam.</strong> Klokkens distanse, armtak og GPS-spor tas som gitt, og Loam legger til den delen klokken ikke viser. Alt under er et anslag (BETA) i påvente av fasit for svømming.',
   'Beta · Watch-counted lengths · One-arm stroke estimates': 'Beta · Lengder telt av klokken · Anslåtte tak med én arm',
   'Beta · Estimated trends · Sparse GPS · ~ Optical heart rate': 'Beta · Anslåtte trender · Sparsom GPS · ~ Optisk puls',
   'Short pool ({len}): distance per stroke is sensitive to push-off': 'Kort basseng ({len}): distanse per tak påvirkes mye av fraspark',
@@ -37211,7 +37382,16 @@ const LOAM_NB = {
   'IMPORTED FROM APPLE HEALTH': 'IMPORTERT FRA APPLE HELSE',
   /* Triathlon race view (TRI-3). */
   '<strong>One race, read from one GPS track.</strong> You named the legs; Loam found the transitions between them, where your pace left one leg and settled into the next.': '<strong>Ett løp, lest fra ett GPS-spor.</strong> Du navnga etappene; Loam fant vekslingene mellom dem, der farten din forlot én etappe og la seg til rette i den neste.',
-  'A modern multisport FIT carries its own transition markers and would replace this estimate; reading one is not built yet. A sprint race, where the legs are short and the transitions a bigger share, has not been tested.': 'En moderne multisport-FIT har egne vekslingsmarkører og ville erstattet dette anslaget; å lese en slik er ikke bygget ennå. Et sprintløp, der etappene er korte og vekslingene en større andel, er ikke testet.',
+  'A multisport FIT from your watch carries its own leg boundaries and is read with those instead. A sprint race, where the legs are short and the transitions a bigger share, has not been tested.': 'En multisport-FIT fra klokken din har egne etappegrenser og leses med dem i stedet. Et sprintløp, der etappene er korte og vekslingene en større andel, er ikke testet.',
+  '<strong>One race, read from your watch\'s multisport file.</strong> The legs and the transitions are the ones your watch recorded; Loam reads the time between the legs.': '<strong>Ett løp, lest fra klokkens multisport-fil.</strong> Etappene og vekslingene er de klokken din registrerte; Loam leser tiden mellom etappene.',
+  'A transition here runs from the end of one leg to the start of the next, exactly as the file marks them. Any time the watch was not recording between two legs counts as transition time, because the race clock kept running through it.': 'En veksling her går fra slutten av én etappe til starten av den neste, nøyaktig slik filen markerer dem. Tid da klokken ikke registrerte mellom to etapper regnes som vekslingstid, fordi løpsklokken gikk videre.',
+  'Where the transitions come from': 'Hvor vekslingene kommer fra',
+  'Open a leg in its own analysis:': 'Åpne en etappe i sin egen analyse:',
+  'Back to the race': 'Tilbake til løpet',
+  '<strong>One race, read from the segments you named.</strong> The legs and the transitions are your file\'s own segments; Loam reads the time between the legs.': '<strong>Ett løp, lest fra segmentene du navnga.</strong> Etappene og vekslingene er filens egne segmenter; Loam leser tiden mellom etappene.',
+  'triathlon is exploratory in Loam. The leg and transition times are your file\'s; a swim\'s GPS distance runs long (33% over the course on the one race measured), so read the swim distance as an upper bound.': 'triatlon er utforskende i Loam. Etappe- og vekslingstidene er filens; GPS-distansen på svømming blir for lang (33 % over løypa på det ene målte løpet), så les svømmedistansen som en øvre grense.',
+  'A sprint race, where the legs are short and the transitions a bigger share, has not been tested.': 'Et sprintløp, der etappene er korte og vekslingene en større andel, er ikke testet.',
+  '{t} of {label} was not recorded, so it counts as neither.': '{t} av {label} ble ikke registrert, så det regnes som ingen av delene.',
   'A transition here starts at the last sustained minute at the previous leg\'s own pace and ends at the first sustained minute at the next one\'s, so a run up the beach, a wetsuit strip and a jog with the bike all count as T1. It is an estimate from GPS pace alone: nothing here knows where the timing mats were.': 'En veksling her starter ved det siste sammenhengende minuttet i forrige etappes eget tempo og slutter ved det første sammenhengende minuttet i den nestes, så løpet opp fra stranden, våtdraktbyttet og joggen med sykkelen teller alle som T1. Det er et anslag fra GPS-tempo alene: ingenting her vet hvor tidtakingsmattene lå.',
   'Bike leg': 'Sykkeletappe',
   'Run leg': 'Løpeetappe',
@@ -45491,6 +45671,9 @@ function linkTimelineToMap(loc, ride, clock) {
     chart.on('plotly_hover', (ev) => {
       if (_linkPinned) return;
       if (!ev || !ev.points || !ev.points.length) return;
+      /* The top-speed peak has its own map marker; a hover there (which a touch tap fires before its
+         click) would drop a second, overlapping cursor on it -- the click branch below already skips it. */
+      if (ev.points.some(p => p.data?.meta === 'road-top-speed')) return;
       place(toRide(ev.points[0].x));
     });
     chart.on('plotly_unhover', () => {
@@ -47790,12 +47973,12 @@ function powerWeightedBalance(fitInRide) {
   return { left: Math.round((100 - right) * 10) / 10, right: Math.round(right * 10) / 10 };
 }
 
-async function analyzeRoadFit(fitFile, onProgress, superseded) {
+async function analyzeRoadFit(fitFile, onProgress, superseded, triLeg = null) {
   _lastSensorFile = null; _lastFitFile = fitFile; _lastHadFit = true;
   onProgress('parsing FIT file');
   const buf = await fitFile.arrayBuffer();
   if (superseded()) return;
-  const messages = parseFIT(buf);
+  const messages = triLeg ? LoamTri.fitLegMessages(parseFIT(buf), triLeg) : parseFIT(buf);
   const { records: rawRecords } = extractFitData(messages);
   const { session, laps } = extractFitSummary(messages);
   if (rawRecords.length < 20) throw new Error('This FIT has no usable ride data.');
@@ -47877,11 +48060,13 @@ async function analyzeRoadFit(fitFile, onProgress, superseded) {
   };
   let contentHash = null;
   try { contentHash = await analysisCacheKeyForFile(fitFile); } catch (e) { console.warn('FIT hash failed', e); }
+  if (contentHash && triLeg) contentHash += ':leg' + triLeg.index;
   if (superseded()) return;
   _currentRunKey = contentHash;
   const recordedAt = new Date((records[0].ts + FIT_EPOCH_UNIX) * 1000).toISOString();
   let saved = null;
-  try {
+  /* A leg is not saved, for the reason analyzeFitOnly gives. */
+  if (!triLeg) try {
     saved = await saveRideToLibrary({ filename: fitFile.name, sport: 'road', sensors, ride, summary: roadSummary, contentKey: contentHash, recordedAt });
     if (contentHash) await putRideSource(contentHash, fitFile.name, buf);
   } catch (e) { console.warn('road library save failed', e); }
@@ -51394,7 +51579,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '42ae87359 · 2026-10-04';
+const LOAM_BUILD = 'b20e8f3fa · 2026-10-05';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
