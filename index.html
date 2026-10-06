@@ -14253,7 +14253,7 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg 
   onProgress('parsing FIT file');
   const buf = await fitFile.arrayBuffer();
   if (superseded()) return;
-  const messages = triLeg ? LoamTri.fitLegMessages(parseFIT(buf), triLeg) : parseFIT(buf);
+  const messages = triLegMessages(buf, triLeg);
   const { records, jumps } = extractFitData(messages);
   /* The watch's own laps. Read here rather than re-derived from the track, because nothing in a GPS
      trace says which press was an interval rep. `foot` is not known until fitDeclaredSport runs a few
@@ -19371,8 +19371,80 @@ function fitLegMessages(messages, leg) {
   if (!sportPlaced) out.unshift({ gm: 12, fields: { 0: +enumOf, 1: 0 } });
   return out;
 }
+
+/* ---- Legs of a race read from a GPX (the phone's segment or pace split) ----
+   A GPX race has no file of its own legs to slice: what it carries is the track -- position, time,
+   elevation and heart rate where the file had them. So a leg is opened from its stretch of that
+   track: the swim as an open-water swim payload, the bike and run as a minimal activity FIT of the
+   same shape the phone writes for an imported leg (LegFitWriter: time, position, elevation, heart
+   rate, summed path distance, no speed field -- the analyzer's own derived speed is the better one),
+   read by the same single-sport path as any other file. No power, no cadence, no strokes: the GPX
+   never had them. */
+
+/* The leg's stretch of the race track, in time order, positions only. */
+function raceLegRoute(race, leg) {
+  return ((race && race.route) || [])
+    .filter(p => p && Number.isFinite(p.t) && Number.isFinite(p.lat) && Number.isFinite(p.lon)
+      && p.t >= leg.t0 && p.t <= leg.t1)
+    .sort((a, b) => a.t - b.t);
+}
+
+/* The swim leg as the payload `normalizeSwimImport` takes for an open-water swim. */
+function routeSwimPayload(points, title = '') {
+  if (!points || points.length < 2) throw new Error('This swim leg has too few GPS fixes to read.');
+  let dist = 0;
+  for (let i = 1; i < points.length; i++) dist += haversineMeters(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+  return {
+    source: 'gpx', title: title || '',
+    start: points[0].t, end: points[points.length - 1].t,
+    locationType: 'openWater', poolLengthM: null, displayUnit: 'm', poolUnit: 'm',
+    totalDistanceM: +dist.toFixed(1), activeEnergyKcal: null, lengths: [],
+    hr: points.filter(p => Number.isFinite(p.hr) && p.hr > 0).map(p => ({ t: p.t, bpm: p.hr })),
+    route: points.map(p => ({ t: p.t, lat: p.lat, lon: p.lon })),
+  };
+}
+
+/* A bike or run leg as a minimal activity FIT (12-byte header, definitions, data, no CRC -- what
+   `parseFIT` reads). Record: timestamp, position, altitude, heart rate, cumulative distance. */
+function routeLegFit(points, sport) {
+  const enumOf = sport === 'bike' ? 2 : sport === 'run' ? 1 : null;
+  if (enumOf == null) throw new Error(`a ${sport} leg cannot be written as a FIT`);
+  if (!points || points.length < 2) throw new Error(`This ${sport} leg has too few GPS fixes to read.`);
+  const body = [];
+  const u8 = (v) => body.push(v & 0xff);
+  const u16 = (v) => { u8(v); u8(v >>> 8); };
+  const u32 = (v) => { u8(v); u8(v >>> 8); u8(v >>> 16); u8(v >>> 24); };
+  const def = (local, gm, fields) => {
+    u8(0x40 | local); u8(0); u8(0); u16(gm); u8(fields.length);
+    for (const [fn, size, base] of fields) { u8(fn); u8(size); u8(base); }
+  };
+  const ts = (t) => Math.round(t - FIT_EPOCH_UNIX);
+  const semi = (deg) => Math.round(deg * 2147483648 / 180);
+  def(0, 0, [[0, 1, 0x00], [4, 4, 0x86]]);                                   // file_id: type, time_created
+  def(1, 12, [[0, 1, 0x00], [1, 1, 0x00]]);                                  // sport: sport, sub_sport
+  def(2, 20, [[253, 4, 0x86], [0, 4, 0x85], [1, 4, 0x85], [2, 2, 0x84], [3, 1, 0x02], [5, 4, 0x86]]);
+  def(3, 18, [[253, 4, 0x86], [2, 4, 0x86], [5, 1, 0x00], [6, 1, 0x00], [7, 4, 0x86], [9, 4, 0x86]]);
+  const t0 = points[0].t, t1 = points[points.length - 1].t;
+  u8(0); u8(4); u32(ts(t0));
+  u8(1); u8(enumOf); u8(0);
+  let dist = 0;
+  points.forEach((p, i) => {
+    if (i) dist += haversineMeters(points[i - 1].lat, points[i - 1].lon, p.lat, p.lon);
+    u8(2); u32(ts(p.t)); u32(semi(p.lat)); u32(semi(p.lon));
+    u16(Number.isFinite(p.ele) ? Math.max(0, Math.min(0xfffe, Math.round((p.ele + 500) * 5))) : 0xffff);
+    u8(Number.isFinite(p.hr) && p.hr > 0 && p.hr < 255 ? Math.round(p.hr) : 0xff);
+    u32(Math.round(dist * 100));
+  });
+  u8(3); u32(ts(t1)); u32(ts(t0)); u8(enumOf); u8(0); u32(Math.round((t1 - t0) * 1000)); u32(Math.round(dist * 100));
+  const bytes = new Uint8Array(12 + body.length);
+  const dv = new DataView(bytes.buffer);
+  dv.setUint8(0, 12); dv.setUint8(1, 0x10); dv.setUint16(2, 2000, true); dv.setUint32(4, body.length, true);
+  bytes.set([0x2e, 0x46, 0x49, 0x54], 8);
+  bytes.set(body, 12);
+  return bytes;
+}
   /* ---- end fit.js ---- */
-  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages };
+  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages, raceLegRoute, routeSwimPayload, routeLegFit };
 })();
 
 /* ===== Ski SK1: the indoor (dome) read ====================================== *
@@ -22554,7 +22626,7 @@ async function analyze(files) {
       if (superseded()) return;
       /* One leg of a multisport FIT, opened from the race view (openTriLeg): read as if the file held
          only that leg, so it takes the same single-sport path a standalone file of that sport does. */
-      const probeMsgs = triLeg ? LoamTri.fitLegMessages(parseFIT(probeBuf), triLeg) : parseFIT(probeBuf);
+      const probeMsgs = triLegMessages(probeBuf, triLeg);
       /* A swim is asked about BEFORE power and GPS: a pool swim has neither, so it fell through to
          the GPS-only path and failed "no usable GPS track", and an open-water one has GPS and
          rendered as a ride. The watch's length messages are the same ground truth the Health
@@ -30082,6 +30154,10 @@ function renderSwim(D) {
         'strength-scope', 'Where these numbers come from', loamT('Beta · One-arm strokes · SWOLF not comparable with watch SWOLF'))
       /* A swim read from a .fit (a watch export, or one leg of a multisport file) said "Imported from
          Apple Health" -- a claim about where the data came from that was simply untrue. */
+      : (D.session && D.session.source) === 'gpx' ? leadNote(
+        loamT('<strong>Read from your GPX track, not recorded by Loam.</strong> The track and heart rate are taken as given. A GPX carries no lengths or strokes, so this is the line you swam, your pace over it and your heart rate.'),
+        loamT('GPS runs long in open water, so read the distance as an upper bound.'),
+        'strength-scope', 'Where these numbers come from', loamT('GPX track · GPS distance · No strokes'))
       : (D.session && D.session.source) === 'fit' ? leadNote(
         loamT(R.hasLengths
           ? '<strong>Read from your watch\'s FIT file, not recorded by Loam.</strong> Your watch\'s lengths, strokes and stroke type are taken as given, and Loam adds the part the watch does not show. Everything below is an estimate (BETA) pending swim ground truth.'
@@ -31356,11 +31432,16 @@ function renderTriathlon(D) {
   const el = document.getElementById('triResults');
   const tileOf = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${escapeHtml(l)}</div></div>`;
   const nameOf = (e) => (e.kind === 'leg' ? triSportLabel(e.sport) : e.label);
+  /* Every leg opens in its own sport's analysis: from the buttons under the strip, and from the
+     strip's segments and the table's leg rows, which are where a thumb already is. The buttons are
+     the keyboard and screen-reader route; the other two are extra targets for the same action. */
+  const openable = triLegsOpenable(D.race);
+  const legTap = (e) => (openable && e.kind === 'leg' ? ` data-leg="${e.index - 1}" onclick="openTriLeg(${e.index - 1})"` : '');
 
   const strip = tl.map(e => {
     if (e.kind === 'transition' && e.none) return '';
-    const bg = e.kind === 'leg' ? `style="flex:${Math.max(0.5, e.sharePct).toFixed(2)};background:${TRI_COLORS[e.sport]}"` : `class="tri-t" style="flex:${Math.max(0.5, e.sharePct).toFixed(2)}"`;
-    return `<div ${bg} title="${escapeHtml(nameOf(e) + ' ' + fmtDuration(e.durationS))}">${e.sharePct >= 6 ? escapeHtml(nameOf(e)) : ''}</div>`;
+    const bg = e.kind === 'leg' ? `style="flex:${Math.max(0.5, e.sharePct).toFixed(2)};background:${TRI_COLORS[e.sport]}${openable ? ';cursor:pointer' : ''}"` : `class="tri-t" style="flex:${Math.max(0.5, e.sharePct).toFixed(2)}"`;
+    return `<div ${bg}${legTap(e)} title="${escapeHtml(nameOf(e) + ' ' + fmtDuration(e.durationS))}">${e.sharePct >= 6 ? escapeHtml(nameOf(e)) : ''}</div>`;
   }).join('');
 
   const totalDist = A.legs.reduce((a, l) => a + l.distanceM, 0);
@@ -31374,7 +31455,7 @@ function renderTriathlon(D) {
     if (trans && e.none) {
       return `<tr class="tri-trans"><td>${dot}${escapeHtml(e.label)}</td><td colspan="6">${loamT('no transition found: the legs meet')}</td></tr>`;
     }
-    return `<tr${trans ? ' class="tri-trans"' : ''}><td>${dot}${escapeHtml(nameOf(e))}</td>
+    return `<tr${trans ? ' class="tri-trans"' : openable ? ' class="tri-leg-row" style="cursor:pointer"' : ''}${legTap(e)}><td>${dot}${escapeHtml(nameOf(e))}${!trans && openable ? ' &rsaquo;' : ''}</td>
       <td>${fmtDuration(e.durationS)}</td><td>${e.sharePct.toFixed(1)}%</td>
       <td>${!trans && !(e.distanceM > 0) ? '—' : U.dist(e.distanceM)}${!trans && !(e.distanceM > 0) ? '' : e.sport === 'swim' ? ' <span title="' + escapeHtml(loamT('GPS runs long on a swim')) + '">~</span>' : ''}</td>
       <td>${trans ? '—' : triPaceLabel(e.sport, e.avgSpeedMps)}</td>
@@ -31382,12 +31463,13 @@ function renderTriathlon(D) {
       <td>${e.elevGainM != null ? U.elev(e.elevGainM) : '—'}</td></tr>`;
   }).join('');
 
-  /* Each leg in its own sport's analysis, read out of the same file. Only for a race read from a
-     FIT: a GPX race's legs import from the phone's leg picker instead. */
-  const legButtons = D.race.source === 'fit' && _triFitSource ? `<div class="strength-tablenote tri-leg-open" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px">
+  /* A FIT race's legs are sliced out of the file; a GPX race's are read from its track, which never
+     had power, cadence or strokes -- said here, before the tap, rather than discovered after it. */
+  const legButtons = openable ? `<div class="strength-tablenote tri-leg-open" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:4px 0 12px">
       <span>${loamT('Open a leg in its own analysis:')}</span>
       ${A.legs.map((l, k) => `<button type="button" class="tri-leg-btn" data-leg="${k}" onclick="openTriLeg(${k})"
         style="padding:8px 14px; min-height:44px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--accent); font-weight:600; cursor:pointer;">${escapeHtml(triSportLabel(l.sport))} &rsaquo;</button>`).join('')}
+      ${D.race.source === 'fit' ? '' : `<span style="flex-basis:100%">${loamT('Read from the GPS track: speed, climbing, heart rate and the line, but no power, cadence or strokes.')}</span>`}
     </div>` : '';
   const trimmed = [
     A.preStartS >= 30 ? loamT('{t} before the start', { t: fmtDuration(A.preStartS) }) : '',
@@ -31405,14 +31487,14 @@ function renderTriathlon(D) {
       loamT('<strong>One race, read from one GPS track.</strong> You named the legs; Loam found the transitions between them, where your pace left one leg and settled into the next.'),
       loamT('A transition here starts at the last sustained minute at the previous leg\'s own pace and ends at the first sustained minute at the next one\'s, so a run up the beach, a wetsuit strip and a jog with the bike all count as T1. It is an estimate from GPS pace alone: nothing here knows where the timing mats were.'),
       'strength-scope', 'How the transitions are found')}
-    <div class="tri-strip" role="img" aria-label="${escapeHtml(tl.filter(e => !e.none).map(e => nameOf(e) + ' ' + fmtDuration(e.durationS)).join(', '))}">${strip}</div>
+    <div class="tri-strip" role="${openable ? 'group' : 'img'}" aria-label="${escapeHtml(tl.filter(e => !e.none).map(e => nameOf(e) + ' ' + fmtDuration(e.durationS)).join(', '))}">${strip}</div>
+    ${legButtons}
     <div class="swim-tiles">${tiles}</div>
     ${trimmed ? `<div class="strength-tablenote">${loamT('Left out: {what}.', { what: trimmed })}</div>` : ''}
     <div class="swim-tablewrap"><table class="strength-table tri-table">
       <thead><tr><th></th><th>${loamT('time')}</th><th>${loamT('share')}</th><th>${loamT('distance')}</th><th>${loamT('pace')}</th><th>${loamT('HR')}</th><th>${loamT('climb')}</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    ${legButtons}
     <div id="triSeam"></div>
     <div class="section-title" style="margin-top:22px">${loamT('The whole race')} <span class="subtitle">${loamT('speed, with each leg and transition shaded')}</span></div>
     <div class="panel"><div id="triSpeedChart" class="chart" style="height:280px"></div></div>
@@ -31491,12 +31573,42 @@ function drawTriMap(D) {
    read from -- null for a GPX race, whose legs have no file of their own to open -- and
    `_triLegRequest` tells the FIT routing in analyze() which leg to read. */
 let _triLastRace = null, _triFitSource = null, _triLegRequest = null;
+/* A leg's messages: sliced out of the race FIT, or -- for a leg written from a GPX race's track
+   (routeLegFit) -- the whole file, which already holds only that leg. */
+function triLegMessages(buf, triLeg) {
+  return triLeg && !triLeg.synthetic ? LoamTri.fitLegMessages(parseFIT(buf), triLeg) : parseFIT(buf);
+}
+/* Whether this race's legs can be opened: a FIT race needs its file; a GPX race opens from its track. */
+function triLegsOpenable(race) {
+  return race && race.source === 'fit' ? !!_triFitSource : !!(race && race.route && race.route.length);
+}
 async function openTriLeg(k) {
   const leg = _triLastRace && _triLastRace.legs && _triLastRace.legs[k];
-  if (!leg || !_triFitSource) return;
-  _triLegRequest = { sport: leg.sport, t0: leg.t0, t1: leg.t1, index: k };
+  if (!leg || !triLegsOpenable(_triLastRace)) return;
   const gen = _analyzeGen + 1;
-  await analyze([_triFitSource]);
+  if (_triLastRace.source === 'fit') {
+    _triLegRequest = { sport: leg.sport, t0: leg.t0, t1: leg.t1, index: k };
+    await analyze([_triFitSource]);
+  } else {
+    const pts = LoamTri.raceLegRoute(_triLastRace, leg);
+    const title = (_triLastRace.title || loamT('Triathlon')) + ' · ' + triSportLabel(leg.sport);
+    try {
+      if (leg.sport === 'swim') {
+        window.onSwimImport(LoamTri.routeSwimPayload(pts, title));
+        showTriBackBar();
+        window.scrollTo(0, 0);
+        return;
+      }
+      const file = new File([LoamTri.routeLegFit(pts, leg.sport)], title.replace(/[\\/:*?"<>|]/g, '-') + '.fit', { type: 'application/octet-stream' });
+      _triLegRequest = { sport: leg.sport, t0: leg.t0, t1: leg.t1, index: k, synthetic: true };
+      await analyze([file]);
+    } catch (e) {
+      hide('triResults'); show('errorBox');
+      document.getElementById('errorBox').textContent = loamT('Could not open this leg: {why}', { why: (e && e.message) || e });
+      showTriBackBar();
+      return;
+    }
+  }
   /* Shown even when the leg could not be read, so an error is never a dead end -- but not when
      another file has been opened since. */
   if (_analyzeGen === gen) showTriBackBar();
@@ -37413,6 +37525,11 @@ const LOAM_NB = {
   'A transition here runs from the end of one leg to the start of the next, exactly as the file marks them. Any time the watch was not recording between two legs counts as transition time, because the race clock kept running through it.': 'En veksling her går fra slutten av én etappe til starten av den neste, nøyaktig slik filen markerer dem. Tid da klokken ikke registrerte mellom to etapper regnes som vekslingstid, fordi løpsklokken gikk videre.',
   'Where the transitions come from': 'Hvor vekslingene kommer fra',
   'Open a leg in its own analysis:': 'Åpne en etappe i sin egen analyse:',
+  'Read from the GPS track: speed, climbing, heart rate and the line, but no power, cadence or strokes.': 'Lest fra GPS-sporet: fart, stigning, puls og linjen, men ingen effekt, tråkkfrekvens eller armtak.',
+  'Could not open this leg: {why}': 'Kunne ikke åpne denne etappen: {why}',
+  '<strong>Read from your GPX track, not recorded by Loam.</strong> The track and heart rate are taken as given. A GPX carries no lengths or strokes, so this is the line you swam, your pace over it and your heart rate.': '<strong>Lest fra GPX-sporet ditt, ikke tatt opp av Loam.</strong> Sporet og pulsen tas som gitt. En GPX har ingen lengder eller armtak, så dette er linjen du svømte, farten din langs den og pulsen.',
+  'GPS runs long in open water, so read the distance as an upper bound.': 'GPS måler for langt i åpent vann, så les distansen som en øvre grense.',
+  'GPX track · GPS distance · No strokes': 'GPX-spor · GPS-distanse · Ingen armtak',
   'Back to the race': 'Tilbake til løpet',
   '<strong>One race, read from the segments you named.</strong> The legs and the transitions are your file\'s own segments; Loam reads the time between the legs.': '<strong>Ett løp, lest fra segmentene du navnga.</strong> Etappene og vekslingene er filens egne segmenter; Loam leser tiden mellom etappene.',
   'triathlon is exploratory in Loam. The leg and transition times are your file\'s; a swim\'s GPS distance runs long (33% over the course on the one race measured), so read the swim distance as an upper bound.': 'triatlon er utforskende i Loam. Etappe- og vekslingstidene er filens; GPS-distansen på svømming blir for lang (33 % over løypa på det ene målte løpet), så les svømmedistansen som en øvre grense.',
@@ -48006,7 +48123,7 @@ async function analyzeRoadFit(fitFile, onProgress, superseded, triLeg = null) {
   onProgress('parsing FIT file');
   const buf = await fitFile.arrayBuffer();
   if (superseded()) return;
-  const messages = triLeg ? LoamTri.fitLegMessages(parseFIT(buf), triLeg) : parseFIT(buf);
+  const messages = triLegMessages(buf, triLeg);
   const { records: rawRecords } = extractFitData(messages);
   const { session, laps } = extractFitSummary(messages);
   if (rawRecords.length < 20) throw new Error('This FIT has no usable ride data.');
@@ -51607,7 +51724,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '1974879b5 · 2026-10-06';
+const LOAM_BUILD = '1a2c9aa3b · 2026-10-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
