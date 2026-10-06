@@ -22582,7 +22582,11 @@ async function analyze(files) {
          (or the picker's current choice) describes the race, not this leg. */
       const userSport = triLeg ? 'auto' : requestedActivity(key);
       if (!triLeg) rememberActivity(key, userSport);
-      const activity = fitActivity(probeMsgs, probe.records, userSport, prefersEmtbRides());
+      /* Nor does "I ride an e-MTB": that preference labels an unexplained cycling FIT, and a
+         triathlon's bike leg is never assisted. Applied to one, it relabelled the leg e-MTB and,
+         because an assisted ride never takes the road path, hid its power analysis (tester report,
+         2026-10-06). The motor-channel and declared e-bike checks inside fitActivity still apply. */
+      const activity = fitActivity(probeMsgs, probe.records, userSport, triLeg ? false : prefersEmtbRides());
       if (activity.road) await analyzeRoadFit(fitFile, onProgress, superseded, triLeg);
       else await analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg);
       return;
@@ -33212,7 +33216,9 @@ function smoothRunPace(times, values, windowS = 30) {
 /* Display-only smoothing: keep event markers and the source analysis untouched. A fixed
    sub-second window disappears at whole-ride scale, so use 1/200 of the timeline duration
    (about two pixels on a phone), capped at 30 s to retain sustained efforts and stops.
-   Short timelines keep the lighter windows; missing readings stay gaps. */
+   Short timelines keep the lighter windows; missing readings stay gaps. The measured bike rows
+   pass the 30 s floor themselves (renderBikeTimeline): a two-pixel median is invisible, so the
+   Smooth box appeared to do nothing (owner report, 2026-10-04). */
 function smoothTimelineTraces(traces, windowS = 3) {
   syncSmoothToggles();
   if (!loamSmooth()) return traces;
@@ -46538,7 +46544,9 @@ function renderBikeTimeline(D) {
   for (const r of rows) {
     const lines = r.traces.map(tr => ({ type: 'scatter', mode: 'lines', yaxis: r.axis, ...tr }));
     // Elevation remains the profile used by the descent detector; smooth the measured signals.
-    traces.push(...(r.key === 'elevation' ? lines : smoothTimelineTraces(lines, r.key === 'turning' ? 0.5 : 3))
+    // 30 s on speed, HR, power and cadence -- the run pace row's window and the usual power
+    // smoothing; anything shorter left the box with no visible effect on 1 Hz GPS.
+    traces.push(...(r.key === 'elevation' ? lines : smoothTimelineTraces(lines, r.key === 'turning' ? 0.5 : 30))
       .map(tr => timelineClockTrace(tr, clock)));
   }
 
@@ -51579,7 +51587,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'b20e8f3fa · 2026-10-05';
+const LOAM_BUILD = '0d9087bd9 · 2026-10-06';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
