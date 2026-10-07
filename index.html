@@ -22593,6 +22593,10 @@ async function analyze(files) {
      inherited it and was cut to the old leg's time span. */
   const triLeg = _triLegRequest; _triLegRequest = null;
   if (!triLeg) { hide('triBackBar'); _triFitSource = null; }
+  /* Remembered against the FILE it was read from, so a re-analysis of that same file (a crop, the
+     activity picker, FTP or weight) re-reads the leg rather than the whole race -- and a later file
+     never inherits it. */
+  _triOpenLeg = triLeg ? { leg: triLeg, file: files[files.length - 1] } : null;
   /* Expand any Loam backup zip into its per-session recordings before dispatching, so dropping a
      backup (one ride or many) analyzes the sessions inside it instead of one empty "no moving window"
      ride. Show the loader first since reading a large backup takes a moment. */
@@ -22608,7 +22612,7 @@ async function analyze(files) {
   if (sensorFiles.length >= 2) return analyzeMulti(sensorFiles);
   _currentRunKey = null;
 
-  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary'); hide('cropSection');
+  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary'); hide('cropSection'); hide('triResults');
   setStatus(loamT('Loading'));
   /* Translated at the SINK, not at the 48 call sites: every one of these is a bare status string
      with no branching around it, and the templated ones carry counts, which is what `modCopyT`'s
@@ -23979,7 +23983,7 @@ function median(arr) {
 async function analyzeMulti(sensorFiles) {
   const gen = ++_analyzeGen;
   const superseded = () => gen !== _analyzeGen;
-  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary'); hide('cropSection');
+  show('loading'); hide('dropzone'); hide('errorBox'); hide('results'); hide('crossResults'); hide('progressResults'); hide('miniSummary'); hide('cropSection'); hide('triResults');
   setStatus(loamT('Loading'));
   /* Translated at the SINK, not at the 48 call sites: every one of these is a bare status string
      with no branching around it, and the templated ones carry counts, which is what `modCopyT`'s
@@ -25094,7 +25098,7 @@ function durTileHTML(sec) {
    Progress page (and of the dropzone after "Analyze another"). */
 function hideOutOfResultsSurfaces() {
   for (const id of ['coachSection', 'cropSection', 'sampleRateNotice', 'truncNotice', 'miniSummary',
-                    'strengthResults', 'golfResults', 'swimResults', 'skiResults', 'triResults']) {
+                    'strengthResults', 'golfResults', 'swimResults', 'skiResults', 'triResults', 'triBackBar']) {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   }
 }
@@ -25102,7 +25106,7 @@ let _progressReturn = null;
 async function openProgress() {
   if (!document.getElementById('progressResults').classList.contains('hidden')) return;
   const ids = ['results','crossResults','coachSection','cropSection','sampleRateNotice','truncNotice',
-    'miniSummary','strengthResults','golfResults','swimResults','skiResults','triResults'];
+    'miniSummary','strengthResults','golfResults','swimResults','skiResults','triResults','triBackBar'];
   _progressReturn = ids.some(id => !document.getElementById(id)?.classList.contains('hidden')) && document.getElementById('dropzone').classList.contains('hidden')
     ? { view: _lastRender, y: window.scrollY, status: document.getElementById('statusText').textContent,
         coach: coachState, visible: ids.filter(id => document.getElementById(id) && !document.getElementById(id).classList.contains('hidden')) } : null;
@@ -31572,7 +31576,11 @@ function drawTriMap(D) {
 /* A leg of a FIT race opens in that sport's own analysis. `_triFitSource` is the file the race was
    read from -- null for a GPX race, whose legs have no file of their own to open -- and
    `_triLegRequest` tells the FIT routing in analyze() which leg to read. */
-let _triLastRace = null, _triFitSource = null, _triLegRequest = null;
+let _triLastRace = null, _triFitSource = null, _triLegRequest = null, _triOpenLeg = null;
+/* The leg open on screen, if `file` is the file it was read from; null for anything else. */
+function triOpenLegFor(file) {
+  return _triOpenLeg && file && _triOpenLeg.file === file ? _triOpenLeg.leg : null;
+}
 /* A leg's messages: sliced out of the race FIT, or -- for a leg written from a GPX race's track
    (routeLegFit) -- the whole file, which already holds only that leg. */
 function triLegMessages(buf, triLeg) {
@@ -31630,7 +31638,8 @@ window.onTriathlonImport = function (payload) {
     const raw = typeof payload === 'string' ? JSON.parse(payload) : payload;
     _triLastRace = raw;
     if (raw && raw.source !== 'fit') _triFitSource = null;
-    hide('triBackBar');
+    _triOpenLeg = null;
+    hide('triBackBar'); hide('progressResults');
     const race = LoamTri.normalizeRace(raw);
     const analysis = LoamTri.analyzeRace(race);
     const fine = LoamTri.raceSpeedSeries(race.route, LoamTri.TRI_BREAKDOWN_WINDOW_S);
@@ -44175,7 +44184,11 @@ async function reanalyzeCurrentRide() {
   const scroll = window.scrollY;
   const files = [_lastSensorFile, _lastFitFile].filter(Boolean);
   if (files.length) {
+    const leg = triOpenLegFor(_lastFitFile);
+    const gen = _analyzeGen + 1;
+    if (leg) _triLegRequest = leg;
     await analyze(files);
+    if (leg && _analyzeGen === gen) showTriBackBar();
     restoreRidePosition(segment, scroll);
   }
 }
@@ -49598,7 +49611,7 @@ function renderRoadRiderControls(D) {
     setLoamAthlete({ ftp: document.getElementById('roadFtpInput').value, weightKg: document.getElementById('roadWeightInput').value });
     if (_lastFitFile) {
       const gen = ++_analyzeGen;
-      analyzeRoadFit(_lastFitFile, () => {}, () => gen !== _analyzeGen).catch(e => console.warn('road re-analyze', e));
+      analyzeRoadFit(_lastFitFile, () => {}, () => gen !== _analyzeGen, triOpenLegFor(_lastFitFile)).catch(e => console.warn('road re-analyze', e));
     }
   };
   const fi = document.getElementById('roadFtpInput'), wi = document.getElementById('roadWeightInput');
@@ -51724,7 +51737,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '1a2c9aa3b · 2026-10-06';
+const LOAM_BUILD = '80d1ab3b2 · 2026-10-07';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
