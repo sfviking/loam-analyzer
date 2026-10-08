@@ -645,6 +645,7 @@
   #formScrubPicks .scrub-chip .sc-amt { font-family: 'JetBrains Mono', monospace; font-size: 11px; opacity: 0.85; }
   #formReviewPicks { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; font-size:13px; }
   #formReviewPicks button, #formReference { min-height:44px; }
+  #formReplaySection .form-replay-grid { scroll-margin-top: 64px; }
   .form-limits { display:grid; gap:4px; font-size:12px; color:var(--text-muted); margin-bottom:12px; }
   .form-calibration-warning { color:var(--accent); padding:10px; border:1px solid var(--accent); border-radius:8px; }
   #formComparison { margin-top:16px; font-size:13px; }
@@ -2597,6 +2598,10 @@
     padding: 8px 12px; margin-bottom: 14px; background: rgba(212,165,116,0.07); }
   .strength-scope strong { color: var(--text, inherit); }
   .beta-badge { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--accent-4, #d4a574); border: 1px solid var(--accent-4, #d4a574); border-radius: 4px; padding: 1px 5px; vertical-align: middle; }
+  /* The portrait is drawn at 480 wide with px-sized type; stretched to a desktop results column it
+     rendered ~2.2x (a 1,300px card for two sets). Capped at its own width, it stays 1:1 there and
+     still shrinks to fit a phone. */
+  .lift-sig-frame { max-width: 480px; }
   .lift-sig { width: 100%; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 34px rgba(15,23,42,0.28); line-height: 0; margin-bottom: 10px; }
   .lift-sig svg { display: block; width: 100%; height: auto; }
   .lift-sig-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
@@ -3210,7 +3215,7 @@
     </div>
     <div class="panel stats-panel jump-summary" id="jumpSummary"></div>
     <div id="jumpLapsCard" class="hidden"></div>
-    <details class="panel jumps-details" id="jumpsDetails">
+    <details class="panel jumps-details" id="jumpsDetails" data-detailed-stay-closed>
       <summary><span id="jumpsTableToggle">All jumps</span></summary>
       <div style="overflow-x:auto;">
         <table id="jumpsTable">
@@ -3229,7 +3234,7 @@
       <span class="subtitle">estimated from phone freefall + landing · attach a Specialized FIT for exact hang</span>
     </div>
     <div class="panel stats-panel jump-summary" id="airtimeSummary"></div>
-    <details class="panel jumps-details" id="airtimeDetails">
+    <details class="panel jumps-details" id="airtimeDetails" data-detailed-stay-closed>
       <summary><span id="airtimeTableToggle">All airtimes</span></summary>
       <div style="overflow-x:auto;">
         <table id="airtimeTable">
@@ -8341,7 +8346,12 @@ function openSegmentPage(r, D, focusN) {
      section is hidden). Selection waits a beat so the moved containers have
      laid out before the tile map measures them. */
   const formSec = document.getElementById('formReplaySection');
-  if (formSec && !formSec.classList.contains('hidden')) {
+  /* A moved mount leaves only this segment's jumps to replay. With none, the replay stays home: the
+     segment page used to borrow it anyway, offer "Whole segment", and leave the ride's first jump on
+     screen under that label because formSelectSegment refuses a moved mount (owner report,
+     2026-10-07, "Mellow Mile" over a jump scene). */
+  const formLean = formLeanReplayable(D);
+  if (formSec && !formSec.classList.contains('hidden') && (formLean || formReplayJumps(D, r).length)) {
     if (!_segFormHome) _segFormHome = { parent: formSec.parentNode, next: formSec.nextElementSibling };
     document.getElementById('segmentPage').appendChild(formSec);
     setTimeout(() => {
@@ -8357,13 +8367,17 @@ function openSegmentPage(r, D, focusN) {
            Offering this run rather than the matching auto-mode one also fixes a latent mismatch: the
            viewed run may come from a segmentation mode whose windows are not in the auto list at all,
            where the old lookup found nothing and left the dropdown reading some other descent. */
-        const pinned = _segPinnedN != null ? turns.find(T => T.n === _segPinnedN) : null;
-        const replayable = turns
+        const pinned = formLean && _segPinnedN != null ? turns.find(T => T.n === _segPinnedN) : null;
+        const replayable = !formLean ? [] : turns
           .filter(T => formTurnRollRange(D, T) <= 65 || (pinned && T.n === pinned.n))
           .sort((a, b) => a.tStart - b.tStart);
         _formScopeRun = r;
-        formFillTurnSelect(D, replayable, [r], pinned ? pinned.n : 'seg:' + r.n);
-        if (pinned) {
+        const firstJump = formLean ? null : formReplayJumps(D, r)[0];
+        formFillTurnSelect(D, replayable, formLean ? [r] : [], pinned ? pinned.n : firstJump ? 'jump:' + firstJump.id : 'seg:' + r.n);
+        if (firstJump) {
+          formMarkActiveChip(null);
+          formSelectJump(D, firstJump);
+        } else if (pinned) {
           /* Arrived on a specific corner, so open the replay ON it rather than on the whole segment:
              the map answers "where is it", this answers "what did I do". Same three steps the
              most-scrubbed chips run. */
@@ -9915,6 +9929,19 @@ function formReplayJumps(D, run) {
   if (!isMtbFamily(D && D.sport)) return [];
   return ((D.replay && D.replay.jumps) || []).filter(j => !run || (j.tStart >= run.tStart && j.tEnd <= run.tEnd));
 }
+/* Bring the replay's TOP into view. `block: 'nearest'` was wrong here: the section (picture, map,
+   video, metrics) is taller than a phone screen, and for an element taller than the viewport and
+   above it, 'nearest' aligns its BOTTOM edge -- so tapping a jump in the table below landed on the
+   metrics and the rider had to scroll up to find the animation (owner report, 2026-10-07). The
+   target is the picture itself rather than the section: on a phone the title, controls and lap chips
+   above it run to ~450px. scroll-margin-top clears the sticky back bar on the segment page. */
+function formScrollToReplay() {
+  try { document.querySelector('#formReplaySection .form-replay-grid')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {}
+}
+/* Turn and segment replays animate LEAN, which a moved mount withholds; a jump replay reads force
+   and airtime, so it survives. Every list the dropdown is built from goes through this, so it never
+   offers an entry whose select function would silently refuse it and leave the last scene up. */
+function formLeanReplayable(D) { return !!D && !bodyFrameMoved(D) && D.phoneMount !== 'handlebar'; }
 function formOpenJump(id) {
   const D = _lastRender && _lastRender.D;
   const J = D && formReplayJumps(D).find(j => j.id === id);
@@ -9925,7 +9952,8 @@ function formOpenJump(id) {
   const sel = document.getElementById('formTurn');
   if (sel) sel.value = 'jump:' + J.id;
   formMarkActiveChip(null); formSelectJump(D, J);
-  document.getElementById('formReplaySection')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  if (_form) { _form.tau = 0; formSetPlaying(true); }
+  formScrollToReplay();
 }
 function formSelectJump(D, J) {
   formStopAnim(); _formZoomMult = 1;
@@ -9938,7 +9966,8 @@ function formSelectJump(D, J) {
     spdT: speed.map(r => r.t), spdV: speed.map(r => r.speed), spdMax: speed.length ? Math.max(...speed.map(r => r.speed)) : 0 };
   _form = { D, S, jump: J, tau: 0, dur, mult: +document.getElementById('formSpeedSel').value || 0.5, playing: false, raf: null, lastTs: null };
   formSetupComparison(D, null);
-  document.getElementById('formLimits').innerHTML = '';
+  document.getElementById('formLimits').innerHTML = formLeanReplayable(D) ? ''
+    : `<div>${escapeHtml(loamT('Turn and segment replays are off for this ride: the phone moved in its mount, so lean cannot be read. Jumps still replay.'))}</div>`;
   formCoachSync(D, null, null);
   /* `J.source` is written by the drift-pinned LoamReplay, so it is translated here where it is drawn. */
   document.getElementById('formNote').textContent = loamT(J.source) + '. ' + loamT('Flight height, bike pitch, and body pose are schematic, not measured. Landing impact is measured at the sensor, not at the wheels.')
@@ -10849,7 +10878,7 @@ function renderCrashSection(D) {
       formMarkActiveChip(T.n);
       formSelectTurn(D, T);
       if (_form) { _form.tau = 0; formSetPlaying(true); }
-      try { const s = document.getElementById('formReplaySection'); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
+      formScrollToReplay();
     };
   });
   sec.classList.remove('hidden');
@@ -10883,7 +10912,7 @@ function formRenderScrubChips(D, subset, labelSuffix) {
       formMarkActiveChip(T.n);
       formSelectTurn(D, T);
       if (_form) { _form.tau = 0; formSetPlaying(true); }
-      try { const sec = document.getElementById('formReplaySection'); if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
+      formScrollToReplay();
     };
   });
 }
@@ -10963,7 +10992,8 @@ function formRestoreRideSelect(D) {
   if (!D || !D.turns) return;
   let segs = [];
   try { segs = (typeof segmentRuns === 'function') ? (segmentRuns(D, 'auto').runs || []) : []; } catch (e) { segs = []; }
-  formFillTurnSelect(D, formCriticalTurns(D), segs, formCurrentSelectValue(segs));
+  if (!formLeanReplayable(D)) segs = [];
+  formFillTurnSelect(D, formLeanReplayable(D) ? formCriticalTurns(D) : [], segs, formCurrentSelectValue(segs));
 }
 
 function setupFormReplay(D) {
@@ -10995,6 +11025,7 @@ function setupFormReplay(D) {
   /* Default to the most-scrubbed turn, a useful review candidate, instead of the first
      chronological one (typically a trivial early bend). The dropdown stays chronological. */
   const reviewPicks = formReviewPicks(D);
+  if (!formLeanReplayable(D)) segs = [];
   formFillTurnSelect(D, ordered, segs, !ordered.length ? 'jump:' + formReplayJumps(D)[0].id : reviewPicks.length ? reviewPicks[0].turn.n : (scrubRanked.length ? scrubRanked[0].T.n : null));
   formRenderScrubChips(D);
   const pick = () => {
@@ -26358,7 +26389,8 @@ function liftSignatureSVG(D) {
   }
   return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeHtml(name + ': ' + headline)}">
     <rect width="${W}" height="${H}" rx="12" fill="#141a10"/>
-    ${text(24, 36, 'LOAM', 23, '#f1f5e9')}${text(W - 24, 36, loamT('BETA'), 15, '#a5b39c', 'end')}
+    <!-- BETA rides beside the wordmark: the corner is the on-page share button's. -->
+    <text x="24" y="36" fill="#f1f5e9" font-size="23" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LOAM<tspan dx="10" fill="#a5b39c" font-size="15">${escapeHtml(loamT('BETA'))}</tspan></text>
     ${text(24, 76, name, 24, '#f1f5e9')}
     ${text(24, 128, headline, 42, '#f1f5e9')}
     ${text(24, 152, top ? loamT('Heaviest logged set') + (lifts.length > 1 ? ' · ' + (liftNameCap(top.set.lift) || loamT('Unlabeled')) : '') : loamT('Session totals'), 16)}
@@ -29044,7 +29076,7 @@ function renderStrength(D) {
       loamT(`Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`),
       loamT(`Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.`),
       'strength-scope', loamT('Which lifts count, and why'), loamT('Beta · Squat / deadlift counts · Bench undercounts · Pull-ups uncounted · Unlabeled sets = squat'))}
-    <div class="sig-frame"><div id="liftSignature" class="lift-sig"></div>
+    <div class="sig-frame lift-sig-frame"><div id="liftSignature" class="lift-sig"></div>
       <button type="button" class="card-share on-card" onclick="saveLiftSignature()" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
     <div class="lift-sig-bar">
       <span class="lift-sig-cap">${loamT('Your session, set by set. Column height shows logged weight; reps reflect your corrections.')}</span>
@@ -33664,6 +33696,8 @@ const LOAM_NB = {
   /* Corner replay measurements and lap comparison. */
   'Phone tilt swings too far in this corner. Lean comparisons are unavailable.': 'Telefonhelningen svinger for mye i denne svingen. Sammenligning av helning er ikke tilgjengelig.',
   'The phone moved. Lean comparisons are unavailable.': 'Telefonen flyttet seg. Sammenligning av helning er ikke tilgjengelig.',
+  'Turn and segment replays are off for this ride: the phone moved in its mount, so lean cannot be read. Jumps still replay.':
+    'Avspilling av svinger og segmenter er av for denne turen: telefonen flyttet seg i festet, så helningen kan ikke leses. Hopp kan fortsatt spilles av.',
   'Calibration is uncertain. Treat this animation as approximate; lean comparisons are unavailable.': 'Kalibreringen er usikker. Animasjonen er omtrentlig; sammenligning av helning er ikke tilgjengelig.',
   'Experimental calibration. Treat this animation as approximate; lean comparisons are unavailable.': 'Eksperimentell kalibrering. Animasjonen er omtrentlig; sammenligning av helning er ikke tilgjengelig.',
   'Lap differences': 'Forskjeller mellom runder',
@@ -45027,7 +45061,8 @@ function setAnalysisView(value) {
    and the modals are not analysis and are left alone.
    The one exception is a fold marked `data-detailed-stay-closed`: the turn-by-turn table lists every
    turn, and opened by default it is a scroll wall (owner, 2026-09-27: "hide the all turns section even
-   in details"). It stays one tap away, and the paths that deep-link into a row still open it. */
+   in details"). The jump and airtime tables are the same wall (owner, 2026-10-07: "give the ability to
+   hide the jump list"). It stays one tap away, and the paths that deep-link into a row still open it. */
 const DETAILED_FOLD_SCOPE = ':is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults, #miniSummary, #coachSection, [id$="Notice"])';
 function syncDetailedFolds(scope) {
   const detailed = analysisView() === 'detailed';
@@ -51737,7 +51772,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '80d1ab3b2 · 2026-10-07';
+const LOAM_BUILD = 'b41ce525b · 2026-10-07';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
