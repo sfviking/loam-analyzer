@@ -9974,16 +9974,24 @@ function formSelectJump(D, J) {
     + (J.fitHang != null && J.timingMeasured ? ' ' + loamT('FIT hang: {hang} s; the replay clock uses the local phone freefall.', { hang: loamNum(J.fitHang, 2) }) : '');
   formInitMap(S); formSetPlaying(false); formFrame();
 }
-/* Presentation only: the clock is recorded, the path and rider pose are illustrative. */
+/* Presentation only: the clock is recorded, the path and rider pose are illustrative. Horizontal
+   position is LINEAR in time over the whole window (1 s approach, flight, 1 s exit): a fixed-width
+   flight arc made a short hop cross the screen several times faster than the approach, so the bike
+   sped up in the air. The arc's width and height follow from the airtime instead. */
+function jumpReplayGeom(J) {
+  const air = J.tEnd - J.tStart > 0 ? J.tEnd - J.tStart : J.hang;
+  const w0 = J.tStart - 1, dur = air + 2, x = t => 58 + Math.max(0, Math.min(1, (t - w0) / dur)) * 244;
+  const takeoff = x(J.tStart), landing = x(J.tStart + air);
+  return { air, x, takeoff, landing, peak: Math.min(44, 0.6 * (landing - takeoff)) };
+}
 function jumpReplayPose(J, t) {
-  const u = Math.max(0, Math.min(1, (t - J.tStart) / J.hang));
-  const approach = Math.max(0, Math.min(1, t - J.tStart + 1));
+  const G = jumpReplayGeom(J);
+  const u = Math.max(0, Math.min(1, (t - J.tStart) / G.air));
   const exit = Math.max(0, Math.min(1, t - J.tEnd));
   const air = t >= J.tStart && t < J.tEnd;
   const load = t < J.tStart ? Math.sin(Math.PI * Math.max(0, 1 + (t - J.tStart) / 0.35)) : 0;
   const settle = t >= J.tEnd && exit < 0.4 ? Math.sin(Math.PI * exit / 0.4) * Math.exp(-3 * exit) : 0;
-  return { x: t < J.tStart ? 58 + 50 * approach : air ? 108 + 144 * u : 252 + 50 * exit,
-    y: 190 - (air ? 44 * 4 * u * (1-u) : 0), pitch: air ? -12 * Math.sin(2 * Math.PI * u) : 0,
+  return { x: G.x(t), y: 190 - (air ? G.peak * 4 * u * (1-u) : 0), pitch: air ? -12 * Math.sin(2 * Math.PI * u) : 0,
     crouch: 6 * load + 12 * settle, u };
 }
 function formJumpScene(F) {
@@ -9996,7 +10004,7 @@ function formJumpScene(F) {
     const cmd = pen && p.t - prev <= 0.06 ? 'L' : 'M'; pen = true; prev = p.t;
     return cmd + x(p.t).toFixed(2) + ',' + (272 - Math.max(0, p.g) / ceiling * 34).toFixed(2);
   }).join(' ');
-  const takeoff = x(J.tStart), landing = x(J.tEnd);
+  const takeoff = x(J.tStart), landing = x(J.tEnd), G = jumpReplayGeom(J);
   const txt = (v) => escapeHtml(loamT(v));
   return `<defs><linearGradient id="jumpSky" x2="0" y2="1"><stop stop-color="#1d2a2b"/><stop offset="1" stop-color="#101b1b"/></linearGradient></defs>
     <rect width="360" height="300" fill="#101a1b"/>
@@ -10007,9 +10015,9 @@ function formJumpScene(F) {
     <path d="M0 173 Q65 158 117 168 T240 161 T360 167 V204 H0Z" fill="#243331" opacity=".5"/>
     <path d="M0 190 H360 V204 H0Z" fill="#35423b"/>
     <path d="M0 190 H360" stroke="#768577" stroke-width="1"/>
-    <path d="M108 190 Q180 102 252 190" fill="none" stroke="#e8b16c" stroke-width="1.5" opacity=".32"/>
+    <path d="M${G.takeoff.toFixed(1)} 190 Q${((G.takeoff+G.landing)/2).toFixed(1)} ${(190-2*G.peak).toFixed(1)} ${G.landing.toFixed(1)} 190" fill="none" stroke="#e8b16c" stroke-width="1.5" opacity=".32"/>
     <path data-jump-trail fill="none" stroke="#e8b16c" stroke-width="2"/>
-    <g fill="#ebbd7a"><circle cx="108" cy="190" r="3"/><circle cx="252" cy="190" r="3"/></g>
+    <g fill="#ebbd7a"><circle cx="${G.takeoff.toFixed(1)}" cy="190" r="3"/><circle cx="${G.landing.toFixed(1)}" cy="190" r="3"/></g>
     <ellipse data-jump-shadow cy="191" rx="47" ry="4" fill="#050b0d" opacity=".3"/>
     <g data-jump-rider>${jumpBikeSVG(avatarPref() === 'classic')}</g>
     <path d="M0 204 H360" stroke="#3e514c"/>
@@ -10049,8 +10057,8 @@ function formJumpFrame() {
   node('shadow').setAttribute('cx', pose.x);
   node('shadow').setAttribute('rx', 47 - (190-pose.y)*0.3);
   node('shadow').setAttribute('opacity', 0.3 - (190-pose.y)*0.003);
-  const u = pose.u;
-  node('trail').setAttribute('d', `M108 190 Q${108+72*u} ${190-88*u} ${108+144*u} ${190-176*u*(1-u)}`);
+  const u = pose.u, G = jumpReplayGeom(J), a = G.takeoff, span = G.landing - a;
+  node('trail').setAttribute('d', `M${a} 190 Q${a+span/2*u} ${190-2*G.peak*u} ${a+span*u} ${190-4*G.peak*u*(1-u)}`);
   node('cursor').setAttribute('transform', `translate(${28+F.tau/F.dur*308} 0)`);
   node('force').textContent = force && force.g != null ? loamNum(force.g, 1) + ' g' : '—';
   const card = (label, value) => '<div class="form-metric"><div class="fm-label">' + label + '</div><div class="fm-value">' + value + '</div></div>';
@@ -51777,7 +51785,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '7dcbdad5e · 2026-10-08';
+const LOAM_BUILD = '64e76e287 · 2026-10-08';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
