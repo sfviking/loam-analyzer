@@ -31617,6 +31617,9 @@ function drawTriMap(D) {
    read from -- null for a GPX race, whose legs have no file of their own to open -- and
    `_triLegRequest` tells the FIT routing in analyze() which leg to read. */
 let _triLastRace = null, _triFitSource = null, _triLegRequest = null, _triOpenLeg = null;
+/* The race as RENDERED: the normalized race and its analysis. A GPX leg opens from these, so the leg
+   view reads the same window as the row that was tapped (see openTriLeg). */
+let _triLastRendered = null;
 /* The leg open on screen, if `file` is the file it was read from; null for anything else. */
 function triOpenLegFor(file) {
   return _triOpenLeg && file && _triOpenLeg.file === file ? _triOpenLeg.leg : null;
@@ -31631,14 +31634,22 @@ function triLegsOpenable(race) {
   return race && race.source === 'fit' ? !!_triFitSource : !!(race && race.route && race.route.length);
 }
 async function openTriLeg(k) {
-  const leg = _triLastRace && _triLastRace.legs && _triLastRace.legs[k];
-  if (!leg || !triLegsOpenable(_triLastRace)) return;
+  if (!_triLastRace || !triLegsOpenable(_triLastRace)) return;
   const gen = _analyzeGen + 1;
   if (_triLastRace.source === 'fit') {
+    const leg = _triLastRace.legs && _triLastRace.legs[k];
+    if (!leg) return;
     _triLegRequest = { sport: leg.sport, t0: leg.t0, t1: leg.t1, index: k };
     await analyze([_triFitSource]);
   } else {
-    const pts = LoamTri.raceLegRoute(_triLastRace, leg);
+    /* `k` is a row of the ANALYSIS (one transition to the next), not of the raw payload. A pace-split
+       race's raw legs still hold the beach staging and T1 inside the swim, T2 inside the bike and the
+       cool-down inside the run, so opening the raw window read up to eight minutes the tapped row
+       did not show. The analysis legs are also in time order, which the raw ones need not be. */
+    const R = _triLastRendered;
+    const leg = R && R.analysis.legs[k];
+    if (!leg) return;
+    const pts = LoamTri.raceLegRoute(R.race, leg);
     const title = (_triLastRace.title || loamT('Triathlon')) + ' · ' + triSportLabel(leg.sport);
     try {
       if (leg.sport === 'swim') {
@@ -31681,12 +31692,13 @@ function backToTriRace() {
 window.onTriathlonImport = function (payload) {
   try {
     const raw = typeof payload === 'string' ? JSON.parse(payload) : payload;
-    _triLastRace = raw;
+    _triLastRace = raw; _triLastRendered = null;
     if (raw && raw.source !== 'fit') _triFitSource = null;
     _triOpenLeg = null;
     hide('triBackBar'); hide('progressResults');
     const race = LoamTri.normalizeRace(raw);
     const analysis = LoamTri.analyzeRace(race);
+    _triLastRendered = { race, analysis };
     const fine = LoamTri.raceSpeedSeries(race.route, LoamTri.TRI_BREAKDOWN_WINDOW_S);
     const seam = LoamTri.seamRead(race.route, analysis);
     const breakdowns = analysis.transitions.map(t => LoamTri.transitionBreakdown(race.route, fine, t));
@@ -51785,7 +51797,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '64e76e287 · 2026-10-08';
+const LOAM_BUILD = 'a9770640e · 2026-10-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
