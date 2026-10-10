@@ -2422,9 +2422,40 @@
   /* Triathlon (TRI-3): one race, legs and transitions on one strip, one chart and one map. */
   #triResults { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
   .tri-strip { display: flex; gap: 2px; height: 30px; margin: 14px 0 6px; border-radius: 6px; overflow: hidden; }
-  .tri-strip > div { min-width: 4px; display: flex; align-items: center; justify-content: center; color: #fff; font: 600 11px 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; }
+  /* A segment shows its name only if the whole name fits: a name too wide for its segment wraps onto a
+     second line behind a zero-width first item and the 30px height clips it. A share threshold cannot
+     know the screen -- an Ironman swim is 8.6% of the race and 27px wide on a phone, which printed
+     the middle of "Swim leg". */
+  .tri-strip > div { min-width: 4px; display: flex; flex-wrap: wrap; align-content: flex-start; align-items: center; justify-content: center; color: #fff; font: 600 11px 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; }
+  .tri-strip > div::before { content: ''; width: 0; height: 100%; }
+  .tri-strip > div > span { line-height: 30px; }
   .tri-strip .tri-t { background: #8a8f99; }
   .tri-table td.tri-trans, .tri-table tr.tri-trans td { color: var(--text-muted, #7a808c); }
+  /* One line per row: a cell that wraps splits a race clock or a leg name over three lines, and the
+     wrapper already scrolls sideways. */
+  .tri-table th, .tri-table td { white-space: nowrap; }
+  /* The seam panel's table runs edge to edge like every other; only its prose is inset, which it was
+     not -- the sentence sat against the border. Inset to the cells' own padding, so the two align. */
+  .tri-seam > .swim-mech { padding: 12px 10px 4px; }
+  .tri-seam > .strength-tablenote { padding: 8px 10px 10px; }
+  /* Its labels may wrap where nothing else may: a longer language ("løp, midterste tredjedel") would
+     otherwise scroll the heart rate out of a two-column table. */
+  .tri-seam .tri-table td:first-child { white-space: normal; }
+  @media (max-width: 560px) {
+    .strength-table.tri-table th, .strength-table.tri-table td { padding: 8px 6px; }
+    .tri-seam > :is(.swim-mech, .strength-tablenote) { padding-left: 6px; padding-right: 6px; }
+  }
+  .tri-leg-open { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 12px; }
+  .tri-leg-open > .tri-leg-prompt { flex-basis: 100%; }
+  .tri-leg-btn { padding: 8px 14px; min-height: 44px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--accent); font-weight: 600; cursor: pointer; white-space: nowrap; }
+  @media (max-width: 560px) { .tri-leg-btn { flex: 1 1 0; } }
+  /* The race clocks cannot break, so a track is at least 120px: every phone gets two columns, which
+     puts the legs down the left and the transition after each beside it. The value is capped to its
+     tile's width so the visual view's larger numbers never run into the next tile on a wide screen. */
+  .swim-tiles.tri-tiles { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .tri-tiles > div { min-width: 0; container-type: inline-size; }
+  .tri-tiles .stile-v { white-space: nowrap; font-size: min(20px, 19cqi); }
+  :root[data-analysis-view="visual"] .tri-tiles .stile-v { font-size: min(clamp(26px, 3vw, 36px), 19cqi); }
   .tri-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
   .swim-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(94px, 1fr)); gap: 10px 14px; margin: 16px 0 22px; }
   /* A panel with EXACTLY FOUR tiles says so, because auto-fit cannot know: at 94px a phone fits
@@ -31436,6 +31467,15 @@ function triPaceLabel(sport, mps) {
   return sport === 'bike' ? U.speed(mps) : U.pace(mps);
 }
 
+/* A race reads in race-clock form, the way a results sheet prints it (13:27:18, T1 8:44). It is also
+   what fits a phone: "13h 27m 18s" broke over two lines in a tile and three in a table cell. Prose
+   keeps fmtDuration. */
+function triClock(sec) {
+  const total = Math.round(sec);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = String(total % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
 /* Race history (TRI-4). localStorage like the swim history and for the same reasons: nothing leaves
    the device, a season fits in the quota as compact records, and a race that cannot be remembered
    still analyzes -- the history section simply does not appear. */
@@ -31460,7 +31500,7 @@ function triSeamSection(D) {
   const { seam, breakdowns } = D;
   const bd = (breakdowns || []).filter(Boolean);
   const tRows = bd.map(b => `<tr><td><span class="tri-dot" style="background:${TRI_COLORS.transition}"></span>${escapeHtml(b.label)}</td>
-      <td>${fmtDuration(b.durationS)}</td><td>${fmtDuration(b.standingS)}</td><td>${fmtDuration(b.movingS)}</td><td>${U.dist(b.distanceM)}</td></tr>`).join('');
+      <td>${triClock(b.durationS)}</td><td>${triClock(b.standingS)}</td><td>${triClock(b.movingS)}</td><td>${U.dist(b.distanceM)}</td></tr>`).join('');
   const tTable = bd.length ? `<div class="section-title" style="margin-top:22px">${loamT('Transitions from the inside')} <span class="subtitle">${loamT('standing still versus on the move')}</span></div>
     <div class="swim-tablewrap"><table class="strength-table tri-table">
       <thead><tr><th></th><th>${loamT('time')}</th><th>${loamT('standing')}</th><th>${loamT('moving')}</th><th>${loamT('distance')}</th></tr></thead>
@@ -31480,7 +31520,7 @@ function triSeamSection(D) {
     : '';
   const drift = seam.hrDriftRunBpm != null ? loamT('Heart rate rose {bpm} bpm from the first third of the run to the last.', { bpm: seam.hrDriftRunBpm }) : '';
   return tTable + `<div class="section-title" style="margin-top:22px">${loamT('Bike into run')} <span class="subtitle">${loamT('the seam between the legs')}</span></div>
-    <div class="panel">
+    <div class="panel tri-seam">
       ${sent ? `<p class="swim-mech">${escapeHtml(loamT(sent.text, sent.vars))}</p>` : ''}
       <div class="swim-tablewrap"><table class="strength-table tri-table"><tbody>${pieces}</tbody></table></div>
       ${open || drift ? `<div class="strength-tablenote">${escapeHtml([open, drift].filter(Boolean).join(' '))}</div>` : ''}
@@ -31494,11 +31534,11 @@ function triHistorySection(D) {
   if (!others.length) return `<div class="strength-tablenote" style="margin-top:18px">${loamT('Import another race in the same order and it appears here, transition by transition.')}</div>`;
   const rec = D.record;
   const nT = rec.transitions.length;
-  const delta = (d) => (d == null ? '' : ` <span class="subtitle">${d > 0 ? '+' : '−'}${fmtDuration(Math.abs(d))}</span>`);
+  const delta = (d) => (d == null ? '' : ` <span class="subtitle">${d > 0 ? '+' : '−'}${triClock(Math.abs(d))}</span>`);
   const head = `<tr><th></th><th>${loamT('race time')}</th>${rec.transitions.map((_, i) => `<th>T${i + 1}</th>`).join('')}</tr>`;
   const row = (r, isThis) => `<tr${isThis ? ' style="font-weight:600"' : ''}><td>${escapeHtml(isThis ? loamT('this race') : (r.title || new Date(r.start * 1000).toLocaleDateString()))}</td>
-      <td>${r.legsComparable || isThis ? fmtDuration(r.totalS) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
-      ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? fmtDuration(r.transitions[i]) : '—'}${isThis ? '' : delta(r.transitionDeltaS && r.transitionDeltaS[i] != null && r.transitions[i] ? -r.transitionDeltaS[i] : null)}</td>`).join('')}</tr>`;
+      <td>${r.legsComparable || isThis ? triClock(r.totalS) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
+      ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? triClock(r.transitions[i]) : '—'}${isThis ? '' : delta(r.transitionDeltaS && r.transitionDeltaS[i] != null && r.transitions[i] ? -r.transitionDeltaS[i] : null)}</td>`).join('')}</tr>`;
   return `<div class="section-title" style="margin-top:22px">${loamT('Against your other races')} <span class="subtitle">${loamT('same order of sports')}</span></div>
     <div class="swim-tablewrap"><table class="strength-table tri-table"><thead>${head}</thead>
       <tbody>${others.map(r => row(r, false)).join('')}${row(rec, true)}</tbody></table></div>
@@ -31523,12 +31563,12 @@ function renderTriathlon(D) {
   const strip = tl.map(e => {
     if (e.kind === 'transition' && e.none) return '';
     const bg = e.kind === 'leg' ? `style="flex:${Math.max(0.5, e.sharePct).toFixed(2)};background:${TRI_COLORS[e.sport]}${openable ? ';cursor:pointer' : ''}"` : `class="tri-t" style="flex:${Math.max(0.5, e.sharePct).toFixed(2)}"`;
-    return `<div ${bg}${legTap(e)} title="${escapeHtml(nameOf(e) + ' ' + fmtDuration(e.durationS))}">${e.sharePct >= 6 ? escapeHtml(nameOf(e)) : ''}</div>`;
+    return `<div ${bg}${legTap(e)} title="${escapeHtml(nameOf(e) + ' ' + fmtDuration(e.durationS))}"><span>${escapeHtml(nameOf(e))}</span></div>`;
   }).join('');
 
   const totalDist = A.legs.reduce((a, l) => a + l.distanceM, 0);
-  const tiles = [tileOf(fmtDuration(A.totalS), loamT('race time')), tileOf(U.dist(totalDist), loamT('distance'))]
-    .concat(tl.map(e => tileOf(e.none ? '—' : fmtDuration(e.durationS), nameOf(e))))
+  const tiles = [tileOf(triClock(A.totalS), loamT('race time')), tileOf(U.dist(totalDist), loamT('distance'))]
+    .concat(tl.map(e => tileOf(e.none ? '—' : triClock(e.durationS), nameOf(e))))
     .join('');
 
   const rows = tl.map(e => {
@@ -31538,7 +31578,7 @@ function renderTriathlon(D) {
       return `<tr class="tri-trans"><td>${dot}${escapeHtml(e.label)}</td><td colspan="6">${loamT('no transition found: the legs meet')}</td></tr>`;
     }
     return `<tr${trans ? ' class="tri-trans"' : openable ? ' class="tri-leg-row" style="cursor:pointer"' : ''}${legTap(e)}><td>${dot}${escapeHtml(nameOf(e))}${!trans && openable ? ' &rsaquo;' : ''}</td>
-      <td>${fmtDuration(e.durationS)}</td><td>${e.sharePct.toFixed(1)}%</td>
+      <td>${triClock(e.durationS)}</td><td>${e.sharePct.toFixed(1)}%</td>
       <td>${!trans && !(e.distanceM > 0) ? '—' : U.dist(e.distanceM)}${!trans && !(e.distanceM > 0) ? '' : e.sport === 'swim' ? ' <span title="' + escapeHtml(loamT('GPS runs long on a swim')) + '">~</span>' : ''}</td>
       <td>${trans ? '—' : triPaceLabel(e.sport, e.avgSpeedMps)}</td>
       <td>${e.hrAvg != null ? e.hrAvg : '—'}</td>
@@ -31547,10 +31587,9 @@ function renderTriathlon(D) {
 
   /* A FIT race's legs are sliced out of the file; a GPX race's are read from its track, which never
      had power, cadence or strokes -- said here, before the tap, rather than discovered after it. */
-  const legButtons = openable ? `<div class="strength-tablenote tri-leg-open" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:4px 0 12px">
-      <span>${loamT('Open a leg in its own analysis:')}</span>
-      ${A.legs.map((l, k) => `<button type="button" class="tri-leg-btn" data-leg="${k}" onclick="openTriLeg(${k})"
-        style="padding:8px 14px; min-height:44px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--accent); font-weight:600; cursor:pointer;">${escapeHtml(triSportLabel(l.sport))} &rsaquo;</button>`).join('')}
+  const legButtons = openable ? `<div class="strength-tablenote tri-leg-open">
+      <span class="tri-leg-prompt">${loamT('Open a leg in its own analysis:')}</span>
+      ${A.legs.map((l, k) => `<button type="button" class="tri-leg-btn" data-leg="${k}" onclick="openTriLeg(${k})">${escapeHtml(triSportLabel(l.sport))} &rsaquo;</button>`).join('')}
       ${D.race.source === 'fit' ? '' : `<span style="flex-basis:100%">${loamT('Read from the GPS track: speed, climbing, heart rate and the line, but no power, cadence or strokes.')}</span>`}
     </div>` : '';
   const trimmed = [
@@ -31571,7 +31610,7 @@ function renderTriathlon(D) {
       'strength-scope', 'How the transitions are found')}
     <div class="tri-strip" role="${openable ? 'group' : 'img'}" aria-label="${escapeHtml(tl.filter(e => !e.none).map(e => nameOf(e) + ' ' + fmtDuration(e.durationS)).join(', '))}">${strip}</div>
     ${legButtons}
-    <div class="swim-tiles">${tiles}</div>
+    <div class="swim-tiles tri-tiles">${tiles}</div>
     ${trimmed ? `<div class="strength-tablenote">${loamT('Left out: {what}.', { what: trimmed })}</div>` : ''}
     <div class="swim-tablewrap"><table class="strength-table tri-table">
       <thead><tr><th></th><th>${loamT('time')}</th><th>${loamT('share')}</th><th>${loamT('distance')}</th><th>${loamT('pace')}</th><th>${loamT('HR')}</th><th>${loamT('climb')}</th></tr></thead>
@@ -51885,7 +51924,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '937ce24e8 · 2026-10-10';
+const LOAM_BUILD = '5f980f314 · 2026-10-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
