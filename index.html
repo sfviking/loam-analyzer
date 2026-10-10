@@ -9964,6 +9964,7 @@ function formSelectJump(D, J) {
   const S = { jump: J, g, n, w0, dur, tStart: J.tStart, tEnd: J.tEnd, tPeak: (J.tStart + J.tEnd) / 2,
     locT: loc.map(r => r.t), locLat: loc.map(r => r.latitude), locLon: loc.map(r => r.longitude),
     spdT: speed.map(r => r.t), spdV: speed.map(r => r.speed), spdMax: speed.length ? Math.max(...speed.map(r => r.speed)) : 0 };
+  S.jumpV = J.speed != null ? J.speed : formRecordedSpeed(S, J.tStart);
   _form = { D, S, jump: J, tau: 0, dur, mult: +document.getElementById('formSpeedSel').value || 0.5, playing: false, raf: null, lastTs: null };
   formSetupComparison(D, null);
   document.getElementById('formLimits').innerHTML = formLeanReplayable(D) ? ''
@@ -9974,18 +9975,23 @@ function formSelectJump(D, J) {
     + (J.fitHang != null && J.timingMeasured ? ' ' + loamT('FIT hang: {hang} s; the replay clock uses the local phone freefall.', { hang: loamNum(J.fitHang, 2) }) : '');
   formInitMap(S); formSetPlaying(false); formFrame();
 }
-/* Presentation only: the clock is recorded, the path and rider pose are illustrative. Horizontal
-   position is LINEAR in time over the whole window (1 s approach, flight, 1 s exit): a fixed-width
-   flight arc made a short hop cross the screen several times faster than the approach, so the bike
-   sped up in the air. The arc's width and height follow from the airtime instead. */
-function jumpReplayGeom(J) {
+/* Presentation only: the clock is recorded, the path and rider pose are illustrative. The scene is
+   drawn at the BIKE's scale: the takeoff speed and the airtime give the flight's length and its
+   flat-ground apex (g*t^2/8) in metres, and the camera follows the rider. A fixed-width arc made a
+   0.5 s hop shorter than the bike and three times as tall as physics allows, so it read as a fast
+   pop; a hang whose apex would leave the sky shrinks the whole picture, bike included. */
+function jumpReplayGeom(J, v) {
+  const pxPerM = 61;   // the drawn wheelbase (96 units at .76) is a ~1.2 m MTB wheelbase
   const air = J.tEnd - J.tStart > 0 ? J.tEnd - J.tStart : J.hang;
-  const w0 = J.tStart - 1, dur = air + 2, x = t => 58 + Math.max(0, Math.min(1, (t - w0) / dur)) * 244;
-  const takeoff = x(J.tStart), landing = x(J.tStart + air);
-  return { air, x, takeoff, landing, peak: Math.min(44, 0.6 * (landing - takeoff)) };
+  const speed = Number.isFinite(v) && v > 0 ? Math.max(2, Math.min(15, v)) : 5;
+  const apexM = 9.81 * air * air / 8;
+  /* Apex plus the drawn rider (118 units tall at .76, ~1.47 m) must fit the 140 px of sky. */
+  const k = Math.min(pxPerM, 140 / (apexM + 118 * 0.76 / pxPerM));
+  return { air, speed, k, scale: 0.76 * k / pxPerM, riderX: 110, x: t => speed * k * (t - J.tStart),
+    takeoff: 0, landing: speed * k * air, peak: k * apexM };
 }
-function jumpReplayPose(J, t) {
-  const G = jumpReplayGeom(J);
+function jumpReplayPose(J, t, v) {
+  const G = jumpReplayGeom(J, v);
   const u = Math.max(0, Math.min(1, (t - J.tStart) / G.air));
   const exit = Math.max(0, Math.min(1, t - J.tEnd));
   const air = t >= J.tStart && t < J.tEnd;
@@ -10004,21 +10010,31 @@ function formJumpScene(F) {
     const cmd = pen && p.t - prev <= 0.06 ? 'L' : 'M'; pen = true; prev = p.t;
     return cmd + x(p.t).toFixed(2) + ',' + (272 - Math.max(0, p.g) / ceiling * 34).toFixed(2);
   }).join(' ');
-  const takeoff = x(J.tStart), landing = x(J.tEnd), G = jumpReplayGeom(J);
+  const takeoff = x(J.tStart), landing = x(J.tEnd), G = jumpReplayGeom(J, F.S.jumpV);
   const txt = (v) => escapeHtml(loamT(v));
+  /* Ground marks span everything the camera can show; the hills scroll at a quarter speed. */
+  const g0 = Math.floor((G.x(F.S.w0) - G.riderX - 40) / 36) * 36, g1 = G.x(F.S.w0 + F.dur) + 400;
+  let marks = '';
+  for (let gx = g0; gx <= g1; gx += 36) marks += `M${gx} 193 h${gx % 72 ? 4 : 9}`;
+  let hills = 'M-1200 204 V173';
+  for (let hx = -1200, i = 0; hx < 1600; hx += 120, i++) hills += ` q60 ${i % 2 ? -9 : -19} 120 ${i % 3 ? 4 : -4}`;
+  hills += ' V204Z';
   return `<defs><linearGradient id="jumpSky" x2="0" y2="1"><stop stop-color="#1d2a2b"/><stop offset="1" stop-color="#101b1b"/></linearGradient></defs>
     <rect width="360" height="300" fill="#101a1b"/>
     <rect width="360" height="204" fill="url(#jumpSky)"/>
     <text data-jump-phase x="18" y="29" fill="#f3f4ed" font-size="20" font-weight="600"></text>
     <text data-jump-clock x="342" y="28" text-anchor="end" fill="#ebbd7a" font-size="13" font-family="monospace"></text>
     <text x="18" y="47" fill="#a5b6b2" font-size="10">${txt('SIDE VIEW · SCHEMATIC FLIGHT')}</text>
-    <path d="M0 173 Q65 158 117 168 T240 161 T360 167 V204 H0Z" fill="#243331" opacity=".5"/>
+    <path data-jump-hills d="${hills}" fill="#243331" opacity=".5"/>
     <path d="M0 190 H360 V204 H0Z" fill="#35423b"/>
     <path d="M0 190 H360" stroke="#768577" stroke-width="1"/>
-    <path d="M${G.takeoff.toFixed(1)} 190 Q${((G.takeoff+G.landing)/2).toFixed(1)} ${(190-2*G.peak).toFixed(1)} ${G.landing.toFixed(1)} 190" fill="none" stroke="#e8b16c" stroke-width="1.5" opacity=".32"/>
-    <path data-jump-trail fill="none" stroke="#e8b16c" stroke-width="2"/>
-    <g fill="#ebbd7a"><circle cx="${G.takeoff.toFixed(1)}" cy="190" r="3"/><circle cx="${G.landing.toFixed(1)}" cy="190" r="3"/></g>
-    <ellipse data-jump-shadow cy="191" rx="47" ry="4" fill="#050b0d" opacity=".3"/>
+    <g data-jump-world>
+      <path d="${marks}" stroke="#5d6c60" stroke-width="1.5"/>
+      <path d="M${G.takeoff.toFixed(1)} 190 Q${((G.takeoff+G.landing)/2).toFixed(1)} ${(190-2*G.peak).toFixed(1)} ${G.landing.toFixed(1)} 190" fill="none" stroke="#e8b16c" stroke-width="1.5" opacity=".32"/>
+      <path data-jump-trail fill="none" stroke="#e8b16c" stroke-width="2"/>
+      <g fill="#ebbd7a"><circle cx="${G.takeoff.toFixed(1)}" cy="190" r="3"/><circle cx="${G.landing.toFixed(1)}" cy="190" r="3"/></g>
+      <ellipse data-jump-shadow cy="191" rx="47" ry="4" fill="#050b0d" opacity=".3"/>
+    </g>
     <g data-jump-rider>${jumpBikeSVG(avatarPref() === 'classic')}</g>
     <path d="M0 204 H360" stroke="#3e514c"/>
     <text x="18" y="223" fill="#a5b6b2" font-size="11">${txt('Phone force')}</text>
@@ -10041,23 +10057,26 @@ function formJumpFrame() {
   if (F.jumpScene !== svg.firstElementChild || F.jumpKit !== kit) {
     svg.innerHTML = formJumpScene(F); F.jumpScene = svg.firstElementChild; F.jumpKit = kit;
   }
-  const pose = jumpReplayPose(J, t), force = LoamReplay.near(J.force || [], t, 0.04);
+  const pose = jumpReplayPose(J, t, F.S.jumpV), G = jumpReplayGeom(J, F.S.jumpV), force = LoamReplay.near(J.force || [], t, 0.04);
   const node = name => svg.querySelector('[data-jump-' + name + ']');
   node('phase').textContent = loamT(LoamReplay.jumpPhase(J, t));
   node('clock').textContent = (t < J.tStart ? '−' : '+') + loamNum(Math.abs(t - J.tStart), 2) + ' s';
-  node('rider').setAttribute('transform', `translate(${pose.x} ${pose.y}) rotate(${pose.pitch}) scale(.76)`);
+  const cam = G.riderX - pose.x;
+  node('world').setAttribute('transform', `translate(${cam} 0)`);
+  node('hills').setAttribute('transform', `translate(${cam / 4} 0)`);
+  node('rider').setAttribute('transform', `translate(${G.riderX} ${pose.y}) rotate(${pose.pitch}) scale(${G.scale})`);
   const c = pose.crouch;
   node('body').setAttribute('transform', `translate(0 ${c})`);
   node('leg').setAttribute('d', `M-16 ${-67+c} L${8+c/3} ${-47+c/2} L0 -27`);
   node('far-leg').setAttribute('d', `M-20 ${-67+c} L${-2+c/3} ${-48+c/2} L-10 -25`);
   node('arm').setAttribute('d', `M6 ${-89+c} L${20+c/3} ${-74+c/2} L32 -66`);
   for (const wheel of svg.querySelectorAll('[data-jump-wheel]')) {
-    wheel.setAttribute('transform', `rotate(${(pose.x-58)/(.76*20)*180/Math.PI} ${wheel.dataset.jumpWheel} -20)`);
+    wheel.setAttribute('transform', `rotate(${pose.x/(G.scale*20)*180/Math.PI} ${wheel.dataset.jumpWheel} -20)`);
   }
   node('shadow').setAttribute('cx', pose.x);
-  node('shadow').setAttribute('rx', 47 - (190-pose.y)*0.3);
+  node('shadow').setAttribute('rx', (47 - (190-pose.y)*0.3) * G.scale / 0.76);
   node('shadow').setAttribute('opacity', 0.3 - (190-pose.y)*0.003);
-  const u = pose.u, G = jumpReplayGeom(J), a = G.takeoff, span = G.landing - a;
+  const u = pose.u, a = G.takeoff, span = G.landing - a;
   node('trail').setAttribute('d', `M${a} 190 Q${a+span/2*u} ${190-2*G.peak*u} ${a+span*u} ${190-4*G.peak*u*(1-u)}`);
   node('cursor').setAttribute('transform', `translate(${28+F.tau/F.dur*308} 0)`);
   node('force').textContent = force && force.g != null ? loamNum(force.g, 1) + ' g' : '—';
@@ -51797,7 +51816,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'a9770640e · 2026-10-09';
+const LOAM_BUILD = 'b702e6ea7 · 2026-10-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
