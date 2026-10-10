@@ -19085,8 +19085,12 @@ function analyzeRace(race) {
   const lastK = legs.length - 1;
   const lastLo = transitions.length ? transitions[transitions.length - 1].t1 : legs[lastK].t0;
   const lastRuns = sustainedRuns(route, speed, meds[lastK], lastLo, legs[lastK].t1);
-  const raceStart = firstRuns.length ? firstRuns[0].t0 : legs[0].t0;
-  const raceEnd = lastRuns.length ? lastRuns[lastRuns.length - 1].t1 : legs[lastK].t1;
+  /* A file's own boundaries are taken as given at BOTH ends too: the watch's swim session starts where
+     the athlete pressed start, and the page says "leg and transition times are your file's". Trimming
+     here made a FIT race's first and last rows shorter than the session the row opens. */
+  const fromFile = race.transitionsFrom === 'file';
+  const raceStart = !fromFile && firstRuns.length ? firstRuns[0].t0 : legs[0].t0;
+  const raceEnd = !fromFile && lastRuns.length ? lastRuns[lastRuns.length - 1].t1 : legs[lastK].t1;
 
   const outLegs = legs.map((l, k) => {
     const t0 = k === 0 ? raceStart : transitions[k - 1].t1;
@@ -19310,13 +19314,15 @@ function raceDigest(race, A, seam, breakdowns, others, metric = true) {
   };
 }
 
-function raceCoachPrompt(level, unitsRule) {
-  return `You are a triathlon coach reading ONE race that the athlete recorded as a single GPS track. The digest gives each leg, each transition broken into standing and moving time, the bike's two halves against the run's three thirds, and up to five earlier races in the same sport order. Athlete level: ${level}. ${unitsRule || ''}
+function raceCoachPrompt(level, unitsRule, fromFile) {
+  return `You are a triathlon coach reading ONE race that the athlete recorded as ${fromFile ? 'a single multisport file' : 'a single GPS track'}. The digest gives each leg, each transition broken into standing and moving time, the bike's two halves against the run's three thirds, and up to five earlier races in the same sport order. Athlete level: ${level}. ${unitsRule || ''}
 
 What makes this analysis different is the time BETWEEN the legs, which other tools do not see: lead with the transitions and the bike-to-run seam, not with a leg-by-leg recap the athlete already has on screen.
 
 Be honest about the instrument:
-- Transitions are ESTIMATED from GPS pace, not timed at the mats. Talk about standing versus moving inside them, not about exact seconds.
+${fromFile
+    ? '- Leg and transition times are the file\'s own boundaries (where the athlete pressed lap), so they can be quoted as recorded. Standing versus moving INSIDE a transition is still estimated from GPS pace.'
+    : '- Transitions are ESTIMATED from GPS pace, not timed at the mats. Talk about standing versus moving inside them, not about exact seconds.'}
 - One race cannot show that the bike CAUSED a run fade. Say what changed; if earlier races are in the digest and show the same pattern, you may say the pattern repeats. Never claim causation from one race.
 - There is no power, no cadence and no swim stroke data. Do not invent them, and do not prescribe watts, zones or a pacing plan in numbers the digest does not contain.
 - The swim distance is an upper bound (GPS runs long in the water); do not coach swim pace from it.
@@ -22705,7 +22711,7 @@ async function analyze(files) {
         return;
       }
       if (LoamSwim.fitIsSwim(probeMsgs)) {
-        window.onSwimImport(LoamSwim.swimPayloadFromFit(probeMsgs));
+        window.onSwimImport(LoamSwim.swimPayloadFromFit(probeMsgs), triLeg ? { transient: true } : undefined);
         return;
       }
       const probe = extractFitData(probeMsgs);
@@ -31366,7 +31372,11 @@ function swimHistoryRemember(session, R) {
   return swimHistorySave(LoamSwim.swimHistoryUpsert(swimHistoryLoad(), rec));
 }
 
-window.onSwimImport = function (payload) {
+/* `opts.transient`: analyze and draw, but do not write the swim into the history. A race's swim leg
+   is opened this way -- the bike and run legs are not saved either ("a leg is not saved"), and the
+   swim history feeds the swim weeks and the training plan, where a GPS-inflated race swim counted
+   only if the leg happened to be tapped. */
+window.onSwimImport = function (payload, opts) {
   try {
     const raw = typeof payload === 'string' ? JSON.parse(payload) : payload;
     const session = LoamSwim.normalizeSwimImport(raw);
@@ -31374,7 +31384,7 @@ window.onSwimImport = function (payload) {
     const summary = LoamSwim.computeSwimSummary(session, swim);
     /* Written down BEFORE rendering, so the history section can place this swim inside its own
        series rather than against everything-except-today. */
-    const history = swimHistoryRemember(session, swim);
+    const history = opts && opts.transient ? swimHistoryLoad() : swimHistoryRemember(session, swim);
     hideAllSections();
     /* An imported swim is not a recording this analyzer holds, so there is nothing to trim. */
     hide('loading'); hide('errorBox'); hide('dropzone'); hide('results'); hide('cropSection');
@@ -31672,7 +31682,7 @@ async function openTriLeg(k) {
     const title = (_triLastRace.title || loamT('Triathlon')) + ' · ' + triSportLabel(leg.sport);
     try {
       if (leg.sport === 'swim') {
-        window.onSwimImport(LoamTri.routeSwimPayload(pts, title));
+        window.onSwimImport(LoamTri.routeSwimPayload(pts, title), { transient: true });
         showTriBackBar();
         window.scrollTo(0, 0);
         return;
@@ -37953,7 +37963,13 @@ let _roadSpeedMarker = null;
 function rerenderUnits(anchor) {
   if (!_lastRender) return;
   const top = anchor && anchor.isConnected ? anchor.getBoundingClientRect().top : null;
-  const selection = _roadSelection;
+  let selection = _roadSelection;
+  /* A climb-profile SECTION is sized per unit system (250 m or a quarter mile), so after a units
+     change "Section 2" names a different piece of road. Fall back to the whole ride, as the
+     Section-length select already does, rather than restore a label that points elsewhere. */
+  /* Dropped, not cleared: the render below resets the selection itself, and clearing first redraws
+     an overlay on the map that render is about to destroy (two Leaflet canvas errors). */
+  if (selection && selection.part.from != null && selection.units !== loamUnits()) selection = null;
   _lastRender.fn(_lastRender.D);
   if (selection && selection.D === _lastRender.D) focusSegment(selection.part, selection.D.ride, false);
   if (top == null) return;
@@ -38253,6 +38269,10 @@ async function loamShareVideo(blob, filename, caption, poster) {
    any ride/run visualization can be saved as an image. The button routes through loamSaveChart so the
    save works both on the web (download) and inside the iOS app (share sheet). */
 const PLOT_CFG = {
+  /* Stated, though it is Plotly's default: newPlot keeps a host's old config and overwrites only the
+     keys it is handed, so the road timeline's `doubleClick: false` stayed on #timelineChart for every
+     ride opened after a road one, and a zoomed MTB or run timeline could not be zoomed back out. */
+  doubleClick: 'reset+autosize',
   responsive: true, displayModeBar: true, displaylogo: false,
   modeBarButtons: [[{
     name: 'Save snapshot', title: 'Save snapshot (PNG)',
@@ -42902,7 +42922,7 @@ function coachSystemPrompt(sport, level, metric, source) {
      analyzer/core/training/drift.test.js rather than by the coaching guard (which declares it). */
   if (sport === 'training') return LoamTraining.trainingCoachPrompt(level, units);
   /* A triathlon race (TRI-4): its prompt lives in the drift-pinned LoamTri port, like the plan's. */
-  if (sport === 'triathlon') return LoamTri.raceCoachPrompt(level, units);
+  if (sport === 'triathlon') return LoamTri.raceCoachPrompt(level, units, !!(_triLastRendered && _triLastRendered.race.transitionsFrom === 'file'));
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
   /* SKIING. It reuses the MTB READS -- descents, body-frame turns, lean off the gravity vector --
      because a ski run and an MTB descent are the same measurement, but it must not reuse the MTB
@@ -45527,7 +45547,7 @@ function renderAll(D) {
 function focusSegment(descent, ride, animate = true) {
   const RD = _lastRender && _lastRender.D;
   if (RD && isRoadAnalysis(RD) && document.body.classList.contains('road-analysis')) {
-    _roadSelection = { D: RD, part: { ...descent } };
+    _roadSelection = { D: RD, part: { ...descent }, units: loamUnits() };
     clearTimelineCursor();
     document.querySelectorAll('.road-grade-row[aria-pressed="true"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
     const reset = document.getElementById('roadClimbReset');
@@ -46102,7 +46122,9 @@ function timelineVisibleRange(chart, ev, fullLo, fullHi) {
    and again on every relayout (zoom, pan, reset, resize). `patchFor(lo, hi)` returns the relayout
    patch for a visible range -- the thinned annotations and the m:ss ticks -- and the `busy` guard
    keeps the relayout issued here from re-entering the handler through the event it emits. */
-function wireTimelineRelayout(chart, fullLo, fullHi, patchFor) {
+/* `initial` is the range the chart is ALREADY showing when it is not the full one (a restored road
+   selection); without it the first pass laid ticks out for the whole ride over a zoomed axis. */
+function wireTimelineRelayout(chart, fullLo, fullHi, patchFor, initial) {
   if (!chart || !chart.on) return;
   let busy = false;
   const apply = (lo, hi) => {
@@ -46110,7 +46132,7 @@ function wireTimelineRelayout(chart, fullLo, fullHi, patchFor) {
     busy = true;
     Plotly.relayout(chart, patchFor(lo, hi)).then(() => { busy = false; }).catch(() => { busy = false; });
   };
-  apply(fullLo, fullHi);
+  apply(initial ? initial[0] : fullLo, initial ? initial[1] : fullHi);
   chart.on('plotly_relayout', (ev) => {
     if (busy) return;
     const [lo, hi] = timelineVisibleRange(chart, ev, fullLo, fullHi);
@@ -46954,16 +46976,18 @@ function renderBikeTimeline(D) {
   window._tlClock = clock;
   loamPlot('timelineChart', traces, layout, isRoadAnalysis(D) ? { ...PLOT_CFG, doubleClick: false } : PLOT_CFG).then(async () => {
     if (host._bikeTimelineRender !== renderToken) return;
+    let restored = null;
     if (_roadSelection && _roadSelection.D === D) {
       const part = _roadSelection.part;
-      await Plotly.relayout(host, { 'xaxis.range': [X(part.tStart), X(part.tEnd)], 'xaxis.autorange': false }).catch(() => {});
+      restored = [X(part.tStart), X(part.tEnd)];
+      await Plotly.relayout(host, { 'xaxis.range': restored, 'xaxis.autorange': false }).catch(() => {});
     }
     if (host._bikeTimelineRender !== renderToken) return;
     wireTimelineRelayout(host, fullLo, fullHi, (lo, hi) => {
       if (distance) return { annotations: annos(lo, hi) };
       const tk = loamTimeTicks(lo, hi);
       return { annotations: annos(lo, hi), 'xaxis.tickvals': tk.tickvals, 'xaxis.ticktext': tk.ticktext };
-    });
+    }, restored);
     linkTimelineToMap((D.sensors && D.sensors.location) || [], ride, clock);
     host._roadSpeedReady = D;
     updateRoadTopSpeed(D);
@@ -51816,7 +51840,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'b702e6ea7 · 2026-10-10';
+const LOAM_BUILD = '05339711c · 2026-10-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
