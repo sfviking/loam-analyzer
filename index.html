@@ -319,6 +319,15 @@
     opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease;
   }
   #loamToast.show { opacity: 0.95; transform: translateX(-50%) translateY(0); }
+  /* A toast that carries an action (a saved card's "Share") takes taps, but only while shown: the
+     hidden toast still sits over the bottom of the page and must not swallow them. */
+  #loamToast.has-action { display: flex; align-items: center; gap: 14px; }
+  #loamToast.has-action.show { pointer-events: auto; }
+  #loamToast .toast-action {
+    flex: none; font: inherit; font-weight: 600; color: inherit; background: transparent;
+    border: 1px solid currentColor; border-radius: 4px; padding: 4px 12px; cursor: pointer;
+  }
+  @media (pointer: coarse) { #loamToast .toast-action { min-height: 36px; } }
   /* Interaction polish (additive, no layout change): smooth state transitions, a tactile press, and a
      keyboard focus ring on every control for consistency and accessibility. */
   button, select, input, .recent-open, .scrub-chip { transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, filter 0.15s ease, transform 0.06s ease, box-shadow 0.15s ease; }
@@ -36756,6 +36765,9 @@ const LOAM_NB = {
   'Opening session': 'Åpner økt',
   'Chart snapshot failed': 'Klarte ikke å lagre grafen som bilde',
   'Card could not be shared': 'Kortet kunne ikke deles',
+  'Saved to Photos': 'Lagret i Bilder',
+  'Image downloaded': 'Bildet er lastet ned',
+  'Share': 'Del',
   'Nothing to put on a card for this swim yet':
     'Ingenting å sette på et kort for denne svømmeøkten ennå',
   'Swim import failed': 'Importen av svømmeøkten mislyktes',
@@ -37984,8 +37996,8 @@ function rerenderUnits(anchor) {
 
 /* Save the chart as a PNG. On the desktop web page this is a normal browser download. Inside the iOS
    app (WKWebView) a normal download silently vanishes (the web view has no download handler), so when
-   embedded we hand the PNG to the native side over the existing `loam` message bridge, which presents
-   a share sheet (Save to Photos / Files). The desktop path is unchanged.
+   embedded we hand the PNG to the native side over the existing `loam` message bridge, which saves it
+   to Photos (its toast offers Share; see loamShareImage). The desktop path is unchanged.
 
    A failure here is REPORTED rather than swallowed, and that is the half of the 2026-08-31 report
    that outlives its cause. `Plotly.toImage` rejects for reasons that have nothing to do with the
@@ -38024,7 +38036,7 @@ function loamSaveChart(gd) {
   try {
     if (embedded && window.Plotly && Plotly.toImage) {
       Plotly.toImage(gd, { format: 'png', scale: 2 })
-        .then(dataURL => { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename }); })
+        .then(dataURL => { if (!loamPostImage('saveImage', { dataURL, filename, text: '' })) loamChartSaveFailed(); })
         .catch(loamChartSaveFailed);
     } else if (window.Plotly && Plotly.downloadImage) {
       /* downloadImage returns a promise too, and it goes through the same toImage machinery, so the
@@ -38038,8 +38050,8 @@ function loamSaveChart(gd) {
 }
 
 /* The card header's share control (see .card-share). The glyph is the platform's own "share" shape
-   -- a tray with an arrow out of it -- rather than a camera, because every one of these hands the
-   picture to the share sheet (Messages, Photos, Files), which is a share and not a photograph. */
+   -- a tray with an arrow out of it -- rather than a camera: a tap saves the picture and its toast
+   hands it on to the share sheet (Messages, Files, ...), which is a share and not a photograph. */
 const CARD_SHARE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11.5"/><path d="M7.8 7.7 12 3.5l4.2 4.2"/><path d="M6 11H5.5A1.5 1.5 0 0 0 4 12.5v6A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-6a1.5 1.5 0 0 0-1.5-1.5H18"/></svg>';
 /* Cards that build their own poster rather than a snapshot of their charts. */
 const CARD_SHARE_CUSTOM = {
@@ -38156,15 +38168,16 @@ function loamCardFilename(slug, when) {
    than the fast one. Swap this one constant when a real download page exists.
 
    How far it actually travels differs by path, and only one of the three carries it to the recipient:
-   - Web Share API: `text` is the message body, so the link lands in Messages / Mail / X beside the
-     picture. This is the path that does the job.
+   - Web Share API (the web toast's Share): `text` is the message body, so the link lands in
+     Messages / Mail / X beside the picture. This is the path that does the job.
    - iOS bridge: the caption becomes the share sheet's SUBJECT and its link-preview title (see
      ShareCardItem in AnalyzerWebView.swift, which deliberately shares ONE image item -- passing the
      text as a second item made several targets attach the card as a link instead of a picture). So a
      Mail share carries it in the subject and the sender sees it in the sheet header, but a Messages
      share sends the picture alone. Putting the URL on the card ART is the only thing that would
      survive that, and it is a design change to three posters, not a caption change.
-   - Plain download: no caption at all; the file is the whole artifact.
+   - A save (Photos in the app, a download on the web): no caption at all; the file is the whole
+     artifact.
    Kept to one line with a single space: a newline would land in a Mail subject line. */
 const LOAM_INSTALL_URL = 'https://testflight.apple.com/join/61Jeddcf';
 
@@ -38176,15 +38189,17 @@ function loamShareText(caption) {
   return c ? c + ' ' + LOAM_INSTALL_URL : LOAM_INSTALL_URL;
 }
 
-/* Share a rendered card (Ride Signature, Lift Signature) as a PNG, nudging the user toward sending it
-   to friends rather than just filing it away. Three delivery paths:
-   - iOS app (WKWebView): hand the PNG (+ a caption) to the native `loam` bridge, which presents the
-     system share sheet (Messages, Instagram, Save to Photos, ...).
-   - Web with the Web Share API: open the OS share sheet with the image file so it reaches the same
-     messaging/social targets. A user cancel (AbortError) is respected, not silently downloaded.
-   - Web without share support (most desktops): fall back to a plain download.
+/* Share a rendered card (Ride Signature, Lift Signature, a section's charts) as a PNG. SAVING is the
+   default and the share sheet is one tap further (owner, 2026-10-10: "default to save image when
+   sharing hero cards"), reversing the earlier "Cards are for sharing, not just saving" call, whose
+   sheet put Save Image below a row of apps on every tap. Two hosts:
+   - iOS app (WKWebView): hand the PNG (+ a caption) to the native `loam` bridge, which writes it to
+     Photos and calls loamImageSaved, whose toast carries "Share" -> the system share sheet. Where
+     Photos access is refused the bridge presents the sheet straight away instead.
+   - Web: download the file, and where the browser can share files, the toast's "Share" opens its
+     share sheet -- a fresh tap, so the Web Share API's user-activation rule is met.
    The install link is appended HERE rather than by each card builder, so all three cards (ride, lift,
-   swim) and all three delivery paths carry the same one and none can be forgotten; the builders'
+   swim) and every delivery path carry the same one and none can be forgotten; the builders'
    captions stay the plain sport-naming sentence the E2E pins. */
 /* The card equivalent of loamChartSaveFailed, and it exists for the same reason on the same day's
    evidence: a Share button whose only failure mode is "nothing happens" is a mystery rather than a
@@ -38205,22 +38220,41 @@ async function loamShareImage(dataURL, filename, caption) {
   if (embedded) {
     /* Reported, not swallowed: this is the same `saveImage` bridge loamSaveChart posts to, and the
        empty catch it used to end in was half of what made the 2026-08-31 report unreadable. */
-    try { window.webkit.messageHandlers.loam.postMessage({ type: 'saveImage', dataURL, filename, text }); }
-    catch (e) { console.warn('card share bridge failed', e); loamCardShareFailed(); }
+    if (!loamPostImage('saveImage', { dataURL, filename, text })) loamCardShareFailed();
     return;
   }
-  try {
-    if (navigator.canShare && typeof fetch === 'function') {
-      const blob = await (await fetch(dataURL)).blob();
-      const file = new File([blob], filename, { type: 'image/png' });
-      if (navigator.canShare({ files: [file] })) {
-        try { await navigator.share({ files: [file], text }); return; }
-        catch (err) { if (err && err.name === 'AbortError') return; /* user canceled; do not also download */ }
-      }
-    }
-  } catch (e) { /* Web Share / File unsupported here: fall through to a download */ }
   const a = document.createElement('a'); a.href = dataURL; a.download = filename; a.click();
+  let file = null;
+  try {
+    if (navigator.canShare && typeof fetch === 'function' && typeof File === 'function') {
+      const blob = await (await fetch(dataURL)).blob();
+      const f = new File([blob], filename, { type: 'image/png' });
+      if (navigator.canShare({ files: [f] })) file = f;
+    }
+  } catch (e) { /* Web Share / File unsupported here: the download is the whole answer */ }
+  loamToast(loamT('Image downloaded'), file ? 8000 : 4500, file && {
+    label: loamT('Share'),
+    run: () => navigator.share({ files: [file], text }).catch(() => { /* cancelled */ }),
+  });
 }
+
+/* The image the app bridge was last asked to save, kept so the "Share" on its toast can hand the
+   same picture and caption to the share sheet without the card being rebuilt. */
+let _loamLastSave = null;
+function loamPostImage(type, payload) {
+  if (type === 'saveImage') _loamLastSave = payload;
+  try { window.webkit.messageHandlers.loam.postMessage({ type, ...payload }); return true; }
+  catch (e) { console.warn('image bridge failed', e); return false; }
+}
+/* Called by the app once the PNG is in Photos. Matched on the filename the app was handed, so a
+   late answer for an earlier save cannot offer to share a different picture. */
+window.loamImageSaved = function (filename) {
+  const p = _loamLastSave && _loamLastSave.filename === filename ? _loamLastSave : null;
+  loamToast(loamT('Saved to Photos'), p ? 8000 : 4500, p && {
+    label: loamT('Share'),
+    run: () => { if (!loamPostImage('shareImage', p)) loamCardShareFailed(); },
+  });
+};
 
 /* The clip equivalent of loamShareImage, with the same three paths, and one difference that is the
    reason it returns a value: recording takes as long as the replay, which outlives the tap's user
@@ -38267,7 +38301,7 @@ async function loamShareVideo(blob, filename, caption, poster) {
 
 /* Plotly config used by every chart: a mode bar exposing just a "save snapshot" (PNG, 2x) button, so
    any ride/run visualization can be saved as an image. The button routes through loamSaveChart so the
-   save works both on the web (download) and inside the iOS app (share sheet). */
+   save works both on the web (download) and inside the iOS app (Photos). */
 const PLOT_CFG = {
   /* Stated, though it is Plotly's default: newPlot keeps a host's old config and overwrites only the
      keys it is handed, so the road timeline's `doubleClick: false` stayed on #timelineChart for every
@@ -46181,9 +46215,10 @@ function speedColor(s, maxS) {
 /* ========== Ride Signature card ===
    A poster-style hero generated from the ride itself: the GPS track drawn as a glowing, speed-
    coloured trail on a dark loam-toned gradient, with start/finish + turn + jump accents and the
-   headline stats laid out like a trading card. Saveable as a PNG (share sheet in the app, download
-   on the web). Pure SVG built from data already computed, so it adds no analysis cost and cannot
-   affect anything else; it simply hides when a ride has no usable GPS track. */
+   headline stats laid out like a trading card. Saveable as a PNG (Photos in the app, download on
+   the web, and Share from the toast either way). Pure SVG built from data already computed, so it
+   adds no analysis cost and cannot affect anything else; it simply hides when a ride has no usable
+   GPS track. */
 function rsSplit(str) {
   if (str == null) return { num: '—', unit: '' };
   const s = String(str).trim();
@@ -46560,7 +46595,7 @@ function renderRideSignature(D, sport) {
   }
 }
 
-/* Hand the finished PNG to the native share sheet (app) or download it (web). */
+/* Hand the finished PNG to Photos (app) or download it (web); see loamShareImage. */
 function rideSigDeliver(canvas) {
   let png;
   try { png = canvas.toDataURL('image/png'); }
@@ -46624,7 +46659,7 @@ function rideSigCompose(opts) {
   });
 }
 
-/* Rasterize the Ride Signature to a PNG and save it (share sheet in the app, download on web). */
+/* Rasterize the Ride Signature to a PNG and save it (Photos in the app, download on web). */
 function saveRideSignature() {
   try { rideSigCompose(); } catch (e) { console.warn('save ride signature failed', e); }
 }
@@ -50995,8 +51030,9 @@ window.addEventListener('drop', (e) => {
   routeDroppedFiles(e.dataTransfer && e.dataTransfer.files ? Array.from(e.dataTransfer.files) : []);
 });
 
-/* Transient feedback that survives analyze() overwriting the header status line. */
-function loamToast(msg, ms = 4500) {
+/* Transient feedback that survives analyze() overwriting the header status line. `action`
+   ({ label, run }) adds one button, which hides the toast and runs. */
+function loamToast(msg, ms = 4500, action) {
   let t = document.getElementById('loamToast');
   if (!t) {
     t = document.createElement('div');
@@ -51006,6 +51042,15 @@ function loamToast(msg, ms = 4500) {
     document.body.appendChild(t);
   }
   t.textContent = msg;
+  t.classList.toggle('has-action', !!action);
+  if (action) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toast-action';
+    b.textContent = action.label;
+    b.onclick = () => { clearTimeout(t._hideTimer); t.classList.remove('show'); action.run(); };
+    t.appendChild(b);
+  }
   t.classList.add('show');
   clearTimeout(t._hideTimer);
   t._hideTimer = setTimeout(() => t.classList.remove('show'), ms);
@@ -51840,7 +51885,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '05339711c · 2026-10-10';
+const LOAM_BUILD = '937ce24e8 · 2026-10-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
