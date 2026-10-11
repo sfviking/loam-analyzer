@@ -18018,8 +18018,10 @@ function computeSwimSummary(session, R) {
    units, so this belongs next to the summary rather than in the generic formatter. */
 function fmtSwimPace(sec) {
   if (sec == null || !Number.isFinite(sec)) return '—';
-  const m = Math.floor(sec / 60);
-  const s = sec - m * 60;
+  /* Round to tenths BEFORE splitting, or 239.97 prints "3:60.0". */
+  const tenths = Math.round(sec * 10);
+  const m = Math.floor(tenths / 600);
+  const s = (tenths - m * 600) / 10;
   return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
 }
 
@@ -18984,9 +18986,15 @@ function normalizeRace(raw) {
      start past its end, so the whole race failed to open. A pace-split leg has no time of its own
      outside the track, so those are still clamped. */
   const fromFile = raw.transitionsFrom === 'file';
+  /* A leg's own distance, where its file recorded one (a multisport FIT's session total), and the
+     unit that file's swim reads in. Only a file's own legs can carry a distance: a pace-split leg is
+     re-cut by the transition search, so a figure for the window the athlete named would describe a
+     different stretch of the race. */
   const legs = (Array.isArray(raw.legs) ? raw.legs : [])
     .map(l => ({ sport: String(l && l.sport || '').toLowerCase(),
-      t0: fromFile ? +l.t0 : Math.max(first, +l.t0), t1: fromFile ? +l.t1 : Math.min(last, +l.t1) }))
+      t0: fromFile ? +l.t0 : Math.max(first, +l.t0), t1: fromFile ? +l.t1 : Math.min(last, +l.t1),
+      distanceM: fromFile && +l.distanceM > 0 && Number.isFinite(+l.distanceM) ? +l.distanceM : null,
+      swimUnit: l.swimUnit === 'yd' ? 'yd' : 'm' }))
     .sort((a, b) => a.t0 - b.t0);
   if (legs.length < 2) throw new Error('a race needs at least two legs');
   for (let i = 0; i < legs.length; i++) {
@@ -19132,10 +19140,21 @@ function analyzeRace(race) {
   const raceStart = !fromFile && firstRuns.length ? firstRuns[0].t0 : legs[0].t0;
   const raceEnd = !fromFile && lastRuns.length ? lastRuns[lastRuns.length - 1].t1 : legs[lastK].t1;
 
+  /* A file's leg is listed at the distance the file recorded for it, where it recorded one, and its
+     pace follows from that distance. The GPS path stays beside it (`pathM`, `pathMps`), because
+     every read INSIDE a leg is cut from the track (legPieces) and a piece is only comparable with a
+     whole measured the same way. On the Santa Cruz file the track runs 33% over the watch's own swim,
+     3.1% over its run and 0.6% over its bike. A swim also carries the unit its own view reads in
+     (`swimUnit`): metres unless the file declared a yard pool. */
   const outLegs = legs.map((l, k) => {
     const t0 = k === 0 ? raceStart : transitions[k - 1].t1;
     const t1 = k === lastK ? raceEnd : transitions[k].t0;
-    return { index: k + 1, sport: l.sport, regimeMps: meds[k], ...raceSpanStats(route, t0, Math.max(t0, t1)) };
+    const span = raceSpanStats(route, t0, Math.max(t0, t1));
+    const own = l.distanceM > 0 ? l.distanceM : null;
+    return { index: k + 1, sport: l.sport, regimeMps: meds[k], ...span,
+      ...(own != null ? { distanceM: own, avgSpeedMps: span.durationS > 0 ? own / span.durationS : 0 } : {}),
+      distanceFrom: own != null ? 'file' : 'gps', pathM: span.distanceM, pathMps: span.avgSpeedMps,
+      ...(l.sport === 'swim' ? { swimUnit: l.swimUnit } : {}) };
   });
 
   const totalS = Math.max(0, raceEnd - raceStart);
@@ -19255,8 +19274,11 @@ function seamRead(route, A) {
   const open = spanPace(route, run.t0, openEnd);
   const bikeFadePct = pctChange(halves[0].mps, halves[1].mps) == null ? null : -pctChange(halves[0].mps, halves[1].mps);
   const runFadePct = pctChange(thirds[0].mps, thirds[2].mps) == null ? null : -pctChange(thirds[0].mps, thirds[2].mps);
-  /* Positive = the opening minutes were SLOWER than the run as a whole: the legs coming round. */
-  const runOpenPct = pctChange(open.mps, run.avgSpeedMps);
+  /* Positive = the opening minutes were SLOWER than the run as a whole: the legs coming round. The
+     whole is the run's TRACK speed (`pathMps`), not its listed one: the opening is cut from the track,
+     and a file's own distance sits a few percent off the track's (3.1% on the Santa Cruz run), which
+     is more than the 2% this read is shown at. */
+  const runOpenPct = pctChange(open.mps, run.pathMps);
   const bikeFaded = bikeFadePct != null && bikeFadePct >= TRI_BIKE_FADE_PCT;
   const runFaded = runFadePct != null && runFadePct >= TRI_RUN_FADE_PCT;
   const hrBike2 = halves[1].hrAvg, hrRun1 = thirds[0].hrAvg, hrRun3 = thirds[2].hrAvg;
@@ -19287,6 +19309,16 @@ function seamSentence(seam) {
     case 'bike-faded': return { text: 'The bike\'s second half was {b}% slower than its first, and the run held (its first and last thirds within {r}%).', vars };
     default: return { text: 'Both held: the bike\'s halves were within {b}% of each other, and the run\'s first and last thirds within {r}%.', vars };
   }
+}
+
+/* Where the swim's listed distance came from: 'file' when every swim leg carries its file's own
+   total, 'gps' when any was summed from the track, null for a race with no swim. One answer for the
+   digest, the coach's prompt and the page's caveat, which must not disagree about whether the swim
+   distance on screen is an upper bound. */
+function swimDistanceSource(A) {
+  const swims = ((A && A.legs) || []).filter(l => l.sport === 'swim');
+  if (!swims.length) return null;
+  return swims.every(l => l.distanceFrom === 'file') ? 'file' : 'gps';
 }
 
 /* The compact record kept for comparing races, keyed by the race's stable id. */
@@ -19348,13 +19380,16 @@ function raceDigest(race, A, seam, breakdowns, others, metric = true) {
       race.transitionsFrom === 'file'
         ? 'Legs and transitions are the file\'s own boundaries (a watch\'s multisport sessions, or track segments the athlete named), not timing mats; a transition includes any time the watch was not recording.'
         : 'Transitions are estimated from GPS pace alone, not from timing mats.',
-      'A swim leg\'s GPS distance runs long (33% over the course on the one real race measured).',
+      swimDistanceSource(A) === 'file'
+        ? 'Each leg\'s distance is the file\'s own total for that leg where the file recorded one (what the watch measured), not a sum of GPS fixes.'
+        : 'A swim leg\'s GPS distance runs long (33% over the course on the one real race measured).',
       'Triathlon is exploratory in Loam; the transition rule has been checked on one real race.',
     ],
   };
 }
 
-function raceCoachPrompt(level, unitsRule, fromFile) {
+/* `swimFromFile`: the swim's distance is the file's own total (swimDistanceSource), not the track's. */
+function raceCoachPrompt(level, unitsRule, fromFile, swimFromFile) {
   return `You are a triathlon coach reading ONE race that the athlete recorded as ${fromFile ? 'a single multisport file' : 'a single GPS track'}. The digest gives each leg, each transition broken into standing and moving time, the bike's two halves against the run's three thirds, and up to five earlier races in the same sport order. Athlete level: ${level}. ${unitsRule || ''}
 
 What makes this analysis different is the time BETWEEN the legs, which other tools do not see: lead with the transitions and the bike-to-run seam, not with a leg-by-leg recap the athlete already has on screen.
@@ -19365,7 +19400,9 @@ ${fromFile
     : '- Transitions are ESTIMATED from GPS pace, not timed at the mats. Talk about standing versus moving inside them, not about exact seconds.'}
 - One race cannot show that the bike CAUSED a run fade. Say what changed; if earlier races are in the digest and show the same pattern, you may say the pattern repeats. Never claim causation from one race.
 - There is no power, no cadence and no swim stroke data. Do not invent them, and do not prescribe watts, zones or a pacing plan in numbers the digest does not contain.
-- The swim distance is an upper bound (GPS runs long in the water); do not coach swim pace from it.
+${swimFromFile
+    ? '- The swim distance is the file\'s own total for that leg (what the watch measured), not a sum of GPS fixes, so the swim\'s pace can be quoted as recorded.'
+    : '- The swim distance is an upper bound (GPS runs long in the water); do not coach swim pace from it.'}
 - Do not compete with training-load tools: no TSS, CTL or fatigue modelling.
 
 Give at most three concrete things to practise, each tied to a number in the digest.`;
@@ -19418,7 +19455,12 @@ function fitMultisportRace(messages, title = '') {
     /* total_elapsed_time, not the message timestamp: the timestamp is when the session was
        written, which a stitcher may set to anything. */
     const t1 = f[7] != null ? t0 + f[7] / 1000 : (f[253] != null ? f[253] + FIT_EPOCH_UNIX : null);
-    return { sport: f[5], t0, t1 };
+    /* total_distance (cm) is the watch's own figure for the leg, and pool_length_unit is FIT
+       display_measure (1 = statute: a pool declared in yards). Both ride on the leg, because the
+       leg's own view reads them off this same session (swimPayloadFromFit) and the race's row for
+       that leg has to say what the view it opens says. Summed from the track instead, the row put
+       the Santa Cruz swim at 1967 m and 2:19/100yd beside a view reading 1478 m and 3:23/100m. */
+    return { sport: f[5], t0, t1, distanceM: f[9] > 0 ? f[9] / 100 : null, swimUnit: f[46] === 1 ? 'yd' : 'm' };
   }).filter(s => s.t1 != null && s.t1 > s.t0).sort((a, b) => a.t0 - b.t0);
 
   const legs = [];
@@ -19426,7 +19468,7 @@ function fitMultisportRace(messages, title = '') {
     if (s.sport === TRI_FIT_TRANSITION) continue;
     const sport = TRI_FIT_SPORTS[s.sport];
     if (!sport) return null;
-    legs.push({ sport, t0: s.t0, t1: s.t1 });
+    legs.push({ sport, t0: s.t0, t1: s.t1, distanceM: s.distanceM, ...(sport === 'swim' ? { swimUnit: s.swimUnit } : {}) });
   }
   if (legs.length < 2 || new Set(legs.map(l => l.sport)).size < 2) return null;
 
@@ -19548,7 +19590,7 @@ function routeLegFit(points, sport) {
   return bytes;
 }
   /* ---- end fit.js ---- */
-  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages, raceLegRoute, routeSwimPayload, routeLegFit };
+  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, swimDistanceSource, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages, raceLegRoute, routeSwimPayload, routeLegFit };
 })();
 
 /* ===== Ski SK1: the indoor (dome) read ====================================== *
@@ -31456,14 +31498,13 @@ function triSportLabel(sport) {
   return loamT(sport === 'swim' ? 'Swim leg' : sport === 'bike' ? 'Bike leg' : 'Run leg');
 }
 
-/* Each leg in its own sport's currency: a swim per 100, a ride in speed, a run in pace. */
-function triPaceLabel(sport, mps) {
+/* Each leg in its own sport's currency: a swim per 100, a ride in speed, a run in pace. A swim reads
+   in the unit and through the formatter of the swim view its row opens (`swimUnit`, see analyzeRace),
+   not in the page's miles-or-kilometres: the row used to say "/100yd" on an imperial page beside a
+   view saying "/100m" for the same leg. */
+function triPaceLabel(sport, mps, swimUnit) {
   if (!(mps > 0)) return '—';
-  if (sport === 'swim') {
-    const per = U.metric() ? 100 : 91.44;
-    const sec = Math.round(per / mps);
-    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}/100${U.metric() ? 'm' : 'yd'}`;
-  }
+  if (sport === 'swim') return LoamSwim.swimPaceLabel(100 / mps, swimUnit === 'yd' ? 'yd' : 'm');
   return sport === 'bike' ? U.speed(mps) : U.pace(mps);
 }
 
@@ -31577,10 +31618,17 @@ function renderTriathlon(D) {
     if (trans && e.none) {
       return `<tr class="tri-trans"><td>${dot}${escapeHtml(e.label)}</td><td colspan="6">${loamT('no transition found: the legs meet')}</td></tr>`;
     }
+    /* A swim leg is listed the way the view it opens lists it: the swim's own unit, the swim view's
+       own formatters, so one swim cannot print two ways on two screens. The `~` marks a figure summed
+       from GPS fixes, which run long in the water, and it goes on the pace too, since that pace is
+       the same distance over the clock. A distance the file itself recorded carries none. */
+    const swim = !trans && e.sport === 'swim';
+    const noDist = !trans && !(e.distanceM > 0);
+    const gpsLong = swim && e.distanceFrom !== 'file' ? ' <span title="' + escapeHtml(loamT('GPS runs long on a swim')) + '">~</span>' : '';
     return `<tr${trans ? ' class="tri-trans"' : openable ? ' class="tri-leg-row" style="cursor:pointer"' : ''}${legTap(e)}><td>${dot}${escapeHtml(nameOf(e))}${!trans && openable ? ' &rsaquo;' : ''}</td>
       <td>${triClock(e.durationS)}</td><td>${e.sharePct.toFixed(1)}%</td>
-      <td>${!trans && !(e.distanceM > 0) ? '—' : U.dist(e.distanceM)}${!trans && !(e.distanceM > 0) ? '' : e.sport === 'swim' ? ' <span title="' + escapeHtml(loamT('GPS runs long on a swim')) + '">~</span>' : ''}</td>
-      <td>${trans ? '—' : triPaceLabel(e.sport, e.avgSpeedMps)}</td>
+      <td>${noDist ? '—' : (swim ? LoamSwim.swimDistanceLabel(e.distanceM, e.swimUnit) : U.dist(e.distanceM)) + gpsLong}</td>
+      <td>${trans ? '—' : triPaceLabel(e.sport, e.avgSpeedMps, e.swimUnit) + (e.avgSpeedMps > 0 ? gpsLong : '')}</td>
       <td>${e.hrAvg != null ? e.hrAvg : '—'}</td>
       <td>${e.elevGainM != null ? U.elev(e.elevGainM) : '—'}</td></tr>`;
   }).join('');
@@ -31623,7 +31671,11 @@ function renderTriathlon(D) {
     <div class="panel"><div id="triMap" style="height:360px;border-radius:10px;overflow:hidden"></div></div>
     <div id="triHistory"></div>
     ${fromFile ? betaCaveat(
-      loamT('triathlon is exploratory in Loam. The leg and transition times are your file\'s; a swim\'s GPS distance runs long (33% over the course on the one race measured), so read the swim distance as an upper bound.'),
+      /* Only a swim summed from the track is an upper bound. A FIT race's swim is listed at the
+         distance its file recorded, and telling that athlete to distrust it would be a false caveat. */
+      LoamTri.swimDistanceSource(A) === 'file'
+        ? loamT('triathlon is exploratory in Loam. The leg and transition times are your file\'s, and each leg\'s distance is the one your file recorded for it, not a sum of GPS fixes.')
+        : loamT('triathlon is exploratory in Loam. The leg and transition times are your file\'s; a swim\'s GPS distance runs long (33% over the course on the one race measured), so read the swim distance as an upper bound.'),
       loamT('A sprint race, where the legs are short and the transitions a bigger share, has not been tested.')) : betaCaveat(
       loamT('triathlon is exploratory in Loam. The transition rule was built on one real race (a 2011 half-iron GPX) and synthetic races, and a swim\'s GPS distance runs long (33% over the course on that race), so read the swim distance as an upper bound.'),
       loamT('A multisport FIT from your watch carries its own leg boundaries and is read with those instead. A sprint race, where the legs are short and the transitions a bigger share, has not been tested.'))}`;
@@ -37681,6 +37733,7 @@ const LOAM_NB = {
   'Back to the race': 'Tilbake til løpet',
   '<strong>One race, read from the segments you named.</strong> The legs and the transitions are your file\'s own segments; Loam reads the time between the legs.': '<strong>Ett løp, lest fra segmentene du navnga.</strong> Etappene og vekslingene er filens egne segmenter; Loam leser tiden mellom etappene.',
   'triathlon is exploratory in Loam. The leg and transition times are your file\'s; a swim\'s GPS distance runs long (33% over the course on the one race measured), so read the swim distance as an upper bound.': 'triatlon er utforskende i Loam. Etappe- og vekslingstidene er filens; GPS-distansen på svømming blir for lang (33 % over løypa på det ene målte løpet), så les svømmedistansen som en øvre grense.',
+  'triathlon is exploratory in Loam. The leg and transition times are your file\'s, and each leg\'s distance is the one your file recorded for it, not a sum of GPS fixes.': 'triatlon er utforskende i Loam. Etappe- og vekslingstidene er filens, og distansen på hver etappe er den filen selv har registrert, ikke en sum av GPS-punkter.',
   'A sprint race, where the legs are short and the transitions a bigger share, has not been tested.': 'Et sprintløp, der etappene er korte og vekslingene en større andel, er ikke testet.',
   '{t} of {label} was not recorded, so it counts as neither.': '{t} av {label} ble ikke registrert, så det regnes som ingen av delene.',
   'A transition here starts at the last sustained minute at the previous leg\'s own pace and ends at the first sustained minute at the next one\'s, so a run up the beach, a wetsuit strip and a jog with the bike all count as T1. It is an estimate from GPS pace alone: nothing here knows where the timing mats were.': 'En veksling her starter ved det siste sammenhengende minuttet i forrige etappes eget tempo og slutter ved det første sammenhengende minuttet i den nestes, så løpet opp fra stranden, våtdraktbyttet og joggen med sykkelen teller alle som T1. Det er et anslag fra GPS-tempo alene: ingenting her vet hvor tidtakingsmattene lå.',
@@ -42995,7 +43048,8 @@ function coachSystemPrompt(sport, level, metric, source) {
      analyzer/core/training/drift.test.js rather than by the coaching guard (which declares it). */
   if (sport === 'training') return LoamTraining.trainingCoachPrompt(level, units);
   /* A triathlon race (TRI-4): its prompt lives in the drift-pinned LoamTri port, like the plan's. */
-  if (sport === 'triathlon') return LoamTri.raceCoachPrompt(level, units, !!(_triLastRendered && _triLastRendered.race.transitionsFrom === 'file'));
+  if (sport === 'triathlon') return LoamTri.raceCoachPrompt(level, units, !!(_triLastRendered && _triLastRendered.race.transitionsFrom === 'file'),
+    !!(_triLastRendered && LoamTri.swimDistanceSource(_triLastRendered.analysis) === 'file'));
   const sportName = sport === 'running' ? 'running' : sport === 'walking' ? 'walking and hiking' : 'mountain biking';
   /* SKIING. It reuses the MTB READS -- descents, body-frame turns, lean off the gravity vector --
      because a ski run and an MTB descent are the same measurement, but it must not reuse the MTB
@@ -46746,13 +46800,20 @@ const TL_BIKE_ROW_PX = 92;      // a supporting row
    in 5% of the row. Symmetric so left and right turns stay equal height; p99 rather than max so one
    spike does not flatten the rest again; floored so a straight ride's sensor noise is not blown up
    into fake corners, and capped at the old +/-200. Rides no longer share one scale -- the tick labels
-   carry the magnitude. */
+   carry the magnitude.
+   A DETECTED TURN IS NOT A SPIKE, so `peaks` (the turns' own peak rates) widen the range past p99:
+   on a long ride the corners are under 1% of the samples, and p99 alone drew the sharpest of them
+   as flat tops against the row's edge (37 of 484 on a 78 min ride). Rounded before the ceil because
+   100 * 1.1 is 110.00000000000001 and went up a whole step. */
 const TL_YAW_RANGE_MIN = 30;
 const TL_YAW_RANGE_MAX = 200;
-function tlYawRange(y) {
+function tlYawRange(y, peaks) {
   const a = y.filter(v => v != null && isFinite(v)).map(Math.abs).sort((p, q) => p - q);
   const p99 = a.length ? a[Math.min(a.length - 1, Math.floor(a.length * 0.99))] : 0;
-  const half = Math.min(TL_YAW_RANGE_MAX, Math.max(TL_YAW_RANGE_MIN, Math.ceil(p99 * 1.1 / 10) * 10));
+  let peak = 0;
+  for (const v of peaks || []) if (v != null && isFinite(v) && Math.abs(v) > peak) peak = Math.abs(v);
+  const step = (v) => Math.ceil(+(v / 10).toFixed(6)) * 10;
+  const half = Math.min(TL_YAW_RANGE_MAX, Math.max(TL_YAW_RANGE_MIN, step(p99 * 1.1), step(peak)));
   return [-half, half];
 }
 
@@ -46775,7 +46836,7 @@ function bikeTimelineRows(D) {
       if (D.t[i] >= ride.start - 5 && D.t[i] <= ride.end + 5) { x.push(D.t[i] - ride.start); y.push(D.yawSeg[i]); }
     }
     rows.push({ key: 'turning', label: loamT('turning'), title: loamT('turning (°/s)'), color: '#e87b3d',
-      range: tlYawRange(y),
+      range: tlYawRange(y, (D.turns || []).map(T => T.peakRate)),
       traces: [{ x, y, line: { color: '#e87b3d', width: 1.3 }, name: loamT('Yaw rate'), hovertemplate: '%{y:.0f}°/s' }] });
   }
 
@@ -51939,7 +52000,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '2a756026a · 2026-10-10';
+const LOAM_BUILD = '3d849f578 · 2026-10-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
