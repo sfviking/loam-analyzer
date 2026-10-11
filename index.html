@@ -1575,6 +1575,18 @@
      footnote, but it must not compete with the verdict it explains. */
   .run-pacing .rp-why { color: var(--text); }
   #runBestEfforts { border-top: 1px solid var(--border); padding-top: 14px; }
+  /* The Cooper test's result, above the splits it was run inside. The figures wrap as whole
+     figure-plus-caption pairs, so a 375px phone stacks them rather than splitting a number from
+     what it measures. */
+  #runCooper { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 14px; }
+  .cooper-figs { display: flex; flex-wrap: wrap; gap: 10px 32px; margin: 4px 0 2px; }
+  .cooper-fig .cooper-num {
+    font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600; font-size: 26px;
+    line-height: 1.1; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums;
+  }
+  .cooper-fig.accent .cooper-num { color: var(--accent); }
+  .cooper-fig .cooper-cap { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+  .cooper-note { margin-top: 8px; font-size: 12.5px; line-height: 1.5; color: var(--text); }
   .be-title {
     font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; font-weight: 600;
     color: var(--text); letter-spacing: 0.02em; margin-bottom: 8px;
@@ -3330,6 +3342,7 @@
       <span class="subtitle"><span id="runSplitsLabel"></span></span>
     </div>
     <div class="panel">
+      <div id="runCooper" class="hidden"></div>
       <div id="runPacing" class="run-pacing hidden analysis-explanation"></div>
       <div style="overflow-x:auto;">
         <!-- THERE IS NO TIME COLUMN, and that is not a cut for room (owner, 2026-09-17: "I don't
@@ -12738,6 +12751,91 @@ function computeBestEfforts(loc, ride, distances) {
     if (b) out.push({ ...d, ...b });
   }
   return out;
+}
+
+/* ========== Cooper test (ported from analyzer/sports/running/cooper.js) === *
+ * How far the runner got in the 12 minutes after the capture app's `Cooper Test` mark, and the
+ * VO2 max Cooper's regression (JAMA 1968) estimates from it: (metres - 504.9) / 44.73.
+ *
+ * Only for a recording that carries the mark. "The best 12 minutes of any run" is deliberately not
+ * offered: the regression describes an ALL-OUT effort, and an easy run pushed through it reports an
+ * easy run's distance as the runner's aerobic capacity.
+ *
+ * The window is the clock (720 unpaused seconds after the mark), not the Segment End the app also
+ * stamps, and the distance is read off beCheckpoints, so it refuses drift, teleports and paused
+ * stretches exactly as the splits table above it does. See the module header for the rest. */
+const COOPER_SECONDS = 720;
+const COOPER_MARK = 'cooper test';
+/* 1,000 m in 12 minutes is 5 km/h, a walk; the regression reads 11 there and crosses zero at 505 m.
+   CooperTest.minMetersForEstimate in the capture app is the same number. */
+const COOPER_MIN_M = 1000;
+/* The last fix lands up to a second before Stop does. */
+const COOPER_END_SLACK_S = 2;
+
+function cooperVo2max(meters) {
+  if (!(meters >= COOPER_MIN_M)) return null;
+  return (meters - 504.9) / 44.73;
+}
+
+/* EXACT match, the rule the Pause marks follow: the app writes this text, nobody speaks it, and a
+   substring rule would read a runner's own note as a test. */
+function findCooperStart(annotations) {
+  let t = null;
+  for (const a of (annotations || [])) {
+    if (!a || !Number.isFinite(a.t)) continue;
+    if (String(a.text == null ? '' : a.text).trim().toLowerCase() !== COOPER_MARK) continue;
+    if (t == null || a.t < t) t = a.t;
+  }
+  return t;
+}
+
+/* A paused stretch inside the window pushes the end out by its length, which can bring a later
+   pause inside too, so the spans are walked in order rather than summed over a fixed window. */
+function cooperWindowEnd(tStart, pausedSpans) {
+  let tEnd = tStart + COOPER_SECONDS;
+  const spans = (pausedSpans || []).slice().sort((a, b) => a.start - b.start);
+  for (const p of spans) {
+    if (p.end <= tStart) continue;
+    if (p.start >= tEnd) break;
+    tEnd += p.end - Math.max(p.start, tStart);
+  }
+  return tEnd;
+}
+
+function cooperGroundAt(pts, t) {
+  if (t <= pts[0].t) return pts[0].d;
+  const last = pts[pts.length - 1];
+  if (t >= last.t) return last.d;
+  let lo = 0, hi = pts.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid].t <= t) lo = mid; else hi = mid;
+  }
+  const span = pts[hi].t - pts[lo].t;
+  return pts[lo].d + (span > 0 ? (pts[hi].d - pts[lo].d) * (t - pts[lo].t) / span : 0);
+}
+
+/* The ride WINDOW is deliberately not read: a runner who stops dead at the whistle can have the
+   active window end at the whistle, and the test must not be judged unfinished by a window drawn
+   for a different question. */
+function cooperTest(annotations, loc, ride) {
+  const tStart = findCooperStart(annotations);
+  if (tStart == null) return null;
+  const paused = (ride && ride.pausedSpans) || [];
+  const tFull = cooperWindowEnd(tStart, paused);
+  const pts = beCheckpoints(loc, { start: -Infinity, end: Infinity, pausedSpans: paused });
+  let lastT = tStart;
+  for (const r of (loc || [])) if (r && Number.isFinite(r.t) && r.t > lastT) lastT = r.t;
+  const complete = lastT >= tFull - COOPER_END_SLACK_S;
+  const tEnd = complete ? tFull : lastT;
+  const pausedS = pausedOverlapS(paused, tStart, tEnd);
+  const seconds = complete ? COOPER_SECONDS : Math.max(0, tEnd - tStart - pausedS);
+  const meters = pts.length >= 2 ? cooperGroundAt(pts, tEnd) - cooperGroundAt(pts, tStart) : null;
+  return {
+    tStart, tEnd, complete, seconds, pausedS, meters,
+    speedMps: meters != null && seconds > 0 ? meters / seconds : null,
+    vo2max: complete && meters != null ? cooperVo2max(meters) : null,
+  };
 }
 
 /* ========== Library (IndexedDB persistence) ===
@@ -31903,12 +32001,16 @@ function renderRunDistanceReads(D) {
      raises but cannot settle ("so how fast can I run a mile"), and reading them side by side is
      what makes the difference between the two obvious. */
   renderRunBestEfforts(computeBestEfforts(rows, D.ride), splits);
+  /* A Cooper test reads off the same fixes under the same rules, and only when the recording
+     carries the capture app's mark; null (and a hidden block) for every other run. */
+  const cooper = cooperTest((D.sensors && D.sensors.annotations) || [], rows, D.ride);
+  renderRunCooper(cooper);
   /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
      grade adjustment and the GAP column can never disagree about the hill. */
   const pacing = runPacing(splits, alts);
   const factors = stridePaceFactors(splits, (D.sensors && D.sensors.pedometer) || []);
   renderRunPacing(pacing, unitLabel, factors);
-  if (isRunAnalysis(D)) renderRunningTakeaway(D, pacing, unitLabel);
+  if (isRunAnalysis(D)) renderRunningTakeaway(D, pacing, unitLabel, cooper);
 }
 
 /* A FOOT ACTIVITY READS ITS OWN NUMBERS FIRST, and the segmentation table is not one of them
@@ -36441,6 +36543,28 @@ const LOAM_NB = {
   'your fastest split was this stretch': 'den raskeste mellomtiden din var nettopp dette strekket',
   'Found by sliding each distance across the whole run rather than reading it off the split markers, so a fast stretch that straddled a marker still counts. Ground covered while you were standing still does not: those fixes wander, and a window that counted them would report a mile you did not run.':
     'Funnet ved å skyve hver distanse gjennom hele turen i stedet for å lese den av mellomtidsmerkene, slik at et raskt strekk som lå på tvers av et merke også teller. Distanse du dekket mens du sto stille, teller ikke: de GPS-punktene vandrer, og et vindu som tok dem med, ville rapportert en kilometer du aldri løp.',
+  /* The Cooper test's result block and the highlight that leads with it. "VO2 maks" as the app's
+     own Vitals screen writes it. */
+  'Cooper test': 'Coopertest',
+  '12 minutes, as far as you can run': '12 minutter, så langt du klarer å løpe',
+  'Cooper test: <strong>{dist}</strong> in 12 minutes, an estimated VO2 max of <strong>{vo2}</strong>.':
+    'Coopertest: <strong>{dist}</strong> på 12 minutter, som gir en estimert VO2 maks på <strong>{vo2}</strong>.',
+  'Cooper test: <strong>{dist}</strong> in 12 minutes.': 'Coopertest: <strong>{dist}</strong> på 12 minutter.',
+  'Measured on GPS over the 12 minutes. The VO2 max is an estimate from the distance, not a measurement.':
+    'Målt med GPS over de 12 minuttene. VO2 maks er et estimat ut fra distansen, ikke en måling.',
+  'in 12:00': 'på 12:00',
+  'estimated VO2 max · ml/kg/min': 'estimert VO2 maks · ml/kg/min',
+  'average pace': 'snittempo',
+  'This recording has no GPS track in the 12 minutes, so the distance could not be measured.':
+    'Dette opptaket har ikke noe GPS-spor i de 12 minuttene, så distansen kunne ikke måles.',
+  'Cut short: the recording holds {t} of the 12 minutes ({dist}), so there is no result.':
+    'Avbrutt: opptaket inneholder {t} av de 12 minuttene ({dist}), så det finnes ikke noe resultat.',
+  'No VO2 max estimate under {dist}: that is walking pace, and the formula describes an all-out run.':
+    'Ingen estimert VO2 maks under {dist}: det er gangfart, og formelen beskriver et løp for fullt.',
+  'The recording was paused for {t} inside the test, so this is not 12 continuous minutes.':
+    'Opptaket sto på pause i {t} under testen, så dette er ikke 12 sammenhengende minutter.',
+  'The ground you covered in the 12 minutes after the test started, measured on GPS under the same rules as the splits below, to the nearest 10 m. VO2 max is Cooper\'s 1968 estimate, (metres − 504.9) ÷ 44.73. It assumes an all-out run on flat ground, so hills, stops or holding back all read as a lower number. On a track, counted laps are more exact than GPS.':
+    'Distansen du tilbakela i de 12 minuttene etter at testen startet, målt med GPS etter de samme reglene som mellomtidene under, til nærmeste 10 m. VO2 maks er Coopers estimat fra 1968, (meter − 504,9) ÷ 44,73. Det forutsetter et løp for fullt på flatt underlag, så bakker, stopp eller å holde igjen gir alle et lavere tall. På bane er opptelte runder mer nøyaktige enn GPS.',
 
   'run': 'etappe',
   'runs': 'etapper',
@@ -38688,7 +38812,7 @@ function renderGeekStats(D, sport) {
   let dg;
   /* Same digest the coach gets, scoped the same way: this panel IS that digest, and a debug dump
      that disagreed with what the model was told would be worse than no dump. */
-  try { dg = buildDigest(coachDigestD(D, sport), sport, U.metric()); } catch (e) { hide('geekStatsSection'); return; }
+  try { dg = sessionDigest(D, sport); } catch (e) { hide('geekStatsSection'); return; }
   const rows = [];
   const human = k => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   const walk = (obj, prefix) => {
@@ -41511,6 +41635,57 @@ function renderRunBestEfforts(efforts, splits) {
   el.classList.remove('hidden');
 }
 
+/* The distance a Cooper test is quoted at: the nearest 10 m, which is finer than GPS resolves over
+   12 minutes and is what the capture app's voice read out at the whistle (CooperTest.spokenMeters).
+   Metres whatever the unit setting, because the test is defined in them. */
+function cooperMetres(m) { return (Math.round(m / 10) * 10).toLocaleString() + ' m'; }
+/* One sentence, shared by the block below and the highlights card so they cannot disagree. */
+function cooperLead(c) {
+  if (!c || !c.complete || c.meters == null) return null;
+  return c.vo2max != null
+    ? loamT('Cooper test: <strong>{dist}</strong> in 12 minutes, an estimated VO2 max of <strong>{vo2}</strong>.',
+        { dist: cooperMetres(c.meters), vo2: Math.round(c.vo2max) })
+    : loamT('Cooper test: <strong>{dist}</strong> in 12 minutes.', { dist: cooperMetres(c.meters) });
+}
+
+/*
+ * The 12 minute Cooper test, when this recording is one (`cooperTest` returned a result).
+ *
+ * Sits at the top of the splits panel: on a test the 12 minutes ARE the read, and the splits under
+ * it are how they were run. Three shapes, and only the first quotes a VO2 max:
+ *   finished    the distance, the estimate (withheld under COOPER_MIN_M) and the average pace
+ *   cut short   how much of the 12 minutes the recording holds, and no estimate
+ *   no GPS      that there was nothing to measure
+ */
+function renderRunCooper(c) {
+  const el = document.getElementById('runCooper');
+  if (!el) return;
+  if (!c) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const clock = (sec) => { const tot = Math.round(sec); return Math.floor(tot / 60) + ':' + String(tot % 60).padStart(2, '0'); };
+  const title = `<div class="be-title">${loamT('Cooper test')} <span class="be-sub">${loamT('12 minutes, as far as you can run')}</span></div>`;
+  let body;
+  if (c.meters == null) {
+    body = `<div class="cooper-note">${loamT('This recording has no GPS track in the 12 minutes, so the distance could not be measured.')}</div>`;
+  } else if (!c.complete) {
+    body = `<div class="cooper-note">${loamT('Cut short: the recording holds {t} of the 12 minutes ({dist}), so there is no result.', { t: clock(c.seconds), dist: cooperMetres(c.meters) })}</div>`;
+  } else {
+    /* The unit setting's own distance beside the metres for an imperial reader; for a metric one
+       it would be the same number again. */
+    const also = U.metric() ? '' : ' · ' + U.dist(c.meters);
+    const figs = [`<div class="cooper-fig accent"><div class="cooper-num">${cooperMetres(c.meters)}</div><div class="cooper-cap">${loamT('in 12:00')}${also}</div></div>`];
+    if (c.vo2max != null) figs.push(`<div class="cooper-fig"><div class="cooper-num">${Math.round(c.vo2max)}</div><div class="cooper-cap">${loamT('estimated VO2 max · ml/kg/min')}</div></div>`);
+    figs.push(`<div class="cooper-fig"><div class="cooper-num">${U.pace(c.speedMps)}</div><div class="cooper-cap">${loamT('average pace')}</div></div>`);
+    const notes = [];
+    if (c.vo2max == null) notes.push(loamT('No VO2 max estimate under {dist}: that is walking pace, and the formula describes an all-out run.', { dist: cooperMetres(COOPER_MIN_M) }));
+    if (c.pausedS > 0) notes.push(loamT('The recording was paused for {t} inside the test, so this is not 12 continuous minutes.', { t: clock(c.pausedS) }));
+    body = `<div class="cooper-figs">${figs.join('')}</div>`
+      + notes.map((n) => `<div class="cooper-note">${n}</div>`).join('')
+      + `<div class="be-foot">${loamT('The ground you covered in the 12 minutes after the test started, measured on GPS under the same rules as the splits below, to the nearest 10 m. VO2 max is Cooper\'s 1968 estimate, (metres − 504.9) ÷ 44.73. It assumes an all-out run on flat ground, so hills, stops or holding back all read as a lower number. On a track, counted laps are more exact than GPS.')}</div>`;
+  }
+  el.innerHTML = title + body;
+  el.classList.remove('hidden');
+}
+
 /* `alts` is the SAME `climbAltSeries` the pacing verdict under this table grade-adjusts with, and
    `cadSeries` the SAME final series the cadence tile and chart above it read, both passed in rather
    than re-derived here. A per-row grade computed a second way, or a cadence read off a series the
@@ -42124,17 +42299,22 @@ function openRunEvidence(id) {
   el.scrollIntoView({ behavior: 'auto', block: 'start' });
 }
 
-function renderRunningTakeaway(D, pacing, unitLabel) {
+function renderRunningTakeaway(D, pacing, unitLabel, cooper) {
   const card = document.getElementById('coachHighlightsCard');
-  const lead = runPacingLead(pacing, unitLabel);
-  const terrain = pacing && pacing.reason === 'terrain';
-  const text = lead || loamT(terrain
+  /* A finished Cooper test IS the highlight: the recording was made to get that number, and a
+     pacing verdict over a warm-up, a 12 minute effort and a cool-down describes the workout's
+     shape rather than the run. */
+  const test = cooperLead(cooper);
+  const lead = test ? null : runPacingLead(pacing, unitLabel);
+  const terrain = !test && pacing && pacing.reason === 'terrain';
+  const text = test || lead || loamT(terrain
     ? 'The halves covered different terrain. Raw and grade-adjusted pace disagree, so no pacing verdict is shown.'
     : 'Explore where your pace changed. There are not enough comparable full splits for a pacing verdict yet.');
-  const context = lead ? loamT(pacing.gradeAdjusted
+  const context = test ? loamT('Measured on GPS over the 12 minutes. The VO2 max is an estimate from the distance, not a measurement.')
+    : lead ? loamT(pacing.gradeAdjusted
     ? 'Compared on grade-adjusted pace. GAP estimates the effect of hills; it does not measure effort.'
     : 'Compared on raw pace. Terrain was not measured well enough to adjust this comparison.') : '';
-  const target = lead || terrain ? 'runSplitsSection' : 'timelineSection';
+  const target = test || lead || terrain ? 'runSplitsSection' : 'timelineSection';
   card.innerHTML = `<h3>${loamT('Run highlights')}</h3>
     <div class="do-slot"><span class="do-badge">${loamT('OBSERVATION')}</span><span class="do-text">${text}</span></div>
     ${context ? `<p class="run-takeaway-context">${context}</p>` : ''}
@@ -42363,6 +42543,33 @@ function digestUnits(metric) {
 
 /* `metric` is the athlete's Units toggle (U.metric()); every distance, speed, pace, and elevation
    below is emitted in that system via digestUnits, so the coach speaks the units the athlete reads. */
+/* The Cooper test, for the coach, when this recording is one. The note is written into the digest
+   rather than left to the system prompt because it is a fact about the NUMBER: the estimate is a
+   regression on distance, and a coach handed a bare `vo2max` will quote it as measured.
+   Attached by sessionDigest rather than built inside buildDigest: that function is pinned body for
+   body to analyzer/core/coaching, and core cannot import a sport module to measure this. */
+function cooperDigest(D) {
+  const c = cooperTest((D.sensors && D.sensors.annotations) || [], (D.sensors && D.sensors.location) || [], D.ride);
+  if (!c) return {};
+  return { cooper_test: {
+    started_at_min: +(((c.tStart - ((D.ride && D.ride.start) || 0)) / 60).toFixed(1)),
+    completed_12_min: c.complete,
+    seconds_recorded: Math.round(c.seconds),
+    distance_m: c.meters != null ? Math.round(c.meters / 10) * 10 : null,
+    estimated_vo2max_ml_kg_min: c.vo2max != null ? Math.round(c.vo2max) : null,
+    paused_s_inside_test: Math.round(c.pausedS),
+    note: 'A guided 12 minute Cooper test: after a warm-up the runner covers as much ground as possible in 12 minutes. distance_m is GPS distance over those 12 minutes. estimated_vo2max is Cooper\'s 1968 regression, (distance_m - 504.9) / 44.73: an ESTIMATE from distance, not a measurement, and it assumes an all-out effort on flat ground, so hills, stops or holding back lower it. It is null when the test was cut short or the distance is under 1000 m. Do not rate it against age or sex norms (neither is known), and do not compare it with a watch VO2 max as if the two were the same measurement.',
+  } };
+}
+
+/* The digest every coach surface on a session reads: buildDigest, plus what a sport module adds
+   that the pinned core function cannot compute for itself. */
+function sessionDigest(D, sport) {
+  const digest = buildDigest(coachDigestD(D, sport), sport, U.metric());
+  if (sport === 'running' || sport === 'walking') Object.assign(digest, cooperDigest(D));
+  return digest;
+}
+
 function buildDigest(D, sport, metric) {
   const s = D.summary || {};
   const u = digestUnits(metric);
@@ -43632,7 +43839,7 @@ function coachInputPlaceholder(sport, opts) {
 function refreshCoachFacts(D, sport) {
   if (!coachState || !coachState.digest || coachState.sport !== sport) return;
   try {
-    coachState.digest = buildDigest(coachDigestD(D, sport), sport, U.metric());
+    coachState.digest = sessionDigest(D, sport);
   } catch (e) { return; }
   coachState.digestReady = Promise.allSettled([
     attachCoachHistory(D, sport),
@@ -43648,7 +43855,7 @@ function renderCoachPanel(D, sport, opts = {}) {
      `opts.digest` is a digest built elsewhere -- the training plan's, which is not a session and has
      no D to build one from -- and it arrives complete, so nothing is attached to it below. */
   const prebuilt = opts && opts.digest;
-  coachState = { sport, digest: prebuilt || buildDigest(coachDigestD(D, sport), sport, U.metric()), messages: [], streaming: false };
+  coachState = { sport, digest: prebuilt || sessionDigest(D, sport), messages: [], streaming: false };
   show('coachSection');
   /* Fold recent same-sport sessions from the library into the digest so coaching can speak to a
      trend ("your weak-side radius improved since last week"), not just this one ride. Async and
@@ -52000,7 +52207,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '3d849f578 · 2026-10-11';
+const LOAM_BUILD = 'c4304d499 · 2026-10-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
