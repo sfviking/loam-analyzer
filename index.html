@@ -2460,6 +2460,23 @@
     .strength-table.tri-table th, .strength-table.tri-table td { padding: 8px 6px; }
     .tri-seam > :is(.swim-mech, .strength-tablenote) { padding-left: 6px; padding-right: 6px; }
   }
+  /* The race history names a race in its first column, as long as the athlete made it ("2024-10-27
+     Ironman California (stitched)"). Kept to one line it was the table's whole width on a phone and
+     every number sat off the right edge. It wraps, anywhere, since a file name has no spaces. */
+  .tri-hist > tbody > tr:not(.tri-hist-detail) > td:first-child { white-space: normal; overflow-wrap: anywhere; min-width: 7em; }
+  .tri-delta { display: block; font-size: 11px; color: var(--text-muted, #7a808c); }
+  .tri-hist-this td { font-weight: 600; }
+  .tri-hist-row { cursor: pointer; }
+  .tri-hist-btn { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; text-align: left; cursor: pointer; }
+  .tri-hist-btn::after { content: ' \25B8'; }
+  .tri-hist-btn[aria-expanded="true"]::after { content: ' \25BE'; }
+  .tri-hist-row.open > td { border-bottom: 0; }
+  .tri-hist > tbody > tr.tri-hist-detail > td { padding: 0 0 12px; white-space: normal; }
+  .tri-hist-legs { background: var(--surface-2, transparent); border-radius: 8px; }
+  /* The leg table sits in one cell of the race table, so its width is the race table's: four columns
+     of one-line clocks under one-line headings were wider than a phone and pushed the race table's
+     own numbers back off the edge. Headings and leg names may wrap; the clocks still may not. */
+  .tri-hist-legs th, .tri-hist-legs td:first-child { white-space: normal; }
   .tri-leg-open { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 12px; }
   .tri-leg-open > .tri-leg-prompt { flex-basis: 100%; }
   .tri-leg-btn { padding: 8px 14px; min-height: 44px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--accent); font-weight: 600; cursor: pointer; white-space: nowrap; }
@@ -7404,10 +7421,17 @@ function segmentRuns(D, mode) {
     }
   }
   /* Opt-in only: Auto above never lands here, because on a run that was not intervals every slow
-     stretch would read as a recovery (see detectIntervals). */
+     stretch would read as a recovery (see detectIntervals).
+     A recording that carries its own rep marks is read from THEM, not re-found from pace. A guided
+     workout stamps Segment Start/End at every rep the voice calls (and a runner may tap them), so
+     the marks are the reps to the second, while the pace detector read a hilly 4x4 as four efforts
+     of the wrong length -- the last a 13-minute "Rep 4" that was the whole descent (owner report,
+     2026-10-11). `fromMarks` tells the panel which of the two it is showing. */
   else if (chosen === 'intervals') {
-    intervalInfo = detectIntervals(sensors.location || [], D.ride, (D.ride && D.ride.pausedSpans) || [],
-      climbAltSeries(sensors.baro || [], sensors.location || [], D.ride));
+    intervalInfo = marks.length
+      ? { runs: marks, blocks: [], fromMarks: true }
+      : detectIntervals(sensors.location || [], D.ride, (D.ride && D.ride.pausedSpans) || [],
+        climbAltSeries(sensors.baro || [], sensors.location || [], D.ride));
     raw = intervalInfo.runs;
   }
   const runs = raw.map((r, i) => ({
@@ -7423,6 +7447,18 @@ function segmentRuns(D, mode) {
 }
 
 let _runsMode = 'auto';
+
+/* The segmentation the PANEL shows. On a run, Auto shows Segment Start/End marks as REPS: there they
+   are efforts -- a guided workout's reps, stamped as the voice calls them, or a hill the runner
+   marked -- and "4 runs from your Segment Start/End taps" over a workout nobody tapped read wrong
+   ("I was expecting something similar to reps", owner, 2026-10-11). The intervals view reads marks
+   first (see segmentRuns), so the rows are the marks, named Rep N. Only the panel: every other
+   caller's segmentRuns(D, 'auto') still gets 'marks', and "Marked runs" still offers the old view. */
+function runsPanelMode(D) {
+  if (_runsMode !== 'auto' || !D) return _runsMode;
+  if (normalizeSport(displaySport(D)) !== 'run') return _runsMode;
+  return pairRunMarks((D.sensors || {}).annotations, D.ride && D.ride.start).length ? 'intervals' : _runsMode;
+}
 let _runsD = null;
 
 /* A TAG CREATED AFTER A RIDE WAS ANALYZED NEVER REACHED THAT RIDE, which is the second half of the
@@ -7876,7 +7912,7 @@ function drawRuns() {
      (which act on savedDescents) read these module vars, same as the old Descents section did. */
   currentSavedDescents = D.savedDescents || null;
   currentLibraryRideId = D.libraryRideId;
-  const { mode, runs, lapInfo } = segmentRuns(D, _runsMode);
+  const { mode, runs, lapInfo } = segmentRuns(D, runsPanelMode(D));
   setRunsModeAttr(mode);
   if (!runs.length) { drawRunsEmpty(mode); return; }
   /* Read once for the whole table: the rider's "not a trail" marks, as time windows, so a mark made
@@ -7931,9 +7967,9 @@ function drawRuns() {
     /* Say where the reps came from and what was left out, so a warm-up that was dropped is visible
        as a decision rather than as a missing row. */
     if (mode === 'intervals') {
-      s += loamT(' found from your pace');
-      if (trackFor(D)) s += loamT(' · on a 400 m track, distances measured along it');
       const info = segmentRuns(D, 'intervals').intervalInfo;
+      s += info && info.fromMarks ? loamT(' from the rep marks in the recording') : loamT(' found from your pace');
+      if (trackFor(D)) s += loamT(' · on a 400 m track, distances measured along it');
       const skipped = info ? info.blocks.filter(b => !b.rep).length : 0;
       if (skipped) s += loamT(skipped === 1
         ? ' · {n} easier running stretch not counted'
@@ -8389,7 +8425,7 @@ function openSegmentPage(r, D, focusN) {
      ledger cell formats with U.speedNum (m/s in), so convert back. The viewed run
      matches by time window, not identity: segmentRuns rebuilds objects each call. */
   let segRunsList = null;
-  try { segRunsList = segmentRuns(D, _runsMode).runs || null; } catch (e) { segRunsList = null; }
+  try { segRunsList = segmentRuns(D, runsPanelMode(D)).runs || null; } catch (e) { segRunsList = null; }
   let segDeltas = null;
   try {
     const me = (segRunsList || []).find(o => o.tStart === r.tStart && o.tEnd === r.tEnd) || r;
@@ -8497,7 +8533,7 @@ function renderSegFade(r, D) {
   const isMe = (o) => o.tStart === r.tStart && o.tEnd === r.tEnd;
   let laps = [];
   try {
-    const { runs } = segmentRuns(D, _runsMode);
+    const { runs } = segmentRuns(D, runsPanelMode(D));
     laps = (runs || []).filter(o => isMe(o) || runsSameSegment(r, o, D));
   } catch (e) { laps = []; }
   if (laps.length < 2) { host.classList.add('hidden'); host.innerHTML = ''; return; }
@@ -31679,21 +31715,68 @@ function triSeamSection(D) {
 }
 
 /* This race against earlier ones in the same sport order. Transitions compare at any distance;
-   leg times only between races of similar length. */
+   leg times only between races of similar length. In date order with this race in its place, and a
+   tap on a race opens it beside this one leg by leg: the history record already holds each leg's
+   time and distance, so the detail needs nothing the row did not. */
 function triHistorySection(D) {
   const others = D.others || [];
   if (!others.length) return `<div class="strength-tablenote" style="margin-top:18px">${loamT('Import another race in the same order and it appears here, transition by transition.')}</div>`;
   const rec = D.record;
   const nT = rec.transitions.length;
-  const delta = (d) => (d == null ? '' : ` <span class="subtitle">${d > 0 ? '+' : '−'}${triClock(Math.abs(d))}</span>`);
+  const races = others.map(r => ({ r, isThis: false })).concat([{ r: rec, isThis: true }]).sort((a, b) => a.r.start - b.r.start);
   const head = `<tr><th></th><th>${loamT('race time')}</th>${rec.transitions.map((_, i) => `<th>T${i + 1}</th>`).join('')}</tr>`;
-  const row = (r, isThis) => `<tr${isThis ? ' style="font-weight:600"' : ''}><td>${escapeHtml(isThis ? loamT('this race') : (r.title || new Date(r.start * 1000).toLocaleDateString()))}</td>
-      <td>${r.legsComparable || isThis ? triClock(r.totalS) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
-      ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? triClock(r.transitions[i]) : '—'}${isThis ? '' : delta(r.transitionDeltaS && r.transitionDeltaS[i] != null && r.transitions[i] ? -r.transitionDeltaS[i] : null)}</td>`).join('')}</tr>`;
+  const row = ({ r, isThis }, k) => {
+    const name = escapeHtml(isThis ? loamT('this race') : (r.title || new Date(r.start * 1000).toLocaleDateString()));
+    const cells = `<td>${r.legsComparable || isThis ? triClock(r.totalS) + (isThis ? '' : triDelta(r.totalS - rec.totalS)) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
+      ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? triClock(r.transitions[i]) : '—'}${isThis ? '' : triDelta(r.transitions[i] && rec.transitions[i] ? r.transitions[i] - rec.transitions[i] : null)}</td>`).join('')}`;
+    if (isThis) return `<tr class="tri-hist-this"><td>${name}</td>${cells}</tr>`;
+    /* The whole row is the target, as a leg row is; the button is the keyboard and screen-reader route
+       to the same toggle, and its click reaches the row's handler by bubbling. */
+    return `<tr class="tri-hist-row" onclick="toggleTriHistoryRace(this)"><td><button type="button" class="tri-hist-btn" aria-expanded="false" aria-controls="triHistDetail${k}">${name}</button></td>${cells}</tr>
+      <tr id="triHistDetail${k}" class="tri-hist-detail hidden"><td colspan="${2 + nT}">${triHistoryDetail(r, rec)}</td></tr>`;
+  };
   return `<div class="section-title" style="margin-top:22px">${loamT('Against your other races')} <span class="subtitle">${loamT('same order of sports')}</span></div>
-    <div class="swim-tablewrap"><table class="strength-table tri-table"><thead>${head}</thead>
-      <tbody>${others.map(r => row(r, false)).join('')}${row(rec, true)}</tbody></table></div>
-    <div class="strength-tablenote">${loamT('A plus sign means that race was slower than this one. Race time is shown only for races within a quarter of this one\'s distance.')}</div>`;
+    <div class="swim-tablewrap"><table class="strength-table tri-table tri-hist"><thead>${head}</thead>
+      <tbody>${races.map(row).join('')}</tbody></table></div>
+    <div class="strength-tablenote">${loamT('A plus sign means that race was slower than this one. Race time is shown only for races within a quarter of this one\'s distance.')} ${loamT('Tap a race to set it beside this one, leg by leg.')}</div>`;
+}
+
+/* That race minus this one, so a plus is the slower race, as the table's note says. Under the clock it
+   qualifies rather than beside it: beside, every transition column was two clocks wide, and with a
+   race's name in the first column the numbers ran off a phone's right edge. */
+function triDelta(d) {
+  if (d == null || !Number.isFinite(d)) return '';
+  return `<span class="tri-delta">${Math.abs(d) < 0.5 ? '±' : d > 0 ? '+' : '−'}${triClock(Math.abs(d))}</span>`;
+}
+
+/* One earlier race beside this one, piece by piece in race order. A leg's difference only between
+   races of similar length, the rule the race time follows; a transition's at any distance. */
+function triHistoryDetail(r, rec) {
+  const signed = (d) => triDelta(d).replace(/^<span class="tri-delta">|<\/span>$/g, '') || '—';
+  const legCell = (l) => (l ? `${triClock(l.durationS)}<span class="tri-delta">${U.dist(l.distanceM)}</span>` : '—');
+  const rows = [];
+  (rec.legs || []).forEach((l, i) => {
+    const then = r.legs && r.legs[i] && r.legs[i].sport === l.sport ? r.legs[i] : null;
+    rows.push(`<tr><td><span class="tri-dot" style="background:${TRI_COLORS[l.sport]}"></span>${escapeHtml(triSportLabel(l.sport))}</td>
+      <td>${legCell(then)}</td><td>${legCell(l)}</td><td>${then && r.legsComparable ? signed(then.durationS - l.durationS) : '—'}</td></tr>`);
+    if (i >= rec.transitions.length) return;
+    const a = r.transitions[i], b = rec.transitions[i];
+    rows.push(`<tr class="tri-trans"><td><span class="tri-dot" style="background:${TRI_COLORS.transition}"></span>T${i + 1}</td>
+      <td>${a ? triClock(a) : '—'}</td><td>${b ? triClock(b) : '—'}</td><td>${a && b ? signed(a - b) : '—'}</td></tr>`);
+  });
+  return `<table class="strength-table tri-table tri-hist-legs">
+      <thead><tr><th></th><th>${loamT('that race')}</th><th>${loamT('this race')}</th><th>${loamT('difference')}</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table>
+    ${r.legsComparable ? '' : `<div class="strength-tablenote">${loamT('A different distance, so only the transitions are compared.')}</div>`}`;
+}
+
+function toggleTriHistoryRace(tr) {
+  const btn = tr.querySelector('.tri-hist-btn');
+  const detail = btn && document.getElementById(btn.getAttribute('aria-controls'));
+  if (!detail) return;
+  const open = !detail.classList.toggle('hidden');
+  btn.setAttribute('aria-expanded', String(open));
+  tr.classList.toggle('open', open);
 }
 
 function renderTriathlon(D) {
@@ -35872,6 +35955,7 @@ const LOAM_NB = {
   'rep': 'rep',
   'hard efforts of 30 s or more between slower stretches': 'harde drag på 30 s eller mer mellom roligere partier',
   ' found from your pace': ' funnet ut fra tempoet ditt',
+  ' from the rep marks in the recording': ' fra dragmerkene i opptaket',
   ' · on a 400 m track, distances measured along it': ' · på en 400 m-bane, distansene målt langs den',
   '(track · GPS {dist})': '(bane · GPS {dist})',
   ' · {n} easier running stretch not counted': ' · {n} roligere løpeparti ikke tatt med',
@@ -37904,6 +37988,9 @@ const LOAM_NB = {
   'Your first {min} min off the bike were {pct}% faster than your run as a whole.': 'De første {min} minuttene etter sykkelen var {pct} % raskere enn løpet ditt som helhet.',
   'Your first {min} min off the bike were {pct}% slower than your run as a whole.': 'De første {min} minuttene etter sykkelen var {pct} % tregere enn løpet ditt som helhet.',
   'a different distance': 'en annen distanse',
+  'A different distance, so only the transitions are compared.': 'En annen distanse, så bare vekslingene sammenlignes.',
+  'Tap a race to set it beside this one, leg by leg.': 'Trykk på et løp for å se det ved siden av dette, etappe for etappe.',
+  'that race': 'det løpet',
   'bike, first half': 'sykkel, første halvdel',
   'bike, second half': 'sykkel, andre halvdel',
   'run, first third': 'løp, første tredjedel',
@@ -52232,7 +52319,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '6c18ddbba · 2026-10-11';
+const LOAM_BUILD = '36743b7ee · 2026-10-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
