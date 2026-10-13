@@ -6999,6 +6999,11 @@ function pairRunMarks(annotations, tActivityStart) {
   const runs = []; let start = null, lastEnd = null;
   for (const a of (annotations || [])) {
     const s = String(a.text || '').toLowerCase().trim();
+    /* A merge seam is the end of one recording, and a recording stopped mid-segment never wrote
+       its Segment End. Left pending, that start paired with the NEXT recording's end and made one
+       segment out of the tail of one session, the gap, and the head of another. An End-only tap
+       after the seam opens at the seam, not back in the earlier recording. */
+    if (isSeamMark(a.text)) { start = null; lastEnd = a.t; continue; }
     if (s.includes('segment start') || s.includes('run start') || s === 'start' || s === 'lap') { if (!start) start = a; }
     else if (s.includes('segment end') || s.includes('run end') || s === 'end' || s === 'stop') {
       if (start) { runs.push({ tStart: start.t, tEnd: a.t }); lastEnd = a.t; start = null; }
@@ -12874,6 +12879,18 @@ function cooperTest(annotations, loc, ride) {
   const pts = beCheckpoints(loc, { start: -Infinity, end: Infinity, pausedSpans: paused });
   let lastT = tStart;
   for (const r of (loc || [])) if (r && Number.isFinite(r.t) && r.t > lastT) lastT = r.t;
+  /* A merged file's seam is where one recording stopped and another began, so a test cannot run
+     across it: for this question the recording ends at the last fix before the first seam after
+     the whistle. Without it a test abandoned at five minutes and merged with the jog home read as
+     finished, on ground the two recordings never covered between them. */
+  let seamT = Infinity;
+  for (const a of (annotations || [])) {
+    if (a && Number.isFinite(a.t) && a.t > tStart && a.t < seamT && isSeamMark(a.text)) seamT = a.t;
+  }
+  if (seamT < lastT) {
+    lastT = tStart;
+    for (const r of (loc || [])) if (r && Number.isFinite(r.t) && r.t < seamT && r.t > lastT) lastT = r.t;
+  }
   const complete = lastT >= tFull - COOPER_END_SLACK_S;
   const tEnd = complete ? tFull : lastT;
   const pausedS = pausedOverlapS(paused, tStart, tEnd);
@@ -31727,8 +31744,8 @@ function triHistorySection(D) {
   const head = `<tr><th></th><th>${loamT('race time')}</th>${rec.transitions.map((_, i) => `<th>T${i + 1}</th>`).join('')}</tr>`;
   const row = ({ r, isThis }, k) => {
     const name = escapeHtml(isThis ? loamT('this race') : (r.title || new Date(r.start * 1000).toLocaleDateString()));
-    const cells = `<td>${r.legsComparable || isThis ? triClock(r.totalS) + (isThis ? '' : triDelta(r.totalS - rec.totalS)) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
-      ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? triClock(r.transitions[i]) : '—'}${isThis ? '' : triDelta(r.transitions[i] && rec.transitions[i] ? r.transitions[i] - rec.transitions[i] : null)}</td>`).join('')}`;
+    const cells = `<td>${r.legsComparable || isThis ? triClock(r.totalS) + (isThis ? '' : triDelta(triGap(r.totalS, rec.totalS))) : '<span title="' + escapeHtml(loamT('a different distance')) + '">—</span>'}</td>
+      ${Array.from({ length: nT }, (_, i) => `<td>${r.transitions[i] ? triClock(r.transitions[i]) : '—'}${isThis ? '' : triDelta(r.transitions[i] && rec.transitions[i] ? triGap(r.transitions[i], rec.transitions[i]) : null)}</td>`).join('')}`;
     if (isThis) return `<tr class="tri-hist-this"><td>${name}</td>${cells}</tr>`;
     /* The whole row is the target, as a leg row is; the button is the keyboard and screen-reader route
        to the same toggle, and its click reaches the row's handler by bubbling. */
@@ -31744,6 +31761,10 @@ function triHistorySection(D) {
 /* That race minus this one, so a plus is the slower race, as the table's note says. Under the clock it
    qualifies rather than beside it: beside, every transition column was two clocks wide, and with a
    race's name in the first column the numbers ran off a phone's right edge. */
+/* The difference between two clocks AS PRINTED: each side rounded the way triClock rounds it, then
+   subtracted. Off the raw seconds, 59:59 beside 1:00:00 read "±0:00" and two identical clocks
+   read "+0:01". */
+function triGap(a, b) { return Math.round(a) - Math.round(b); }
 function triDelta(d) {
   if (d == null || !Number.isFinite(d)) return '';
   return `<span class="tri-delta">${Math.abs(d) < 0.5 ? '±' : d > 0 ? '+' : '−'}${triClock(Math.abs(d))}</span>`;
@@ -31758,11 +31779,11 @@ function triHistoryDetail(r, rec) {
   (rec.legs || []).forEach((l, i) => {
     const then = r.legs && r.legs[i] && r.legs[i].sport === l.sport ? r.legs[i] : null;
     rows.push(`<tr><td><span class="tri-dot" style="background:${TRI_COLORS[l.sport]}"></span>${escapeHtml(triSportLabel(l.sport))}</td>
-      <td>${legCell(then)}</td><td>${legCell(l)}</td><td>${then && r.legsComparable ? signed(then.durationS - l.durationS) : '—'}</td></tr>`);
+      <td>${legCell(then)}</td><td>${legCell(l)}</td><td>${then && r.legsComparable ? signed(triGap(then.durationS, l.durationS)) : '—'}</td></tr>`);
     if (i >= rec.transitions.length) return;
     const a = r.transitions[i], b = rec.transitions[i];
     rows.push(`<tr class="tri-trans"><td><span class="tri-dot" style="background:${TRI_COLORS.transition}"></span>T${i + 1}</td>
-      <td>${a ? triClock(a) : '—'}</td><td>${b ? triClock(b) : '—'}</td><td>${a && b ? signed(a - b) : '—'}</td></tr>`);
+      <td>${a ? triClock(a) : '—'}</td><td>${b ? triClock(b) : '—'}</td><td>${a && b ? signed(triGap(a, b)) : '—'}</td></tr>`);
   });
   return `<table class="strength-table tri-table tri-hist-legs">
       <thead><tr><th></th><th>${loamT('that race')}</th><th>${loamT('this race')}</th><th>${loamT('difference')}</th></tr></thead>
@@ -52319,7 +52340,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '36743b7ee · 2026-10-11';
+const LOAM_BUILD = 'f0f1b1f29 · 2026-10-12';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
