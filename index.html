@@ -13012,7 +13012,8 @@ async function saveRide(record) {
      existing row instead of piling on duplicate copies of the same ride. */
   const store = _tx(db, 'rides', 'readwrite');
   const existing = await _req(store.getAll());
-  const prior = key ? existing.find(r => rideDedupKey(r) === key) : null;
+  const prior = existing.find(r => (key && rideDedupKey(r) === key)
+    || (record.sourceSession && (r.sourceSession === record.sourceSession || (!r.sourceSession && r.filename === record.sourceSession))));
   const now = new Date().toISOString();
   if (prior) {
     return _req(store.put({ ...record, id: prior.id, recordedAt: prior.recordedAt || record.recordedAt, savedAt: now }));
@@ -13799,13 +13800,14 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
   }
   const record = {
     filename, sport,
+    sourceSession: LOAM_EMBEDDED && window.LOAM_RECORDING_ID ? window.LOAM_RECORDING_ID : null,
     /* Content hash when available (identical CSV in => identical key), else a
        composite of the ride window + distance. saveRide upserts on this so a
        recording analyzed more than once updates its row instead of duplicating.
        The distance is the DOPPLER integral where the summary carries one, for the
        reason rideDedupKey states: it is the figure rows saved before the ride
        distance moved onto the GPS path stored, so the key survives the change. */
-    dedupKey: contentKey || `${filename}|${Math.round(ride.start)}|${Math.round(ride.end)}|${Math.round((summary && (summary.distanceDoppler != null ? summary.distanceDoppler : summary.distance)) || 0)}`,
+    dedupKey: nativeRecordingKey(contentKey) || `${filename}|${Math.round(ride.start)}|${Math.round(ride.end)}|${Math.round((summary && (summary.distanceDoppler != null ? summary.distanceDoppler : summary.distance)) || 0)}`,
     /* The exact key this ride's render was cached under (dedupKey plus the calibration/sport suffix).
        The bare dedupKey is NOT that key when a non-default calibration or a declared sport is in play,
        so the Library/switcher must look the analysis up by this stored key, not by dedupKey, or every
@@ -22734,7 +22736,7 @@ function analysisKeyParts(contentHash, fallbackName, fitHash = null, hasFit = !!
        keyed by name and is orphaned (not mis-applied) if the ride is deleted from the library. */
     // Paired sessions used filename-scoped controls before they were cacheable. Keep their
     // existing trims, calibration references and run labels in that same namespace.
-    const cropKey = (hasFit ? fallbackName : contentHash || fallbackName) || null;
+    const cropKey = (hasFit ? fallbackName : nativeRecordingKey(contentHash || fallbackName)) || null;
     const storedCrop = cropStored(cropKey);
     const cropSuffix = storedCrop ? `:crop=${Math.round(storedCrop.start)}-${Math.round(storedCrop.end)}` : '';
     /* The e-MTB preference is an INPUT to the analysis for exactly the reason the pool length and
@@ -22800,6 +22802,23 @@ function contentKeyRecall(identity) {
   if (!identity) return null;
   const v = ckeyIndexLoad()[identity];
   return (typeof v === 'string' && v) ? v : null;
+}
+
+// A repaired CSV has new bytes, but still owns the same corrections, labels and history entry.
+function nativeRecordingKey(contentHash) {
+  const id = LOAM_EMBEDDED && window.LOAM_RECORDING_ID;
+  if (!id || !contentHash) return contentHash;
+  try {
+    const keys = JSON.parse(localStorage.getItem('loam_nativekeys') || '{}');
+    if (keys[id]) return keys[id];
+    const prefix = encodeURIComponent(window.LOAM_SESSION_NAME || id) + '|';
+    const previous = Object.entries(ckeyIndexLoad()).find(([identity]) => identity.startsWith(prefix));
+    let prior = previous && previous[1];
+    if (prior && prior.startsWith('{')) { try { prior = JSON.parse(prior).contentHash; } catch { prior = null; } }
+    keys[id] = prior || contentHash;
+    localStorage.setItem('loam_nativekeys', JSON.stringify(keys));
+    return keys[id];
+  } catch { return contentHash; }
 }
 /* ONE localStorage entry holding the whole map, FIFO-capped. A key per recording would grow without
    bound and could not be evicted without scanning every key in the store. */
@@ -23011,7 +23030,7 @@ async function analyze(files) {
        derive different keys for one recording -- which would be a permanent silent MISS rather than
        a visible fault. Remembering the hash against the recording's identity is what lets the NEXT
        open skip both the fetch and the hash. */
-    const activityKey = fitFile ? sensorFile.name : contentHash || sensorFile.name;
+    const activityKey = fitFile ? sensorFile.name : nativeRecordingKey(contentHash || sensorFile.name);
     const activitySel = document.getElementById('sportOverride');
     const selectedActivity = requestedActivity(activityKey);
     if (activitySel && activitySel.querySelector('option[value="' + selectedActivity + '"]')) activitySel.value = selectedActivity;
@@ -23293,7 +23312,7 @@ async function analyze(files) {
           const skiRender = { dome, profile, signals, channels, spanS: skiSpanS, sport: 'skiing',
             guessed: null,
             title: sensorFile && sensorFile.name,
-            key: contentHash || (sensorFile && sensorFile.name), imuRateHz };
+            key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)), imuRateHz };
           if (cacheKey) { putCachedAnalysis(cacheKey, 'skiing', skiRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
           renderSkiIndoor(skiRender);
           setStatus(loamT('Indoor ski session loaded ({laps} \u00b7 {descents} \u00b7 experimental, graded once)', {
@@ -23497,7 +23516,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('strengthResults');
-      const liftRender = { sensors, ride, strength, summary, sport, guessed: stationaryGuess, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const liftRender = { sensors, ride, strength, summary, sport, guessed: stationaryGuess, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)) };
       /* Cache + deep-link the lift like every other sport so it reopens instantly and is bookmarkable at
          #/ride/<key> (this was the only branch that recomputed on every open and had no URL). The render
          object is structured-cloneable (plain sensor/summary/strength data, no functions), so it round-
@@ -23523,7 +23542,7 @@ async function analyze(files) {
       if (superseded()) return;
       onProgress('rendering');
       hideAllSections(); hide('loading'); hide('results'); show('golfResults');
-      const golfRender = { sensors, ride, golf, summary, sport, guessed: stationaryGuess, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name) };
+      const golfRender = { sensors, ride, golf, summary, sport, guessed: stationaryGuess, imuRateHz, fitRepair, title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)) };
       /* Cache + deep-link like every other sport so it reopens instantly at #/ride/<key>. The render
          object is structured-cloneable (plain data, no functions), so it round-trips through the
          IndexedDB analysis cache; renderCachedAnalysis + cachedSportNoun carry a golf branch.
@@ -23601,7 +23620,7 @@ async function analyze(files) {
       hideAllSections(); hide('loading'); hide('results'); show('swimResults');
       const swimRender = { session, swim, summary, history: swimHistoryLoad(), sport: 'swimming',
         guessed: stationaryGuess,
-        title: sensorFile && sensorFile.name, key: contentHash || (sensorFile && sensorFile.name), imuRateHz };
+        title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)), imuRateHz };
       if (cacheKey) { putCachedAnalysis(cacheKey, sport, swimRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
       renderSwim(swimRender);
       const blocks = payload.capturedTotals.blocks;
@@ -29046,6 +29065,7 @@ function golfBetaBanner() {
 }
 
 function renderGolf(D) {
+  if (D.key) D = { ...D, key: nativeRecordingKey(D.key) };
   _lastRender = { fn: renderGolf, D };
   _golfD = D;   // the swing-count control writes against this session's key
   /* Hidden even though golf DOES calibrate: analyzeGolf asks for the 'quietest' window explicitly
@@ -29207,6 +29227,7 @@ function liftNameCap(lift) {
 function liftNameLower(lift) { const n = liftNameCap(lift); return n == null ? null : n.toLowerCase(); }
 
 function renderStrength(D) {
+  if (D.key) D = { ...D, key: nativeRecordingKey(D.key) };
   _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
   /* The header's Calibration selector belongs to the body-frame path and is only ever un-hidden by
      renderAll, so analyzing a ride and then a lift in one page session left a lift session offering
@@ -32081,10 +32102,14 @@ function isRunAnalysis(D) {
   return !!D && (['running', 'run'].includes(D.sport) || D.gpsSport === 'run');
 }
 
-/* Read both capture and FIT payloads, including older cached renders. */
+/* Read both capture and FIT payloads, including older cached renders.
+   Cadence falls back to the series ONLY when it is a FIT's own step channel, which carries no summary
+   median. A capture's null `cadMedian` is the analysis REFUSING (no confident window while moving),
+   and its DFT series holds an in-band peak for every window whatever the phone was doing: a 23 s
+   recording in a car read 137 spm here while the Cadence tile below it said "—" (owner, 2026-10-13). */
 function runHeadline(D) {
   const s = D.summary || {}, ride = D.ride || {};
-  const cadence = ((D.running || {}).cadSeries || [])
+  const cadence = ((D.running || {}).cadSource === 'fit' ? D.running.cadSeries || [] : [])
     .filter(r => r.t >= ride.start && r.t <= ride.end && Number.isFinite(r.spm) && r.spm > 0)
     .map(r => r.spm);
   return {
@@ -37788,6 +37813,10 @@ const LOAM_NB = {
   'cadence (rpm), AirPods': 'kadens (rpm), AirPods',
   'Cadence from AirPods head bob: median <strong>{rpm} rpm</strong>.':
     'Kadens fra hodebevegelsen i AirPods: median <strong>{rpm} rpm</strong>.',
+  'AirPods cadence: <strong>{rpm} rpm</strong> · {pct}% coverage; excludes coasting. Off-road estimate.':
+    'AirPods-kadens: <strong>{rpm} rpm</strong> · {pct}% dekning; uten frihjul. Terreng: estimat.',
+  'AirPods cadence: <strong>{rpm} rpm</strong>; excludes coasting. Off-road estimate.':
+    'AirPods-kadens: <strong>{rpm} rpm</strong>; uten frihjul. Terreng: estimat.',
   'Read for {pct}% of moving time; coasting is never read.':
     'Avlest for {pct}% av tiden i bevegelse; frihjul blir aldri avlest.',
   'Checked on one road ride against an ankle-worn watch; not yet validated off-road.':
@@ -47279,8 +47308,12 @@ function pedalCadenceNote(pc) {
   if (!pc || !pc.summary) return '';
   const s = pc.summary;
   const cov = s.coverage == null ? '' : ' ' + loamT('Read for {pct}% of moving time; coasting is never read.', { pct: Math.round(s.coverage * 100) });
-  return loamT('Cadence from AirPods head bob: median <strong>{rpm} rpm</strong>.', { rpm: Math.round(s.median) }) + cov
-    + ' ' + loamT('Checked on one road ride against an ankle-worn watch; not yet validated off-road.');
+  const short = loamT(s.coverage == null
+    ? 'AirPods cadence: <strong>{rpm} rpm</strong>; excludes coasting. Off-road estimate.'
+    : 'AirPods cadence: <strong>{rpm} rpm</strong> · {pct}% coverage; excludes coasting. Off-road estimate.',
+    { rpm: Math.round(s.median), pct: Math.round(s.coverage * 100) });
+  return viewText(loamT('Cadence from AirPods head bob: median <strong>{rpm} rpm</strong>.', { rpm: Math.round(s.median) }) + cov
+    + ' ' + loamT('Checked on one road ride against an ankle-worn watch; not yet validated off-road.'), short);
 }
 
 function renderBikeTimeline(D) {
@@ -52359,7 +52392,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '275ac02c7 · 2026-10-13';
+const LOAM_BUILD = 'b1f8b4445 · 2026-10-13';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
