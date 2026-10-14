@@ -2976,6 +2976,7 @@
     color: var(--moss); font: 600 9px 'JetBrains Mono', monospace; letter-spacing: 0.11em; text-align: center; text-transform: uppercase; }
   .lf-phase[data-phase="drive"] { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 55%, transparent); }
   .lf-phase[data-phase="lockout"] { color: var(--text-muted); border-color: var(--border); }
+  .lf-phase[data-phase="pause"] { color: #8fd3ff; border-color: color-mix(in srgb, #8fd3ff 50%, transparent); }
   .lf-delta { font: 500 10px 'JetBrains Mono', monospace; color: var(--text-dim, #475569); letter-spacing: 0.04em; }
   .lf-ghost { font: 500 11px 'JetBrains Mono', monospace; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--border, #2a2e37);
     background: transparent; color: var(--text-dim, #475569); cursor: pointer; }
@@ -27217,14 +27218,17 @@ function liftFitTransform(c, dmax, ln, barPos, lift, bx, by, bw, bh) {
   for (const th of [0, dmax * 0.5, dmax]) {
     const s = liftSkeleton(th, ln, barPos, lift);
     const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
-    for (const p of [s.ankle, s.knee, s.hip, s.shoulder, s.head, s.bar, heel, toe]) {
+    for (const p of [s.ankle, s.knee, s.hip, s.shoulder, s.head, s.bar, heel, toe, ...(s.extents || [])]) {
       minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
     }
   }
   const pad = 48 + c.limb;
   const sc = Math.min((bw - pad) / (maxX - minX || 1), (bh - pad) / (maxY - minY || 1));
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const T = p => ({ x: bx + bw / 2 + (p.x - cx) * sc, y: by + bh / 2 - (p.y - cy) * sc });
+  const cx = (minX + maxX) / 2;
+  /* Anchored to the floor, not centred: a standing pose fills the box's height and the two are the
+     same thing, but a lying pose (the bench) is limited by its WIDTH, and centring it vertically left
+     the figure and its bench floating above the stage's floor line. */
+  const T = p => ({ x: bx + bw / 2 + (p.x - cx) * sc, y: by + bh - pad / 2 - (p.y - minY) * sc });
   return { T, sc };
 }
 
@@ -27259,6 +27263,7 @@ function liftTrailSVG(trail, col) {
 function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
   const L = { foot: 46, shank: 96, thigh: 96, torso: 120, neck: 16, headR: 16, upperArm: 46, forearm: 44 };
   const R = Math.PI / 180, frac = barPos === 'low' ? 0.17 : 0.05, BARBACK = 15;
+  if (lift === 'bench') return liftBenchSkeleton(thighDeg, leanDeg, L);
   const isDL = lift === 'deadlift';
   const isCurl = lift === 'curl';
   // 'upright' (a lift with no dedicated pose), the curl, and the deadlift all hold the bar in the hands
@@ -27296,6 +27301,44 @@ function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
   return { ankle, knee, hip, shoulder, head, bar, elbow, td, headR: L.headR, foot: L.foot, deadlift: isDL, barInHands, curl: isCurl };
 }
 
+/* The bench press, supine on a bench, head to the left and feet planted to the right (so the figure
+   still faces +x). `pct` is the bar's descent from lockout to the chest in percent (the pose's depth
+   parameter, capped at the chest: a rep whose relative ROM scales past 100 cannot go through the
+   body, it can only reach the chest). `forearmDeg` is the MEASURED forearm angle from vertical at the
+   chest, and it is what places the bottom of the bar path: with the hands on the bar and the forearm
+   at that angle, the elbow sits forearm-length below and behind the bar, and the upper arm has to
+   reach it from the shoulder, which fixes how far down the chest the bar lands. From there to the
+   lockout straight above the shoulder the bar runs a straight line (a model, labelled as such on the
+   stage), and the elbow is solved by two-link IK at every instant, always on the below-the-line
+   branch, so it leaves the lockout line smoothly and arrives at the measured angle. The direction of
+   the forearm's tilt is not something the watch can tell (the angle is read from |gx|), so the elbow
+   is drawn toward the head, the way a bar touching the lower chest is pressed. */
+function liftBenchSkeleton(pct, forearmDeg, L) {
+  const R = Math.PI / 180, CHEST = 24, BENCH_Y = 44, BENCH_H = 9;
+  const p = Math.max(0, Math.min(1, (+pct || 0) / 100));
+  const th = Math.max(0, Math.min(60, +forearmDeg || 0)) * R;
+  const hip = { x: 50, y: BENCH_Y + 8 };
+  const shoulder = { x: hip.x - L.torso, y: hip.y };
+  const head = { x: shoulder.x - (L.neck + L.headR), y: hip.y };
+  const knee = { x: hip.x + L.thigh * Math.cos(37 * R), y: hip.y + L.thigh * Math.sin(37 * R) };   // feet drawn in: the pose is width-limited in the stage
+  const ankle = { x: knee.x + Math.sqrt(Math.max(0, L.shank * L.shank - (knee.y - 14) * (knee.y - 14))), y: 14 };
+  const u = L.upperArm, f = L.forearm;
+  const top = { x: shoulder.x, y: shoulder.y + u + f };
+  /* The bottom: elbow = bar - f * (sin th, cos th) must sit u from the shoulder. */
+  const dy = CHEST - f * Math.cos(th);
+  const bottom = { x: shoulder.x + f * Math.sin(th) + Math.sqrt(Math.max(0, u * u - dy * dy)), y: shoulder.y + CHEST };
+  const bar = { x: top.x + (bottom.x - top.x) * p, y: top.y + (bottom.y - top.y) * p };
+  /* Two-link IK, elbow below the shoulder->bar line (toward the head and the floor). */
+  const dxb = bar.x - shoulder.x, dyb = bar.y - shoulder.y, d = Math.max(1e-6, Math.hypot(dxb, dyb));
+  const a = (u * u - f * f + d * d) / (2 * d), h = Math.sqrt(Math.max(0, u * u - a * a));
+  const dir = { x: dxb / d, y: dyb / d };
+  const elbow = { x: shoulder.x + a * dir.x + h * dir.y, y: shoulder.y + a * dir.y - h * dir.x };
+  const bench = { x1: shoulder.x - 52, x2: hip.x + 22, yTop: BENCH_Y, yBot: BENCH_Y - BENCH_H };
+  return { ankle, knee, hip, shoulder, head, bar, elbow, td: { x: -1, y: 0 }, headR: L.headR, foot: L.foot,
+    deadlift: false, barInHands: true, curl: false, bench,
+    extents: [{ x: bench.x1, y: bench.yBot }, { x: bench.x2, y: 0 }] };
+}
+
 /* Draw one character at one pose using a fixed transform `tf` ({T, sc}). Returns { markup, bar } with
    the bar point in screen coords (so the caller can extend the bar-path trail). The stick gets a neon
    glow; The Cleaner is a cylinder-shaded mannequin with ball joints; the slab bodies are unchanged. */
@@ -27317,6 +27360,17 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf, opts = {}) 
   };
   const ball = (p, r) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" fill="url(#ball_${c.key})"/>`;
   let out = '';
+  /* The bench: a slab under the torso with two posts to the floor, before everything else so the body
+     lies on it. Pose ghosts omit it like they omit the plate. */
+  if (s.bench && !opts.ghost) {
+    const tl = T({ x: s.bench.x1, y: s.bench.yTop }), br = T({ x: s.bench.x2, y: s.bench.yBot });
+    const floorY = T({ x: 0, y: 0 }).y;
+    out += `<g class="lf-bench">`
+      + `<line x1="${(tl.x + 9 * sc).toFixed(1)}" y1="${br.y.toFixed(1)}" x2="${(tl.x + 9 * sc).toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#5f6b58" stroke-width="${(5 * sc).toFixed(1)}"/>`
+      + `<line x1="${(br.x - 9 * sc).toFixed(1)}" y1="${br.y.toFixed(1)}" x2="${(br.x - 9 * sc).toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#5f6b58" stroke-width="${(5 * sc).toFixed(1)}"/>`
+      + `<rect x="${tl.x.toFixed(1)}" y="${tl.y.toFixed(1)}" width="${(br.x - tl.x).toFixed(1)}" height="${(br.y - tl.y).toFixed(1)}" rx="${(3 * sc).toFixed(1)}" fill="#3b4634" stroke="#5f6b58" stroke-width="${(1.5 * sc).toFixed(1)}"/>`
+      + `</g>`;
+  }
   out += seg(He, To, Math.max(4, lw * 0.6), c.line ? c.skin : c.skin);   // foot
   // barbell: a loaded plate (outer disc + collar hub) seen end-on behind the shoulder. Pose ghosts
   // omit it so the live bar and its path stay legible instead of becoming a stack of glowing plates.
@@ -27800,16 +27854,22 @@ function onLiftReps(i, val) {
    shape the side-view skeleton; its fore-aft bar path is explicitly labeled as a model. ---- */
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', planKey: '', plan: null, repIdx: -1, trail: [], ghosts: [] };
 function liftFormCharKey() { try { return localStorage.getItem('loam.liftChar') || 'stick'; } catch (e) { return 'stick'; } }
-/* Squat, deadlift and curl have real, fact-driven poses (squat descent, hip hinge, elbow-flexion
-   curl). Any OTHER explicitly tapped lift (press, bench, dips, other, row, ...) has no dedicated pose
-   yet and is drawn as a neutral upright standing hold, not a misleading squat: no descent (dmax 0), a
-   small upright lean, and the bar in the hands. An unlabeled set stays a squat (the analyzer's default). */
-function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift' && set.lift !== 'curl'; }
-/* For a curl, dmax is the elbow-flexion sweep (degrees from arm-straight-down), not a squat depth. */
-function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; if (set.lift === 'curl') return 145; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
-function liftLeanDeg(set) { if (set.lift === 'deadlift') return 6; if (set.lift === 'curl' || liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
+/* Squat, deadlift, bench and curl have real, fact-driven poses (squat descent, hip hinge, the supine
+   press, elbow-flexion curl). Any OTHER explicitly tapped lift (press, dips, other, row, ...) has no
+   dedicated pose yet and is drawn as a neutral upright standing hold, not a misleading squat: no
+   descent (dmax 0), a small upright lean, and the bar in the hands. An unlabeled set stays a squat
+   (the analyzer's default). */
+function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift' && set.lift !== 'curl' && set.lift !== 'bench'; }
+/* For a curl, dmax is the elbow-flexion sweep (degrees from arm-straight-down), not a squat depth; for a
+   bench it is the bar's descent from lockout to the chest, in percent, so a rep's relative ROM scales
+   it like a squat's and the skeleton stops at the chest for anything past 100. */
+function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 62; if (set.lift === 'curl') return 145; if (set.lift === 'bench') return 100; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : 94; }
+/* The one angle that shapes the pose: torso lean for a standing lift (from the bar-position tap), and
+   for a bench the MEASURED forearm angle at the chest (`set.forearmDeg`, the watch's x axis against
+   gravity at the reversal), with 15 degrees standing in where no watch measured it. */
+function liftLeanDeg(set) { if (set.lift === 'bench') return set.forearmDeg != null && Number.isFinite(+set.forearmDeg) ? Math.max(0, Math.min(60, +set.forearmDeg)) : 15; if (set.lift === 'deadlift') return 6; if (set.lift === 'curl' || liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
-function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : set.lift === 'curl' ? 'curl' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
+function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : set.lift === 'curl' ? 'curl' : set.lift === 'bench' ? 'bench' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
 
 /* A compact replay clock built from the detector facts already carried by each set. `repTimes` are
    the detected per-rep anchors, so their gaps preserve a fast rep, a grind, and the real pauses
@@ -27846,13 +27906,19 @@ function liftRepTimeline(set) {
     const p = phasesMeasured ? phases[i] : null;
     const eccS = Math.min(cadenceS * 0.72, Math.max(0.12, p ? +p.eccS : cadenceS * 0.45));
     const conS = Math.min(cadenceS * 0.72, Math.max(0.12, p ? +p.conS : cadenceS * 0.37));
+    /* The measured dwell at the reversal (the chest on a bench, the hole on a squat). The counter's
+       `conS` runs from the velocity bottom to the end of the drive and so already contains it, which
+       is why the hold is carved out of the drive rather than added: the rep ends where it ended.
+       Under 0.25 s it is the smoothing floor, not a pause, and is not drawn. */
+    const rawPause = p && Number.isFinite(+p.pauseS) ? +p.pauseS : 0;
+    const pauseS = rawPause >= 0.25 ? Math.min(rawPause, Math.max(0, conS - 0.12)) : 0;
     const depthScale = medDepth == null ? 1 : Math.max(0.72, Math.min(1.18, depths[i] / medDepth));
     /* `depthScale` is CLAMPED so one mis-measured rep cannot draw a caricature; `depthM` is the raw
        measurement, and every NUMBER shown to the lifter is derived from it rather than from the
        clamp -- see liftGhostRead, where reading the clamp back would under-report the rep that faded
        most, which is exactly the rep worth reporting. */
     const depthM = validDepths ? depths[i] : null;
-    return { index: i, startS: bottomS - eccS, bottomS, endS: bottomS + conS, cadenceS, depthScale, depthM };
+    return { index: i, startS: bottomS - eccS, bottomS, holdS: bottomS + pauseS, endS: bottomS + conS, cadenceS, depthScale, depthM };
   });
   /* Detector noise can make measured phases overlap. Keep the anchors, and shorten only the two
      touching limbs around their midpoint so one rep can never jump backwards into the previous one. */
@@ -27866,7 +27932,7 @@ function liftRepTimeline(set) {
     reps[i + 1].startS = reps[i + 1].bottomS - ecc * scale;
   }
   const origin = reps[0].startS;
-  for (const r of reps) { r.startS -= origin; r.bottomS -= origin; r.endS -= origin; }
+  for (const r of reps) { r.startS -= origin; r.bottomS -= origin; r.holdS = Math.min(r.endS - origin, r.holdS - origin); r.endS -= origin; }
   const tailS = Math.max(0.2, Math.min(0.6, cadenceAt(n - 1) * 0.18));
   return {
     reps,
@@ -27874,6 +27940,7 @@ function liftRepTimeline(set) {
     cadenceMeasured,
     phasesMeasured,
     depthMeasured: validDepths,
+    pauseMeasured: reps.some(r => r.holdS > r.bottomS),
   };
 }
 
@@ -27886,8 +27953,10 @@ function liftRepFrame(plan, elapsedS) {
   let i = 0;
   for (let k = 1; k < reps.length && t >= reps[k].startS; k++) i = k;
   const r = reps[i];
+  const holdS = Number.isFinite(+r.holdS) ? Math.max(r.bottomS, +r.holdS) : r.bottomS;
   if (t < r.bottomS) return { repIdx: i, phase: 'down', progress: Math.max(0, Math.min(1, (t - r.startS) / Math.max(0.01, r.bottomS - r.startS))), depthScale: r.depthScale };
-  if (t < r.endS) return { repIdx: i, phase: 'drive', progress: Math.max(0, Math.min(1, (t - r.bottomS) / Math.max(0.01, r.endS - r.bottomS))), depthScale: r.depthScale };
+  if (t < holdS) return { repIdx: i, phase: 'pause', progress: Math.max(0, Math.min(1, (t - r.bottomS) / Math.max(0.01, holdS - r.bottomS))), depthScale: r.depthScale };
+  if (t < r.endS) return { repIdx: i, phase: 'drive', progress: Math.max(0, Math.min(1, (t - holdS) / Math.max(0.01, r.endS - holdS))), depthScale: r.depthScale };
   return { repIdx: i, phase: 'lockout', progress: 1, depthScale: r.depthScale };
 }
 
@@ -27897,6 +27966,7 @@ function liftThighAt(dmax, phase, progress) {
   const p = Math.min(1, Math.max(0, +progress || 0));
   const ease = 0.5 - 0.5 * Math.cos(Math.PI * p);
   if (phase === 'down') return dmax * ease;
+  if (phase === 'pause') return dmax;
   if (phase === 'drive') return dmax * (1 - ease);
   return 0;
 }
@@ -27961,6 +28031,9 @@ function liftDepthTargetSVG(set, dmax, leanDeg, barPos, lift, tf, t) {
    and their labels must not land on top of each other when they do. */
 function liftRefDepthSVG(refScale, targetDmax, leanDeg, barPos, lift, tf, t) {
   if (!(refScale > 0)) return '';
+  /* On a bench the bar's lowest point is at body level, so a full-width line here runs through the
+     lifter and its label lands on a thigh; the rep-1 ghost and the read-out carry the comparison. */
+  if (lift === 'bench') return '';
   const y = tf.T(liftSkeleton(targetDmax * refScale, leanDeg, barPos, lift).bar).y;
   const label = (t || ((x) => x))('REP 1 DEPTH · MEASURED');
   const w = label.length * 4.9 + 10;
@@ -28020,7 +28093,7 @@ function liftFormCompose(st, set, elapsedS) {
     + liftCharDefs(c) + `</defs>`
     + `<rect width="300" height="320" rx="12" fill="url(#lfBg)"/>`
     + `<line x1="18" y1="300" x2="282" y2="300" stroke="#7fb069" stroke-opacity="0.25" stroke-width="2"/>`
-    + (() => { const mf = st.tf.T({ x: liftSkeleton(0, ln, bp, lk).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<g class="lf-midfoot"><line x1="${mf}" y1="300" x2="${mf}" y2="24" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/><text x="${(+mf + 4).toFixed(1)}" y="294" fill="#7fb069" fill-opacity="0.62" font-size="7.5" letter-spacing="0.8" font-family="'JetBrains Mono',monospace">${loamT('MIDFOOT')}</text></g>`; })()
+    + (() => { if (lk === 'bench') return ''; const mf = st.tf.T({ x: liftSkeleton(0, ln, bp, lk).ankle.x + 46 * 0.15, y: 0 }).x.toFixed(1); return `<g class="lf-midfoot"><line x1="${mf}" y1="300" x2="${mf}" y2="24" stroke="#7fb069" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 6"/><text x="${(+mf + 4).toFixed(1)}" y="294" fill="#7fb069" fill-opacity="0.62" font-size="7.5" letter-spacing="0.8" font-family="'JetBrains Mono',monospace">${loamT('MIDFOOT')}</text></g>`; })()
     + liftDepthTargetSVG(set, targetDmax, ln, bp, lk, st.tf, loamT)
     + liftBarGuideSVG(dmax, ln, bp, lk, st.tf, trailCol, loamT)
     + (ghostRead ? liftRefDepthSVG(ghostRead.depthScale, targetDmax, ln, bp, lk, st.tf, loamT) : '')
@@ -28077,7 +28150,7 @@ function liftFormFrame(ts) {
   }
   if (st.playing) st.raf = requestAnimationFrame(liftFormFrame);
 }
-/* No animation for a lift we cannot pose honestly (press, bench, dips, ...): a static, clearly-labeled
+/* No animation for a lift we cannot pose honestly (press, dips, ...): a static, clearly-labeled
    placeholder in the stage, not a stand-in body pretending to be the movement. The set's reps, tempo,
    and bar speed above are still real; only the moving figure is withheld until that lift gets a pose. */
 function liftFormShowNoPose(set) {
@@ -28087,7 +28160,7 @@ function liftFormShowNoPose(set) {
     `<div class="lf-nopose">
        <div class="lf-nopose-icon">🏋️</div>
        <div class="lf-nopose-title">${loamT('No form view for {lift} yet', { lift: escapeHtml(name) })}</div>
-       <div class="lf-nopose-sub">${loamT('We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.')}</div>
+       <div class="lf-nopose-sub">${loamT('We only animate lifts we can show honestly (squat, deadlift, bench, curl). Your reps, tempo, and bar speed above are still the real numbers.')}</div>
      </div>`;
   const note = document.getElementById('liftFormNote'); if (note) note.textContent = '';
   const rc = document.getElementById('liftFormRep'); if (rc) rc.textContent = '';
@@ -28275,7 +28348,11 @@ async function shareLiftForm() {
   }
 }
 function renderLiftForm(D) {
-  _liftForm.D = D; _liftForm.setIdx = 0; _liftClip.ready = null;
+  /* The stage is rebuilt below with its "Building…" caption, so the first frame must refresh the
+     caption and the ghost toggle even when the pose key is unchanged -- a re-render after a rep edit
+     or a relabel used to keep the key, skip the refresh, and leave "Building the rep-by-rep replay…"
+     under a replay that was already running. */
+  _liftForm.D = D; _liftForm.setIdx = 0; _liftForm.tfKey = ''; _liftForm.planKey = ''; _liftForm.plan = null; _liftClip.ready = null;
   const sets = D.strength.sets;
   const ck = liftFormCharKey();
   const chars = LIFT_CHARS.map(c => `<button class="lf-char ${c.key === ck ? 'on' : ''}" data-k="${c.key}" onclick="setLiftFormChar('${c.key}')">${loamT(c.name)}</button>`).join('');
@@ -28303,8 +28380,9 @@ function renderLiftForm(D) {
     <div class="lf-note" id="liftFormNote">${loamT('Building the rep-by-rep replay…')}</div>`;
   liftFormStart();
 }
-/* Honest per-lift caption: squat, deadlift and curl have real poses (squat descent, hip hinge, elbow
-   flexion); press/bench/dips/other have no dedicated pose yet, so the body is a neutral standing hold. */
+/* Honest per-lift caption: squat, deadlift, bench and curl have real poses (squat descent, hip hinge, the
+   supine press, elbow flexion); press/dips/other have no dedicated pose yet, so the body is a neutral
+   standing hold. */
 function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEnabled()) {
   /* Assembled from whole sentences joined by a space rather than from fragments carrying their own
      leading one: a translation has to be free to reorder a clause, and an empty fragment must not
@@ -28312,9 +28390,18 @@ function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEn
   const join = (...bits) => bits.filter(Boolean).join(' ');
   const clock = plan.cadenceMeasured ? loamT('Each rep follows its measured cadence.') : loamT('Replay timing uses the set\'s median tempo.');
   const phases = plan.phasesMeasured ? loamT('Down and drive durations come from wrist motion.') : loamT('The down/drive split is modeled.');
+  /* Only said where a hold is DRAWN (0.25 s and up; under that the figure never stops), so the
+     sentence cannot promise a pause the replay does not show. */
+  const hold = plan.pauseMeasured ? (set.lift === 'bench' ? loamT('The hold at the chest is measured.') : loamT('The hold at the bottom is measured.')) : '';
   const path = loamT('The side-view bar path is modeled, not measured fore-aft travel.');
-  if (set.lift === 'deadlift') return join(loamT('Deadlift hip-hinge replay.'), clock, phases, path);
-  if (set.lift === 'curl') return join(loamT('Curl elbow-flexion replay.'), clock, phases, path);
+  if (set.lift === 'bench') {
+    const arm = Number.isFinite(+set.forearmDeg)
+      ? loamT('The forearm angle at the chest is measured ({deg}° from vertical); the elbow path and the side-view bar path are modeled.', { deg: Math.round(+set.forearmDeg) })
+      : loamT('No watch measured the forearm angle at the chest, so the arm is modeled, as are the elbow path and the side-view bar path.');
+    return join(loamT('Bench press replay.'), clock, phases, hold, arm);
+  }
+  if (set.lift === 'deadlift') return join(loamT('Deadlift hip-hinge replay.'), clock, phases, hold, path);
+  if (set.lift === 'curl') return join(loamT('Curl elbow-flexion replay.'), clock, phases, hold, path);
   if (liftFormNoPose(set)) return loamT('{Lift}: no dedicated form view yet, so this is a neutral standing hold, not the real {lift} motion. Your reps and tempo are the real numbers.',
     { Lift: liftNameCap(set.lift), lift: liftNameLower(set.lift) });
   const target = liftDepthCap(set.depthTarget) ? liftDepthCap(set.depthTarget).toLowerCase() : null;
@@ -28327,7 +28414,7 @@ function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEn
   const ghost = ghostOn && plan.depthMeasured && plan.reps.length > 1
     ? loamT('The faint body behind you is rep 1 at the same point in the movement: only depth differs between reps, because torso lean is drawn from your taps rather than measured.')
     : '';
-  return join(clock, phases, depth, ghost, path);
+  return join(clock, phases, hold, depth, ghost, path);
 }
 
 /* ---- Coach's read: a deterministic, on-device form read from the set facts (metric -> mechanism ->
@@ -29993,7 +30080,7 @@ function liftBarCap(p) { return p === 'high' ? loamT('High') : p === 'low' ? loa
    key only a variable can reach is a key the copy-table sweep cannot audit. */
 function liftPhaseWord(phase) {
   return phase === 'down' ? loamT('down') : phase === 'drive' ? loamT('drive')
-    : phase === 'lockout' ? loamT('lockout') : phase;
+    : phase === 'pause' ? loamT('pause') : phase === 'lockout' ? loamT('lockout') : phase;
 }
 /* Null for an untapped set, so a caller can tell "no depth was tapped" from a depth that was. */
 function liftDepthCap(t) { return t === 'full' ? loamT('Full') : t === 'parallel' ? loamT('Parallel') : null; }
@@ -35707,8 +35794,15 @@ const LOAM_NB = {
   'Replay could not be shared': 'Avspillingen kunne ikke deles',
   'This replay could not be recorded, so nothing was shared.': 'Avspillingen kunne ikke tas opp, så ingenting ble delt.',
   'No form view for {lift} yet': 'Ingen teknikkvisning for {lift} ennå',
-  'We only animate lifts we can show honestly (squat, deadlift, curl). Your reps, tempo, and bar speed above are still the real numbers.':
-    'Vi animerer bare øvelser vi kan vise ærlig (knebøy, markløft, curl). Repetisjonene, tempoet og stangfarten over er fortsatt ekte tall.',
+  'We only animate lifts we can show honestly (squat, deadlift, bench, curl). Your reps, tempo, and bar speed above are still the real numbers.':
+    'Vi animerer bare øvelser vi kan vise ærlig (knebøy, markløft, benkpress, curl). Repetisjonene, tempoet og stangfarten over er fortsatt ekte tall.',
+  'Bench press replay.': 'Avspilling av benkpress.',
+  'The hold at the chest is measured.': 'Stoppet ved brystet er målt.',
+  'The hold at the bottom is measured.': 'Stoppet nederst er målt.',
+  'The forearm angle at the chest is measured ({deg}° from vertical); the elbow path and the side-view bar path are modeled.':
+    'Underarmsvinkelen ved brystet er målt ({deg}° fra loddrett); albuebanen og stangbanen sett fra siden er modellert.',
+  'No watch measured the forearm angle at the chest, so the arm is modeled, as are the elbow path and the side-view bar path.':
+    'Ingen klokke målte underarmsvinkelen ved brystet, så armen er modellert, og det er også albuebanen og stangbanen sett fra siden.',
 
   /* The bar-position and depth words, keyed by the chip name the capture app stamps. */
   'High': 'Høy',
@@ -53691,7 +53785,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'ab5a8e26a · 2026-10-14';
+const LOAM_BUILD = 'd3e0bd1a9 · 2026-10-14';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
