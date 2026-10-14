@@ -747,7 +747,7 @@
   /* `:not(:has(...))` for the reason the Visual tablenote rule below carries it: a note that
      holds a control is not a caption. The swim view's pool-length fix is a `.swim-mech` paragraph,
      and hiding it left a web swimmer with no distance and nothing to press. */
-  :root[data-analysis-view="visual"] :is(.lf-note, .lift-sig-cap, .swim-sig-cap, .gr-note, .swim-mech, .swim-act, .be-foot):not(:has(button, input, select, a)) { display:none; }
+  :root[data-analysis-view="visual"] :is(.lf-note, .lf-nopose-sub, .lift-sig-cap, .swim-sig-cap, .gr-note, .swim-mech, .swim-act, .be-foot):not(:has(button, input, select, a)) { display:none; }
   .analysis-visual-only { display:none; }
   /* The coach panel is session prose in these views -- except where Progress borrows it INTO the
      training plan, whose "Write my plan with the coach" button would otherwise scroll to nothing,
@@ -15561,6 +15561,56 @@ const WRIST_VEL_THR = 0.30;      // m/s; a real rep swings the bar's vertical ve
 const WRIST_MIN_ROM_M = 0.15;    // and moves it at least this far vertically
 const WRIST_MIN_REP_SEP_S = 2.0; // two bottoms closer than one squat rep are one rep (a bounce out of the hole)
 /*
+ * The same window for a set tapped as a BENCH press, where the 2.0 s above was the whole undercount.
+ * That window was set for a squat's bounce out of the hole and graded on squat sessions; a bench has
+ * no hole and no bounce, and a light touch-and-go set runs at 1.0-1.8 s per rep, so every pair of
+ * bottoms inside the window collapsed into one rep. Measured on synthetic touch-and-go sets of 17
+ * (ROM 0.35 m, the reps themselves clearing both gates with margin): 6-8 of 17 at 1.0-1.8 s per rep,
+ * 14 at 2.0 s, all 17 from 2.2 s up. The LIVE detector (ios LiveRepDetector.minRepPeriodS = 0.8 s)
+ * counts all 17 at every tempo -- which is why the audio coach counted every rep of a 60 kg x 17
+ * bench set that the saved analysis then reported at about half (owner report, 2026-10-13). 0.8 s is
+ * the live detector's value: chosen there on the squat evidence that a bounce's two bottoms sit
+ * 0.4-1.0 s apart and a real rep's never closer than 1.2 s, and a press has nothing of the first
+ * kind, so the window only has to be shorter than a rep. KEYED ON THE TAPPED LIFT, and bench alone:
+ * squat, deadlift and every unlabeled set keep the 2.0 s window the validated sessions were graded
+ * under, so nothing they measure moves. The same merge almost certainly costs reps on a fast light
+ * deadlift or press set too (a 12-rep set at 1.8 s per rep simulates as 6), but no graded recording
+ * of either exists; grade one before widening this. Not yet graded on a real bench recording
+ * either: the 2026-10-13 session (60x17, 80x7, 90x3, counts corrected by the lifter) is the one to
+ * run when it reaches data/strength/.
+ */
+const WRIST_MIN_REP_SEP_BENCH_S = 0.8;
+/*
+ * The rest of the bench PROFILE, graded on data/strength/bench-2026-10-13/ -- four tapped bench sets
+ * (60x17, 80x7, 90x3, 80x12) with the lifter's own corrected counts as truth, the first real bench
+ * recording in the project. With the merge window alone the saved counts were 15 / 3 / 2 / 2, and the
+ * cycle-by-cycle replay says why: (1) a controlled bench lowering runs at 0.15-0.30 m/s -- 40 of the
+ * 41 reps in the three working sets never reached the squat's 0.30 descent gate, so they were never
+ * looked at; (2) the first press off the un-rack is slow (0.26-0.28 m/s, under the 0.30 drive gate),
+ * so reps 1 and 2 fused into one cycle on two sets; (3) the un-rack flows straight into rep 1 (the
+ * bar comes off the hooks and lowers to the chest in one movement), so the leading-un-rack trim,
+ * written for a squat's separate walk-out, dropped rep 1, and the trailing trim dropped a real last
+ * rep whenever the cadence slowed with fatigue; (4) the only phantoms were two cycles in the 90 kg
+ * set made AFTER racking the bar, with the forearm horizontal and then hanging -- during every real
+ * rep the forearm points up within 25 degrees of vertical. So: descent gate 0.15 m/s, drive gate
+ * 0.25 m/s (a failed press runs 0.12-0.18, so it stays out), no end trims, and a posture gate on the
+ * forearm. Result 16 / 8 / 5 / 10 against 17 / 7 / 3 / 12. What is still wrong, named: set 2's extra
+ * is a failed eighth attempt whose cycle the re-rack lift closed; set 3's five are five press cycles
+ * of which the lifter credits three (two were assisted or failed); set 4's two missing reps lower at
+ * 0.10-0.18 m/s and press at 0.3 inside a fatigued set and are not separable from their neighbours
+ * in the band-passed velocity. Thresholds sit on plateaus (0.10-0.18 on the descent gate and 0.22-0.25
+ * on the drive gate give the same counts), not on edges. ONE session, one lifter: the next bench
+ * recording grades these again before any of them is called validated.
+ */
+const WRIST_DOWN_THR_BENCH = 0.15;        // m/s: a controlled bench lowering never reaches the squat's 0.30
+const WRIST_UP_THR_BENCH = 0.25;          // m/s: the first press off the un-rack runs 0.26-0.28; a failed one 0.12-0.18
+const WRIST_BENCH_FOREARM_MAX_DEG = 60;   // a cycle pressed with the forearm this far off the set's line is not a rep
+/* How still the bar must be (band-passed vertical velocity, m/s) to be dwelling at the bottom: the pause
+   read is the time around each rep's reversal spent under this. ~0.1 s on a touch-and-go rep (the
+   reversal is smeared by the 0.5 s smoothing), 0.2 s on a heavier one, and the real dwell -- 0.4-2 s on
+   the reference session's fatigued twelfth set -- when the lifter actually stops. */
+const WRIST_PAUSE_V_MPS = 0.10;
+/*
  * A descent that has not driven back up this long after its bottom was not a rep. Without it the
  * "down" state has no exit but a drive, so a walk-out -- which lowers the bar onto the back and then
  * simply holds it there, never clearing +WRIST_VEL_THR -- stays open across the get-set pause and
@@ -15615,22 +15665,34 @@ const WRIST_MAX_HOLD_S = 11.0;
  * 140x3) added the two rules called out on WRIST_MAX_HOLD_S and dipAcc below, each of
  * which cost one rep on one of the two heavy sets; it now reproduces all four.
  */
-function countRepsWrist(wrist, tStart, tEnd) {
+function countRepsWrist(wrist, tStart, tEnd, opts = {}) {
   const seg = (wrist || []).filter(r => r.t >= tStart && r.t <= tEnd);
   if (seg.length < 50) return null;
+  /* The bench PROFILE (WRIST_MIN_REP_SEP_BENCH_S and the three constants under it): the merge window,
+     both velocity gates, the forearm posture gate and the absence of end trims are properties of the
+     LIFT, not of the counter, and every other lift keeps the squat values it was graded under. */
+  const bench = String((opts && opts.lift) || '').toLowerCase() === 'bench';
+  const minRepSepS = bench ? WRIST_MIN_REP_SEP_BENCH_S : WRIST_MIN_REP_SEP_S;
+  const downThr = bench ? WRIST_DOWN_THR_BENCH : WRIST_VEL_THR;
+  const upThr = bench ? WRIST_UP_THR_BENCH : WRIST_VEL_THR;
   const G = 9.80665;
   const tw = seg.map(r => r.t);
   const up = seg.map(r => { const g = unit(r.gx, r.gy, r.gz); return -(r.ax * g.x + r.ay * g.y + r.az * g.z) * G; });
+  /* Gravity along the watch's x axis, which runs along the FOREARM (the crown points along the arm,
+     and the band only lets the watch turn about that axis), so |gx| is the cosine of the forearm's
+     angle from vertical and its sign says whether the hand is above or below the elbow. Read at the
+     chest of each rep for the forearm-angle read and, on a bench, for the posture gate. */
+  const fore = seg.map(r => unit(r.gx, r.gy, r.gz).x);
   /* Resample to a uniform grid. */
   const n = Math.max(2, Math.floor((tw[tw.length - 1] - tw[0]) * WRIST_FS));
-  const tu = new Array(n), a = new Array(n);
+  const tu = new Array(n), a = new Array(n), gf = new Array(n);
   let j = 0;
   for (let i = 0; i < n; i++) {
     const tt = tw[0] + i / WRIST_FS;
     while (j + 1 < tw.length && tw[j + 1] < tt) j++;
     const j1 = Math.min(j + 1, tw.length - 1);
     const f = tw[j1] > tw[j] ? (tt - tw[j]) / (tw[j1] - tw[j]) : 0;
-    tu[i] = tt; a[i] = up[j] + (up[j1] - up[j]) * f;
+    tu[i] = tt; a[i] = up[j] + (up[j1] - up[j]) * f; gf[i] = fore[j] + (fore[j1] - fore[j]) * f;
   }
   const dt = 1 / WRIST_FS;
   /* Band-passed vertical velocity: drop the acceleration DC (3 s), integrate, then drop the slow
@@ -15642,7 +15704,7 @@ function countRepsWrist(wrist, tStart, tEnd) {
   const vs = movAvg(v.map((x, i) => x - vBias[i]), Math.round(0.5 * WRIST_FS));
   /* Amplitude-gated velocity cycle: descent -> drive up = one rep. */
   const reps = [];
-  let state = 'idle', vMin = 0, tBottom = 0, tDown = 0, romAcc = 0, upSum = 0, upN = 0;
+  let state = 'idle', vMin = 0, tBottom = 0, iBottom = 0, tDown = 0, romAcc = 0, upSum = 0, upN = 0;
   /* The descent in progress, tracked from the ZERO crossing rather than from the -WRIST_VEL_THR
      crossing, because the lowering starts where the bar starts moving down and not where it gets
      fast enough to notice. Integrating from the threshold instead threw away the slow head of every
@@ -15652,31 +15714,56 @@ function countRepsWrist(wrist, tStart, tEnd) {
   let dipAcc = 0, dipStart = 0;
   /* Eccentric (lowering) time = descent start -> bottom; concentric (drive) time = bottom -> end of the
      up phase. Both come free from the same state machine, so a set's tempo splits into down / up. */
-  const mkRep = (tEnd) => ({ t: tBottom, rom: romAcc, cv: upN ? upSum / upN : 0, amp: -vMin,
-    eccS: +Math.max(0, tBottom - tDown).toFixed(2), conS: +Math.max(0, tEnd - tBottom).toFixed(2) });
+  /* The CHEST (or the hole): the first sample after the bottom where the bar has stopped going down.
+     The pause is how long the band-passed velocity stays within WRIST_PAUSE_V_MPS of zero around it,
+     and the forearm angle is read at the same sample. */
+  const chestOf = (ib) => { let z = ib; while (z < n - 1 && vs[z] < 0) z++; return z; };
+  const pauseAt = (z) => {
+    let lo = z, hi = z;
+    while (lo > 0 && Math.abs(vs[lo - 1]) < WRIST_PAUSE_V_MPS) lo--;
+    while (hi < n - 1 && Math.abs(vs[hi + 1]) < WRIST_PAUSE_V_MPS) hi++;
+    return (hi - lo + 1) * dt;
+  };
+  const mkRep = (tEnd) => {
+    const z = chestOf(iBottom);
+    return { t: tBottom, rom: romAcc, cv: upN ? upSum / upN : 0, amp: -vMin,
+      eccS: +Math.max(0, tBottom - tDown).toFixed(2), conS: +Math.max(0, tEnd - tBottom).toFixed(2),
+      pauseS: +pauseAt(z).toFixed(2), fore: gf[z],
+      forearmDeg: Math.round(Math.acos(Math.min(1, Math.abs(gf[z]))) * RAD2DEG) };
+  };
   for (let i = 0; i < n; i++) {
     if (vs[i] < 0) { if (dipAcc === 0) dipStart = tu[i]; dipAcc += -vs[i] * dt; } else dipAcc = 0;
     if (state === 'idle') {
-      if (vs[i] < -WRIST_VEL_THR) { state = 'down'; vMin = vs[i]; tBottom = tu[i]; tDown = dipStart; romAcc = dipAcc; upSum = 0; upN = 0; }
+      if (vs[i] < -downThr) { state = 'down'; vMin = vs[i]; tBottom = tu[i]; iBottom = i; tDown = dipStart; romAcc = dipAcc; upSum = 0; upN = 0; }
     } else if (state === 'down') {
       if (vs[i] < 0) romAcc += -vs[i] * dt;        // integrate the descent distance
-      if (vs[i] < vMin) { vMin = vs[i]; tBottom = tu[i]; }
-      if (vs[i] > WRIST_VEL_THR) { state = 'up'; upSum = vs[i]; upN = 1; }
+      if (vs[i] < vMin) { vMin = vs[i]; tBottom = tu[i]; iBottom = i; }
+      if (vs[i] > upThr) { state = 'up'; upSum = vs[i]; upN = 1; }
       else if (tu[i] - tBottom > WRIST_MAX_HOLD_S) state = 'idle';   // held down, never drove: not a rep
     } else {
       if (vs[i] > 0) { upSum += vs[i]; upN++; }
-      if (vs[i] < WRIST_VEL_THR) {
+      if (vs[i] < upThr) {
         if (romAcc > WRIST_MIN_ROM_M) reps.push(mkRep(tu[i]));
         state = 'idle';
       }
     }
   }
   if (state === 'up' && romAcc > WRIST_MIN_ROM_M) reps.push(mkRep(tu[n - 1]));
+  /* Bench only: a cycle pressed with the forearm pointing somewhere other than the set's pressing
+     line is not a rep. The reference is the set's own median, so the watch's crown orientation and
+     which wrist it is on cancel out; the only phantoms on the reference session were two cycles made
+     after racking, with the forearm horizontal and then hanging (0 and -0.86 against reps at -1.0). */
+  let cycles = reps;
+  if (bench && reps.length) {
+    const ref = Math.sign(median(reps.map(r => r.fore))) || 1;
+    const cosMax = Math.cos(WRIST_BENCH_FOREARM_MAX_DEG / RAD2DEG);
+    cycles = reps.filter(r => r.fore * ref >= cosMax);
+  }
   /* Merge bottoms closer than one squat rep (a bounce), keeping the deeper swing. */
   const merged = [];
-  for (const rep of reps) {
+  for (const rep of cycles) {
     const last = merged[merged.length - 1];
-    if (last && rep.t - last.t < WRIST_MIN_REP_SEP_S) { if (rep.amp > last.amp) merged[merged.length - 1] = rep; }
+    if (last && rep.t - last.t < minRepSepS) { if (rep.amp > last.amp) merged[merged.length - 1] = rep; }
     else merged.push(rep);
   }
   /* Drop a lone leading un-rack and/or trailing re-rack. The walk-out to get set (un-rack a squat off
@@ -15688,8 +15775,11 @@ function countRepsWrist(wrist, tStart, tEnd) {
      threshold is cadence-relative (1.7x, with a small 3 s floor) rather than a hard 6 s floor: a fast
      dumbbell curl cadence (~2 s) puts the un-rack/re-rack gap at only ~4-5 s, which the old floor missed
      and left as +2 reps. Deadlift/floor-pull working sets start at the bar and run at a uniform cadence,
-     so no end gap exceeds the threshold and none are dropped. Only lone END movements are trimmed. */
-  if (merged.length >= 3) {
+     so no end gap exceeds the threshold and none are dropped. Only lone END movements are trimmed.
+     Not on a bench: there the un-rack flows straight into rep 1 and the re-rack never clears the ROM
+     gate, so these trims can only ever eat real reps -- and did, at both ends, on the reference
+     session. */
+  if (!bench && merged.length >= 3) {
     const gaps = [];
     for (let k = 1; k < merged.length; k++) gaps.push(merged[k].t - merged[k - 1].t);
     const inner = gaps.slice(1, -1).slice().sort((a, b) => a - b);
@@ -15705,7 +15795,7 @@ function countRepsWrist(wrist, tStart, tEnd) {
      median). Validated on the 2026-07-15 ground-truth squat session: set 1 counts 13, the lone-pop trims
      it to 12, and this cluster trim drops the two remaining shallow re-racks (ROM ~0.2 m vs ~0.7 m
      working) to reach the true 10; the five other sets are untouched. */
-  if (merged.length >= 4) {
+  if (!bench && merged.length >= 4) {
     const gaps = [];
     for (let k = 1; k < merged.length; k++) gaps.push(merged[k].t - merged[k - 1].t);
     const interior = gaps.slice(1, -1);
@@ -15718,7 +15808,7 @@ function countRepsWrist(wrist, tStart, tEnd) {
     }
     if (cut >= 2 && cut < merged.length) merged.length = cut;
   }
-  if (!merged.length) return { reps: 0, repTimes: [], romMeters: null, concVelMps: null, perRep: [], eccS: null, conS: null };
+  if (!merged.length) return { reps: 0, repTimes: [], romMeters: null, concVelMps: null, perRep: [], eccS: null, conS: null, pauseS: null, forearmDeg: null };
   return {
     reps: merged.length,
     repTimes: merged.map(r => +r.t.toFixed(2)),
@@ -15727,9 +15817,14 @@ function countRepsWrist(wrist, tStart, tEnd) {
     // Median eccentric (lowering) and concentric (drive) time per rep, seconds — the tempo split.
     eccS: +median(merged.map(r => r.eccS)).toFixed(2),
     conS: +median(merged.map(r => r.conS)).toFixed(2),
-    // Per-rep concentric velocity (m/s), bar ROM / depth (m), and phase times (s), in rep order, for the
-    // per-rep breakdown, velocity-loss, and tempo-split reads. Medians above stay the headline.
-    perRep: merged.map(r => ({ cvMps: +r.cv.toFixed(2), romMeters: +r.rom.toFixed(2), eccS: r.eccS, conS: r.conS })),
+    // Median dwell at the bottom (the chest, on a bench) per rep, seconds, and the median forearm angle
+    // from vertical at the chest, degrees. See WRIST_PAUSE_V_MPS and the forearm channel above.
+    pauseS: +median(merged.map(r => r.pauseS)).toFixed(2),
+    forearmDeg: Math.round(median(merged.map(r => r.forearmDeg))),
+    // Per-rep concentric velocity (m/s), bar ROM / depth (m), phase times (s), pause (s) and forearm
+    // angle (deg), in rep order, for the per-rep breakdown, velocity-loss, and tempo-split reads.
+    // Medians above stay the headline.
+    perRep: merged.map(r => ({ cvMps: +r.cv.toFixed(2), romMeters: +r.rom.toFixed(2), eccS: r.eccS, conS: r.conS, pauseS: r.pauseS, forearmDeg: r.forearmDeg })),
   };
 }
 
@@ -15798,8 +15893,14 @@ function analyzeStrength(sensors, ride, opts = {}) {
     const phone = countReps(rangeX >= rangeY ? sliceX : sliceY, segT);
 
     /* Reps prefer the wrist (bar) motion when the watch was worn: it counts
-       cleanly regardless of phone pocket, unlike the pocket-tilt fallback. */
-    const wristRes = countRepsWrist(wrist, segT[0], segT[segT.length - 1]);
+       cleanly regardless of phone pocket, unlike the pocket-tilt fallback. The
+       lift goes along, because how close two bottoms may sit and still be two
+       reps is a property of the lift (see WRIST_MIN_REP_SEP_BENCH_S): the tapped
+       label, or a relabel made after the fact (`opts.liftOverrides`, by set
+       index), which stands in for the tap everywhere the tap is read below. */
+    const lift = (opts.liftOverrides && opts.liftOverrides[sets.length]) || (win ? (win.lift || null) : null);
+    const squatLift = !lift || lift === 'squat';
+    const wristRes = countRepsWrist(wrist, segT[0], segT[segT.length - 1], { lift });
     const useWrist = !!(wristRes && wristRes.reps >= 1);
 
     /* Auto-segmented spans need a couple of reps to count as a set; a lifter's
@@ -15835,21 +15936,27 @@ function analyzeStrength(sensors, ride, opts = {}) {
       tempoS: periods.length ? +median(periods).toFixed(2) : null,
       romMeters: useWrist ? wristRes.romMeters : null,   // bar ROM (depth) in m, wrist only
       repDepthsM: useWrist ? (wristRes.perRep || []).map(r => r.romMeters) : [],   // per-rep bar ROM, wrist only
-      repPhaseTimes: useWrist ? (wristRes.perRep || []).map(r => ({ eccS: r.eccS, conS: r.conS })) : [],
+      repPhaseTimes: useWrist ? (wristRes.perRep || []).map(r => ({ eccS: r.eccS, conS: r.conS, pauseS: r.pauseS })) : [],
       eccS: useWrist ? wristRes.eccS : null,   // median eccentric (lowering) time per rep, seconds
       conS: useWrist ? wristRes.conS : null,   // median concentric (drive) time per rep, seconds
+      pauseS: useWrist ? wristRes.pauseS : null,   // median dwell at the bottom (the chest, on a bench) per rep, seconds
+      /* Forearm angle from vertical at the chest, degrees, median over the set's reps. The watch's x axis
+         runs along the forearm, so this is drift-free and needs no calibration; it means something on a
+         press with the hands above the elbows (a bench), which is the only lift the view shows it for. */
+      forearmDeg: useWrist ? wristRes.forearmDeg : null,
+      repForearmDeg: useWrist ? (wristRes.perRep || []).map(r => r.forearmDeg) : [],
       flexionProxyDeg: +phone.ampDeg.toFixed(1),          // pocket-tilt depth proxy (secondary)
       headPitchDeg,
       barSpeed,
       /* Lift type: tapped 'squat' | 'deadlift' | 'press' | 'bench' | 'curl', or null (treated as squat).
          High/low bar and full/parallel depth are squat concepts, so a non-squat lift skips those reads. */
-      lift: win ? (win.lift || null) : null,
+      lift,
       /* Bar position + depth are squat concepts, so a non-squat lift reports neither, even if a sticky
          bar / depth tap from an earlier squat set carried into this window. A squat uses the tapped bar
          position when present (authoritative), else it is inferred from torso lean below. */
-      barPosition: (!win || !win.lift || win.lift === 'squat') ? (win && win.barPosition ? win.barPosition : 'uncertain') : null,
-      labeled: !!(win && win.barPosition && (!win.lift || win.lift === 'squat')),
-      depthTarget: (!win || !win.lift || win.lift === 'squat') ? (win ? (win.depthTarget || null) : null) : null,
+      barPosition: squatLift ? (win && win.barPosition ? win.barPosition : 'uncertain') : null,
+      labeled: !!(win && win.barPosition && squatLift),
+      depthTarget: squatLift ? (win ? (win.depthTarget || null) : null) : null,
       misses: win ? (win.misses || []) : [],
       forwardLeanDeg: null,
     });
@@ -27537,8 +27644,26 @@ function liftApplyRepCorr(D) {
   const corr = liftRepsCorr(key), lifts = liftLiftCorr(key);
   if (!corr.some(v => v != null) && !lifts.some(v => v)) return D;
   const isSquat = l => !l || l === 'squat';
+  /* A relabel into or out of Bench changes how the set is COUNTED, not only what it is called: the
+     bench profile (WRIST_MIN_REP_SEP_BENCH_S and its gates) is keyed on the lift, and the squat profile
+     read the graded bench session at half its reps. So when the recording's sensors are at hand (they
+     ride along in the render object and its cache), the analysis runs again with the relabels standing
+     in for the taps, and the corrections layer onto THAT; its per-set counts become the "auto" counts
+     the tooltip quotes and a cleared cell falls back to. A relabel between any other two lifts changes
+     no count, and a render object without its sensors keeps the label-only path below. */
+  let base = D;
+  const benchMoved = (D.strength.sets || []).some((s, i) => lifts[i] && ((s.lift === 'bench') !== (lifts[i] === 'bench')));
+  if (benchMoved && D.sensors && D.ride) {
+    try {
+      const setWindows = LoamStrength.parseSetMarks(D.sensors.annotations || [], D.ride);
+      const strength = LoamStrength.analyzeStrength(D.sensors, D.ride, { setWindows, liftOverrides: lifts });
+      if (strength.sets.length === D.strength.sets.length) {
+        base = { ...D, strength: { ...strength, autoSets: strength.sets }, summary: LoamStrength.computeStrengthSummary(D.sensors, D.ride, strength) };
+      }
+    } catch (e) { /* too thin to count again (the analysis throws on a recording with little orientation data): label-only below */ }
+  }
   let reread = false;
-  let sets = (D.strength.sets || []).map((s, i) => {
+  let sets = (base.strength.sets || []).map((s, i) => {
     let out = s;
     if (corr[i] != null) out = { ...out, reps: corr[i], repSource: 'manual' };
     const l = lifts[i];
@@ -27558,9 +27683,9 @@ function liftApplyRepCorr(D) {
   }
   const nReps = sets.reduce((a, s) => a + s.reps, 0);
   const nBar = p => sets.filter(s => s.barPosition === p).length;
-  const summary = { ...D.summary, nReps, avgRepsPerSet: sets.length ? +(nReps / sets.length).toFixed(1) : 0,
+  const summary = { ...base.summary, nReps, avgRepsPerSet: sets.length ? +(nReps / sets.length).toFixed(1) : 0,
     nHighBarSets: nBar('high'), nLowBarSets: nBar('low'), nUncertainSets: nBar('uncertain') };
-  return { ...D, strength: { ...D.strength, sets }, summary };
+  return { ...base, strength: { ...base.strength, sets }, summary };
 }
 /* A full re-render, unlike onLiftWeight: the lift reaches the tiles, the squat-only columns, the
    Spotter Cam's body, the history row and the coach. */
@@ -29824,7 +29949,10 @@ function renderStrength(D) {
   _liftDc = Dc;
   const corr = liftRepsCorr(D.key || '');
   const liftSel = liftLiftCorr(D.key || '');   // per-set relabels, '' where the recording stands
-  const autoSets = D.strength.sets;         // raw per-set counts, for the corrected-value tooltip
+  const rawSets = D.strength.sets;          // what the recording said: the lift each Exercise picker's top option names
+  /* The counter's own per-set counts, for the corrected-value tooltip: the analysis as run, or as run
+     again under a Bench relabel (liftApplyRepCorr), since that is what a cleared cell falls back to. */
+  const autoSets = (Dc.strength && Dc.strength.autoSets) || rawSets;
   const sum = Dc.summary, sets = (Dc.strength && Dc.strength.sets) || [];
   /* Weightlifting was declared but no set survived segmentation: the lifter never tapped "Start set" and
      the motion auto-segmenter found nothing (a quiet or very short recording). Without this guard the
@@ -29860,14 +29988,39 @@ function renderStrength(D) {
     : v <= 0.5 ? `<span style="color:var(--text-muted, #7a808c)" title="${escapeHtml(loamT('most upright set (baseline)'))}">${loamT('ref')}</span>`
     : '+' + v.toFixed(0) + '°';
 
+  /* Which per-set facts earn a place. High/low bar, full/parallel depth and the lean read are squat
+     concepts: on a bench-and-deadlift session every one of them printed a dash or a "?", while the
+     one fact that told the sets apart -- the lift the lifter tapped -- appeared on no panel here
+     (owner report, 2026-10-13: "confusing to see which lift was which"). A non-squat set shows its
+     lift where its bar position would go, and the squat-only tiles and columns go when no set is a
+     squat. The lift itself is the Exercise picker on every row (the relabel, below). */
+  const isSquatSet = s => !s.lift || s.lift === 'squat';
+  const anySquat = sets.some(isSquatSet);
+  const hasLift = sets.some(s => s.lift);
+  /* The forearm column is a bench read (hands above the elbows, the watch's x axis along the forearm),
+     so it appears only when a set was tapped Bench and reads a dash on every other set. */
+  const hasBench = sets.some(s => s.lift === 'bench');
+  /* "Bench: 3 sets · Deadlift: 4 sets", in the order the lifts were first tapped. */
+  const liftCounts = [];
+  for (const s of sets) {
+    const key = s.lift || null;
+    const row = liftCounts.find(r => r.key === key);
+    if (row) row.n++; else liftCounts.push({ key, n: 1 });
+  }
+  const liftBreakdown = liftCounts.map(r => {
+    const name = r.key ? liftNameCap(r.key) : loamT('Unlabeled');
+    return escapeHtml(r.n === 1 ? loamT('{lift}: 1 set', { lift: name }) : loamT('{lift}: {n} sets', { lift: name, n: r.n }));
+  }).join(' · ');
+
   const blocks = sets.map((s, i) => {
     const col = barColor(s.barPosition);
     const bs = barSpd(s);
+    const squat = isSquatSet(s);
     return `<div class="setblock" style="border-top:4px solid ${col}">
       <div class="setblock-n">${loamT('SET {n}', { n: i + 1 })}${corr[i] != null ? ` <span class="setblock-edit" title="${escapeHtml(loamT('Rep count corrected by you'))}">${loamT('edited')}</span>` : ''}</div>
       <div class="setblock-reps">${s.reps}<span>${loamT('reps')}</span></div>
-      <div class="setblock-bar" style="color:${col}">${(s.barPosition === 'uncertain' || s.barPosition == null) ? loamT('? bar') : loamT('{pos} bar', { pos: liftBarCap(s.barPosition).toLowerCase() })}</div>
-      <div class="setblock-depth">${depthIcon(s.depthTarget)} ${liftDepthCap(s.depthTarget) ? liftDepthCap(s.depthTarget).toLowerCase() : loamT('depth ?')}</div>
+      <div class="setblock-bar" style="color:${squat ? col : 'var(--text, inherit)'}">${!squat ? escapeHtml(liftNameCap(s.lift)) : (s.barPosition === 'uncertain' || s.barPosition == null) ? loamT('? bar') : loamT('{pos} bar', { pos: liftBarCap(s.barPosition).toLowerCase() })}</div>
+      <div class="setblock-depth">${squat ? `${depthIcon(s.depthTarget)} ${liftDepthCap(s.depthTarget) ? liftDepthCap(s.depthTarget).toLowerCase() : loamT('depth ?')}` : ''}</div>
       <div class="setblock-bs">${bs != null ? f(bs) + ' m/s' : ''}</div>
     </div>`;
   }).join('');
@@ -29888,8 +30041,8 @@ function renderStrength(D) {
   const tiles = [
     tile(sum.nSets, loamT('sets')),
     tile(sum.nReps, loamT('reps')),
-    tile(sum.nHighBarSets + ' / ' + sum.nLowBarSets, loamT('high / low bar')),
-    tile(nFull + ' / ' + nPar, loamT('full / parallel')),
+    anySquat ? tile(sum.nHighBarSets + ' / ' + sum.nLowBarSets, loamT('high / low bar')) : '',
+    anySquat ? tile(nFull + ' / ' + nPar, loamT('full / parallel')) : '',
     sum.hasBarSpeed ? tile(f(sum.meanBarSpeedMps), loamT('mean bar m/s')) : tile('—', loamT('bar speed (watch)')),
     tile(sum.medianTempoS != null ? f(sum.medianTempoS, 1) + 's' : '—', loamT('tempo / rep')),
     tile('<span id="liftVolTile">' + (volKg > 0 ? fmtVol(volKg) : '—') + '</span>', loamT('volume (load × reps)')),
@@ -29899,8 +30052,8 @@ function renderStrength(D) {
   const rows = sets.map((s, i) => {
     const bs = barSpd(s);
     /* The top option is "what the recording said", named so choosing it reads as a reset. Read off
-       `autoSets`, not `s`: `s` is the corrected set and would show the relabel as the recording's. */
-    const autoLift = autoSets[i] && autoSets[i].lift;
+       `rawSets`, not `s`: `s` is the corrected set and would show the relabel as the recording's. */
+    const autoLift = rawSets[i] && rawSets[i].lift;
     const liftOpts = [`<option value=""${liftSel[i] ? '' : ' selected'}>&mdash; ${escapeHtml(liftNameCap(autoLift) || loamT('Unlabeled'))}</option>`]
       .concat(LoamStrength.LIFT_LABELS.map(l => `<option value="${escapeHtml(l)}"${liftSel[i] === l ? ' selected' : ''}>${escapeHtml(liftNameCap(l))}</option>`)).join('');
     return `<tr>
@@ -29908,12 +30061,13 @@ function renderStrength(D) {
       <td><select class="lift-in${liftSel[i] ? ' rep-corr' : ''}" aria-label="${escapeHtml(loamT('Set {n}', { n: i + 1 }) + ' · ' + loamT('Exercise'))}" title="${escapeHtml(liftSel[i] ? loamT('Relabelled by you. Pick the top option to go back to what the recording said.') : loamT('As tapped during the recording. An untapped set is read as a squat; pick the lift if that is wrong.'))}" onchange="onLiftLift(${i}, this.value)">${liftOpts}</select></td>
       <td><input class="rep-in${corr[i] != null ? ' rep-corr' : ''}" type="number" inputmode="numeric" min="0" step="1" value="${s.reps}" title="${escapeHtml(corr[i] != null ? loamT('Corrected by you (auto counted {n}). Clear the field to reset to the counter.', { n: autoSets[i].reps }) : loamT('Auto rep count. Edit to correct a miscount; clear to reset.'))}" onchange="onLiftReps(${i}, this.value)"></td>
       <td><input class="wt-in" type="number" inputmode="decimal" min="0" step="any" value="${weights[i] != null ? kgToDisp(weights[i]) : ''}" placeholder="—" onchange="onLiftWeight(${i}, this.value)"></td>
-      <td style="color:${barColor(s.barPosition)};text-transform:capitalize">${s.barPosition ? liftBarCap(s.barPosition) : '—'}</td>
-      <td style="text-transform:capitalize">${liftDepthCap(s.depthTarget) || '—'}</td>
+      ${anySquat ? `<td style="color:${barColor(s.barPosition)};text-transform:capitalize">${s.barPosition ? liftBarCap(s.barPosition) : '—'}</td>
+      <td style="text-transform:capitalize">${liftDepthCap(s.depthTarget) || '—'}</td>` : ''}
       <td>${s.tempoS != null ? f(s.tempoS, 1) + 's' : '—'}</td>
       <td>${s.romMeters != null ? (s.romMeters * 100).toFixed(0) + ' cm' : '—'}</td>
       <td>${bs != null ? f(bs) : '—'}</td>
-      <td>${leanCell(s.forwardLeanDeg)}</td>
+      ${hasBench ? `<td>${s.lift === 'bench' && s.forearmDeg != null ? s.forearmDeg + '°' : '—'}</td>` : ''}
+      ${anySquat ? `<td>${leanCell(s.forwardLeanDeg)}</td>` : ''}
       <td>${s.tutS != null ? s.tutS.toFixed(0) + 's' : '—'}</td>
       <td>${(s.misses && s.misses.length) || 0}</td></tr>`;
   }).join('');
@@ -29932,13 +30086,20 @@ function renderStrength(D) {
       const h = Math.max(2, (v / mx) * (H - 3));
       const fr = v / mx, col = fr > 0.85 ? '#37c6b5' : fr > 0.62 ? '#e0c34a' : '#f0954f';
       const dcm = dep[k] != null ? loamT(', {cm} cm', { cm: (dep[k] * 100).toFixed(0) }) : '';
-      return `<rect x="${(k * bw + 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${col}"><title>${loamT('rep {n}: {v} m/s', { n: k + 1, v: f(v) })}${dcm}</title></rect>`;
+      const ph = (s.repPhaseTimes || [])[k];
+      const pz = ph && ph.pauseS != null ? `, ${f(ph.pauseS, 1)} s ${loamT('pause')}` : '';
+      return `<rect x="${(k * bw + 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${col}"><title>${loamT('rep {n}: {v} m/s', { n: k + 1, v: f(v) })}${dcm}${pz}</title></rect>`;
     }).join('');
     const depStr = dep.length ? dep.map(d => (d * 100).toFixed(0)).join(' · ') + ' cm' : '';
+    /* The dwell at the reversal sits between the two halves it separates: "at the chest" on a bench,
+       "at the bottom" everywhere else. ~0.1 s is a touch-and-go rep (the reversal is smeared by the
+       smoothing); it grows with fatigue and reads the real second or two of a paused rep. */
+    const pauseStr = s.pauseS != null
+      ? ` · ${f(s.pauseS, 1)}s <span class="rt-pause">${s.lift === 'bench' ? loamT('at the chest') : loamT('at the bottom')}</span>` : '';
     const tempoStr = (s.eccS != null && s.conS != null)
-      ? `<div class="rep-tempo">${loamT('tempo ≈')} ${f(s.eccS, 1)}s <span class="rt-ecc">${loamT('down')}</span> · ${f(s.conS, 1)}s <span class="rt-con">${loamT('up')}</span></div>` : '';
+      ? `<div class="rep-tempo">${loamT('tempo ≈')} ${f(s.eccS, 1)}s <span class="rt-ecc">${loamT('down')}</span>${pauseStr} · ${f(s.conS, 1)}s <span class="rt-con">${loamT('up')}</span></div>` : '';
     return `<div class="rep-set">
-      <div class="rep-set-head">${loamT('Set {n}', { n: i + 1 })} · ${loamT('{n} reps', { n: s.reps })}${vloss >= 8 ? ` · <span class="rep-fade">${loamT('{pct}% fade', { pct: vloss })}</span>` : ''}</div>
+      <div class="rep-set-head">${loamT('Set {n}', { n: i + 1 })}${s.lift ? ' · ' + escapeHtml(liftNameLower(s.lift)) : ''} · ${loamT('{n} reps', { n: s.reps })}${vloss >= 8 ? ` · <span class="rep-fade">${loamT('{pct}% fade', { pct: vloss })}</span>` : ''}</div>
       <svg class="rep-bars" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bars}</svg>
       ${depStr ? `<div class="rep-depths">${loamT('depth {list}', { list: depStr })}</div>` : ''}
       ${tempoStr}
@@ -29956,9 +30117,9 @@ function renderStrength(D) {
   document.getElementById('strengthResults').innerHTML = `
     <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
     ${leadNote(
-      loamT(`Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`),
+      loamT(`Counts <strong>squat</strong>, <strong>deadlift</strong> and <strong>bench</strong>; on a bench, a failed or assisted rep still counts as an attempt and a grinding last rep can be missed. Pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`),
       loamT(`Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.`),
-      'strength-scope', loamT('Which lifts count, and why'), loamT('Beta · Squat / deadlift counts · Bench undercounts · Pull-ups uncounted · Unlabeled sets = squat'))}
+      'strength-scope', loamT('Which lifts count, and why'), loamT('Beta · Squat / deadlift / bench count · Pull-ups uncounted · Unlabeled sets = squat'))}
     <div class="sig-frame lift-sig-frame"><div id="liftSignature" class="lift-sig"></div>
       <button type="button" class="card-share on-card" onclick="saveLiftSignature()" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
     <div class="lift-sig-bar">
@@ -29981,14 +30142,17 @@ function renderStrength(D) {
       <div class="panel strength-stats" style="padding:18px">
         <div class="s-big">${sum.nReps} <span>${loamT('reps')}</span> · ${sum.nSets} <span>${loamT('sets')}</span></div>
         ${hasBar ? `<div class="s-sub">${loamT('{arc} bar', { arc: barArc })}</div>` : ''}
+        ${hasLift ? `<div class="s-sub">${liftBreakdown}</div>` : ''}
         <div class="stiles">${tiles}</div>
       </div>
     </div>
     <div class="panel" style="padding:6px 12px;overflow-x:auto">
       <table class="strength-table"><thead><tr>
-        <th>${loamT('Set')}</th><th title="${escapeHtml(loamT('The lift as tapped during the recording. Nothing detects it, so an untapped set is read as a squat; relabel any set here.'))}">${loamT('Exercise')} <span class="th-hint">${loamT('edit')}</span></th><th title="${escapeHtml(loamT('Auto-counted from wrist motion; edit any cell to correct a miscount'))}">${loamT('Reps')} <span class="th-hint">${loamT('edit')}</span></th><th>${loamT('Weight ({unit})', { unit: liftUnit() })}</th><th>${loamT('Bar')}</th><th>${loamT('Depth')}</th><th>${loamT('Tempo')}</th><th title="${escapeHtml(loamT('Bar range of motion'))}">${loamT('ROM')}</th><th>${loamT('Bar m/s')}</th><th title="${escapeHtml(loamT("Forward torso lean relative to your most-upright set (squat). Not an absolute angle: 'ref' is the baseline set, '+N°' leans that much more forward."))}">${loamT('Lean Δ')}</th><th title="${escapeHtml(loamT('Time under tension (set span)'))}">${loamT('TUT')}</th><th>${loamT('Miss')}</th>
+        <th>${loamT('Set')}</th><th title="${escapeHtml(loamT('The lift as tapped during the recording. Nothing detects it, so an untapped set is read as a squat; relabel any set here.'))}">${loamT('Exercise')} <span class="th-hint">${loamT('edit')}</span></th><th title="${escapeHtml(loamT('Auto-counted from wrist motion; edit any cell to correct a miscount'))}">${loamT('Reps')} <span class="th-hint">${loamT('edit')}</span></th><th>${loamT('Weight ({unit})', { unit: liftUnit() })}</th>${anySquat ? `<th>${loamT('Bar')}</th><th>${loamT('Depth')}</th>` : ''}<th>${loamT('Tempo')}</th><th title="${escapeHtml(loamT('Bar range of motion'))}">${loamT('ROM')}</th><th>${loamT('Bar m/s')}</th>${hasBench ? `<th title="${escapeHtml(loamT('Forearm angle from vertical at the chest, median over the set (bench only): 0° is a forearm stacked straight under the bar.'))}">${loamT('Forearm')}</th>` : ''}${anySquat ? `<th title="${escapeHtml(loamT("Forward torso lean relative to your most-upright set (squat). Not an absolute angle: 'ref' is the baseline set, '+N°' leans that much more forward."))}">${loamT('Lean Δ')}</th>` : ''}<th title="${escapeHtml(loamT('Time under tension (set span)'))}">${loamT('TUT')}</th><th>${loamT('Miss')}</th>
       </tr></thead><tbody>${rows}</tbody></table>
-      <div class="strength-tablenote">${loamT('<strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set ({ref}), not an absolute angle. Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.', { ref: `<span style="color:var(--text-muted, #7a808c)">${loamT('ref')}</span>` })} ${loamT('Wrong lift? Nothing detects it and an untapped set is read as a squat, so pick the right one under <strong>Exercise</strong>; the top option goes back to what the recording said.')}</div>
+      <div class="strength-tablenote">${anySquat
+        ? loamT('<strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set ({ref}), not an absolute angle. Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.', { ref: `<span style="color:var(--text-muted, #7a808c)">${loamT('ref')}</span>` })
+        : loamT('Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.')} ${loamT('Wrong lift? Nothing detects it and an untapped set is read as a squat, so pick the right one under <strong>Exercise</strong>; the top option goes back to what the recording said.')}</div>
     </div>
     ${repBlocks ? `<div class="panel" style="padding:14px 16px">
       <div class="rep-detail-title">${loamT('Rep by rep')} <span class="subtitle">${loamT('bar speed per rep (m/s) — teal fast, orange slowed; a drop toward the end is fatigue. Per-rep depth is listed under each set. Tempo split (down / up) is approximate.')}</span></div>
@@ -29996,7 +30160,7 @@ function renderStrength(D) {
     </div>` : ''}
     <div id="liftHistoryPanel">${liftHistorySection(liftHistory)}</div>
     ${betaCaveat(
-      loamT('treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> {barSpeed}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.',
+      loamT('treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat, deadlift and bench count on clean reps; a failed or assisted bench rep can count as an attempt, a grinding last one can be missed, and chin-ups and pull-ups do not count at all.</strong> {barSpeed}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.',
         { barSpeed: sum.hasBarSpeed ? '' : loamT('Bar speed needs the watch and was not recorded. ') }),
       /* The instrument sentence is TWO whole keys rather than one carrying a `{source}` clause.
          English can splice "Reps" or "... Everywhere else, reps" into the same sentence because the
@@ -35227,6 +35391,19 @@ const LOAM_NB = {
   /* The per-set table. `text-transform: capitalize` does nothing to a word that is already
      capitalized, in either language. */
   'Set': 'Sett',
+  /* The per-set lift column, shown once any set carries a lift tap. Not 'Lift', which is already
+     the view's title ('Styrke'); the column names the exercise. */
+  'Exercise': 'Øvelse',
+  /* The bench reads: forearm angle at the chest (a column, bench sessions only) and the dwell at the
+     reversal, which the rep-by-rep tempo line names by where it happens ('at the bottom', its other
+     wording, is the Spotter Cam's existing entry further down). */
+  'Forearm': 'Underarm',
+  'Forearm angle from vertical at the chest, median over the set (bench only): 0° is a forearm stacked straight under the bar.':
+    'Underarmens vinkel fra loddrett ved brystet, median over settet (kun benkpress): 0° er en underarm som står rett under stangen.',
+  'at the chest': 'ved brystet',
+  /* The headline's lift breakdown ("Bench: 3 sets · Deadlift: 4 sets"); two keys for the plural. */
+  '{lift}: 1 set': '{lift}: 1 sett',
+  '{lift}: {n} sets': '{lift}: {n} sett',
   'Auto-counted from wrist motion; edit any cell to correct a miscount': 'Telt automatisk fra håndleddsbevegelse; rediger en celle for å rette en feiltelling',
   'edit': 'rediger',
   'Weight ({unit})': 'Vekt ({unit})',
@@ -35243,7 +35420,6 @@ const LOAM_NB = {
   'Corrected by you (auto counted {n}). Clear the field to reset to the counter.': 'Rettet av deg (telleren fant {n}). Tøm feltet for å gå tilbake til telleren.',
   'Auto rep count. Edit to correct a miscount; clear to reset.': 'Automatisk repetisjonstall. Rediger for å rette en feiltelling; tøm feltet for å nullstille.',
   /* The per-set lift relabel. 'Exercise' rather than 'Lift', whose entry is the view's title ('Styrke'). */
-  'Exercise': 'Øvelse',
   'The lift as tapped during the recording. Nothing detects it, so an untapped set is read as a squat; relabel any set here.':
     'Øvelsen slik den ble trykket under opptaket. Ingenting gjenkjenner den, så et sett uten trykk leses som knebøy; endre hvilket som helst sett her.',
   'Relabelled by you. Pick the top option to go back to what the recording said.': 'Endret av deg. Velg det øverste valget for å gå tilbake til det opptaket sa.',
@@ -35253,6 +35429,9 @@ const LOAM_NB = {
     'Feil øvelse? Ingenting gjenkjenner den, og et sett uten trykk leses som knebøy, så velg riktig under <strong>Øvelse</strong>; det øverste valget går tilbake til det opptaket sa.',
   '<strong>Lean Δ</strong> is relative: forward torso lean vs your most-upright set ({ref}), not an absolute angle. Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.':
     '<strong>Helning Δ</strong> er relativ: foroverhelning i overkroppen mot settet der du står mest oppreist ({ref}), ikke en absolutt vinkel. Teller telleren feil? Rediger <strong>Reps</strong> for et sett for å rette det (tøm cellen for å nullstille). Lagres på denne enheten.',
+  /* The same note without the lean sentence, for a session with no squat set (no lean column). */
+  'Counter off? Edit a set\'s <strong>Reps</strong> to correct it (clear the cell to reset). Saved on this device.':
+    'Teller telleren feil? Rediger <strong>Reps</strong> for et sett for å rette det (tøm cellen for å nullstille). Lagres på denne enheten.',
 
   /* Rep by rep. */
   'Rep by rep': 'Repetisjon for repetisjon',
@@ -35271,15 +35450,15 @@ const LOAM_NB = {
   'Coach\'s read': 'Trenerens lesning',
 
   /* The scope note above the card: which lifts the counter supports. */
-  'Counts <strong>squat</strong> and <strong>deadlift</strong> reliably; bench press undercounts and pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.':
-    'Teller <strong>knebøy</strong> og <strong>markløft</strong> pålitelig; benkpress telles for lavt og pull-ups registreres ikke. Trykk på øvelsen ved hvert sett &mdash; et sett uten merkelapp leses som knebøy.',
+  'Counts <strong>squat</strong>, <strong>deadlift</strong> and <strong>bench</strong>; on a bench, a failed or assisted rep still counts as an attempt and a grinding last rep can be missed. Pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.':
+    'Teller <strong>knebøy</strong>, <strong>markløft</strong> og <strong>benkpress</strong>; i benkpress telles en mislykket eller assistert repetisjon fortsatt som et forsøk, og en siste repetisjon som sliter seg opp kan bli oversett. Pull-ups registreres ikke. Trykk på øvelsen ved hvert sett &mdash; et sett uten merkelapp leses som knebøy.',
   'Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.':
     'Skulderpress telles rent, men er uprøvd, og curl alene blir støyete fordi håndleddet roterer. Knappene er Knebøy / Markløft / Press, med «Mer» for alt annet. At et sett uten merkelapp leses som knebøy betyr noe, fordi høy/lav stang og parallell/full dybde bare gir mening for knebøy.',
   'Which lifts count, and why': 'Hvilke øvelser telles, og hvorfor',
 
   /* The BETA caveat. */
-  'treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong> {barSpeed}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.':
-    'behandle repetisjonstall, dybde, stangplassering og stangfart som anslag. <strong>Knebøy og markløft telles pålitelig; benkpress telles omtrent halvparten for lavt, og chin-ups og pull-ups telles ikke i det hele tatt.</strong> {barSpeed}Øvelsen gjenkjennes aldri automatisk: et sett uten trykk på en øvelsesknapp analyseres som knebøy.',
+  'treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat, deadlift and bench count on clean reps; a failed or assisted bench rep can count as an attempt, a grinding last one can be missed, and chin-ups and pull-ups do not count at all.</strong> {barSpeed}Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.':
+    'behandle repetisjonstall, dybde, stangplassering og stangfart som anslag. <strong>Knebøy, markløft og benkpress telles på rene repetisjoner; en benkpress-repetisjon som mislykkes eller får hjelp kan telles som et forsøk, en siste som sliter seg opp kan bli oversett, og chin-ups og pull-ups telles ikke i det hele tatt.</strong> {barSpeed}Øvelsen gjenkjennes aldri automatisk: et sett uten trykk på en øvelsesknapp analyseres som knebøy.',
   'Bar speed needs the watch and was not recorded. ': 'Stangfart krever klokken og ble ikke registrert. ',
   'Reps, tempo, ROM and bar speed come from the Apple Watch (the wrist tracks the bar); bar position and depth are your Set/type taps.':
     'Reps, tempo, ROM og stangfart kommer fra Apple Watch (håndleddet følger stangen); stangplassering og dybde er dine Sett- og øvelsestrykk.',
@@ -35809,7 +35988,7 @@ const LOAM_NB = {
   '~ Estimated': '~ Anslått',
   'Watch · FIT': 'Klokke · FIT',
   'Beta · Body-motion estimates only · No ball or club data': 'Beta · Kun anslag av kroppsbevegelse · Ingen ball- eller kølledata',
-  'Beta · Squat / deadlift counts · Bench undercounts · Pull-ups uncounted · Unlabeled sets = squat': 'Beta · Teller knebøy / markløft · Benkpress undertelles · Pull-ups telles ikke · Umerkede sett = knebøy',
+  'Beta · Squat / deadlift / bench count · Pull-ups uncounted · Unlabeled sets = squat': 'Beta · Teller knebøy / markløft / benkpress · Pull-ups telles ikke · Umerkede sett = knebøy',
   'Experimental · Barometer-derived descents · Stairs can count · No speed, distance or radius': 'Eksperimentelt · Nedkjøringer fra barometer · Trapper kan telles · Ingen fart, distanse eller radius',
   'Per-swing tempo: ±0.3 noise · Read the session average': 'Tempo per sving: ±0,3 støy · Les snittet for økten',
   'Options': 'Valg',
@@ -37736,8 +37915,8 @@ const LOAM_NB = {
     'Bare {lift}-settene dine, for en øvelse kan bare sammenlignes med seg selv.',
   '<strong>BETA, and the two halves are not equally solid:</strong> the weight is exactly what you typed, the rep count is an estimate from wrist travel.':
     '<strong>BETA, og de to halvdelene er ikke like solide:</strong> vekten er nøyaktig det du skrev inn, reptellingen er et anslag fra håndleddets bevegelse.',
-  'treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat and deadlift count reliably; bench press undercounts by about half, and chin-ups and pull-ups do not count at all.</strong>':
-    'behandle reptelling, dybde, stangplassering og stangfart som anslag. <strong>Knebøy og markløft telles pålitelig; benkpress teller omtrent halvparten for lite, og chins og pull-ups telles ikke i det hele tatt.</strong>',
+  'treat rep counts, depth, bar position and bar speed as estimates. <strong>Squat, deadlift and bench count on clean reps; a failed or assisted bench rep can count as an attempt, a grinding last one can be missed, and chin-ups and pull-ups do not count at all.</strong>':
+    'behandle reptelling, dybde, stangplassering og stangfart som anslag. <strong>Knebøy, markløft og benkpress telles på rene repetisjoner; en benkpress-repetisjon som mislykkes eller får hjelp kan telles som et forsøk, en siste som sliter seg opp kan bli oversett, og chin-ups og pull-ups telles ikke i det hele tatt.</strong>',
   'Bar speed needs the watch and was not recorded.':
     'Stangfart krever klokken, og ble ikke tatt opp.',
   'Lift type is never auto-detected: a set without a lift-chip tap is analyzed as a squat.':
@@ -43676,7 +43855,7 @@ function buildDigest(D, sport, metric) {
       volume: liftVolumeKg(D) > 0 ? fmtVol(liftVolumeKg(D)) : null,
       heart_rate_bpm: s.hrAvg != null ? { avg: s.hrAvg, max: s.hrMax } : null,
       sets: setRows,
-      notes: 'Bar position and depth are the lifter\'s Set-tap labels (authoritative). ' + (repSourceNote ? repSourceNote + ' Everywhere else, reps' : 'Reps') + ', tempo, ROM and bar speed come from the Apple Watch wrist motion; the wrist rep count and bar speed are experimental (the rep count can over-count a trailing re-rack). Rep counting is reliable for squat and deadlift only: press is unproven, curls are noisy, bench undercounts by about half, and chin-ups/pull-ups do not count, so distrust rep totals on those lifts. Each set\'s lift is the lifter\'s tapped label, never auto-detected; a set without a label is assumed to be a squat, so treat its lift identity as uncertain. High-vs-low bar is a RELATIVE torso-lean read within this session, not an absolute measurement. Coach on what the numbers support: velocity-based autoregulation (fade), depth consistency, and the high/low bar tradeoff.',
+      notes: 'Bar position and depth are the lifter\'s Set-tap labels (authoritative). ' + (repSourceNote ? repSourceNote + ' Everywhere else, reps' : 'Reps') + ', tempo, ROM and bar speed come from the Apple Watch wrist motion; the wrist rep count and bar speed are experimental (the rep count can over-count a trailing re-rack). Rep counting is reliable for squat and deadlift, and for bench on clean reps (a failed or assisted bench rep can count as an attempt and a grinding last rep can be missed): press is unproven, curls are noisy, and chin-ups/pull-ups do not count, so distrust rep totals on those lifts. Each set\'s lift is the lifter\'s tapped label, never auto-detected; a set without a label is assumed to be a squat, so treat its lift identity as uncertain. High-vs-low bar is a RELATIVE torso-lean read within this session, not an absolute measurement. Coach on what the numbers support: velocity-based autoregulation (fade), depth consistency, and the high/low bar tradeoff.',
     };
   }
   /* Road cycling (head-unit FIT with a power meter): the coach's currency is rider watts. Every
@@ -53352,7 +53531,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '784972691 · 2026-10-14';
+const LOAM_BUILD = '190995e2b · 2026-10-14';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
