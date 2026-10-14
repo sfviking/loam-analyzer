@@ -6111,6 +6111,81 @@ function applyWalkBandCadence(running, walkCadSeries) {
   return running;
 }
 
+/* ===== Brisk minutes =================================================================
+   Ported from analyzer/sports/running/brisk.js and pinned to it by that module's drift guard; the
+   reasoning (the Tudor-Locke cadence thresholds, why a run-classified window reads the running band,
+   why each window counts one HOP) lives in the module header. */
+const BRISK_MODERATE_SPM = 100;
+const BRISK_VIGOROUS_SPM = 130;
+const BRISK_MIN_CONF = 0.15;
+const BRISK_WEEK_TARGET_MIN = 150;
+const BRISK_WEEK_DAYS = 7;
+const FAST_WALK_SPM = 120;
+const FAST_WALK_MPS = 1.8;
+
+function briskNearestCadence(series, t, maxGapS) {
+  let best = null;
+  for (const c of series || []) {
+    if (!c || !Number.isFinite(c.t) || !Number.isFinite(c.spm)) continue;
+    const gap = Math.abs(c.t - t);
+    if (gap <= maxGapS && (best == null || gap < best.gap)) best = { gap, c };
+  }
+  return best && best.c.conf > BRISK_MIN_CONF ? best.c.spm : null;
+}
+function briskWindowHopS(windows) {
+  let hop = null;
+  for (let i = 1; i < windows.length; i++) {
+    const d = windows[i].t0 - windows[i - 1].t0;
+    if (d > 0 && (hop == null || d < hop)) hop = d;
+  }
+  return hop || 5;
+}
+function briskMinutes(windows, walkCadSeries, runCadSeries) {
+  const ws = (Array.isArray(windows) ? windows : []).filter(w => w && Number.isFinite(w.t0) && Number.isFinite(w.t1));
+  if (!ws.length) return null;
+  const hopS = briskWindowHopS(ws);
+  let moderate = 0, vigorous = 0, read = 0, moving = 0, walkN = 0, runN = 0;
+  for (const w of ws) {
+    if (w.gait !== 'walk' && w.gait !== 'run') continue;
+    moving++;
+    const c = (w.t0 + w.t1) / 2;
+    let spm = null;
+    if (w.gait === 'walk') { walkN++; spm = briskNearestCadence(walkCadSeries, c, hopS / 2); }
+    else { runN++; spm = briskNearestCadence(runCadSeries, c, hopS / 2); }
+    if (spm == null) continue;
+    read++;
+    if (spm >= BRISK_MODERATE_SPM) moderate++;
+    if (spm >= BRISK_VIGOROUS_SPM) vigorous++;
+  }
+  const min = n => +(n * hopS / 60).toFixed(1);
+  return {
+    moderateMin: min(moderate), vigorousMin: min(vigorous), readMin: min(read), movingMin: min(moving),
+    hopS, walkWindows: walkN, runWindows: runN,
+    thresholds: { moderateSpm: BRISK_MODERATE_SPM, vigorousSpm: BRISK_VIGOROUS_SPM },
+  };
+}
+function isFastWalk(summary) {
+  if (!summary) return false;
+  const speed = summary.movingSpeed != null ? summary.movingSpeed : summary.avgSpeed;
+  return (summary.cadMedian != null && summary.cadMedian >= FAST_WALK_SPM)
+    || (speed != null && speed >= FAST_WALK_MPS);
+}
+function briskWeek(rows, nowMs, { days = BRISK_WEEK_DAYS, sport = 'walking' } = {}) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const since = now - days * 86400e3;
+  let minutes = 0, vigorous = 0, sessions = 0;
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r || r.sport !== sport || !r.brisk || !Number.isFinite(r.brisk.moderateMin)) continue;
+    const at = Date.parse(r.recordedAt);
+    if (!Number.isFinite(at) || at < since || at > now) continue;
+    sessions++;
+    minutes += r.brisk.moderateMin;
+    vigorous += Number.isFinite(r.brisk.vigorousMin) ? r.brisk.vigorousMin : 0;
+  }
+  return { minutes: +minutes.toFixed(1), vigorousMin: +vigorous.toFixed(1), sessions,
+    targetMin: BRISK_WEEK_TARGET_MIN, days };
+}
+
 /*
  * Cadence from the WATCH instead of the phone. See analyzer/sports/running/wrist-cadence.js for the
  * full reasoning and the measurements; the short version:
@@ -14221,7 +14296,7 @@ function librarySessionAvgHr(sensors, ride) {
   const hr = ((sensors && sensors.heartRate) || []).filter(r => r && r.bpm > 0 && r.t >= ride.start && r.t <= ride.end);
   return hr.length >= LIBRARY_AVG_HR_MIN_ROWS ? Math.round(hr.reduce((a, r) => a + r.bpm, 0) / hr.length) : null;
 }
-async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey, turnSidesUnreliable, bestEfforts }) {
+async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey, turnSidesUnreliable, bestEfforts, brisk }) {
   /* Build descent list with polylines + speed for every recording, not just
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
      net-drop floor; running keeps every graded segment (hill repeats are short).
@@ -14347,6 +14422,11 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
        passes nothing and the key is simply absent. */
     ...(Array.isArray(bestEfforts) && bestEfforts.length
       ? { bestEfforts: bestEfforts.map(e => ({ meters: e.meters, label: e.label, seconds: +e.seconds.toFixed(2) })) }
+      : {}),
+    /* A walk's brisk minutes (brisk.js), so the week's tally can be summed over rows without
+       re-walking any track. Two numbers; walks only (the caller passes null for a run). */
+    ...(brisk && Number.isFinite(brisk.moderateMin)
+      ? { brisk: { moderateMin: brisk.moderateMin, vigorousMin: brisk.vigorousMin } }
       : {}),
     /* Compact per-ride mechanics for the Progress dashboard's career trends (median apex radius, lean
        symmetry). Computed here so the trend has real body-motion signal, not just volume/speed. Only
@@ -24040,6 +24120,10 @@ async function analyze(files) {
          has to reach the per-segment cadence too, which is why it is a function now: it used to be
          inline here and touched only the series and the medians, leaving the climb/descent table and
          the coach digest quoting the harmonic under a headline that did not. */
+      /* Brisk minutes read BOTH cadence series (walk windows the walk band, run-classified windows
+         the running band -- see brisk.js), so they are counted before the swap below discards the
+         running-band series. Walks only: a run's minutes are vigorous by definition. */
+      const brisk = sport === 'walking' && running ? briskMinutes(gait.windows, gait.walkCadSeries, running.cadSeries) : null;
       if (sport === 'walking') applyWalkBandCadence(running, gait.walkCadSeries);
       /* The watch is the better cadence sensor whenever it was worn, because the phone is the one
          that can be put down: hand-carried, it loses the peak the moment it is held still for a
@@ -24097,13 +24181,14 @@ async function analyze(files) {
            render's own `computeBestEfforts` reads, so the row stored and the table drawn cannot
            disagree about what this run's fastest mile was. */
         bestEfforts: computeBestEfforts(sensors.location, ride),
+        brisk,
       });
       if (superseded()) return;
       onProgress('rendering');
       hide('loading'); show('results');
       const runRender = {
         sensors, ride, running, gait, summary: runSummary, detection, sport, imuRateHz, fitRepair,
-        descents, comparison, libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
+        descents, comparison, libraryRideId: saved && saved.id, savedDescents: saved && saved.descents, brisk,
         /* The key the row stores as `analysisKey`, so a render whose save returned no id can still
            find its own row (effortPRHistory). */
         analysisKey: cacheKey || null,
@@ -32907,7 +32992,7 @@ function renderRunDistanceReads(D, decoupling) {
      grade adjustment and the GAP column can never disagree about the hill. */
   const pacing = runPacing(splits, alts);
   const factors = stridePaceFactors(splits, (D.sensors && D.sensors.pedometer) || []);
-  renderRunPacing(pacing, unitLabel, factors, decoupling);
+  renderRunPacing(pacing, unitLabel, factors, decoupling, D.sport === 'walking' ? 'walking' : 'running');
   if (isRunAnalysis(D)) renderRunningTakeaway(D, pacing, unitLabel, cooper, decoupling);
 }
 
@@ -33034,7 +33119,24 @@ function renderRunStatsFor(D, sport, segments) {
     cadence: pedCad,
     agreement: pedCadenceAgreement(D.summary && D.summary.cadMedian, pedCad),
   };
-  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo, sport, segments);
+  renderRunStats(D.summary, D.detection, D.running && D.running.mount, pedInfo, sport, segments, D.brisk);
+  if (sport === 'walking' && D.brisk) refreshBriskWeek();
+}
+
+/* The rolling week's brisk minutes, filled in once the library answers (same shape as the best-effort
+   PR column: the tile renders first with this walk's own figure, the week arrives after). Walks only,
+   and the line says so, because the 150 min guideline counts every moderate activity and a runner
+   reading a walks-only number as their week would be short-changed. */
+async function refreshBriskWeek() {
+  const el = document.getElementById('briskWeekNote');
+  if (!el) return;
+  let rides;
+  try { rides = await listRides(); } catch (e) { return; }
+  if (document.getElementById('briskWeekNote') !== el) return;
+  const wk = briskWeek(rides, Date.now());
+  if (!wk.sessions) return;
+  el.textContent = ' \u00b7 ' + loamT('{min} of {target} min this week, from {n} walks', {
+    min: Math.round(wk.minutes), target: wk.targetMin, n: wk.sessions });
 }
 
 /* GPS-only render for a standalone FIT: stats, map, timeline, climb/descent segments, and the
@@ -34792,6 +34894,18 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  'Brisk minutes': 'Raske minutter',
+  '{v} min at {vig}+ spm · {mod}+ spm counts': '{v} min på {vig}+ spm · {mod}+ spm teller',
+  '{min} of {target} min this week, from {n} walks': '{min} av {target} min denne uken, fra {n} turer',
+  'Quicker steps did it: cadence rose {spm} spm between the halves while your step length held.': 'Raskere steg gjorde det: kadensen steg {spm} spm mellom halvdelene mens steglengden holdt seg.',
+  'Slower steps did it: cadence dropped {spm} spm between the halves while your step length held.': 'Tregere steg gjorde det: kadensen falt {spm} spm mellom halvdelene mens steglengden holdt seg.',
+  'Step length did it: each step got {cm} cm longer between the halves while your cadence held.': 'Steglengden gjorde det: hvert steg ble {cm} cm lengre mellom halvdelene mens kadensen holdt seg.',
+  'Step length did it: each step got {cm} cm shorter between the halves while your cadence held.': 'Steglengden gjorde det: hvert steg ble {cm} cm kortere mellom halvdelene mens kadensen holdt seg.',
+  'Underneath that, the two levers pulled against each other: quicker steps ({spm} spm) and longer ones ({cm} cm).': 'Under det trakk de to spakene mot hverandre: raskere steg ({spm} spm) og lengre steg ({cm} cm).',
+  'Underneath that, the two levers pulled against each other: quicker steps ({spm} spm) but shorter ones ({cm} cm).': 'Under det trakk de to spakene mot hverandre: raskere steg ({spm} spm) men kortere steg ({cm} cm).',
+  'Underneath that, the two levers pulled against each other: slower steps ({spm} spm) but longer ones ({cm} cm).': 'Under det trakk de to spakene mot hverandre: tregere steg ({spm} spm) men lengre steg ({cm} cm).',
+  'Underneath that, the two levers pulled against each other: slower steps ({spm} spm) and shorter ones ({cm} cm).': 'Under det trakk de to spakene mot hverandre: tregere steg ({spm} spm) og kortere steg ({cm} cm).',
+  'It came from both: about {cad}% step rate and {stride}% step length.': 'Det kom fra begge: omtrent {cad}% stegfrekvens og {stride}% steglengde.',
   'Showing {section} · Show full ride': 'Viser {section} · Vis hele turen',
   'Show top speed on map': 'Vis toppfart på kartet',
   'Show top speed on timeline': 'Vis toppfart på tidslinjen',
@@ -39930,7 +40044,7 @@ function steepestInclineTile(segments, pace) {
   </div>`;
 }
 
-function renderRunStats(s, detection, mount, ped, sport, segments) {
+function renderRunStats(s, detection, mount, ped, sport, segments, brisk) {
   const fmt = (v, unit, d=1) => v == null ? '—' : `<span class="value">${v.toFixed(d)}<span class="unit">${unit}</span></span>`;
   /* Hand-carried oscillation is inflated by arm swing, so it is an upper bound, not a measurement.
      Mark the number itself (~, muted) instead of relying only on the caption below. Not when the
@@ -40030,6 +40144,15 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
       ${oscVal}
       <div class="sub">${oscHand ? loamT('hand carry · upper bound') : oscHead ? loamT('estimated head bob · AirPods') : loamT('estimated phone motion')}</div>
     </div>`;
+  /* A walk takes the slot the oscillation tile leaves: minutes at or above the moderate cadence
+     threshold, with the vigorous share beside it (brisk.js). The week's line arrives from the
+     library afterwards (refreshBriskWeek). Nothing when the walk had no window to count. */
+  const briskTile = sport !== 'walking' || !brisk ? '' : `
+    <div class="stat accent2" id="briskTile">
+      <div class="label">${loamT('Brisk minutes')}</div>
+      <span class="value">${Math.round(brisk.moderateMin)}<span class="unit">min</span></span>
+      <div class="sub">${loamT('{v} min at {vig}+ spm · {mod}+ spm counts', { v: Math.round(brisk.vigorousMin), vig: brisk.thresholds.vigorousSpm, mod: brisk.thresholds.moderateSpm })}<span id="briskWeekNote"></span></div>
+    </div>`;
   const hrTile = s.hrAvg == null ? '' : `
     <div class="stat accent2">
       <div class="label">${loamT('Heart rate')}</div>
@@ -40042,7 +40165,7 @@ function renderRunStats(s, detection, mount, ped, sport, segments) {
       ${fmt(s.cadMedian, 'spm', 0)}
       <div class="sub">${cadSub}</div>
     </div>
-    ${oscTile}
+    ${oscTile}${briskTile}
     <div class="stat">
       <div class="label">${loamT('Duration')}</div>
       <div class="value">${durTileHTML(movingSec)}</div>
@@ -42585,7 +42708,7 @@ function runPacingLead(pacing, unitLabel, decoupling) {
   return lead;
 }
 
-function renderRunPacing(pacing, unitLabel, factors, decoupling) {
+function renderRunPacing(pacing, unitLabel, factors, decoupling, sport) {
   const el = document.getElementById('runPacing');
   if (!el) return;
   const secs = (v) => {
@@ -42623,7 +42746,7 @@ function renderRunPacing(pacing, unitLabel, factors, decoupling) {
   const hrNote = pacingDeference(pacing, decoupling)
     ? `<span class="rp-note">${loamT('Heart rate is read from the Aerobic decoupling panel below, which halves the run by time after the warmup.')}</span>`
     : '';
-  el.innerHTML = `${lead}${whyClause(factors, pacing)}<span class="rp-note">${note}</span>${hrNote}`;
+  el.innerHTML = `${lead}${whyClause(factors, pacing, sport)}<span class="rp-note">${note}</span>${hrNote}`;
   el.classList.remove('hidden');
 }
 
@@ -42632,13 +42755,39 @@ function renderRunPacing(pacing, unitLabel, factors, decoupling) {
    cadence divides by the split's own moving clock (so the identity with the printed pace closes)
    while the Cadence tile is a windowed median that never divides by a moving-time figure at all.
    Printing the two side by side would invite a comparison they do not support. */
-function whyClause(f, pacing) {
+function whyClause(f, pacing, sport) {
   if (!f || !f.driver || !pacing || !pacing.verdict) return '';
   const spm = Math.abs(f.cadenceDeltaSpm);
   const strideCm = Math.abs(f.strideDeltaM) * 100;
   const rose = f.cadenceDeltaSpm > 0;
   const longer = f.strideDeltaM > 0;
   let body;
+  /* A walker's two levers are the same two numbers, but "stride" is two steps to a walker and the
+     coaching fact is which lever they pulled -- quicker steps or longer ones -- so a walk says "step". */
+  if (sport === 'walking') {
+    if (f.driver === 'cadence') {
+      body = loamT(rose
+          ? 'Quicker steps did it: cadence rose {spm} spm between the halves while your step length held.'
+          : 'Slower steps did it: cadence dropped {spm} spm between the halves while your step length held.',
+        { spm: spm.toFixed(0) });
+    } else if (f.driver === 'stride') {
+      body = loamT(longer
+          ? 'Step length did it: each step got {cm} cm longer between the halves while your cadence held.'
+          : 'Step length did it: each step got {cm} cm shorter between the halves while your cadence held.',
+        { cm: strideCm.toFixed(0) });
+    } else if (f.compensating) {
+      body = loamT(rose
+          ? (longer ? 'Underneath that, the two levers pulled against each other: quicker steps ({spm} spm) and longer ones ({cm} cm).'
+                    : 'Underneath that, the two levers pulled against each other: quicker steps ({spm} spm) but shorter ones ({cm} cm).')
+          : (longer ? 'Underneath that, the two levers pulled against each other: slower steps ({spm} spm) but longer ones ({cm} cm).'
+                    : 'Underneath that, the two levers pulled against each other: slower steps ({spm} spm) and shorter ones ({cm} cm).'),
+        { spm: spm.toFixed(0), cm: strideCm.toFixed(0) });
+    } else {
+      body = loamT('It came from both: about {cad}% step rate and {stride}% step length.',
+        { cad: Math.round(Math.abs(f.cadenceShare) * 100), stride: Math.round(Math.abs(f.strideShare) * 100) });
+    }
+    return ` <span class="rp-why">${body}</span>`;
+  }
   if (f.driver === 'cadence') {
     body = loamT(rose
         ? 'Turnover did it: cadence rose {spm} spm between the halves while your stride held.'
@@ -44060,6 +44209,12 @@ function buildDigest(D, sport, metric) {
         walk_fraction_pct: D.gait.walkFrac != null ? +(D.gait.walkFrac * 100).toFixed(0) : null,
         walk_breaks: (D.gait.breaks || []).map(b => ({ at_min: +((b.t0 - D.ride.start) / 60).toFixed(1), duration_s: Math.round(b.t1 - b.t0) })),
       } : null,
+      /* A walk's intensity by the public-health cadence thresholds (brisk.js), and whether it is a
+         FAST walk, which is what lets the prompt below allow cadence coaching on it. */
+      ...(sport === 'walking' && D.brisk ? { brisk_minutes: {
+        at_or_above_100_spm_min: D.brisk.moderateMin, at_or_above_130_spm_min: D.brisk.vigorousMin,
+        moving_min: D.brisk.movingMin } } : {}),
+      ...(sport === 'walking' ? { fast_walk: isFastWalk(s) } : {}),
       duration_min: r1(s.duration / 60),
       /* Moving and stopped, so the coach can see a session that was 50 minutes of running inside a
          57-minute window and speak to the stops. `avg_pace` is the MOVING pace, matching the Pace
@@ -44098,7 +44253,8 @@ function buildDigest(D, sport, metric) {
            coach told only "the phone was in a hand" would reasonably hedge both. */
         + (run.cadSource === 'wrist' ? ' Cadence (and per-segment cadence_spm) came from the APPLE WATCH on the wrist, not the phone, so it is unaffected by how the phone was carried; it is the step rate, not the arm-swing rate.' : '')
         + (run.cadSource === 'head' ? ' Cadence (and per-segment cadence_spm) came from the AIRPODS, not the phone, so it is unaffected by how the phone was carried; head bob peaks once per footstrike, so it is the step rate. It is NOT a measurement of running form: nothing here read head posture or head angle.' : '')
-        + (sport === 'walking' ? ' This is a WALK: cadence is walking step rate (typical 100-120 spm); do not coach running form, pace zones, or oscillation targets.' : '')
+        + (sport === 'walking' && !isFastWalk(s) ? ' This is a WALK: cadence is walking step rate (typical 100-120 spm); do not coach running form, pace zones, or oscillation targets.' : '')
+        + (sport === 'walking' && isFastWalk(s) ? ' This is a FAST WALK (brisk or power walking): cadence is walking step rate. You MAY coach step rate against the brisk thresholds (100 spm moderate, 130 spm vigorous) and the quicker-steps-vs-longer-steps lever from the digest; do not coach running form or oscillation.' : '')
     };
   }
   const turns = D.turns || [];
@@ -44584,7 +44740,7 @@ Format your FIRST analysis as compact markdown:
 For follow-up questions, answer briefly and conversationally. Always respond directly, with no preamble. Stay in scope: you only coach this athlete's training and their sport, which includes general questions about technique, pacing, and training for it. If asked for anything else (general knowledge, code, writing, or any other topic), say in one sentence that you only help with their training, and answer nothing further.`;
   }
   const domain = sport === 'walking' ? `Walking/hiking reference points (the digest's gait block confirms this is a walk):
-- Cadence here is walking STEP rate: ~100-120 spm is typical; treat it descriptively, not as a target.
+- Cadence here is walking STEP rate: ~100-120 spm is typical; treat it descriptively, not as a target -- UNLESS the digest's fast_walk flag is true. On a fast walk you MAY coach step rate against the brisk thresholds in brisk_minutes (100+ spm moderate, 130+ spm vigorous; 150 moderate minutes a week is the guideline) and the lever the pacing read names: quicker steps are the safer lever for most walkers, longer steps load the hips and shins. Never race-walking technique (knee lock, ground contact), which nothing here measures.
 - Coach what a walk rewards: pacing versus grade (did pace hold on the climbs?), elevation load and duration as training volume, and consistency across the outing.
 - Do NOT coach running form: no running-cadence targets (175-180 spm does not apply), no vertical-oscillation goals, no race-pace talk. If the gait block shows some running mixed in, mention it descriptively.
 - Oscillation on a walk is small and mount-dependent; ignore it unless it is clearly anomalous.` : sport === 'running' ? `Running reference points:
@@ -44959,6 +45115,7 @@ function coachChips(sport, opts) {
   if (isGolfSport(sport)) return ['How do I make my swings repeat?', 'Is my tempo consistent?', 'What should I work on next range session?'];
   if (sport === 'lift' || isLiftSport(sport)) return ['Where did my bar speed fade?', 'Was my depth consistent?', 'High bar vs low bar for my goals?'];
   if (sport === 'running') return ['How did my pacing change?', 'How did terrain affect this run?', 'What should I focus on next run?'];
+  if (sport === 'walking' && opts && opts.fastWalk) return ['How many brisk minutes did I get?', 'Quicker steps or longer steps to walk faster?', 'How do I hold my cadence on the climbs?'];
   if (sport === 'walking') return ['How was my pacing on the climbs?', 'How can walks like this build fitness?', 'What should I try on my next hike?'];
   if (sport === 'run' || sport === 'walk') return ['How was my pacing on the climbs?', 'Where did I fade?', `What should I focus on next ${sport === 'walk' ? 'hike' : 'run'}?`];
   if (sport === 'ride') return ['How consistent were my descents?', 'Where did I fade during the day?', 'What should I focus on next park day?'];
@@ -45139,7 +45296,8 @@ function renderCoachPanelChips(D, sport, chips) {
   if (isMtbFamily(sport) || isSkiSport(sport)) {
     try { sidesUnreliable = !!sidesUnreliableFor(D); } catch (e) { sidesUnreliable = false; }
   }
-  const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false), sidesUnreliable };
+  const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false), sidesUnreliable,
+    fastWalk: sport === 'walking' && isFastWalk(D && D.summary) };
   /* Translated HERE rather than inside `coachChips`, which is a pure per-sport picker with some
      twenty return sites. The chip's text is also the QUESTION sent to the coach, and the coach
      already answers in the reader's language (`coachLanguage`), so asking in it is the consistent
@@ -53533,7 +53691,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '7cd347866 · 2026-10-14';
+const LOAM_BUILD = 'ab5a8e26a · 2026-10-14';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
