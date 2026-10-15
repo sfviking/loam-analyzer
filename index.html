@@ -11,7 +11,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,400;12..96,600;12..96,800&family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
 <!-- Subresource Integrity on every third-party file. The whole promise of this page is that a
-     recording never leaves the device, and these four scripts run with full access to the parsed
+     recording never leaves the device, and these scripts run with full access to the parsed
      GPS track, so a compromised or substituted CDN response is the one way that promise could
      quietly break. The hashes pin the exact bytes; a mismatch makes the browser refuse the file
      rather than run it. The URLs were already version-pinned, and the same bytes are committed under
@@ -40,6 +40,13 @@
      A trace type outside scatter/bar/pie needs plotly-cartesian (1.30 MB) or the full bundle, and
      a re-measure. analyzer/plotly-bundle.test.js pins both halves; see CLAUDE.md. -->
 <script src="https://cdn.plot.ly/plotly-basic-2.35.2.min.js" integrity="sha384-wQ3lfCxuvLfhHGiSdHF5+e3NZ1zNwEMd8/nII+K7VKChF9llO/OwOcn/aVRkB7az" crossorigin="anonymous"></script>
+<!-- Motion (motion.dev) drives the Form Replay's playhead glides and its scene crossfade, and nothing
+     else. DEFERRED, unlike the four above, because nothing needs it while the page parses: 146,777
+     bytes (48.7 KB gzipped), ~17 ms net to fetch, parse and run in Chromium against plotly-basic's
+     ~95 ms on the same harness -- V8, not the JavaScriptCore the app ships, which is not measured.
+     Optional by design: every caller reaches it through formMotion() at the moment of use, and with
+     it absent (blocked, offline web page, not yet run) seeks jump and replays cut, as before it. -->
+<script src="https://unpkg.com/motion@13.4.6/dist/motion.js" integrity="sha384-r/e4U+dyOcWBX2/DXrTeaB1R9i9FhnrrxlcxehiAjy3Z1fa8134rTLsgfThF9tYQ" crossorigin="anonymous" defer></script>
 
 <style>
   /* ---- Field Instrument tokens (analyzer-visual-language.md) ----
@@ -9051,10 +9058,27 @@ function closeFootSegmentPage() {
   }
   if (S) S.parked.forEach(show);
   setStatus(loamT('Back to {noun}', { noun: lexNounT(pageLex()) }), true);
-  const y = _segReturnScroll;
+  restoreScrollOnceTall(_segReturnScroll);
+}
+
+/* Charts size themselves after they are drawn, which can be several frames on a busy machine, and a
+   scrollTo issued while the page is still shorter than y is clamped and never revisited: Back landed
+   353 px short on the CI Mac mini (PR #1011) while one extra frame was enough everywhere else. So
+   keep re-applying y for up to ~1 s of frames while the page grows, and stop the moment the reader
+   scrolls or touches, so this never fights a reader who has already moved on. */
+function restoreScrollOnceTall(y) {
   window.scrollTo(0, y);
-  /* Charts size themselves a frame after they are drawn, which can move the page under the reader. */
-  requestAnimationFrame(() => window.scrollTo(0, y));
+  let frames = 0, cancelled = false;
+  const cancel = () => { cancelled = true; };
+  const opts = { passive: true, once: true };
+  ['wheel', 'touchstart', 'keydown'].forEach(ev => window.addEventListener(ev, cancel, opts));
+  const done = () => ['wheel', 'touchstart', 'keydown'].forEach(ev => window.removeEventListener(ev, cancel, opts));
+  const step = () => {
+    if (cancelled || ++frames > 60) { done(); return; }
+    if (Math.abs(window.scrollY - y) > 2) window.scrollTo(0, y);
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function showTurnsForRun(r, D) {
@@ -10335,6 +10359,38 @@ let _formObserver = null;   /* auto-plays the replay once when the section scrol
 
 const FORM_ENTRY_RATE = 25; /* deg/s body yaw that counts as the bike committing (matches TURN_PARAMS) */
 
+/* A seek GLIDES THE PLAYHEAD, never the picture: a spring carries tau from where it is to where the
+   rider tapped, and every frame on the way is formFrame at a recorded instant. Springing the pose
+   instead would draw leans nobody rode and leave the hero number disagreeing with the rider. A step
+   a drag makes (under FORM_GLIDE_MIN_FRAC of the clip) follows the thumb 1:1, as a scrubber should;
+   past FORM_GLIDE_MAX_S of ride the frames on the way are seconds apart, a flicker through other
+   corners rather than motion, so a segment-wide jump cuts. */
+const FORM_GLIDE_S = 0.4;            /* spring visual duration */
+const FORM_GLIDE_MIN_FRAC = 0.05;
+const FORM_GLIDE_MAX_S = 8;
+function formMotion() {
+  const M = window.Motion;
+  return M && typeof M.animate === 'function' && typeof M.motionValue === 'function' ? M : null;
+}
+function formReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+/* One channel of a replay series at the continuous playhead. The series sit on a 50 Hz grid and the
+   frame used to read the NEXT sample, so at 0.5x each pose was held for two or three display frames
+   and at 0.25x the rider moved in 12.5 steps a second. Linear between the two neighbours: the lean is
+   LP_10 roll, so 20 ms apart they lie on the same band-limited curve. A gated (null) neighbour keeps
+   the old read rather than inventing a value across the gap. */
+function formSampleAt(S, arr, tNow) {
+  if (!arr) return null;
+  const i = Math.max(0, Math.min(S.n - 1, lowerBound(S.g, tNow)));
+  const b = arr[i];
+  if (i === 0) return b;
+  const a = arr[i - 1];
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return b;
+  const f = (tNow - S.g[i - 1]) / ((S.g[i] - S.g[i - 1]) || 1);
+  return a + (b - a) * Math.max(0, Math.min(1, f));
+}
+
 /* Clamped linear interpolation of ys at xq using a sorted xs (same scheme as ghostAt). */
 function formInterp(xs, ys, xq) {
   const n = xs.length; if (!n) return null;
@@ -10721,6 +10777,7 @@ function formOpenJump(id) {
   formScrollToReplay();
 }
 function formSelectJump(D, J) {
+  const replacing = !!_form;
   formStopAnim(); _formZoomMult = 1; formMarkReplayKind('jump');
   const w0 = J.tStart - 1, dur = J.tEnd + 1 - w0;
   const n = Math.max(20, Math.round(dur * 50)), g = Array.from({ length: n }, (_, k) => w0 + k * dur / (n - 1));
@@ -10739,6 +10796,7 @@ function formSelectJump(D, J) {
   document.getElementById('formNote').textContent = loamT(J.source) + '. ' + loamT('Flight height, bike pitch, and body pose are schematic, not measured. Landing impact is measured at the sensor, not at the wheels.')
     + (J.fitHang != null && J.timingMeasured ? ' ' + loamT('FIT hang: {hang} s; the replay clock uses the local phone freefall.', { hang: loamNum(J.fitHang, 2) }) : '');
   formInitMap(S); formSetPlaying(false); formFrame();
+  if (replacing) formCrossfade();
 }
 /* Presentation only: the clock is recorded, the path and rider pose are illustrative. The scene is
    drawn at the BIKE's scale: the takeoff speed and the airtime give the flight's length and its
@@ -11244,7 +11302,7 @@ function formInitMap(S) {
       const px = (ev.clientX - rect.left) / rect.width * W, py = (ev.clientY - rect.top) / rect.height * H;
       let best = -1, bd = Infinity;
       for (let i = 0; i < S.locT.length; i++) { const c = toSvg(S.locLat[i], S.locLon[i]); const d = (c[0] - px) ** 2 + (c[1] - py) ** 2; if (d < bd) { bd = d; best = i; } }
-      if (best >= 0) { formSetPlaying(false); _form.tau = Math.max(0, Math.min(_form.dur, S.locT[best] - S.w0)); formFrame(); }
+      if (best >= 0) { formSetPlaying(false); formSeek(S.locT[best] - S.w0, true); }
     };
   } catch (e) { console.warn('formInitMap (svg) failed', e); if (wrap) wrap.style.display = 'none'; }
 }
@@ -11925,9 +11983,7 @@ function setupFormReplay(D) {
   scrub.oninput = () => {
     if (!_form) return;
     formSetPlaying(false);
-    _form.restingAtPeak = false;   /* user took the playhead; Play resumes from here */
-    _form.tau = (+scrub.value / 1000) * _form.dur;
-    formFrame();
+    formSeek((+scrub.value / 1000) * _form.dur, true);
   };
   pick();
   formArmAutoplay();
@@ -12116,6 +12172,7 @@ function formAskCoach() {
 
 function formSelectTurn(D, turn) {
   if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
+  const replacing = !!_form;
   formStopAnim(); formMarkReplayKind('turn');
   _formZoomMult = 1;   /* each new turn starts framed to fit */
   const S = formTurnSeries(D, turn);
@@ -12158,6 +12215,7 @@ function formSelectTurn(D, turn) {
   }
   formInitMap(S);
   formFrame();
+  if (replacing) formCrossfade();
 }
 
 /* Whole-segment series: one continuous replay across an entire run/descent instead of a single turn.
@@ -12258,6 +12316,7 @@ function formGhostContext(D, run) {
 
 function formSelectSegment(D, run) {
   if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
+  const replacing = !!_form;
   formStopAnim(); formMarkReplayKind('segment');
   _formZoomMult = 1;   /* each new segment starts framed to fit */
   /* The button switches to the SEGMENT question here rather than going away: a run has no apex, but
@@ -12302,6 +12361,7 @@ function formSelectSegment(D, run) {
   const btn = document.getElementById('formPlay'); if (btn) btn.textContent = loamT('▶ Play segment');
   formInitMap(S);
   formFrame();
+  if (replacing) formCrossfade();
 }
 
 /* Park a freshly selected turn/segment mid-action at its peak lean instead of the window start
@@ -12337,14 +12397,53 @@ function formParkAtPeak() {
   const scrub = document.getElementById('formScrub');
   if (scrub) scrub.value = Math.round((F.tau / S.dur) * 1000);
 }
+/* A seek the rider made: the scrubber, or a tap on the replay map. See FORM_GLIDE_S for the rule. */
+function formSeek(tau, glide) {
+  const F = _form; if (!F) return;
+  const to = Math.max(0, Math.min(F.dur, tau)), gap = Math.abs(to - F.tau);
+  F.restingAtPeak = false;   /* the rider took the playhead; Play resumes from here */
+  const M = glide && !formReducedMotion() ? formMotion() : null;
+  if (!M || gap > FORM_GLIDE_MAX_S || (!F.glide && gap <= F.dur * FORM_GLIDE_MIN_FRAC)) {
+    formStopGlide(); F.tau = to; formFrame(); return;
+  }
+  if (!F.glideMV) {
+    F.glideMV = M.motionValue(F.tau);
+    F.glideMV.on('change', v => { if (_form === F && F.glide) { F.tau = Math.max(0, Math.min(F.dur, v)); formFrame(); } });
+  }
+  /* From rest unless a glide is already running, in which case retargeting keeps its velocity. */
+  if (!F.glide) F.glideMV.jump(F.tau);
+  const anim = M.animate(F.glideMV, to, { type: 'spring', visualDuration: FORM_GLIDE_S, bounce: 0 });
+  F.glide = anim; F.glideTo = to;
+  /* Motion lands the spring on the target itself; finishing only has to hand the thumb back, so the
+     next drag step follows 1:1 instead of retargeting a glide that is over. */
+  anim.then(() => { if (_form === F && F.glide === anim) F.glide = null; });
+}
+function formStopGlide() {
+  const F = _form;
+  if (F && F.glide) { const a = F.glide; F.glide = null; a.stop(); }
+}
+/* Play pressed mid-glide plays from where the glide was heading, not from wherever it had got to. */
+function formSettleGlide() {
+  const F = _form;
+  if (F && F.glide) { const to = F.glideTo; formStopGlide(); F.tau = to; formFrame(); }
+}
+/* A new replay replacing the one on screen fades in rather than cutting. Not on the first replay of
+   a render (nothing to replace), and never under reduced motion. */
+function formCrossfade() {
+  const M = formMotion(), el = document.getElementById('formReplaySvg');
+  if (!M || !el || formReducedMotion()) return;
+  M.animate(el, { opacity: [0.2, 1] }, { duration: 0.22, ease: 'easeOut' });
+}
 function formPlayClicked() {
   if (!_form) return;
+  formSettleGlide();
   if (_form.tau >= _form.dur) { _form.tau = 0; formSetPlaying(true); return; }
   formSetPlaying(!_form.playing);
 }
 function formSetPlaying(on) {
   if (!_form) return;
   if (_form.raf) { cancelAnimationFrame(_form.raf); _form.raf = null; }
+  if (on) formStopGlide();
   if (!on) document.getElementById('formVideo')?.pause();
   if (on && _form.restingAtPeak) {
     _form.restingAtPeak = false;
@@ -12367,7 +12466,7 @@ function formTick(ts) {
   formFrame();
   _form.raf = requestAnimationFrame(formTick);
 }
-function formStopAnim() { if (_form && _form.raf) cancelAnimationFrame(_form.raf); if (_form) { _form.raf = null; _form.playing = false; } document.getElementById('formVideo')?.pause(); }
+function formStopAnim() { formStopGlide(); if (_form && _form.raf) cancelAnimationFrame(_form.raf); if (_form) { _form.raf = null; _form.playing = false; } document.getElementById('formVideo')?.pause(); }
 function formStop() {
   formStopAnim();
   _formPairCache = null;
@@ -12411,12 +12510,12 @@ function formFrame() {
   const F = _form; if (!F) return;
   if (F.jump) { formJumpFrame(); return; }
   const S = F.S;
-  const k = Math.max(0, Math.min(S.n - 1, lowerBound(S.g, S.w0 + F.tau)));
-  const lean = S.lean[k] || 0;                 /* deg, + = leaning right */
-  const headRel = S.headRel ? S.headRel[k] : null;
-  const wristRoll = S.wristRoll ? S.wristRoll[k] : null;
-  const seg = !!(S && S.segment);
   const tNow = S.w0 + F.tau;
+  const k = Math.max(0, Math.min(S.n - 1, lowerBound(S.g, tNow)));
+  const lean = formSampleAt(S, S.lean, tNow) || 0;   /* deg, + = leaning right */
+  const headRel = formSampleAt(S, S.headRel, tNow);
+  const wristRoll = formSampleAt(S, S.wristRoll, tNow);
+  const seg = !!(S && S.segment);
   /* In segment mode there is no single corner: phase comes from whether the bike is turning right now
      (yaw rate past the entry threshold), and time is measured from the segment start. */
   let tRel, phase, phaseCol;
@@ -12618,7 +12717,7 @@ function formFrame() {
       + `<circle cx="${g(pFr)}" cy="${stripY}" r="3.5" fill="#f1f5f9" stroke="#0a0d07" stroke-width="1"/>`;
   }
 
-  const ghostLean = F.formGhost?.lean[k];
+  const ghostLean = F.formGhost ? formSampleAt(S, F.formGhost.lean, tNow) : null;
   const ghostOn = document.getElementById('formGhostToggle')?.checked && ghostLean != null;
   const ghostAngle = ghostOn ? Math.max(-58, Math.min(58, ghostLean * visualSign)) : 0;
   const ghostBody = ghostOn ? `<g id="formGhostBody" transform="rotate(${ghostAngle} 180 252)" opacity="0.32" fill="none" stroke="#a8d5ef" stroke-width="9" stroke-linecap="round"><path d="M180 248 L180 158 L180 111 M180 157 L157 193 L171 222 M180 157 L203 193 L189 222 M180 112 L148 147 M180 112 L212 147"/><circle cx="180" cy="86" r="17"/></g>` : '';
@@ -27570,7 +27669,10 @@ function liftSkeleton3D(s, lift) {
   /* Model half-widths (same units as liftSkeleton: torso 120). Chosen to look like a lifter, not
      measured from one -- the phone and watch cannot see stance or grip. */
   const foot = isCurl || upright ? 16 : 22, knee = isCurl || upright ? 15 : 20, hip = 11, sh = 20;
-  const grip = isCurl ? 18 : (inHands ? 22 : 36);
+  /* A bench takes a medium grip, hands at 1.7 shoulder widths: with the deadlift's shoulder-width
+     grip it read as a close-grip bench from the foot end (owner, 2026-10-15). */
+  const bench = lift === 'bench';
+  const grip = isCurl ? 18 : bench ? 34 : (inHands ? 22 : 36);
   const BAR = 62, PLATE = 14;
   const P = (p, z) => ({ x: p.x, y: p.y, z });
   const heel = { x: s.ankle.x - 20, y: 0 }, toe = { x: s.ankle.x + s.foot, y: 0 };
@@ -27578,6 +27680,17 @@ function liftSkeleton3D(s, lift) {
      so the back-rack elbow is 34 BELOW the shoulder here. */
   const elbow = s.elbow ? s.elbow
     : (inHands ? { x: (s.shoulder.x + s.bar.x) / 2, y: (s.shoulder.y + s.bar.y) / 2 } : { x: s.shoulder.x - 16, y: s.shoulder.y - 34 });
+  /* On a bench the elbow is on the straight shoulder->hand line at lockout and stacks the forearm under
+     the bar as it bends, fully at 90 degrees: a vertical forearm from the foot end, with no kink at the
+     top. Every other lift keeps the elbow at its fixed width. */
+  let elbowZ = isCurl || inHands ? grip : sh + 4;
+  if (bench) {
+    const u = Math.hypot(elbow.x - s.shoulder.x, elbow.y - s.shoulder.y), f = Math.hypot(s.bar.x - elbow.x, s.bar.y - elbow.y);
+    const cos = ((s.shoulder.x - elbow.x) * (s.bar.x - elbow.x) + (s.shoulder.y - elbow.y) * (s.bar.y - elbow.y)) / Math.max(1e-9, u * f);
+    const bend = Math.min(1, Math.max(0, (180 - Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI) / 90));
+    const along = u / Math.max(1e-9, u + f);
+    elbowZ = sh + (grip - sh) * (along + (1 - along) * bend);
+  }
   const J = {
     heelL: P(heel, foot), toeL: P(toe, foot), heelR: P(heel, -foot), toeR: P(toe, -foot),
     ankleL: P(s.ankle, foot), ankleR: P(s.ankle, -foot),
@@ -27585,7 +27698,7 @@ function liftSkeleton3D(s, lift) {
     hipL: P(s.hip, hip), hipR: P(s.hip, -hip), pelvis: P(s.hip, 0),
     shoulderL: P(s.shoulder, sh), shoulderR: P(s.shoulder, -sh), neck: P(s.shoulder, 0),
     head: P(s.head, 0),
-    elbowL: P(elbow, isCurl ? grip : (inHands ? grip : sh + 4)), elbowR: P(elbow, isCurl ? -grip : (inHands ? -grip : -(sh + 4))),
+    elbowL: P(elbow, elbowZ), elbowR: P(elbow, -elbowZ),
     handL: P(s.bar, grip), handR: P(s.bar, -grip),
     barL: P(s.bar, BAR), barR: P(s.bar, -BAR), bar: P(s.bar, 0),
   };
@@ -27864,7 +27977,9 @@ function liftSignatureSVG(D) {
     .filter(x => Number.isFinite(x.kg) && x.kg > 0);
   const top = loaded.reduce((best, x) => !best || x.kg > best.kg ? x : best, null);
   const lifts = [...new Set(sets.map(set => set.lift || 'unlabeled'))];
-  const name = lifts.length === 1 && lifts[0] !== 'unlabeled' ? liftNameCap(lifts[0]) : loamT('Weightlifting');
+  /* An unlabeled set among labelled ones is a lift nobody named, so the card says Weightlifting
+     rather than naming only the lifts it can. */
+  const name = (!lifts.includes('unlabeled') && liftSessionName(lifts)) || loamT('Weightlifting');
   const W = 480, rows = Math.max(1, Math.ceil(sets.length / 4)), H = 226 + rows * 190;
   const text = (x, y, value, size = 16, color = '#a5b39c', anchor = 'start') =>
     `<text x="${x}" y="${y}" fill="${color}" font-size="${size}" text-anchor="${anchor}" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">${escapeHtml(String(value))}</text>`;
@@ -30615,6 +30730,32 @@ function liftNameCap(lift) {
 }
 function liftNameLower(lift) { const n = liftNameCap(lift); return n == null ? null : n.toLowerCase(); }
 
+/* Which half of the body each lift trains, for naming a session of three or more. The SAME table as
+   the app's `SessionTitle.liftRegions`, pinned to it by session-title-contract.test.js, so the lift
+   card and the Sessions row cannot name one session two ways. 'other' says nothing about where. */
+const LIFT_REGIONS = {
+  'squat': 'lower', 'deadlift': 'lower', 'front squat': 'lower', 'romanian deadlift': 'lower',
+  'hip thrust': 'lower', 'lunge': 'lower', 'calf raise': 'lower',
+  'press': 'upper', 'bench': 'upper', 'curl': 'upper', 'row': 'upper', 'pull-up': 'upper',
+  'chin-up': 'upper', 'dips': 'upper', 'lateral raise': 'upper', 'triceps extension': 'upper',
+  'clean': 'whole',
+};
+/* Up to this many lifts are named; past it the session is named by the half of the body it trained. */
+const LIFTS_NAMED_MAX = 2;
+/* "Squat", "Squat & Deadlift", or "Lower body" / "Upper body" / "Full body"; null when no set carries
+   a lift, so the caller keeps its own word. The app's rule (SessionTitle.liftsName), applied to the
+   sets as they now read, so a relabelled set renames the card. */
+function liftSessionName(lifts) {
+  const named = [...new Set((lifts || []).map(l => String(l || '').trim().toLowerCase())
+    .filter(l => l && l !== 'other' && l !== 'unlabeled'))];
+  if (!named.length) return null;
+  if (named.length <= LIFTS_NAMED_MAX) return named.map(liftNameCap).join(' & ');
+  const regions = new Set(named.map(l => LIFT_REGIONS[l] || 'whole'));
+  if (regions.size === 1 && regions.has('lower')) return loamT('Lower body');
+  if (regions.size === 1 && regions.has('upper')) return loamT('Upper body');
+  return loamT('Full body');
+}
+
 function renderStrength(D) {
   if (D.key) D = { ...D, key: nativeRecordingKey(D.key) };
   _liftD = D;                               // raw analysis, keep for re-render + the "auto count" hint
@@ -30647,7 +30788,7 @@ function renderStrength(D) {
      state that points at the fix instead. */
   if (!sets.length) {
     document.getElementById('strengthResults').innerHTML = `
-      <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+      <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml((appSessionContext(D) || {}).title || D.title || '')}</span></div>
       <div class="panel" style="padding:24px;text-align:center">
         <div class="s-big">${loamT('No sets detected')}</div>
         <div class="strength-scope" style="margin-top:10px">${loamT('This recording was tagged as a lift, but no sets were found. Tap <strong>Start set</strong> at the top of each working set when you record (the analyzer segments sets from those taps), otherwise the motion was too quiet or short to auto-segment. Reps count from wrist vertical travel, so wear the watch for the fullest read.')}</div>
@@ -30802,7 +30943,7 @@ function renderStrength(D) {
   const readCards = liftCoachRead(Dc).map(c => `<div class="lc-card"><div class="lc-head">${escapeHtml(c.head)}</div><div class="lc-body">${escapeHtml(c.body)}</div></div>`).join('');
 
   document.getElementById('strengthResults').innerHTML = `
-    <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml(D.title || '')}</span></div>
+    <div class="section-title"><span class="activity-title">${activityIcon('lift')}<span>${loamT('Lift')}</span></span> <span class="beta-badge">${loamT('BETA')}</span> <span class="subtitle">${escapeHtml((appSessionContext(D) || {}).title || D.title || '')}</span></div>
     ${leadNote(
       loamT(`Counts <strong>squat</strong>, <strong>deadlift</strong> and <strong>bench</strong>; on a bench, a failed or assisted rep still counts as an attempt and a grinding last rep can be missed. Pull-ups do not register. Tap the lift at each set &mdash; an unlabeled set is read as a squat.`),
       loamT(`Overhead press counts cleanly but is unproven, and standalone curls are noisier because the wrist rotates. The chips are Squat / Deadlift / Press, with "More" for everything else. Reading an unlabeled set as a squat matters because high/low bar and parallel/full depth are squat-only reads.`),
@@ -38437,6 +38578,21 @@ const LOAM_NB = {
   '↓ DESC': '↓ NED',
   '↑ CLIMB': '↑ OPP',
   'CLIMB': 'STIGNING',
+  'REP PACE': 'DRAGTEMPO',
+  'REPS': 'DRAG',
+  /* The reps of an interval session, on the run hero card and the walk highlights (intervalLead). */
+  '<strong>{name}</strong>: reps at {paces} {unit}.': '<strong>{name}</strong>: drag på {paces} {unit}.',
+  '<strong>{n} reps</strong> at {paces} {unit}.': '<strong>{n} drag</strong> på {paces} {unit}.',
+  '<strong>{name}</strong>: {n} reps averaging {avg} {unit}, fastest {fast}, slowest {slow}.':
+    '<strong>{name}</strong>: {n} drag med snitt {avg} {unit}, raskest {fast}, tregest {slow}.',
+  '<strong>{n} reps</strong> averaging {avg} {unit}, fastest {fast}, slowest {slow}.':
+    '<strong>{n} drag</strong> med snitt {avg} {unit}, raskest {fast}, tregest {slow}.',
+  'Each rep runs from its Segment Start mark to its Segment End, so the warm-up, recoveries and cool-down are left out. Raw pace: a rep up a hill reads slower.':
+    'Hvert drag går fra Segmentstart-merket til Segmentslutt, så oppvarming, pauser og nedjogg er holdt utenfor. Rått tempo: et drag i motbakke blir tregere.',
+  /* A lift session of three or more lifts, named by the half of the body it trained (liftSessionName). */
+  'Lower body': 'Underkropp',
+  'Upper body': 'Overkropp',
+  'Full body': 'Helkropp',
   'Vertical oscillation': 'Vertikal svingning',
   '{activity} session': '{activity}',
   'My {noun}, analyzed with Loam.': 'Min {noun}, analysert med Loam.',
@@ -44269,16 +44425,19 @@ function renderRunningTakeaway(D, pacing, unitLabel, cooper, decoupling) {
      pacing verdict over a warm-up, a 12 minute effort and a cool-down describes the workout's
      shape rather than the run. */
   const test = cooperLead(cooper);
-  const lead = test ? null : runPacingLead(pacing, unitLabel, decoupling);
-  const terrain = !test && pacing && pacing.reason === 'terrain';
-  const text = test || lead || loamT(terrain
+  /* Reps are the highlight of an interval session for the same reason. */
+  const reps = test ? null : intervalLead(D, sessionReps(D));
+  const lead = test || reps ? null : runPacingLead(pacing, unitLabel, decoupling);
+  const terrain = !test && !reps && pacing && pacing.reason === 'terrain';
+  const text = test || reps || lead || loamT(terrain
     ? 'The halves covered different terrain. Raw and grade-adjusted pace disagree, so no pacing verdict is shown.'
     : 'Explore where your pace changed. There are not enough comparable full splits for a pacing verdict yet.');
   const context = test ? loamT('Measured on GPS over the 12 minutes. The VO2 max is an estimate from the distance, not a measurement.')
+    : reps ? loamT('Each rep runs from its Segment Start mark to its Segment End, so the warm-up, recoveries and cool-down are left out. Raw pace: a rep up a hill reads slower.')
     : lead ? loamT(pacing.gradeAdjusted
     ? 'Compared on grade-adjusted pace. GAP estimates the effect of hills; it does not measure effort.'
     : 'Compared on raw pace. Terrain was not measured well enough to adjust this comparison.') : '';
-  const target = test || lead || terrain ? 'runSplitsSection' : 'timelineSection';
+  const target = reps ? 'runsSection' : test || lead || terrain ? 'runSplitsSection' : 'timelineSection';
   card.innerHTML = `<h3>${loamT('Run highlights')}</h3>
     <div class="do-slot"><span class="do-badge">${loamT('OBSERVATION')}</span><span class="do-text">${text}</span></div>
     ${context ? `<p class="run-takeaway-context">${context}</p>` : ''}
@@ -44292,6 +44451,9 @@ function runningHighlights(D) {
   const s = D.summary || {};
   const climbs = (D.running && D.running.climbs) || [];
   const c = [];
+  /* A walk's reps lead this card. A run's lead the takeaway, which replaces this card on a run. */
+  const reps = intervalLead(D, sessionReps(D));
+  if (reps) c.push(reps);
   /* Distance and elevation follow the Units toggle (they used to hardcode km/m). Oscillation stays
      cm in both systems, the running-industry convention (Garmin/Stryd report cm to statute users). */
   if (s.cadMedian) c.push(s.distance
@@ -48572,6 +48734,65 @@ function rsDate(monthIndex, day, year) {
   return loamT('{mon} {day}, {year}', { mon: loamT(RS_MONTHS[(monthIndex % 12 + 12) % 12]), day, year });
 }
 let _rideSig = null;   /* last-built ride card pieces (defs, chrome, terrain tiles) for PNG export */
+/* The session's own title, from the app. The app names a session from what the recording cannot
+   say about itself -- the park the geocoder found, the guided workout that was picked, a rename (its
+   SessionTitle) -- and hands that over as LOAM_SESSION_TITLE / _PLACE / _WORKOUT on every load
+   (currentSessionContextJS). They describe ONE recording, the one the app opened this page for, so
+   they are read only while that recording is the one on screen: a library ride opened inside the
+   same page is another session and keeps its own label. None of them is in a cache key, so a rename
+   or a newly found park reaches a cached render on the next open. */
+function appSessionContext(D) {
+  if (typeof LOAM_EMBEDDED === 'undefined' || !LOAM_EMBEDDED || !D || !window.LOAM_SESSION_NAME) return null;
+  if (D.title !== loamCsvName(window.LOAM_SESSION_NAME)) return null;
+  const str = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
+  const ctx = { title: str(window.LOAM_SESSION_TITLE), place: str(window.LOAM_SESSION_PLACE), workout: str(window.LOAM_SESSION_WORKOUT) };
+  return ctx.title || ctx.place || ctx.workout ? ctx : null;
+}
+
+/* The reps of an interval session: two or more Segment Start / Segment End pairs on a run or a walk.
+   A guided workout stamps one pair per rep as the voice calls it, and a runner may tap them; the runs
+   panel already lists these as Reps (runsPanelMode). One pair is a marked stretch rather than a set,
+   and a Cooper test is one block read by its own mark, so both return null -- as does a session
+   with a rep that recorded no distance, whose pace would be a dash in the middle of a list. */
+function sessionReps(D) {
+  if (!D || !D.sensors || !['run', 'walk'].includes(normalizeSport(displaySport(D)))) return null;
+  const marks = pairRunMarks(D.sensors.annotations, D.ride && D.ride.start);
+  if (marks.length < 2) return null;
+  const reps = marks.map(m => runMetrics(m, D)).map(r => ({ duration: r.duration, distance: r.distance,
+    speed: r.duration > 0 ? r.distance / r.duration : 0 }));
+  return reps.every(r => r.speed > 0) ? reps : null;
+}
+/* The reps' own pace: their distance over their time, so the warm-up, the recoveries and the
+   cool-down are not in it. */
+function repsSpeed(reps) {
+  const dist = reps.reduce((a, r) => a + r.distance, 0), dur = reps.reduce((a, r) => a + r.duration, 0);
+  return dur > 0 ? dist / dur : 0;
+}
+/* Up to this many reps are listed pace by pace; a 30/30 is ten, and ten paces is a table. */
+const REPS_LISTED_MAX = 6;
+/* One sentence for the hero card when the session is a set of reps. It replaces the pacing verdict
+   there for the reason the Cooper test does: halves of a warm-up, four efforts, three recoveries and
+   a cool-down describe the workout's shape, not how it was run. Named after the workout when the app
+   knows which one ran. */
+function intervalLead(D, reps) {
+  if (!reps) return null;
+  const app = appSessionContext(D);
+  const unit = U.metric() ? '/km' : '/mi';
+  const bare = (mps) => U.pace(mps).replace(/\/(km|mi)$/, '');
+  const n = reps.length;
+  const named = app && app.workout ? escapeHtml(app.workout) : null;
+  if (n <= REPS_LISTED_MAX) {
+    const paces = reps.map(r => bare(r.speed)).join(', ');
+    return named
+      ? loamT('<strong>{name}</strong>: reps at {paces} {unit}.', { name: named, paces, unit })
+      : loamT('<strong>{n} reps</strong> at {paces} {unit}.', { n, paces, unit });
+  }
+  const speeds = reps.map(r => r.speed);
+  const vars = { n, avg: bare(repsSpeed(reps)), unit, fast: bare(Math.max(...speeds)), slow: bare(Math.min(...speeds)) };
+  return named
+    ? loamT('<strong>{name}</strong>: {n} reps averaging {avg} {unit}, fastest {fast}, slowest {slow}.', { ...vars, name: named })
+    : loamT('<strong>{n} reps</strong> averaging {avg} {unit}, fastest {fast}, slowest {slow}.', vars);
+}
 function openSessionDataSources() {
   const section = document.getElementById('recordingQualitySection');
   const detail = section && section.querySelector('details');
@@ -48607,7 +48828,10 @@ function renderSessionOverview(D, sport) {
   const road = isRoadAnalysis(D);
   const distance = run ? run.distance : road ? s.distance : s.riddenDistance ?? s.distance;
   const label = rsLabel(D.title);
-  const title = label && label !== 'RECORDING' ? label
+  const app = appSessionContext(D);
+  /* The app's title when it has one ("Edgewood Park · 4x4"), which is what the Sessions row calls
+     this session; the date it used to fall back to is on the line under it either way. */
+  const title = app && app.title ? app.title : label && label !== 'RECORDING' ? label
     : loamT('{activity} session', { activity: lexNounT(sportLex(sport), { cap: true }) });
   const date = D.recordedAt || parseUTCFromFilename(D.title || '');
   /* The reader's own date order. Left to the browser's default this printed an American ordering
@@ -48643,6 +48867,8 @@ function renderSessionOverview(D, sport) {
   };
   host.classList.remove('hidden');
 }
+/* The longest place name the share card's subtitle line prints before it shortens one. */
+const RS_PLACE_MAX = 26;
 function renderRideSignature(D, sport) {
   if (isRoadAnalysis(D)) sport = 'road';
   renderSessionOverview(D, sport);
@@ -48758,7 +48984,17 @@ function renderRideSignature(D, sport) {
     /* Stats, sport-aware. Walking shares the running layout. */
     const s = D.summary || {};
     let stats;
-    if (sport === 'running' || sport === 'walking') {
+    const reps = (sport === 'running' || sport === 'walking') ? sessionReps(D) : null;
+    if (reps) {
+      /* A set of reps shares as one: the reps' own pace, not one averaged over the recoveries, and
+         how many there were in place of cadence. */
+      stats = [
+        { ...rsSplit(U.dist(s.sessionDistance != null ? s.sessionDistance : s.distance)), label: 'DISTANCE' },
+        { ...rsSplit(U.pace(repsSpeed(reps))), label: 'REP PACE' },
+        { num: String(reps.length), unit: '', label: 'REPS' },
+        { ...rsSplit(U.elev(s.altGain)), label: 'CLIMB' },
+      ];
+    } else if (sport === 'running' || sport === 'walking') {
       /* Moving pace, matching the Pace tile and the splits below it. A card is the thing that gets
          shared, so it is the worst place for the elapsed figure to disagree with the screen it was
          cut from. GPS-only foot activities (sport 'run'/'walk', below) already run on a moving
@@ -48818,7 +49054,13 @@ function renderRideSignature(D, sport) {
     const label = D.recordedAt ? rsDateLabel(D.recordedAt) : rsLabel(D.title);
     const lex = sportLex(sport);
     const rideWord = loamT(displaySport(D) === 'emtb' ? 'E-MTB' : lex.signature);
-    const subtitle = `${rideWord} · ${durLabel}${label ? ' · ' + escapeHtml(label) : ''}`;
+    /* The workout leads where the app knows one ran ("4X4 · 41 MIN"), and the park or town joins the
+       date. The place is capped so a long park name cannot run the line off the card. */
+    const app = appSessionContext(D);
+    const lead = reps && app && app.workout ? app.workout.toUpperCase() : rideWord;
+    const place = app && app.place ? app.place.toUpperCase() : null;
+    const where = place && place.length > RS_PLACE_MAX ? place.slice(0, RS_PLACE_MAX - 1) + '\u2026' : place;
+    const subtitle = [lead, durLabel, where, label].filter(Boolean).map(escapeHtml).join(' · ');
 
     const statCols = stats.map((st, i) => {
       const cx = 40 + i * ((W - 80) / stats.length);
@@ -54329,7 +54571,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'd6b20f69b · 2026-10-15';
+const LOAM_BUILD = 'f0ce4158f · 2026-10-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
