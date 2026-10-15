@@ -8229,12 +8229,16 @@ function drawRuns() {
     const a = pacingAltAt(footAlts, r.tStart), b = pacingAltAt(footAlts, r.tEnd);
     return a != null && b != null ? b - a : null;
   });
-  const gapSpeeds = runs.map((r, i) => {
+  const gapGrades = runs.map((r, i) => {
     const dist = trackDists[i] ? (trackDists[i].snapped || trackDists[i].meters) : r.metrics.distance;
-    return netElev[i] != null && dist > 0 && avgSpeeds[i] > 0
-      ? gradeAdjustedSpeed(avgSpeeds[i], (netElev[i] / dist) * 100) : null;
+    return netElev[i] != null && dist > 0 && avgSpeeds[i] > 0 ? (netElev[i] / dist) * 100 : null;
   });
-  const anyGap = footSport && gapSpeeds.some(v => v != null);
+  const gapSpeeds = gapGrades.map((g, i) => (g != null ? gradeAdjustedSpeed(avgSpeeds[i], g) : null));
+  /* Graded but unpriced is a descent past gradeAdjustedSpeed's floor (owner, 2026-10-15: a -12.9%
+     rep at 6:19/mi, fourth fastest on its Strava segment, read 11:46 GAP). Said in words rather than
+     a dash, which reads as a measurement that failed. */
+  const steepGapTitle = loamT('Grade-adjusted pace is not shown on a descent steeper than 5%: the model behind it rates a steep descent far easier than running it fast really is.');
+  const anyGap = footSport && gapGrades.some(g => g != null);
   /* A guided walk's reps are called brisk, and whether a rep WAS brisk is a step rate: the same
      public-health thresholds the Brisk tile counts minutes against (brisk.js, 100 / 130 spm). Pace
      cannot say it -- a long-legged stroll and a short brisk stride share a pace. Reps on a walk only:
@@ -8334,7 +8338,8 @@ function drawRuns() {
       ? `<td data-l="Turns" data-s="Turns">${m.nTurns}</td><td data-l="L/R" data-s="L/R">${m.leftTurns}/${m.rightTurns}</td>
          <td data-l="Radius" data-s="Rad">${m.medianRadius != null ? U.small(m.medianRadius) : '—'}</td>`
       : `<td data-l="${avgLabel}" data-s="${avgShort}" ${bestAvg != null && avgSpeeds[index] === bestAvg ? hi : ''}>${footSport ? U.pace(avgSpeeds[index]) : U.speed(m.avgSpeed)}</td>`
-        + (anyGap ? `<td data-l="GAP" data-s="GAP">${gapSpeeds[index] ? U.pace(gapSpeeds[index]) : '\u2014'}</td>` : '')
+        + (anyGap ? `<td data-l="GAP" data-s="GAP">${gapSpeeds[index] ? U.pace(gapSpeeds[index])
+            : gapGrades[index] != null ? `<span title="${steepGapTitle}">${loamT('too steep')}</span>` : '\u2014'}</td>` : '')
         + (anySteps ? `<td class="rep-steps" data-l="Steps" data-s="${loamT('Steps')}" title="${stepsTitle}" ${repSpm[index] != null && repSpm[index] >= BRISK_MODERATE_SPM ? hi : ''}>${repSpm[index] != null
             ? `${Math.round(repSpm[index])} spm${repSpm[index] >= BRISK_VIGOROUS_SPM ? ' \u00b7 ' + loamT('vigorous') : repSpm[index] >= BRISK_MODERATE_SPM ? ' \u00b7 ' + loamT('brisk') : ''}` : '\u2014'}</td>` : '');
     /* A row drills into the dedicated segment page (focused map + corner ledger) when it is an MTB run
@@ -37146,6 +37151,11 @@ const LOAM_NB = {
      `{word}` placeholder would put an uninflected verb in the middle of a sentence. */
   '{n} s': '{n} s',
   'No pacing verdict for this one.': 'Ingen fartsvurdering for denne.',
+  'At least one {unit} of this run dropped more than 5%, and grade-adjusted pace cannot price a descent that steep. Raw pace would credit its speed to whichever half ran it, so the halves are not compared.':
+    'Minst én {unit} av denne turen falt mer enn 5 %, og stigningsjustert tempo kan ikke prise en så bratt nedoverbakke. Rått tempo ville gitt farten til den halvdelen som løp den, så halvdelene sammenlignes ikke.',
+  'Grade-adjusted pace is not shown on a descent steeper than 5%: the model behind it rates a steep descent far easier than running it fast really is.':
+    'Stigningsjustert tempo vises ikke i en nedoverbakke brattere enn 5 %: modellen bak det anslår en bratt nedoverbakke som langt lettere enn det faktisk er å løpe den fort.',
+  'too steep': 'for bratt',
   'The halves ran different terrain, and correcting for it flips the answer over: raw pace says you faded by {v}/{unit}, while grade-adjusted pace says the opposite. A verdict that only the model points at is a verdict about the model, so there is nothing honest to report here.':
     'De to halvdelene gikk i ulikt terreng, og korrigerer man for det, snur svaret: rått tempo sier at du falt av med {v}/{unit}, mens helningsjustert tempo sier det motsatte. En vurdering bare modellen peker på, er en vurdering av modellen, så det er ingenting ærlig å rapportere her.',
   'The halves ran different terrain, and correcting for it flips the answer over: raw pace says you finished quicker by {v}/{unit}, while grade-adjusted pace says the opposite. A verdict that only the model points at is a verdict about the model, so there is nothing honest to report here.':
@@ -39825,6 +39835,7 @@ const LOAM_NB = {
   'Heart rate is read from the Aerobic decoupling panel below, which halves the run by time after the warmup.':
     'Pulsen er hentet fra panelet Aerob frakobling nedenfor, som deler turen i to like lange halvdeler etter oppvarmingen.',
   'The halves covered different terrain. Raw and grade-adjusted pace disagree, so no pacing verdict is shown.': 'Halvdelene gikk i ulikt terreng. Rått og stigningsjustert tempo gir ulike svar, så ingen vurdering av fartsholdningen vises.',
+  'Part of this run was a descent too steep to grade-adjust, so no pacing verdict is shown.': 'En del av turen var en nedoverbakke for bratt til å stigningsjusteres, så ingen vurdering av fartsholdningen vises.',
   'Explore where your pace changed. There are not enough comparable full splits for a pacing verdict yet.': 'Se hvor tempoet endret seg. Det er ennå ikke nok sammenlignbare hele splitter til å vurdere fartsholdningen.',
   'Compared on grade-adjusted pace. GAP estimates the effect of hills; it does not measure effort.': 'Sammenlignet med stigningsjustert tempo. GAP anslår effekten av bakker; det måler ikke innsats.',
   'Compared on raw pace. Terrain was not measured well enough to adjust this comparison.': 'Sammenlignet med rått tempo. Terrenget ble ikke målt godt nok til å justere sammenligningen.',
@@ -41633,9 +41644,18 @@ function runningGradeCost(gradePct) {
   return 155.4 * i ** 5 - 30.4 * i ** 4 - 43.3 * i ** 3 + 46.3 * i ** 2 + 19.5 * i + 3.6;
 }
 /* Flat-equivalent speed: the speed you would run on the flat at the same metabolic power, since
-   power = cost-per-metre x speed. Uphill costs more per metre, so the flat equivalent is faster. */
+   power = cost-per-metre x speed. Uphill costs more per metre, so the flat equivalent is faster.
+
+   NULL ON A DESCENT STEEPER THAN -5%. Minetti measured oxygen cost at treadmill speeds, and his curve
+   keeps getting cheaper down to about -20% (0.76 of flat at -5%, 0.60 at -10%, 0.54 at -13%). A fast
+   trail descent is limited by braking and footing, which no oxygen cost prices: a -12.9% rep at
+   6:19/mi, fourth fastest on its Strava segment, read 11:46/mi GAP. See the GAP entry in
+   decisions/analyzer-and-app.md. The constant is declared inside so the drift guards can run this
+   copy in a bare scope. */
 function gradeAdjustedSpeed(speedMps, gradePct) {
+  const GAP_MIN_GRADE_PCT = -5;
   if (!speedMps || speedMps <= 0) return null;
+  if (gradePct < GAP_MIN_GRADE_PCT) return null;
   const cost = runningGradeCost(gradePct), flat = runningGradeCost(0);
   return cost > 0 ? speedMps * (cost / flat) : null;
 }
@@ -41694,10 +41714,17 @@ function runningClimbMetrics(seg, alts, cadSeries, hrRows, index) {
 
    Returns null rather than a number when there is no altitude to work with: a "grade-adjusted" pace
    computed over no grade is just the pace, and printing it twice under two names is a claim that
-   something was corrected when nothing was. */
+   something was corrected when nothing was.
+
+   STEEP DESCENTS ARE LEFT OUT, and past `GAP_SESSION_MAX_UNPRICED` of the distance the figure is
+   withheld. `gradeAdjustedSpeed` has no price below -5%, so that ground is in neither the distance
+   nor the flat-equivalent time. A tenth of the distance left out moves the figure by at most 4% if
+   that ground's true flat-equivalent pace was within 30% of the rest's (harmonic mean, s = 0.1);
+   much more and the figure describes the climbs and flats rather than the outing. */
 const GAP_GRADE_WIN_S = 20;
+const GAP_SESSION_MAX_UNPRICED = 0.10;
 /* Timeline GAP uses the session's 20-second grade window and Minetti model. Require
-   altitude coverage at both ends and leave stops and sensor dropouts as gaps. */
+   altitude coverage at both ends and leave stops, sensor dropouts and steep descents as gaps. */
 function timelineGapSpeeds(rows, alts) {
   let ai = 0;
   const altAt = (t) => {
@@ -41729,7 +41756,7 @@ function sessionGapSpeed(locRows, alts, ride) {
     while (ai > 0 && alts[ai].t > t) ai--;
     return alts[ai] ? alts[ai].alt : null;
   };
-  let dist = 0, flatTime = 0;
+  let dist = 0, flatTime = 0, unpriced = 0;
   for (let i = 1; i < rows.length; i++) {
     const dt = rows[i].t - rows[i - 1].t;
     if (!(dt > 0) || dt > 5) continue;
@@ -41741,10 +41768,11 @@ function sessionGapSpeed(locRows, alts, ride) {
     const run = v * GAP_GRADE_WIN_S;
     const grade = (a0 != null && a1 != null && run > 0) ? ((a1 - a0) / run) * 100 : 0;
     const g = gradeAdjustedSpeed(v, grade);
-    if (!(g > 0)) continue;
+    if (!(g > 0)) { unpriced += d; continue; }
     dist += d;
     flatTime += d / g;
   }
+  if (unpriced > GAP_SESSION_MAX_UNPRICED * (dist + unpriced)) return null;
   return flatTime > 0 ? dist / flatTime : null;
 }
 /* The climbs of a run/hike: every sustained up-segment carrying at least a 5 m gain, renumbered in
@@ -42897,7 +42925,7 @@ function pacingMean(xs) {
 
 /**
  * Compare the first and second halves of a run's full splits. Returns an object whose `verdict` is
- * 'negative' | 'even' | 'fade', or null with a `reason` ('too-short' | 'terrain') when withheld.
+ * 'negative' | 'even' | 'fade', or null with a `reason` ('too-short' | 'terrain' | 'steep-descent') when withheld.
  */
 function runPacing(splits, alts) {
   const full = (splits || []).filter((s) => !s.partial && pacingMovingOf(s) > 0 && s.meters > 0);
@@ -42924,12 +42952,21 @@ function runPacing(splits, alts) {
   const half = Math.floor(rows.length / 2);
   const firstRows = rows.slice(0, half);
   const lastRows = rows.slice(rows.length - half);
+  const compared = firstRows.concat(lastRows);
+
+  /* A split the altitude graded but GAP will not price is a descent steeper than gradeAdjustedSpeed
+     allows. Falling back to raw pace would hand that descent's speed to whichever half ran it, the
+     bias this read exists to remove, so there is no verdict. The dropped middle split cannot cause it. */
+  const steep = compared.filter((r) => r.gradePct != null && r.gapSecPerUnit == null);
+  if (steep.length) {
+    return { verdict: null, reason: 'steep-descent', fullSplits: full.length, steepSplits: steep.map((r) => r.index) };
+  }
 
   const rawFirst = pacingMean(firstRows.map((r) => r.rawSecPerUnit));
   const rawLast = pacingMean(lastRows.map((r) => r.rawSecPerUnit));
   const rawDelta = rawLast - rawFirst;
 
-  const haveGap = rows.every((r) => r.gapSecPerUnit != null);
+  const haveGap = compared.every((r) => r.gapSecPerUnit != null);
   const gapFirst = haveGap ? pacingMean(firstRows.map((r) => r.gapSecPerUnit)) : null;
   const gapLast = haveGap ? pacingMean(lastRows.map((r) => r.gapSecPerUnit)) : null;
   const gapDelta = haveGap ? gapLast - gapFirst : null;
@@ -43508,7 +43545,14 @@ function renderRunPacing(pacing, unitLabel, factors, decoupling, sport) {
     const a = Math.abs(Math.round(v));
     return a >= 60 ? `${Math.floor(a / 60)}:${String(a % 60).padStart(2, '0')}` : loamT('{n} s', { n: a });
   };
-  if (!pacing || (!pacing.verdict && pacing.reason !== 'terrain')) { el.classList.add('hidden'); return; }
+  if (!pacing || (!pacing.verdict && pacing.reason !== 'terrain' && pacing.reason !== 'steep-descent')) { el.classList.add('hidden'); return; }
+
+  if (pacing.reason === 'steep-descent') {
+    el.innerHTML = `<span class="rp-verdict">${loamT('No pacing verdict for this one.')}</span> `
+      + loamT('At least one {unit} of this run dropped more than 5%, and grade-adjusted pace cannot price a descent that steep. Raw pace would credit its speed to whichever half ran it, so the halves are not compared.', { unit: unitLabel });
+    el.classList.remove('hidden');
+    return;
+  }
 
   if (pacing.reason === 'terrain') {
     el.innerHTML = `<span class="rp-verdict">${loamT('No pacing verdict for this one.')}</span> `
@@ -43844,12 +43888,12 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
   /* GAP per split from the SAME net grade `runPacing` corrects its verdict with (`splitGradePct`), so
      the column and the verdict cannot disagree about a mile. Net grade is endpoint to endpoint: a
      mile that climbs and gives it all back reads flat here, which is what the topo beside it shows. */
-  const gaps = splits.map(sp => {
-    const mv = movingOf(sp);
-    const g = splitGradePct(sp, alts);
-    return mv > 0 && g != null ? gradeAdjustedSpeed(sp.meters / mv, g) : null;
-  });
-  const anyGap = gaps.some(v => v != null);
+  const gapGrades = splits.map(sp => (movingOf(sp) > 0 ? splitGradePct(sp, alts) : null));
+  const gaps = splits.map((sp, i) => (gapGrades[i] != null ? gradeAdjustedSpeed(sp.meters / movingOf(sp), gapGrades[i]) : null));
+  /* Graded but unpriced is a descent past gradeAdjustedSpeed's floor: a dash that says why, and the
+     column stays when that is every split. */
+  const steepGapTitle = loamT('Grade-adjusted pace is not shown on a descent steeper than 5%: the model behind it rates a steep descent far easier than running it fast really is.');
+  const anyGap = gapGrades.some(g => g != null);
   document.querySelectorAll('#runSplitsTable .split-gap-col').forEach(th => th.classList.toggle('hidden', !anyGap));
   /* The pace unit joins the heading on a phone like the others, which is the room the GAP column
      needs to keep a split on one line at 375px. */
@@ -43960,7 +44004,7 @@ function renderRunSplits(splits, unitLabel, driftM, { alts = [], cadSeries = [] 
     return `<tr>
       <td>${sp.index}${mark}${part}${stopNote}</td>
       <td>${paceCell(mps)}</td>
-      ${anyGap ? `<td class="split-gap-col">${paceCell(gaps[i])}</td>` : ''}
+      ${anyGap ? `<td class="split-gap-col">${gaps[i] == null && gapGrades[i] != null ? `<span title="${steepGapTitle}">\u2014</span>` : paceCell(gaps[i])}</td>` : ''}
       ${anyHr ? `<td class="split-hr-col">${sp.avgHr != null ? sp.avgHr + unit('bpm') : '\u2014'}</td>` : ''}
       ${anyCad ? `<td class="split-cad-col">${cads[i] != null ? Math.round(cads[i]) + unit('spm') : '\u2014'}</td>` : ''}
       ${anyAlt ? `<td class="split-alt-col"${prof ? ` title="${escapeHtml(altText(sp, prof))}" aria-label="${escapeHtml(altText(sp, prof))}"` : ''}>${prof ? sparkline(prof) : '\u2014'}</td>` : ''}
@@ -44429,15 +44473,17 @@ function renderRunningTakeaway(D, pacing, unitLabel, cooper, decoupling) {
   const reps = test ? null : intervalLead(D, sessionReps(D));
   const lead = test || reps ? null : runPacingLead(pacing, unitLabel, decoupling);
   const terrain = !test && !reps && pacing && pacing.reason === 'terrain';
+  const steep = !test && !reps && pacing && pacing.reason === 'steep-descent';
   const text = test || reps || lead || loamT(terrain
     ? 'The halves covered different terrain. Raw and grade-adjusted pace disagree, so no pacing verdict is shown.'
+    : steep ? 'Part of this run was a descent too steep to grade-adjust, so no pacing verdict is shown.'
     : 'Explore where your pace changed. There are not enough comparable full splits for a pacing verdict yet.');
   const context = test ? loamT('Measured on GPS over the 12 minutes. The VO2 max is an estimate from the distance, not a measurement.')
     : reps ? loamT('Each rep runs from its Segment Start mark to its Segment End, so the warm-up, recoveries and cool-down are left out. Raw pace: a rep up a hill reads slower.')
     : lead ? loamT(pacing.gradeAdjusted
     ? 'Compared on grade-adjusted pace. GAP estimates the effect of hills; it does not measure effort.'
     : 'Compared on raw pace. Terrain was not measured well enough to adjust this comparison.') : '';
-  const target = reps ? 'runsSection' : test || lead || terrain ? 'runSplitsSection' : 'timelineSection';
+  const target = reps ? 'runsSection' : test || lead || terrain || steep ? 'runSplitsSection' : 'timelineSection';
   card.innerHTML = `<h3>${loamT('Run highlights')}</h3>
     <div class="do-slot"><span class="do-badge">${loamT('OBSERVATION')}</span><span class="do-text">${text}</span></div>
     ${context ? `<p class="run-takeaway-context">${context}</p>` : ''}
@@ -54571,7 +54617,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'f0ce4158f · 2026-10-15';
+const LOAM_BUILD = '24c1dec37 · 2026-10-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
