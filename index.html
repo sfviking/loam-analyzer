@@ -827,6 +827,15 @@
     padding: 1px 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;
     color: var(--text); cursor: pointer; }
   .pbp-turn:hover { border-color: var(--accent); }
+  /* The chips sit inside a sentence, and `#results button`'s 44px touch floor made each one taller
+     than its line, spreading every line that held one apart (owner screenshot, 2026-10-17). The hit
+     area keeps most of that height through the pseudo-element instead of through the layout. */
+  #results .pbp-turn { min-height: 0; line-height: 1.4; position: relative; vertical-align: baseline; }
+  #results .pbp-turn::after { content: ''; position: absolute; inset: -8px -4px; }
+  /* Prose inside the runs panel, which has no padding of its own because its table and charts bring
+     their own edge spacing. Same inset as .panel-content. */
+  #playByPlay, #ghostRace { padding-left: 20px; padding-right: 20px; }
+  @media (max-width: 720px) { #playByPlay, #ghostRace { padding-left: 16px; padding-right: 16px; } }
   .pbp-row-link { cursor: pointer; color: var(--text-muted); font-size: 11px; text-decoration: underline; white-space: nowrap; }
   .pbp-row-link:hover { color: var(--accent); }
   .comparison-toggle { background:none; border:0; padding:4px 0; color:inherit; font:inherit; font-weight:inherit; cursor:pointer; text-align:left; }
@@ -3360,8 +3369,9 @@
   <section id="airtimeSection" class="hidden">
     <div class="section-title">
       Airtime
-      <span class="subtitle">estimated from phone freefall + landing · attach a Specialized FIT for exact hang</span>
+      <span class="subtitle" id="airtimeSubtitle">estimated from phone freefall + landing · attach a Specialized FIT for exact hang</span>
     </div>
+    <div class="dim hidden visual-keep" id="airtimeFitNote" style="font-size:13px; margin:0 0 10px;"></div>
     <div class="panel stats-panel jump-summary" id="airtimeSummary"></div>
     <details class="panel jumps-details" id="airtimeDetails" data-detailed-stay-closed>
       <summary><span id="airtimeTableToggle">All airtimes</span></summary>
@@ -24933,6 +24943,15 @@ async function analyze(files) {
       }
       ridingJumps = deduped;
     }
+    /* What the attached FIT held, so a FIT that yields no jumps for this ride can say WHY (no jump
+       records in the file, jumps outside this recording, or a file from another ride) instead of
+       the phone's Airtime section telling the rider to attach the FIT they already attached. */
+    const fitSync = fitData ? {
+      fileJumps: fitJumps.length,
+      fitStartUnix: fitRecords.length
+        ? fitRecords.reduce((m, r) => (r.ts < m ? r.ts : m), Infinity) + FIT_EPOCH_UNIX : null,
+      phoneStartUnix: phoneStartUTC ? phoneStartUTC.getTime() / 1000 : null,
+    } : null;
 
     /* The phone's freefall detector now runs EITHER WAY, but it is never a second jump list.
        With no FIT it is the jump source, as before, and the Airtime section shows it. With a FIT
@@ -25003,7 +25022,7 @@ async function analyze(files) {
       sensors, t, yawSeg, rollSmooth, R,
       replay: LoamReplay.prepare(sensors, turns, ridingJumps, phoneAir.jumps, phoneAir.scaledFromG),
       ride, turns, summary, gradeSegments, calibWin, sport, imuRateHz, fitRepair, emtbReason,
-      fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData,
+      fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData, fitSync,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
     };
@@ -39500,6 +39519,22 @@ const LOAM_NB = {
     'svevetid + utgangsfart fra Levo/Specialized-FIT · landing målt av telefon eller håndledd',
   'estimated from phone freefall + landing · attach a Specialized FIT for exact hang':
     'anslått fra fritt fall + landing målt av telefonen · fest en Specialized-FIT for nøyaktig svevetid',
+  'estimated from phone freefall + landing': 'anslått fra fritt fall + landing målt av telefonen',
+  'A FIT is attached, but this recording\'s file name has no start time, so the two clocks cannot be lined up and nothing from the FIT was used.':
+    'En FIT er festet, men filnavnet til dette opptaket har ingen starttid, så klokkene kan ikke stilles mot hverandre, og ingenting fra FIT-en ble brukt.',
+  'The attached FIT does not overlap this recording in time (the FIT starts {fit}, this recording {rec}), so nothing from it was used. It is probably from a different ride.':
+    'Den festede FIT-en overlapper ikke dette opptaket i tid (FIT-en starter {fit}, dette opptaket {rec}), så ingenting fra den ble brukt. Den er sannsynligvis fra en annen tur.',
+  'The attached FIT does not overlap this recording in time, so nothing from it was used. It is probably from a different ride.':
+    'Den festede FIT-en overlapper ikke dette opptaket i tid, så ingenting fra den ble brukt. Den er sannsynligvis fra en annen tur.',
+  'The attached FIT lines up with this recording, but it holds no jump records.':
+    'Den festede FIT-en stemmer med dette opptaket, men den inneholder ingen registrerte hopp.',
+  'The attached FIT holds {n} jump, but it falls outside this recording.':
+    'Den festede FIT-en inneholder {n} hopp, men det faller utenfor dette opptaket.',
+  'The attached FIT holds {n} jumps, but none fall inside this recording.':
+    'Den festede FIT-en inneholder {n} hopp, men ingen av dem faller innenfor dette opptaket.',
+  'The attached FIT has no jumps inside this recording.': 'Den festede FIT-en har ingen hopp innenfor dette opptaket.',
+  'The airtimes below are the phone\'s own estimate.': 'Svevene nedenfor er telefonens eget anslag.',
+  'The phone found no airtime either.': 'Telefonen fant heller ingen svev.',
   'replay a lap against your fastest lap of the same segment':
     'spill av en runde mot din raskeste runde på det samme segmentet',
   'Your lap races a ghost of the fastest lap on the map above. The live gap is seconds ahead of or behind the ghost at the same point along the track.':
@@ -48161,7 +48196,7 @@ function renderAll(D) {
   renderRadiusChart(D.turns);
   renderParams(D.summary, D.hasFit);
   if (D.ridingJumps && D.ridingJumps.length) { show('jumpsSection'); renderJumpSummary(D); renderJumpLaps(D); renderJumpsTable(D.ridingJumps); }
-  else if (D.airtime && D.airtime.jumps && D.airtime.jumps.length) { show('airtimeSection'); renderAirtime(D); }
+  else if ((D.airtime && D.airtime.jumps && D.airtime.jumps.length) || fitJumpNote(D)) { show('airtimeSection'); renderAirtime(D); }
   /* The FIT's channels over time are rows of the timeline now (renderBikeTimeline); what stays down
      here are the two reads a time series cannot give -- cadence against motor power, and the
      motor-off stretches. */
@@ -49982,13 +50017,62 @@ function renderJumpSummary(D) {
   if (tog) tog.textContent = loamT('All {n} jumps', { n });
 }
 
-/* Phone-only airtime estimate (shown only when no Specialized FIT is attached). Leads with the
+/* Why an ATTACHED FIT gave this recording no jumps, or null when there is nothing to explain. The
+   phone's Airtime section is what renders in that case, and it used to tell the rider to attach a
+   Specialized FIT -- over a ride that had one (owner report, 2026-10-17). The causes call for
+   different actions (attach the right file, undo a trim, or none), so they are named apart. A render
+   cached before `fitSync` existed gets the generic last line, which is true of every cause. */
+function fitJumpNote(D) {
+  if (!D || !D.hasFit || (D.ridingJumps && D.ridingJumps.length)) return null;
+  const S = D.fitSync || null;
+  if (D.fitInRide == null) {
+    return loamT("A FIT is attached, but this recording's file name has no start time, so the two clocks cannot be lined up and nothing from the FIT was used.");
+  }
+  if (!D.fitInRide.length) {
+    const lang = loamLang();
+    const when = (u) => (u != null && Number.isFinite(u))
+      ? new Date(u * 1000).toLocaleString(lang && lang !== 'en' ? lang : undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      : null;
+    const fit = S && when(S.fitStartUnix), rec = S && when(S.phoneStartUnix);
+    return fit && rec
+      ? loamT('The attached FIT does not overlap this recording in time (the FIT starts {fit}, this recording {rec}), so nothing from it was used. It is probably from a different ride.', { fit, rec })
+      : loamT('The attached FIT does not overlap this recording in time, so nothing from it was used. It is probably from a different ride.');
+  }
+  if (S && S.fileJumps === 0) {
+    return loamT('The attached FIT lines up with this recording, but it holds no jump records.');
+  }
+  if (S && S.fileJumps > 0) {
+    return loamT(S.fileJumps === 1
+      ? 'The attached FIT holds {n} jump, but it falls outside this recording.'
+      : 'The attached FIT holds {n} jumps, but none fall inside this recording.', { n: S.fileJumps });
+  }
+  return loamT('The attached FIT has no jumps inside this recording.');
+}
+
+/* Phone-only airtime estimate (shown when no FIT jumps reach this recording). Leads with the
    biggest freefall, then count, total air, and landing-impact g (which the phone measures directly
    and the FIT does not), with a per-airtime table behind the same disclosure as the jumps table. */
 function renderAirtime(D) {
   const A = D.airtime;
   const el = document.getElementById('airtimeSummary');
-  if (!el || !A || !A.jumps || !A.jumps.length) { if (el) el.innerHTML = ''; return; }
+  const hasAir = !!(A && A.jumps && A.jumps.length);
+  const sub = document.getElementById('airtimeSubtitle');
+  if (sub) sub.textContent = loamT(D && D.hasFit
+    ? 'estimated from phone freefall + landing'
+    : 'estimated from phone freefall + landing · attach a Specialized FIT for exact hang');
+  const fitNote = fitJumpNote(D);
+  const noteEl = document.getElementById('airtimeFitNote');
+  if (noteEl) {
+    noteEl.textContent = fitNote
+      ? fitNote + ' ' + loamT(hasAir ? "The airtimes below are the phone's own estimate." : 'The phone found no airtime either.')
+      : '';
+    noteEl.classList.toggle('hidden', !fitNote);
+  }
+  for (const id of ['airtimeSummary', 'airtimeDetails']) {
+    const n = document.getElementById(id);
+    if (n) n.classList.toggle('hidden', !hasAir);
+  }
+  if (!el || !hasAir) { if (el) el.innerHTML = ''; return; }
   const js = A.jumps;
   let totalAir = 0, maxHang = 0, maxLand = 0, sumLand = 0, nHigh = 0;
   for (const j of js) { totalAir += j.hang; if (j.hang > maxHang) maxHang = j.hang; if (j.landingG > maxLand) maxLand = j.landingG; sumLand += j.landingG; if (j.conf === 'high') nHigh++; }
@@ -54708,7 +54792,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '231310ba5 · 2026-10-16';
+const LOAM_BUILD = 'efc3994b9 · 2026-10-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
