@@ -1300,6 +1300,9 @@
   .do-slot .do-badge { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.16em;
     color: var(--amber); font-weight: 700; flex-shrink: 0; }
   .do-slot .do-text { font-size: 14px; color: var(--text); line-height: 1.5; }
+  /* The win slot sits above the lead observation in moss, so the card does not open on the worst corner. */
+  .do-slot.do-win { border-left-color: var(--moss); }
+  .do-slot.do-win .do-badge { color: var(--moss); }
   /* Ledger symmetry read: median peak lean per side, sky left / clay right. */
   /* Segment page: focused map beside the segment's corner ledger. The map column
      is sticky on desktop so the connection survives scrolling the ledger. */
@@ -15463,17 +15466,24 @@ function computeGpsSummary(sensors, ride, segments) {
   };
 }
 
-/* Identity comes from the rider first; available channels determine the analysis, not the name. */
-function fitActivity(messages, records, userSport, prefersEmtb) {
+/* Identity comes from the rider first; available channels determine the analysis, not the name.
+
+   An imported file is labelled by what IT says, never by the rider's usual-bike answer (owner,
+   2026-10-17: "Don't assume emtb for the import", over a 2019 Garmin ride that came up e-MTB). That
+   answer exists for phone recordings, where nothing can tell the two bikes apart; a file names its
+   own sport, and a season of Garmin history predates whatever the rider rides now. The file's own
+   e-bike signs still decide: motor power, an e-bike sport or sub-sport, the Avinox signature. A
+   cycling file with none of them reads 'file-silent', and the notice offers "This ride: e-MTB". */
+function fitActivity(messages, records, userSport) {
   const motor = records.filter(r => r.motorPower != null && r.motorPower > 0).length >= 20;
   const assisted = motor || fitIsEbike(messages);
   const explicit = ['mtb', 'emtb', 'road', 'running', 'walking'].includes(userSport);
   let sport = explicit ? normalizeSport(userSport) : fitDeclaredSport(messages);
   let reason = 'not-applicable';
   if (!explicit && sport === 'ride') {
-    const label = emtbLabel({ userSport: 'auto', detectedSport: 'mtb', fitRecords: records, prefersEmtb });
+    const label = emtbLabel({ userSport: 'auto', detectedSport: 'mtb', fitRecords: records, prefersEmtb: false });
     sport = assisted ? 'emtb' : label.sport === 'emtb' ? 'emtb' : fitIsMountain(messages) ? 'mtb' : 'ride';
-    reason = assisted ? 'fit-motor-power' : label.reason;
+    reason = assisted ? 'fit-motor-power' : label.reason === 'no-evidence' ? 'file-silent' : label.reason;
   }
   const foot = sport === 'run' || sport === 'walk';
   const power = records.filter(r => r.power != null && r.power > 0).length >= 20;
@@ -24107,11 +24117,11 @@ async function analyze(files) {
          (or the picker's current choice) describes the race, not this leg. */
       const userSport = triLeg ? 'auto' : requestedActivity(key);
       if (!triLeg) rememberActivity(key, userSport);
-      /* Nor does "I ride an e-MTB": that preference labels an unexplained cycling FIT, and a
-         triathlon's bike leg is never assisted. Applied to one, it relabelled the leg e-MTB and,
-         because an assisted ride never takes the road path, hid its power analysis (tester report,
-         2026-10-06). The motor-channel and declared e-bike checks inside fitActivity still apply. */
-      const activity = fitActivity(probeMsgs, probe.records, userSport, triLeg ? false : prefersEmtbRides());
+      /* "I ride an e-MTB" is not consulted for any imported file (see fitActivity). A triathlon's
+         bike leg was the first case of it: relabelled e-MTB, it never took the road path and its
+         power analysis was hidden (tester report, 2026-10-06). The motor-channel and declared e-bike
+         checks inside fitActivity still apply. */
+      const activity = fitActivity(probeMsgs, probe.records, userSport);
       if (activity.road) await analyzeRoadFit(fitFile, onProgress, superseded, triLeg);
       else await analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg);
       return;
@@ -37033,6 +37043,10 @@ const LOAM_NB = {
   'Range highlights': 'Høydepunkter fra rangeøkten',
   'Session highlights': 'Høydepunkter fra økten',
   'OBSERVATION': 'OBSERVASJON',
+  'WIN': 'GODT GJORT',
+  'Cleanest fast corner: <strong>T{turn}</strong>, {apex} at the apex of a {radius} radius turn with no speed lost from entry.': 'Reneste raske sving: <strong>T{turn}</strong>, {apex} i apex på en sving med {radius} radius, uten fartstap fra inngangen.',
+  'Cleanest fast corner: <strong>T{turn}</strong>, {apex} at the apex of a {radius} radius turn, only {lost} slower than entry.': 'Reneste raske sving: <strong>T{turn}</strong>, {apex} i apex på en sving med {radius} radius, bare {lost} lavere enn ved inngangen.',
+  'You carried speed through <strong>{pct}%</strong> of your turns, losing less than {thr} from entry.': 'Du holdt farten gjennom <strong>{pct}%</strong> av svingene, og mistet mindre enn {thr} fra inngangen.',
   'Ask the AI coach for the why and the drill': 'Spør AI-treneren om hvorfor og hvilken øvelse',
 
   /* runningHighlights. */
@@ -37359,6 +37373,8 @@ const LOAM_NB = {
   'Analog \u2014 keep calling it MTB': 'Analog \u2014 fortsett å kalle det terrengsykling',
   'Nothing in this recording can tell an e-bike from an analog one \u2014 a motor shows up only in a Specialized head unit\'s FIT file, and there is none here.':
     'Ingenting i dette opptaket kan skille en elsykkel fra en analog \u2014 en motor dukker bare opp i FIT-filen fra en Specialized-sykkelcomputer, og det finnes ingen her.',
+  'An imported file is labelled by what it says, and this one does not say e-bike.':
+    'En importert fil merkes etter det filen sier, og denne sier ikke elsykkel.',
   'Labelled e-MTB because you said you ride one.':
     'Merket som el-terrengsykkel fordi du sa at du sykler en.',
   'This label, and the Strava activity type that follows from it, come from your answer rather than from the ride.':
@@ -44562,19 +44578,73 @@ function mtbHighlights(D) {
      slot it has to take from. Anything shorter stays a volume stat at the back: the reference set's
      MEDIAN jump is 9.9 ft, so promoting those would push a real mechanics finding off the card on
      essentially every jump ride. */
-  const heroJumps = jumpsOnLabelledTrails(D);
-  const longest = topJumps(heroJumps, 1)[0] || null;
-  if (longest && longest.dist != null && longest.dist >= JUMP_BIG_M) {
-    const nBig = bigJumpCount(heroJumps);
-    const landed = longest.landingG != null ? loamT(', landed {g} g', { g: longest.landingG.toFixed(1) }) : '';
-    const more = nBig > 1 ? loamT(', {big} of {total} over {bar}', { big: nBig, total: heroJumps.length, bar: U.small(JUMP_BIG_M) }) : '';
-    cands.splice(1, 0, loamT('Longest jump <strong>{dist}</strong> ({speed} takeoff &times; {hang} ms hang{landed}){more}.',
-      { dist: U.small(longest.dist), speed: U.speed(longest.speed_mps), hang: Math.round(longest.hang * 1000), landed, more }));
+  const bigJump = bigJumpHeadline(jumpsOnLabelledTrails(D));
+  if (bigJump) {
+    cands.splice(1, 0, bigJump);
   } else if (s.nJumps) {
     cands.push(loamT(s.nJumps === 1 ? '<strong>{n} jump</strong>, biggest air {air}s.' : '<strong>{n} jumps</strong>, biggest air {air}s.',
       { n: s.nJumps, air: (s.maxAirtime || 0).toFixed(2) }));
   }
   return cands.slice(0, 3);
+}
+
+/* The jump headline, shared by the observations list and the win slot so the render can drop it from
+   one when it shows in the other by plain string equality. Null below JUMP_BIG_M. */
+function bigJumpHeadline(heroJumps) {
+  const longest = topJumps(heroJumps, 1)[0] || null;
+  if (!longest || longest.dist == null || longest.dist < JUMP_BIG_M) return null;
+  const nBig = bigJumpCount(heroJumps);
+  const landed = longest.landingG != null ? loamT(', landed {g} g', { g: longest.landingG.toFixed(1) }) : '';
+  const more = nBig > 1 ? loamT(', {big} of {total} over {bar}', { big: nBig, total: heroJumps.length, bar: U.small(JUMP_BIG_M) }) : '';
+  return loamT('Longest jump <strong>{dist}</strong> ({speed} takeoff &times; {hang} ms hang{landed}){more}.',
+    { dist: U.small(longest.dist), speed: U.speed(longest.speed_mps), hang: Math.round(longest.hang * 1000), landed, more });
+}
+
+/* The win slot (owner, 2026-10-17: "highlights could also emphasize wins and not just something you
+   did poorly"). mtbHighlights leads with mechanics, so on any ride with one scrubbed corner the hero
+   card only ever named the WORST corner. This is its mirror, read from the same scoped turns and the
+   same scrub measure (turnScrubMph), so one corner cannot be both the win and the largest drop.
+   Descriptive like everything else on the card: it says what was measured, never why.
+
+   Order: a jump over JUMP_BIG_M (already a headline fact); else the cleanest fast corner -- tighter
+   than the ride's median radius, at least WIN_MIN_APEX_MPS at the apex, under WIN_CLEAN_SCRUB_MPH
+   lost, ranked by v^2/r (the lateral load r = v/omega already implies, so no new measurement); else
+   the share of corners that stayed under the analyzer's own scrub flag. Null when nothing clears a
+   bar, and the card then reads exactly as before. */
+const WIN_MIN_APEX_MPS = 3.0;      /* ~6.7 mph: rules out walking-pace hairpins that are "clean" by default */
+const WIN_CLEAN_SCRUB_MPH = 1.0;   /* half of FORM_SCRUB_MIN_MPH: "clean" has to mean clearly not scrubbed */
+const WIN_CARRY_MIN_TURNS = 5;
+const WIN_CARRY_MIN_PCT = 75;
+function mtbWin(D) {
+  D = coachDigestD(D, D.sport || 'mtb');
+  const jump = bigJumpHeadline(jumpsOnLabelledTrails(D));
+  if (jump) return jump;
+  /* turnScrubMph's own 1.8 m/s entry floor: below it the scrub is reported as 0, which would make a
+     slow corner look clean rather than unmeasured. */
+  const turns = (D.turns || []).filter(t => t.vEntry > 1.8 && t.vPeak != null && isFinite(t.vPeak)
+    && isFinite(t.radius) && t.radius > 0);
+  if (turns.length < 3) return null;
+  const medR = median(turns.map(t => t.radius));
+  const load = t => t.vPeak * t.vPeak / t.radius;
+  const clean = turns.filter(t => t.radius <= medR && t.vPeak >= WIN_MIN_APEX_MPS
+    && turnScrubMph(t) < WIN_CLEAN_SCRUB_MPH);
+  if (clean.length) {
+    const best = clean.reduce((a, b) => (load(b) > load(a) ? b : a));
+    const lostMph = turnScrubMph(best);
+    const p = { turn: best.n, apex: U.speed(best.vPeak), radius: U.small(best.radius), lost: U.speed(lostMph / 2.23694) };
+    return lostMph < 0.1
+      ? loamT('Cleanest fast corner: <strong>T{turn}</strong>, {apex} at the apex of a {radius} radius turn with no speed lost from entry.', p)
+      : loamT('Cleanest fast corner: <strong>T{turn}</strong>, {apex} at the apex of a {radius} radius turn, only {lost} slower than entry.', p);
+  }
+  if (turns.length >= WIN_CARRY_MIN_TURNS) {
+    const kept = turns.filter(t => turnScrubMph(t) < FORM_SCRUB_MIN_MPH).length;
+    const pct = Math.round(100 * kept / turns.length);
+    if (pct >= WIN_CARRY_MIN_PCT) {
+      return loamT('You carried speed through <strong>{pct}%</strong> of your turns, losing less than {thr} from entry.',
+        { pct, thr: U.speed(FORM_SCRUB_MIN_MPH / 2.23694) });
+    }
+  }
+  return null;
 }
 
 function openRunEvidence(id) {
@@ -44774,7 +44844,14 @@ function renderCoachHighlights(D, sport) {
       : (sport === 'running' || sport === 'walking') ? runningHighlights(D)
       : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D);
   } catch (e) { console.warn('highlights failed', e); bullets = []; }
-  if (!bullets.length) { sec.classList.add('hidden'); card.innerHTML = ''; return; }
+  /* The win slot is the descents-and-turns pipeline's only (mtbHighlights' sports). A win that is
+     also one of the observations -- the big-jump line -- shows once, as the win. */
+  let win = null;
+  if (!['gps', 'running', 'walking', 'road'].includes(sport)) {
+    try { win = mtbWin(D); } catch (e) { console.warn('highlight win failed', e); win = null; }
+    if (win) bullets = bullets.filter(b => b !== win);
+  }
+  if (!bullets.length && !win) { sec.classList.add('hidden'); card.innerHTML = ''; return; }
   /* Through the lexicon rather than an inline ternary, which is what left this card reading "Ride
      highlights" over a ski day: the signature card was taught the sport noun and this one, which
      sits ABOVE it and is the first thing on the page, was not. GPS-only foot activities still need
@@ -44792,7 +44869,8 @@ function renderCoachHighlights(D, sport) {
      byte-identical either way. The bare noun is deliberately NOT translated on its own: `Run` is
      already an LOAM_NB key meaning a DESCENT, so a running card would have read "Nedkjøring". */
   card.innerHTML = `<h3>${loamT(word + ' highlights')}</h3>`
-    + `<div class="do-slot"><span class="do-badge">${loamT('OBSERVATION')}</span><span class="do-text">${lead}</span></div>`
+    + (win ? `<div class="do-slot do-win"><span class="do-badge">${loamT('WIN')}</span><span class="do-text">${win}</span></div>` : '')
+    + (lead ? `<div class="do-slot"><span class="do-badge">${loamT('OBSERVATION')}</span><span class="do-text">${lead}</span></div>` : '')
     + (rest.length ? (isMtbFamily(displaySport(D)) || (D.gpsOnly && displaySport(D) === 'ride')
         ? `<details class="more-observations" data-detailed-stay-closed><summary>${loamT('More observations')}</summary><ul>${rest.map(b => `<li>${b}</li>`).join('')}</ul></details>`
         : `<ul>${rest.map(b => `<li>${b}</li>`).join('')}</ul>`) : '')
@@ -47027,6 +47105,20 @@ function renderEmtbNotice(D) {
     body.appendChild(document.createTextNode(' '));
     body.appendChild(mkBtn(loamT('My usual bike: MTB'), declineEmtbPreference));
     noticeFold(body, loamT('This recording has no motor data that distinguishes an e-bike from an analog bike.'));
+    sec.classList.remove('hidden');
+    return;
+  }
+
+  /* AN IMPORTED FILE that does not say e-bike. Its label came from the file, not from the usual-bike
+     answer (fitActivity), so the one thing worth offering is the per-ride correction: without it, a
+     real e-bike ride recorded on a Garmin profile that is not an e-bike one would have no way to say
+     so in the app, which hides the Sport picker. Not shown to a rider who answered "analog". */
+  if (reason === 'file-silent' && emtbPreference() !== 'no' && !dismissed) {
+    lead.textContent = loamT(D.gpsSport === 'ride' ? 'Analyzed as a ride.' : 'Analyzed as MTB.');
+    body.textContent = ' ' + loamT('An imported file is labelled by what it says, and this one does not say e-bike.');
+    body.appendChild(document.createTextNode(' '));
+    body.appendChild(mkBtn(loamT('This ride: e-MTB'), () => setRideActivity('emtb')));
+    noticeFold(body, '');
     sec.classList.remove('hidden');
     return;
   }
@@ -54792,7 +54884,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'efc3994b9 · 2026-10-17';
+const LOAM_BUILD = 'da564e5b1 · 2026-10-17';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
