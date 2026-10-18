@@ -1318,7 +1318,22 @@
   #segmentPage .seg-map-col .map-legend { border: 1px solid var(--border); border-top: 0; border-radius: 0 0 10px 10px;
     font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.04em; color: var(--text-muted); }
   /* Foot: the MTB corner ledger, its map and the fade strip give way to the borrowed run sections. */
-  #segmentPage.seg-foot :is(#segStats, .seg-grid, #segFade) { display: none; }
+  #segmentPage.seg-foot :is(#segStats, .seg-grid, #segFade, #segPast) { display: none; }
+  /* Past laps: this trail's laps from every ride in the library, ranked, this lap marked. */
+  .seg-past { margin: 0 0 18px; padding: 14px 18px 10px; }
+  .seg-past .past-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .seg-past .past-title { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); }
+  .seg-past .past-compare { margin-left: auto; }
+  .seg-past .past-read { font-size: 14px; line-height: 1.5; margin-bottom: 8px; }
+  .seg-past .past-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 64px; gap: 12px; align-items: baseline; padding: 6px; border-bottom: 1px solid var(--surface-2); }
+  .seg-past .past-row:last-of-type { border-bottom: 0; }
+  .seg-past .past-row.me { background: var(--surface-2); border-radius: 6px; }
+  .seg-past .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .seg-past .past-row.me .when { color: var(--text); font-weight: 600; }
+  .seg-past .t, .seg-past .d { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .seg-past .d { text-align: right; color: var(--text-muted); }
+  .seg-past .d.best { color: var(--amber); }
+  .seg-past .past-more, .seg-past .past-note { font-size: 12px; line-height: 1.5; color: var(--text-muted); margin-top: 8px; }
   #segmentPage .seg-stepper { margin-left: auto; display: flex; gap: 8px; }
   #segmentPage .seg-step { color: var(--text); padding: 9px 12px; }
   #segmentPage .seg-step:disabled { opacity: 0.4; cursor: default; }
@@ -3752,10 +3767,13 @@
     <span class="subtitle" id="segSub"></span>
   </div>
   <div class="seg-stats" id="segStats"></div>
+  <!-- This trail's laps across the library (renderSegPast), when the run is a lap of a tagged
+       segment. Above the map so a phone reaches it without scrolling past the whole ledger. -->
+  <div class="panel seg-past hidden" id="segPast"></div>
   <div class="seg-grid">
     <div class="seg-map-col">
       <div id="segMap"></div>
-      <div class="map-legend">turn ring = speed kept: <span class="lg scrub"></span>scrubbed <span class="lg held"></span>held <span class="lg carry"></span>carried · track colour = speed · tap a corner row</div>
+      <div class="map-legend">turn ring = speed kept: <span class="lg scrub"></span>scrubbed <span class="lg held"></span>held <span class="lg carry"></span>carried · track colour = speed <span class="map-help">· tap a corner row</span></div>
     </div>
     <div class="panel corner-ledger" id="segLedger"></div>
   </div>
@@ -8674,6 +8692,7 @@ function openSegmentPage(r, D, focusN) {
   } catch (e) { segDeltas = null; }
   renderCornerLedger(turns, 'segLedger', segDeltas);
   renderSegFade(r, D);
+  renderSegPast(r, D);
   /* Form replay rides along: the one replay instance (its ids stay unique) moves
      into this page preloaded with THIS run's whole-segment replay, and Back
      returns it home. Skipped when the ride has no clean lean signal (the
@@ -8822,8 +8841,143 @@ function renderSegFade(r, D) {
   host.classList.remove('hidden');
 }
 
+/* ---------- Past laps on the segment page ----------
+   The fade strip and the ledger's vs-best column only ever read laps from THIS recording, so a trail
+   ridden once today showed no comparison at all, however many times the library held it (owner
+   report, 2026-10-18: "Why is there no comparison with previous Tanga rides?"). The cross-ride view
+   existed, but only behind the runs table's ⋯ menu on the ride page.
+
+   This lap is clipped through buildTagMember against the same tag as the library laps, for the reason
+   setupPlayByPlay gives at length: the run window and the gate clip are different stretches of trail,
+   and comparing one with the other once reported a PR as 20 s slower. That is also why the time here
+   can differ from the page's own Time tile, and the panel says so.
+
+   `others` is this trail's library laps with this lap taken out; `self` is this lap, clipped. Pure,
+   so every verdict can be driven without a library. The partner is the lap this one is READ against:
+   the best, or the next one down when this lap is the best. A gap inside `tieS` is called too close
+   to call, from the same SEG_TIME_TIE_S the leaderboard badges ties with. */
+function segPastRead(others, self, tieS) {
+  const all = [...(others || []), self].filter(m => m && isFinite(m.duration))
+    .sort((a, b) => a.duration - b.duration);
+  const best = all[0] || null;
+  const partner = !best ? null : best === self ? (all[1] || null) : best;
+  const gapS = partner ? self.duration - partner.duration : null;
+  const tied = partner != null && Math.abs(gapS) <= tieS;
+  const dSelf = self && self.distance, dPartner = partner && partner.distance;
+  const distFrac = (isFinite(dSelf) && dSelf > 0 && isFinite(dPartner) && dPartner > 0)
+    ? (dSelf - dPartner) / dPartner : null;
+  return {
+    all, best, partner, gapS, distFrac,
+    rank: all.indexOf(self) + 1, n: all.length,
+    verdict: !partner ? 'only' : tied ? 'tied' : best === self ? 'fastest' : 'behind',
+  };
+}
+/* Rows the panel lists before handing the rest to Compare laps. This lap is always listed. */
+const SEG_PAST_ROWS = 5;
+let _segPastGen = 0;
+async function renderSegPast(r, D) {
+  const host = document.getElementById('segPast');
+  if (!host) return;
+  const gen = ++_segPastGen;
+  host.classList.add('hidden');
+  host.innerHTML = '';
+  const src = r && r.src;
+  const tagId = src && src.autoTag ? src.autoTag.taggedSegmentId : null;
+  if (tagId == null) return;
+  let allRides, allTags;
+  try { [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]); } catch (e) { return; }
+  /* A slow library read must not paint over a page the rider has since closed or replaced. */
+  if (gen !== _segPastGen) return;
+  const tag = (allTags || []).find(t => t.id === tagId);
+  if (!tag) return;
+  /* This ride's own library row, for its id, date and sport. A recording that never reached the
+     library still has a lap to place, so it gets a stand-in row with no id. */
+  const selfRow = (allRides || []).find(x => x.id === D.libraryRideId)
+    || { id: null, filename: D.title || null, recordedAt: null, sport: D.sport || null };
+  let self, members;
+  try {
+    self = buildTagMember(selfRow, src, tag);
+    members = buildTagMembers(tag, allRides || []);
+  } catch (e) { console.warn('past laps lookup failed', e); return; }
+  if (gen !== _segPastGen || !isFinite(self.duration)) return;
+  /* Take THIS lap out of the library's list, by its own window in its own ride, or by absolute time
+     for a copy of the same lap under another library row (a head unit's FIT of the same descent,
+     which buildTagMembers' own overlap test is written for). Today's OTHER laps of this trail stay. */
+  const absWin = (m) => {
+    const d = memberRideClock(m);
+    return (d && !isNaN(d) && m.tStart != null && m.tEnd != null)
+      ? [d.getTime() / 1000 + m.tStart, d.getTime() / 1000 + m.tEnd] : null;
+  };
+  const selfWin = absWin(self);
+  const isThisLap = (m) => {
+    if (selfRow.id != null && m.rideId === selfRow.id) return m.tStart < self.tEnd && self.tStart < m.tEnd;
+    const w = absWin(m);
+    return !!(w && selfWin && w[0] < selfWin[1] && selfWin[0] < w[1]);
+  };
+  const others = members.filter(m => !isThisLap(m));
+  const read = segPastRead(others, self, SEG_TIME_TIE_S);
+  const lex = sportLex(displaySport(D));
+  const name = escapeHtml(tag.name);
+  /* The same count compareWithPastLaps gates on, so the button never opens onto its alert. */
+  const canCompare = members.length >= 2;
+  const head = `<div class="past-head"><span class="past-title">${loamT('Your laps of {name}', { name })}</span>`
+    + (canCompare ? `<button type="button" class="seg-back past-compare">${loamT('Compare laps')}</button>` : '')
+    + `</div>`;
+  if (read.verdict === 'only') {
+    host.innerHTML = head + `<div class="past-read visual-keep">${loamT('No other laps of {name} in your library yet. {Verb} it again to compare.',
+      { name, Verb: lexVerbT(lex, true) })}</div>`;
+  } else {
+    const labels = memberDateLabels(read.all, capitalize(rowNounT('lap')));
+    const labelOf = (m) => escapeHtml(labels[read.all.indexOf(m)]);
+    const time = `<b>${fmtDuration(self.duration)}</b>`;
+    let line;
+    if (read.verdict === 'fastest') {
+      line = loamT('This lap: {time} gate to gate, your fastest of {n} laps here.', { time, n: read.n });
+    } else if (read.verdict === 'behind') {
+      line = loamT('This lap: {time} gate to gate, #{rank} of {n} laps here, {gap}s off your best ({label}).',
+        { time, rank: read.rank, n: read.n, gap: read.gapS.toFixed(1), label: labelOf(read.partner) });
+    } else {
+      line = loamT('This lap: {time} gate to gate, within {s}s of {label} ({other}): too close to call.',
+        { time, s: SEG_TIME_TIE_S, label: labelOf(read.partner), other: fmtDuration(read.partner.duration) });
+    }
+    /* Same threshold the PR card names a distance gap at: a clip that missed a gate keeps the whole
+       descent (SEG_CLIP_MAX_MISS_M), and then the two clocks timed different ground. */
+    let caveat = '';
+    if (read.distFrac != null && Math.abs(read.distFrac) >= PR_DIST_NOTE_FRAC) {
+      const vals = { pct: `${Math.round(Math.abs(read.distFrac) * 100)}%`, label: labelOf(read.partner),
+        dist: U.dist(self.distance), prevDist: U.dist(read.partner.distance) };
+      caveat = `<div class="past-note visual-keep">${read.distFrac > 0
+        ? loamT('This lap covered {pct} more ground than {label} ({dist} vs {prevDist}): one of the two may not have clipped to the segment gates.', vals)
+        : loamT('This lap covered {pct} less ground than {label} ({dist} vs {prevDist}): one of the two may not have clipped to the segment gates.', vals)}</div>`;
+    }
+    const shown = read.all.slice(0, SEG_PAST_ROWS);
+    if (!shown.includes(self)) shown.push(self);
+    const tieTitle = escapeHtml(loamT("Within {s}s of the best time. Re-timing one lap through this same code moves it 1-2s depending on where the recording's descent window happens to start, so a gap this small is measurement, not riding.", { s: SEG_TIME_TIE_S }));
+    const rows = shown.map(m => {
+      const me = m === self, isBest = m === read.best;
+      const tiedBest = !isBest && (m.duration - read.best.duration) <= SEG_TIME_TIE_S;
+      return `<div class="past-row${me ? ' me' : ''}"><span class="when">${labelOf(m)}`
+        + (me ? ` · ${loamT('this lap')}` : '')
+        + (tiedBest ? ` <span title="${tieTitle}">= ${loamT('tied')}</span>` : '')
+        + `</span><span class="t">${fmtDuration(m.duration)}</span>`
+        + (isBest ? `<span class="d best">${loamT('best')}</span>`
+          : `<span class="d">+${(m.duration - read.best.duration).toFixed(1)}s</span>`)
+        + `</div>`;
+    }).join('');
+    const more = read.n - shown.length;
+    host.innerHTML = head + `<div class="past-read visual-keep">${line}</div>` + rows
+      + (more > 0 ? `<div class="past-more">${loamT('{n} more in Compare laps', { n: more })}</div>` : '')
+      + caveat
+      + `<div class="past-note analysis-explanation">${loamT('Times run gate to gate on the saved segment, the clock Compare laps uses, so this lap can differ from the Time above.')}</div>`;
+  }
+  const btn = host.querySelector('.past-compare');
+  if (btn) btn.onclick = () => compareWithPastLaps(src, { sport: displaySport(D), returnTo: 'segment' });
+  host.classList.remove('hidden');
+}
+
 function closeSegmentPage() {
   if (_footSeg) { closeFootSegmentPage(); return; }
+  _segPastGen++;
   hide('segmentPage'); show('results');
   /* Send the borrowed coach panel home BEFORE #segmentPage is any use to it: leaving the node inside
      a display:none page is how an answer the rider is mid-way through reading would vanish. The
@@ -34466,9 +34620,14 @@ async function compareWithPastLaps(descent, opts = {}) {
      does this). The comparison itself opens at the TOP: it is a different page, and without this it
      inherited whatever scroll the ride page was at, which on a phone was the bottom of a page the
      rider had never seen, with the Back button somewhere above (owner report, 2026-09-12). */
-  _crossReturnView = 'ride';
+  /* Opened from a trail's own page (renderSegPast), Back returns to that page rather than to the ride:
+     the rider asked about this trail, and landing on the runs table would make them find it again. */
+  const fromSegment = opts.returnTo === 'segment';
+  _crossReturnView = fromSegment ? 'segment' : 'ride';
   _crossReturnScroll = window.scrollY;
-  hide('results'); show('crossResults');
+  hide('results');
+  if (fromSegment) { hide('segmentPage'); try { formStopAnim(); } catch (e) {} }
+  show('crossResults');
   window.scrollTo(0, 0);
   /* This cross-ride view was opened from a single ride's analysis, so offer a way back to it (the
      native Done button otherwise drops all the way out to the Sessions list). The multi-file drop
@@ -34476,7 +34635,10 @@ async function compareWithPastLaps(descent, opts = {}) {
   { const b = document.getElementById('crossBackBar'); if (b) b.classList.remove('hidden'); }
   /* Names the page it returns to in that page's sport, as the segment page's Back does: a run's
      comparison said "Back to ride" (owner report, 2026-09-29). */
-  { const b = document.getElementById('crossBackBtn'); if (b) b.textContent = '← ' + loamT('Back to {noun}', { noun: lexNounT(pageLex()) }); }
+  { const b = document.getElementById('crossBackBtn');
+    if (b) b.textContent = '← ' + (fromSegment
+      ? loamT('Back to {name}', { name: descent.autoTag.name })
+      : loamT('Back to {noun}', { noun: lexNounT(pageLex()) })); }
   renderCrossRide({ perRide, clusters: [cluster] });
   /* The alert above names what the RIDER should go do next, so it speaks in this recording's sport.
      This line describes the SET now on screen, so it reads the members' own sports -- the same
@@ -39945,6 +40107,25 @@ const LOAM_NB = {
   'How did my pacing change?': 'Hvordan endret fartsholdningen min seg?',
   'How did terrain affect this run?': 'Hvordan påvirket terrenget denne løpeturen?',
   'Climb': 'Stigning',
+  /* The segment page's past-laps panel (renderSegPast) and the comparison's Back to that page. */
+  'Your laps of {name}': 'Rundene dine på {name}',
+  'No other laps of {name} in your library yet. {Verb} it again to compare.':
+    'Ingen andre runder på {name} i biblioteket ditt ennå. {Verb} den en gang til for å sammenligne.',
+  'This lap: {time} gate to gate, your fastest of {n} laps here.':
+    'Denne runden: {time} fra port til port, din raskeste av {n} runder her.',
+  'This lap: {time} gate to gate, #{rank} of {n} laps here, {gap}s off your best ({label}).':
+    'Denne runden: {time} fra port til port, nr. {rank} av {n} runder her, {gap} s bak din beste ({label}).',
+  'This lap: {time} gate to gate, within {s}s of {label} ({other}): too close to call.':
+    'Denne runden: {time} fra port til port, innenfor {s} s av {label} ({other}): for jevnt til å kåre en vinner.',
+  'This lap covered {pct} more ground than {label} ({dist} vs {prevDist}): one of the two may not have clipped to the segment gates.':
+    'Denne runden dekket {pct} lengre strekning enn {label} ({dist} mot {prevDist}): en av de to ble kanskje ikke klippet til portene i segmentet.',
+  'This lap covered {pct} less ground than {label} ({dist} vs {prevDist}): one of the two may not have clipped to the segment gates.':
+    'Denne runden dekket {pct} kortere strekning enn {label} ({dist} mot {prevDist}): en av de to ble kanskje ikke klippet til portene i segmentet.',
+  'this lap': 'denne runden',
+  '{n} more in Compare laps': '{n} til i Sammenlign runder',
+  'Times run gate to gate on the saved segment, the clock Compare laps uses, so this lap can differ from the Time above.':
+    'Tidene måles fra port til port på det lagrede segmentet, samme klokke som Sammenlign runder bruker, så denne runden kan avvike fra Varighet ovenfor.',
+  'Back to {name}': 'Tilbake til {name}',
 };
 
 /* ---------- Static chrome ----------
@@ -53202,7 +53383,22 @@ let _crossReturnScroll = null;   /* window.scrollY on the page that opened the c
 let _crossReturnView = null;     /* 'ride', 'progress', or null for a Library/multi-file comparison */
 function backFromCross() {
   if (_crossReturnView === 'progress') { backToProgressFromCross(); return; }
+  if (_crossReturnView === 'segment') { backToSegmentFromCross(); return; }
   backToRideFromCross();
+}
+/* The comparison opened from a trail's page hid that page (and #results under it) without closing
+   it, so its map, ledger and borrowed sections are all still in place. A Leaflet map measured while
+   hidden needs telling its size again. */
+function backToSegmentFromCross() {
+  const b = document.getElementById('crossBackBar');
+  if (b) b.classList.add('hidden');
+  hide('crossResults');
+  show('segmentPage');
+  window.scrollTo(0, _crossReturnScroll != null ? _crossReturnScroll : 0);
+  { const t = document.getElementById('segTitle'); if (t) setStatus(loamT('Segment: {label}', { label: t.textContent }), true); }
+  setTimeout(() => { try { if (_segMap) _segMap.invalidateSize(); } catch (e) {} }, 60);
+  _crossReturnScroll = null;
+  _crossReturnView = null;
 }
 function backToRideFromCross() {
   const b = document.getElementById('crossBackBar');
@@ -54884,7 +55080,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'da564e5b1 · 2026-10-17';
+const LOAM_BUILD = 'a511e9f05 · 2026-10-18';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
