@@ -8885,7 +8885,9 @@ async function renderSegPast(r, D) {
   const tagId = src && src.autoTag ? src.autoTag.taggedSegmentId : null;
   if (tagId == null) return;
   let allRides, allTags;
-  try { [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]); } catch (e) { return; }
+  /* The same one-time duplicate cleanup compareWithPastLaps runs before it counts, or a library still
+     holding a pre-upsert copy of this ride would offer Compare laps onto that function's alert. */
+  try { await dedupeRides(); [allRides, allTags] = await Promise.all([listRides(), listTaggedSegments()]); } catch (e) { return; }
   /* A slow library read must not paint over a page the rider has since closed or replaced. */
   if (gen !== _segPastGen) return;
   const tag = (allTags || []).find(t => t.id === tagId);
@@ -10179,7 +10181,9 @@ function setupGhostRace(runs, D, rowNoun) {
   if (how) how.classList.remove('hidden');
   if (note) note.classList.add('hidden');
   sel.innerHTML = comparable.map(r => `<option value="${r.n}">${escapeHtml(runDisplayLabel(r))}</option>`).join('');
-  sel.onchange = () => ghostRaceStop();
+  /* A new lap is a new race: the gap chart and its "lost most between" line describe the old one
+     until cleared. Stop alone keeps them, since the chart is that race's result. */
+  sel.onchange = () => { ghostRaceStop(); ghostGapClear(); };
   document.getElementById('ghostPlay').onclick = ghostPlayClicked;
   document.getElementById('ghostSpeedSel').onchange = (e) => { if (_ghost) _ghost.mult = +e.target.value; };
   scrub.value = 0;
@@ -34070,7 +34074,8 @@ async function refreshBriskWeek() {
   if (document.getElementById('briskWeekNote') !== el) return;
   const wk = briskWeek(rides, Date.now());
   if (!wk.sessions) return;
-  el.textContent = ' \u00b7 ' + loamT('{min} of {target} min this week, from {n} walks', {
+  el.textContent = ' \u00b7 ' + loamT(wk.sessions === 1 ? '{min} of {target} min this week, from 1 walk'
+    : '{min} of {target} min this week, from {n} walks', {
     min: Math.round(wk.minutes), target: wk.targetMin, n: wk.sessions });
 }
 
@@ -35841,6 +35846,7 @@ const LOAM_NB = {
   'Brisk minutes': 'Raske minutter',
   '{v} min at {vig}+ spm · {mod}+ spm counts': '{v} min på {vig}+ spm · {mod}+ spm teller',
   '{min} of {target} min this week, from {n} walks': '{min} av {target} min denne uken, fra {n} turer',
+  '{min} of {target} min this week, from 1 walk': '{min} av {target} min denne uken, fra 1 tur',
   'Median step rate over the rep: {mod}+ spm is brisk, {vig}+ vigorous': 'Median skrittfrekvens i draget: {mod}+ spm er raskt, {vig}+ hardt',
   'brisk': 'raskt',
   'vigorous': 'hardt',
@@ -37485,6 +37491,10 @@ const LOAM_NB = {
   'Pacing advice for the climbs': 'Fartsråd for stigningene',
   'How was my pacing on the climbs?': 'Hvordan var fartsfordelingen min i stigningene?',
   'How can walks like this build fitness?': 'Hvordan kan gåturer som denne bygge form?',
+  /* The fast walk's chips (coachChips, opts.fastWalk). */
+  'How many brisk minutes did I get?': 'Hvor mange raske minutter fikk jeg?',
+  'Quicker steps or longer steps to walk faster?': 'Raskere steg eller lengre steg for å gå fortere?',
+  'How do I hold my cadence on the climbs?': 'Hvordan holder jeg stegfrekvensen i bakkene?',
   'What should I try on my next hike?': 'Hva bør jeg prøve på neste fottur?',
   'What should I focus on next hike?': 'Hva bør jeg fokusere på neste fottur?',
   'What should I focus on next run?': 'Hva bør jeg fokusere på neste løpetur?',
@@ -44700,7 +44710,7 @@ function scrollToCoach() { const c = document.getElementById('coachSection'); if
 /* A local "what mattered" read computed from the same metrics the coach gets, shown as a hero card up
    top so the narrative is the first thing seen (no API key or scroll needed). 2-3 bullets, mechanics
    first (the differentiators), then headline turn / jump / e-bike facts. */
-function mtbHighlights(D) {
+function mtbHighlights(D, exclude = null) {
   D = coachDigestD(D, D.sport || 'mtb');
   const s = D.summary || {};
   /* The same downhill, labelled-trail population and confidence gate as the coach and ledger. */
@@ -44766,7 +44776,9 @@ function mtbHighlights(D) {
     cands.push(loamT(s.nJumps === 1 ? '<strong>{n} jump</strong>, biggest air {air}s.' : '<strong>{n} jumps</strong>, biggest air {air}s.',
       { n: s.nJumps, air: (s.maxAirtime || 0).toFixed(2) }));
   }
-  return cands.slice(0, 3);
+  /* The win slot shows the big-jump line itself, so it leaves this list BEFORE the cut: filtering
+     after it cost every big-jump ride its third observation. */
+  return cands.filter(c => c !== exclude).slice(0, 3);
 }
 
 /* The jump headline, shared by the observations list and the win slot so the render can drop it from
@@ -45017,21 +45029,21 @@ function renderCoachHighlights(D, sport) {
   const card = document.getElementById('coachHighlightsCard');
   if (!sec || !card) return;
   let bullets = [];
+  /* The win slot is the descents-and-turns pipeline's only (mtbHighlights' sports). A win that is
+     also one of the observations -- the big-jump line -- shows once, as the win, and is excluded
+     before mtbHighlights cuts to three so it does not cost an observation. */
+  let win = null;
+  if (!['gps', 'running', 'walking', 'road'].includes(sport)) {
+    try { win = mtbWin(D); } catch (e) { console.warn('highlight win failed', e); win = null; }
+  }
   /* Walking reuses the running highlights (cadence, oscillation, elevation all apply); road and the
      MTB family keep theirs. Every sport that renders a coach panel now also renders this card; the
      empty-guard below still hides it when a sport produces no bullets. */
   try {
     bullets = (sport === 'gps') ? gpsHighlights(D)
       : (sport === 'running' || sport === 'walking') ? runningHighlights(D)
-      : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D);
+      : (sport === 'road') ? roadHighlights(D) : mtbHighlights(D, win);
   } catch (e) { console.warn('highlights failed', e); bullets = []; }
-  /* The win slot is the descents-and-turns pipeline's only (mtbHighlights' sports). A win that is
-     also one of the observations -- the big-jump line -- shows once, as the win. */
-  let win = null;
-  if (!['gps', 'running', 'walking', 'road'].includes(sport)) {
-    try { win = mtbWin(D); } catch (e) { console.warn('highlight win failed', e); win = null; }
-    if (win) bullets = bullets.filter(b => b !== win);
-  }
   if (!bullets.length && !win) { sec.classList.add('hidden'); card.innerHTML = ''; return; }
   /* Through the lexicon rather than an inline ternary, which is what left this card reading "Ride
      highlights" over a ski day: the signature card was taught the sport noun and this one, which
@@ -48469,7 +48481,7 @@ function renderAll(D) {
   renderRadiusChart(D.turns);
   renderParams(D.summary, D.hasFit);
   if (D.ridingJumps && D.ridingJumps.length) { show('jumpsSection'); renderJumpSummary(D); renderJumpLaps(D); renderJumpsTable(D.ridingJumps); }
-  else if ((D.airtime && D.airtime.jumps && D.airtime.jumps.length) || fitJumpNote(D)) { show('airtimeSection'); renderAirtime(D); }
+  else if ((D.airtime && D.airtime.jumps && D.airtime.jumps.length) || fitJumpNoteStandsAlone(D)) { show('airtimeSection'); renderAirtime(D); }
   /* The FIT's channels over time are rows of the timeline now (renderBikeTimeline); what stays down
      here are the two reads a time series cannot give -- cadence against motor power, and the
      motor-off stretches. */
@@ -50320,6 +50332,15 @@ function fitJumpNote(D) {
       : 'The attached FIT holds {n} jumps, but none fall inside this recording.', { n: S.fileJumps });
   }
   return loamT('The attached FIT has no jumps inside this recording.');
+}
+
+/* Whether the FIT note is worth an Airtime section on its own, with no phone airtime to sit beside.
+   A FIT that does not overlap the ride, or whose jumps miss it, is a problem the rider can fix. A FIT
+   that lines up and simply holds no jump records is a jump-free ride, or a head unit that never
+   writes them (an Edge, an Amflow): a section whose whole content is "nothing happened" is noise. */
+function fitJumpNoteStandsAlone(D) {
+  if (!fitJumpNote(D)) return false;
+  return !(D.fitInRide && D.fitInRide.length && D.fitSync && D.fitSync.fileJumps === 0);
 }
 
 /* Phone-only airtime estimate (shown when no FIT jumps reach this recording). Leads with the
@@ -55080,7 +55101,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'a511e9f05 · 2026-10-18';
+const LOAM_BUILD = 'e8f45f56c · 2026-10-19';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
