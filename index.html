@@ -34389,7 +34389,7 @@ function renderGpsStats(s, sport, segments, D) {
       <div class="sub">${s.maxDescentDrop ? loamT('biggest {v} drop', { v: U.elev(s.maxDescentDrop) }) : loamT('sustained grade')}${s.vamPedaled ? ' · ' + loamT('VAM {v} m/h', { v: Math.round(s.vamPedaled) }) : ''}</div>
     </div>
     ${steepestInclineTile(segments, foot)}
-    ${steepestDescentTile(segments, foot)}
+    ${steepestDescentTile(segments, foot, foot ? null : STEEPEST_PITCH_FLOOR)}
   `;
 }
 
@@ -41090,8 +41090,10 @@ function renderGeekStats(D, sport) {
    already applied the duration and grade gates, so this is a summary over accepted descents rather
    than a new detector. The three activity paths use two field names (`gradeAvg` and `avgGrade`) and
    two speed names (`speedAvg` and `avgSpeed`); normalize those here so the headline means the same
-   thing for a phone run, a GPS-only ride, and a road FIT. */
-function steepestDescentStat(segments) {
+   thing for a phone run, a GPS-only ride, and a road FIT.
+   `floor` ({ minDistance, minSpeed }, optional) drops segments too short or too slow to read a pitch
+   from -- see STEEPEST_PITCH_FLOOR for the one caller that passes it. */
+function steepestDescentStat(segments, floor) {
   let best = null;
   for (const s of (segments || [])) {
     if (!s || (s.dir != null && s.dir !== 'down')) continue;
@@ -41103,6 +41105,7 @@ function steepestDescentStat(segments) {
     const avgSpeed = Number.isFinite(s.speedAvg) ? s.speedAvg
       : Number.isFinite(s.avgSpeed) ? s.avgSpeed
       : (distance != null && duration > 0 ? distance / duration : null);
+    if (floor && !(distance >= floor.minDistance && avgSpeed >= floor.minSpeed)) continue;
     const candidate = { gradePct, avgSpeed, distance, duration };
     if (!best || gradePct < best.gradePct
         || (gradePct === best.gradePct && (distance || 0) > (best.distance || 0))) best = candidate;
@@ -41110,8 +41113,21 @@ function steepestDescentStat(segments) {
   return best;
 }
 
-function steepestDescentTile(segments, pace) {
-  const d = steepestDescentStat(segments);
+/* The floor the steepest-descent read needs on a GPS-only BIKE ride (owner screenshot, 2026-10-20:
+   "-41.3% · 1.9 mph avg · 64 ft"). That path hands the tile every downhill grade segment, and a
+   segment only has to last 20 s, so a 20 m stretch walked or pushed at 1.9 mph qualified -- and its
+   20 s grade windows divide a GPS altitude change by ~17 m of ground, where every 2 m of altitude
+   error is 12 points of grade. A phone-recorded ride never sees this, because its tile reads only the
+   counted descents; here the owner chose to keep the steepest PITCH rather than the steepest whole
+   descent, so the floor keeps short pitches that were ridden and drops the ones that were not.
+   - minSpeed 2.0 m/s (4.5 mph): detectRidingWindow's riding gate. Below it a bike is walked or
+     pushed (FAST_WALK_MPS is 1.8). At it, a 20 s window spans 40 m, so the same 2 m is 5 points.
+   - minDistance 100 m: the shortest section the climb profile offers, and two and a half windows of
+     ground at the speed floor, so no single window is the whole segment.
+   Not applied to foot activities: a hiker's steepest descent IS at walking pace. */
+const STEEPEST_PITCH_FLOOR = { minDistance: 100, minSpeed: 2.0 };
+function steepestDescentTile(segments, pace, floor) {
+  const d = steepestDescentStat(segments, floor);
   if (!d) return '';
   const movement = d.avgSpeed > 0 ? (pace ? U.pace(d.avgSpeed) : U.speed(d.avgSpeed)) : '—';
   const distance = d.distance > 0 ? ` · ${U.dist(d.distance)}` : '';
@@ -55198,7 +55214,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '4b4c9f73b · 2026-10-19';
+const LOAM_BUILD = 'b99e0f2e8 · 2026-10-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
