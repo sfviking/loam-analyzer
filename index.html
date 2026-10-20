@@ -29508,8 +29508,9 @@ function scClubTip(hands, angleDeg, len) {
 const SC_STAGE = { W: 358, H: 280, groundY: 262, topY: 30, cx: 179 };
 
 /* The schematic golfer, in stage units: a right-handed golfer seen face-on, so the target is to the
-   viewer's RIGHT, the backswing goes left and the finish right. The hands ride an arc about the
-   address shoulder centre, set so the clubhead sits on the ball at the ground line at address and
+   viewer's RIGHT, the backswing goes left and the finish right. The hands hang off the LEAD arm, a
+   fixed length from the lead shoulder, so the arm the watch is on stays straight and never stretches;
+   the club hangs off the hands at the measured angle. The clubhead sits on the ball at address and
    comes back to it whenever the measured angle does. None of this is measured: only the club ANGLE
    that drives it is, and the swing's own top and impact times, which is what the card beside it says.
 
@@ -29523,48 +29524,56 @@ const SC_G = {
   BEND_SH: 0.57, BEND_HIP: 0.3,     // how much of a turn shows as a vertical drop (sin of the forward bend)
   HEAD_UP: 17, HEAD_R: 15,
   FOOT_TRAIL: { x: 157, y: 260 }, FOOT_LEAD: { x: 201, y: 260 },
-  ARM_R0: 42, ARM_R1: 8,            // hands' radius about the shoulder centre: hanging, plus overhead
-  PHI0: 29, PHI_K: 0.72,            // arm angle at address, and its share of the club angle
-  PHI_KNEE_BACK: -95, PHI_MAX_BACK: -132, PHI_KNEE_THRU: 70, PHI_MAX_THRU: 100, PHI_FINISH: 35,
+  LEAD_ARM: 40, ARM_ADDR: -2,       // lead shoulder to the grip; the arm's angle at address (deg, + toward the target)
+  SH_Z: 30, HANDS_Z: 18.6,          // depth toward the camera: shoulders over the ball, hands out in front of them
   TILT: 5, SHAFT: 94, R_TIP: 100,
 };
-/* The shoulder centre at address, which is also the centre the hands swing about. Fixed rather than
-   moving with the body, so the club returns to the ball at impact however the drawn hips have shifted. */
 SC_G.SH = { x: SC_G.HIP.x - SC_G.SPINE * Math.sin(SC_G.TILT0 * Math.PI / 180), y: SC_G.HIP.y - SC_G.SPINE * Math.cos(SC_G.TILT0 * Math.PI / 180) };
 SC_G.HEAD = { x: SC_G.SH.x, y: SC_G.SH.y - SC_G.HEAD_UP };
 
-/* `x` unchanged up to `knee`, then eased toward `limit` and never past it. A hard clamp stops the
-   hands dead at the limit while the club keeps turning, which reads as the arms hitting a wall. */
-function scSoftLimit(x, knee, limit) {
-  const span = limit - knee;
-  if ((x - knee) / span <= 0) return x;
-  return knee + span * Math.tanh((x - knee) / span);
+/* The lead arm's swing for a club angle, as [club angle, arm angle] knots. The club turns faster than
+   the arm, and the gap between the two is the wrist hinge: it sets through the backswing (the arm is
+   a little above level with the club pointing straight up), holds at the top, and re-sets past impact.
+   Through the ball the arms swing out toward the target before they fold, which is the extension.
+   One table each way, because a golfer's arms do not swing through as they went back. */
+const SC_ARM_BACK = [[0, 0], [45, 22], [90, 45], [135, 80], [180, 115], [225, 138], [270, 152], [330, 158], [420, 160]];
+const SC_ARM_THRU = [[0, 0], [45, 26], [90, 58], [135, 74], [180, 82], [225, 102], [270, 122], [330, 136], [420, 140]];
+
+/* A smooth curve through knots (monotone cubic, Fritsch-Carlson), held flat past either end. Piecewise
+   straight lines would put a kink in the arm's speed at every knot. */
+function scKnots(k, x) {
+  const n = k.length;
+  if (x <= k[0][0]) return k[0][1];
+  if (x >= k[n - 1][0]) return k[n - 1][1];
+  let i = 0;
+  while (x > k[i + 1][0]) i++;
+  const d = (j) => (k[j + 1][1] - k[j][1]) / (k[j + 1][0] - k[j][0]);
+  const m = (j) => {
+    if (j === 0) return d(0);
+    if (j === n - 1) return d(n - 2);
+    const a = d(j - 1), b = d(j);
+    return a * b <= 0 ? 0 : 2 / (1 / a + 1 / b);
+  };
+  const h = k[i + 1][0] - k[i][0], t = (x - k[i][0]) / h, t2 = t * t, t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * k[i][1] + (t3 - 2 * t2 + t) * h * m(i) + (-2 * t3 + 3 * t2) * k[i + 1][1] + (t3 - t2) * h * m(i + 1);
 }
 
-/* The hands at a club angle. The arms carry most of the club's turn and the wrists hinge the rest,
-   and the limits keep a long swing from folding the arms through the golfer or the club off the stage:
-   with the club pointing straight up the hands stay about shoulder high, and only once the clubhead
-   is coming back down behind the golfer do they rise into the finish. */
-function scHandsAt(angleDeg) {
-  let phi = SC_G.PHI0 - angleDeg * SC_G.PHI_K;
-  if (phi < 0) phi = scSoftLimit(phi, SC_G.PHI_KNEE_BACK, SC_G.PHI_MAX_BACK);
-  else {
-    const f = Math.max(0, Math.min(1, (-angleDeg - 175) / 85));
-    phi = scSoftLimit(phi, SC_G.PHI_KNEE_THRU, SC_G.PHI_MAX_THRU) + SC_G.PHI_FINISH * f * f * (3 - 2 * f);
-  }
-  const p = phi * Math.PI / 180;
-  const r = SC_G.ARM_R0 + SC_G.ARM_R1 * (1 - Math.cos(p)) / 2;
-  return { x: SC_G.SH.x + r * Math.sin(p), y: SC_G.SH.y + r * Math.cos(p) };
+/* The hands at a club angle, hung off the lead shoulder wherever the body has put it. The lead arm is
+   straight from address until the club is well past horizontal in the follow-through, and only then
+   folds into the finish: folding it any earlier is the "chicken wing" every golf coach corrects. */
+function scHandsFrom(leadSh, ang) {
+  const phi = (ang >= 0 ? SC_G.ARM_ADDR - scKnots(SC_ARM_BACK, ang) : SC_G.ARM_ADDR + scKnots(SC_ARM_THRU, -ang)) * Math.PI / 180;
+  const f = Math.max(0, Math.min(1, (-ang - 110) / 140));
+  const k = 1 - 0.36 * f * f * (3 - 2 * f);
+  /* Depth: hanging, the hands are out in front of the shoulder; overhead at the top or in the finish
+     they are behind it. It is never drawn, but the trail elbow is solved in it (`scElbow`). */
+  return { x: leadSh.x + SC_G.LEAD_ARM * k * Math.sin(phi), y: leadSh.y + SC_G.LEAD_ARM * k * Math.cos(phi), z: (leadSh.z || 0) + SC_G.HANDS_Z * k * Math.cos(phi) };
 }
-
-/* Where the ball sits: wherever the clubhead is at address. Derived rather than typed in, so moving
-   the hands can never leave the club hovering beside the ball. */
-SC_G.BALL = scClubTip(scHandsAt(0), 0, SC_G.R_TIP);
 
 /* The clubhead at phase u of a measured trace, hands and all. */
 function scTipAt(path, u) {
-  const a = scAngleAt(path, u);
-  return scClubTip(scHandsAt(a), a, SC_G.R_TIP);
+  const p = scPose(path, u);
+  return scClubTip(p.hands, p.ang, SC_G.R_TIP);
 }
 
 /* The clubhead's whole path for one swing, sampled finely enough that the downswing reads as an arc.
@@ -29599,41 +29608,52 @@ function scBodyPhase(path, u, ang) {
   return { coil, release, thru };
 }
 
-/* An elbow for a shoulder-to-hands reach of two `len` segments: straight (and stretched, which is the
-   face-on projection lengthening as the arm swings out of the line of sight) when it cannot reach,
-   bent otherwise. It hangs below the line, leaning to the arm's own side (`side` +1 toward the target
-   for the lead arm, -1 for the trail).
+/* An elbow for a shoulder-to-hands reach of two `len` segments, solved in depth and then drawn
+   face-on. It bends toward `pole` (an elbow points at the ground), and is straight at full reach.
 
-   When the reach passes vertical the two sides tie, and choosing one outright flipped the trail elbow
-   45 units across the arm between two frames of the downswing. The bend fades out through the tie
-   instead, so the arm straightens for an instant and folds again on the other side. */
-function scElbow(sh, hand, len, side) {
-  const dx = hand.x - sh.x, dy = hand.y - sh.y, d = Math.hypot(dx, dy) || 1e-6;
+   Solving it flat on the screen is what made the arms look wrong. Face-on, the trail arm passes
+   vertical twice a swing, with the hands under the trail shoulder going back and coming down, and a
+   flat elbow has to pick a side of that line: it jumped across, and every way of easing the jump read
+   as the arm snapping straight and refolding. In depth there is no such line. With the club halfway
+   back the hands are out in front of the body while the trail shoulder has turned away, so the arm is
+   near straight and simply points at the camera, and the drawn elbow slides along it. */
+function scElbow(sh, hand, len, pole) {
+  const ux = hand.x - sh.x, uy = hand.y - sh.y, uz = (hand.z || 0) - (sh.z || 0);
+  const d = Math.hypot(ux, uy, uz) || 1e-6;
   const mid = { x: (sh.x + hand.x) / 2, y: (sh.y + hand.y) / 2 };
   if (d >= 2 * len) return mid;
-  let px = -dy / d, py = dx / d, score = py + 0.15 * side * px;
-  if (score < 0) { px = -px; py = -py; score = -score; }
-  const w = Math.min(1, score / 0.4);
-  const h = Math.sqrt(len * len - (d / 2) * (d / 2)) * w * w * (3 - 2 * w);
+  const dot = (pole.x * ux + pole.y * uy + pole.z * uz) / d;
+  let px = pole.x - dot * ux / d, py = pole.y - dot * uy / d, pz = pole.z - dot * uz / d;
+  const pn = Math.hypot(px, py, pz);
+  if (pn < 1e-6) return mid;
+  const h = Math.sqrt(len * len - (d / 2) * (d / 2)) / pn;
   return { x: mid.x + px * h, y: mid.y + py * h };
 }
+
+/* Which way each elbow points, in (x right, y down, z toward the camera): at the ground, the trail one
+   a little toward the trail side and the lead one a little toward the target and away. */
+const SC_POLE_TRAIL = { x: -0.2, y: 1, z: 0 };
+const SC_POLE_LEAD = { x: 0.2, y: 1, z: -0.2 };
 
 /* The schematic golfer at phase u: every joint the drawing needs, in stage units. Shoulders and hips
    TURN about a spine that is bent toward the ball, so a turn shows face-on as the line shortening and
    one end dropping, not as a bar tilting in the plane of the screen. The weight moves to the trail
    side going back, onto the lead side through the ball, and up over the lead foot at the finish; the
-   trail heel comes up and the trail knee kicks in; the elbows fold where the hands come in. The head
-   holds still to impact (the AirPods measure that, and a drawing that moved it would read as a
-   finding) and rides up with the body only in the follow-through. */
+   trail heel comes up and the trail knee kicks in. The head holds still to impact (the AirPods measure
+   that, and a drawing that moved it would read as a finding) and rides up with the body only in the
+   follow-through. */
 function scPose(path, u) {
   const ang = scAngleAt(path, u);
-  const { coil, release, thru } = scBodyPhase(path, u, ang);
+  return scPoseAt(ang, scBodyPhase(path, u, ang));
+}
+
+function scPoseAt(ang, { coil, release, thru }) {
   const c = Math.min(1, coil), t = Math.min(1, thru);
   const rad = Math.PI / 180;
   const shTurn = Math.max(-110, Math.min(100, 88 * coil - 6 * release - 90 * thru)) * rad;
   const hipTurn = Math.max(-95, Math.min(50, 40 * coil - 32 * release - 50 * thru)) * rad;
-  const tilt = (SC_G.TILT0 + 3 * c + 9 * release - 15 * thru) * rad;
-  const pelvis = { x: SC_G.HIP.x - 3 * c + 7 * release + 9 * thru, y: SC_G.HIP.y - 3 * thru };
+  const tilt = (SC_G.TILT0 + 3 * c + 4 * release - 10 * thru) * rad;
+  const pelvis = { x: SC_G.HIP.x - 3 * c + 5 * release + 9 * thru, y: SC_G.HIP.y - 3 * thru };
   const sh = { x: pelvis.x - SC_G.SPINE * Math.sin(tilt), y: pelvis.y - SC_G.SPINE * Math.cos(tilt) };
   /* `e` is across the body toward the target, `n` down the spine. */
   const across = (axisTilt, half, turn, bend, centre) => {
@@ -29642,39 +29662,54 @@ function scPose(path, u) {
     const oy = half * (Math.cos(turn) * e.y + bend * Math.sin(turn) * n.y);
     return [{ x: centre.x + ox, y: centre.y + oy }, { x: centre.x - ox, y: centre.y - oy }];
   };
-  const [leadSh, trailSh] = across(tilt, SC_G.SH_HALF, shTurn, SC_G.BEND_SH, sh);
+  const [leadSh, trailShBody] = across(tilt, SC_G.SH_HALF, shTurn, SC_G.BEND_SH, sh);
+  /* Turning carries the lead shoulder toward the camera going back and away from it coming through. */
+  const zTurn = SC_G.SH_HALF * Math.sin(shTurn) * Math.sqrt(1 - SC_G.BEND_SH * SC_G.BEND_SH);
+  leadSh.z = SC_G.SH_Z + zTurn;
+  trailShBody.z = SC_G.SH_Z - zTurn;
   const [leadHip, trailHip] = across(tilt * 0.4, SC_G.HIP_HALF, hipTurn, SC_G.BEND_HIP, pelvis);
   const leadAnkle = { x: SC_G.FOOT_LEAD.x, y: SC_G.FOOT_LEAD.y };
   const trailAnkle = { x: SC_G.FOOT_TRAIL.x + 5 * t, y: SC_G.FOOT_TRAIL.y - 7 * t };
   const knee = (hip, ankle, dx, dy) => ({ x: (hip.x + ankle.x) / 2 + dx, y: (hip.y + ankle.y) / 2 + dy });
   const leadKnee = knee(leadHip, leadAnkle, -1.5 * (1 - t) - 6 * c, 0);
   const trailKnee = knee(trailHip, trailAnkle, 1.5 + 12 * t, 2 * t);
-  const hands = scHandsAt(ang);
+  const hands = scHandsFrom(leadSh, ang);
+  /* The trail arm can only reach so far. Where the hands are further than that, the trail shoulder
+     comes forward to them, as it does through impact, rather than the arm stretching. */
   const arms = scArmLengths();
+  const dT = Math.hypot(hands.x - trailShBody.x, hands.y - trailShBody.y, hands.z - trailShBody.z) || 1e-6;
+  const pull = Math.min(1, 2 * arms.trail / dT);
+  const trailSh = { x: hands.x + (trailShBody.x - hands.x) * pull, y: hands.y + (trailShBody.y - hands.y) * pull, z: hands.z + (trailShBody.z - hands.z) * pull };
   const head = { x: SC_G.HEAD.x + (sh.x - SC_G.SH.x) * (0.3 + 0.7 * t), y: sh.y - SC_G.HEAD_UP };
   return {
     ang, shTurnDeg: shTurn / rad, pelvis, sh, head, leadSh, trailSh, leadHip, trailHip,
     leadKnee, trailKnee, leadAnkle, trailAnkle, hands,
-    leadElbow: scElbow(leadSh, hands, arms.lead, 1),
-    trailElbow: scElbow(trailSh, hands, arms.trail, -1),
+    leadElbow: scElbow(leadSh, hands, SC_G.LEAD_ARM / 2, SC_POLE_LEAD),
+    trailElbow: scElbow(trailSh, hands, arms.trail, SC_POLE_TRAIL),
     trailToe: { x: SC_G.FOOT_TRAIL.x + 5 + 4 * t, y: SC_G.FOOT_TRAIL.y + 1 },
     trailHeel: { x: SC_G.FOOT_TRAIL.x - 6 + 11 * t, y: SC_G.FOOT_TRAIL.y + 1 - 9 * t },
   };
 }
 
-/* Upper arm and forearm lengths, from the address pose: the lead arm all but straight, the trail arm
-   a touch soft, as they hang. Computed once, the first time a pose is drawn. */
+/* The trail arm's upper arm and forearm length, from the address pose: a little short of the reach
+   there, so it hangs straight at address, is close to straight through impact and straight out toward
+   the target after it, and bends only where the hands come in toward it. Computed once, the first
+   time a pose is drawn. */
 let _scArms = null;
 function scArmLengths() {
   if (_scArms) return _scArms;
   const tilt = SC_G.TILT0 * Math.PI / 180;
   const e = { x: Math.cos(tilt), y: -Math.sin(tilt) };
-  const lead = { x: SC_G.SH.x + SC_G.SH_HALF * e.x, y: SC_G.SH.y + SC_G.SH_HALF * e.y };
-  const trail = { x: SC_G.SH.x - SC_G.SH_HALF * e.x, y: SC_G.SH.y - SC_G.SH_HALF * e.y };
-  const h = scHandsAt(0);
-  _scArms = { lead: 0.51 * Math.hypot(h.x - lead.x, h.y - lead.y), trail: 0.53 * Math.hypot(h.x - trail.x, h.y - trail.y) };
+  const lead = { x: SC_G.SH.x + SC_G.SH_HALF * e.x, y: SC_G.SH.y + SC_G.SH_HALF * e.y, z: SC_G.SH_Z };
+  const trail = { x: SC_G.SH.x - SC_G.SH_HALF * e.x, y: SC_G.SH.y - SC_G.SH_HALF * e.y, z: SC_G.SH_Z };
+  const h = scHandsFrom(lead, 0);
+  _scArms = { trail: 0.48 * Math.hypot(h.x - trail.x, h.y - trail.y, h.z - trail.z) };
   return _scArms;
 }
+
+/* Where the ball sits: wherever the clubhead is at address. Derived rather than typed in, so moving
+   the hands can never leave the club hovering beside the ball. */
+SC_G.BALL = scClubTip(scPoseAt(0, { coil: 0, release: 0, thru: 0 }).hands, 0, SC_G.R_TIP);
 
 /*
  * The golfer's real body at phase u, when a pose track has been extracted from their clip and the
@@ -29808,7 +29843,7 @@ function swingCamSVG(sw, u, ghosts) {
   const refSw = ghostList.find(g => g.index === _swingCam.ref);
   if (refSw) {
     const gAng = scAngleAt(refSw.path, u);
-    const gHands = movingHands ? scHandsAt(gAng) : hands;
+    const gHands = movingHands ? scPose(refSw.path, u).hands : hands;
     const gh = scClubTip(gHands, gAng, movingHands ? SC_G.R_TIP : shaft);
     refGhost = line(gHands, gh, 2.5, 'var(--text-muted)', 0.32)
       + `<circle cx="${gh.x.toFixed(1)}" cy="${gh.y.toFixed(1)}" r="4" fill="var(--text-muted)" opacity="0.32"/>`;
@@ -29876,16 +29911,16 @@ function swingCamSVG(sw, u, ghosts) {
 function scMannequin(p, line) {
   const limb = (a, b, w, casing, core) => line(a, b, w, casing) + line(a, b, (w * 0.5).toFixed(1), core);
   const joint = (q, r, fill) => `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="${r}" fill="${fill}"/>`;
-  const leadArm = limb(p.leadSh, p.leadElbow, 13, '#4d5643', '#c3bda9') + limb(p.leadElbow, p.hands, 12, '#4d5643', '#c3bda9')
+  const leadArm = '<g class="sc-arm-lead">' + limb(p.leadSh, p.leadElbow, 13, '#4d5643', '#c3bda9') + limb(p.leadElbow, p.hands, 12, '#4d5643', '#c3bda9')
     + (() => {
       /* The watch, a band on the lead forearm a little above the grip. */
       const dx = p.leadElbow.x - p.hands.x, dy = p.leadElbow.y - p.hands.y, d = Math.hypot(dx, dy) || 1;
       const at = { x: p.hands.x + dx / d * 9, y: p.hands.y + dy / d * 9 };
       return `<circle cx="${at.x.toFixed(1)}" cy="${at.y.toFixed(1)}" r="4.2" fill="#2c3327"/>`;
     })()
-    + joint(p.leadElbow, 4.5, '#d5cfbb');
-  const trailArm = limb(p.trailSh, p.trailElbow, 13, '#3f4838', '#8b9179') + limb(p.trailElbow, p.hands, 12, '#3f4838', '#8b9179')
-    + joint(p.trailElbow, 4.5, '#95a084');
+    + joint(p.leadElbow, 4.5, '#d5cfbb') + '</g>';
+  const trailArm = '<g class="sc-arm-trail">' + limb(p.trailSh, p.trailElbow, 13, '#3f4838', '#8b9179') + limb(p.trailElbow, p.hands, 12, '#3f4838', '#8b9179')
+    + joint(p.trailElbow, 4.5, '#95a084') + '</g>';
   const turn = p.shTurnDeg;
   const back = turn > 35 ? trailArm : turn < -35 ? leadArm : '';
   const front = turn > 35 ? leadArm : turn < -35 ? trailArm : trailArm + leadArm;
@@ -55382,7 +55417,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '69c3935ea · 2026-10-20';
+const LOAM_BUILD = 'de8880287 · 2026-10-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
