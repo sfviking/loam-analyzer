@@ -29439,15 +29439,17 @@ function golfTruthSection(D) {
 
 /* ================= Swing Cam ==========   The golf analog of the lift's Spotter Cam, and the same honesty contract: the CLUB ANGLE is measured
    (gClubAngleTrace, from the watch's attitude quaternion), the TIMING is measured (the detector's own
-   address / top / impact stamps, so a rushed transition looks rushed), the head and hip turn MAGNITUDES
-   are measured (AirPods and pocket phone), and everything else, the body itself, is a schematic drawn
-   around those numbers. There is no clubhead position, no face angle, and no ball, because nothing here
-   can measure them; the caption says so rather than letting a pretty drawing imply otherwise.
+   address / top / impact stamps, so a rushed transition looks rushed), and everything else, the body
+   itself, is a schematic posed from those two. The head and hip turn the AirPods and a pocket phone
+   measure are read in the table under the stage, not drawn into the body. There is no clubhead
+   position, no face angle, and no ball, because nothing here can measure them; the caption says so
+   rather than letting a pretty drawing imply otherwise.
 
-   View is face-on (the golfer facing the camera, ball at their feet), because that is the view where a
-   single measured rotation angle in the swing plane reads correctly: the club sweeps a real arc. Turn of
-   the shoulders and hips is drawn as foreshortening (a bar of width w*cos(turn)), which is the honest 2D
-   projection of a line rotating away from the viewer. */
+   View is face-on (a right-handed golfer facing the camera, target to the viewer's right, ball at their
+   feet), because that is the view where a single measured rotation angle in the swing plane reads
+   correctly: the club sweeps a real arc. Turn of the shoulders and hips is drawn as foreshortening (the
+   line between the joints shortening, one end dropping toward the ball), which is the honest 2D
+   projection of a line rotating away from the viewer about a spine bent toward the ball. */
 const _swingCam = {
   /* `u` is the swing phase, 0 at address and 1 at the finish, and it is the SINGLE clock every
      animated surface reads: the stage, the phase rail, the overlay readouts and the tempo panel's
@@ -29484,45 +29486,194 @@ function scAngleAt(path, u) {
 }
 
 /* Where the clubhead sits for a given club angle, in stage coordinates. The shaft leaves the hands
-   pointing down at the ball (angle 0) and rotates by the measured angle; screen y grows downward, so a
-   positive (backswing) angle lifts the club up and behind the golfer.
+   pointing down at the ball (angle 0) and turns the way the backswing goes: away from the target
+   (screen left), up, and over the top toward the target, so a full swing's 270 degrees is the shaft
+   parallel at the top pointing down the target line. Past impact the angle goes negative and the club
+   swings up the target side into the finish.
 
-   This is the SAME arithmetic as the club's `rotate(-angle - BASE_TILT)` transform below, written out
-   for the code that needs the tip as a point (the trail, the ghost arcs) rather than as a transform.
+   This is the SAME arithmetic as the club's `rotate(angle + TILT)` transform below, written out for
+   the code that needs the tip as a point (the trail, the ghost arcs) rather than as a transform.
    Keeping one convention is the whole reason it is a function: the live club, the motion-ghosts, the
-   trail and the ghost arcs are four drawings of one arc, and they cannot be allowed to disagree. */
+   trail and the ghost arcs are four drawings of one arc, and they cannot be allowed to disagree.
+
+   It used to turn the other way from the hands (2026-10-20): the hands went back to the left while
+   the club rose up the TARGET side, so through the takeaway the shaft lay across the golfer's chest,
+   and every swing was drawn with the club and the arms turning against each other. */
 function scClubTip(hands, angleDeg, len) {
   const a = (angleDeg + SC_G.TILT) * Math.PI / 180;
-  return { x: hands.x + len * Math.sin(a), y: hands.y + len * Math.cos(a) };
+  return { x: hands.x - len * Math.sin(a), y: hands.y + len * Math.cos(a) };
 }
 
 /* The stage the Swing Cam draws into, and the box a pose body is scaled to stand in. */
 const SC_STAGE = { W: 358, H: 280, groundY: 262, topY: 30, cx: 179 };
 
-/* The schematic golfer's geometry, in stage units. The hands ride an ARC about the shoulder centre
-   rather than sitting on a fixed chest pivot, so the arms actually take the club up and round; the
-   numbers are set so the clubhead sits on the ball at the ground line at address. None of this is
-   measured: only the club ANGLE that drives it is, which is what the card beside it says. */
-const SC_G = {
-  SH: { x: 179, y: 122 },      // shoulder centre
-  HIP: { x: 179, y: 176 },
-  HEAD: { x: 179, y: 106 }, HEAD_R: 15,
-  FOOT_L: { x: 166, y: 260 }, FOOT_R: { x: 198, y: 260 },
-  BALL: { x: 197, y: 259 },
-  R_ARM: 40, PHI0: 6, PHI_K: 0.42, PHI_MAX: 105,
-  TILT: 8, SHAFT: 94, R_TIP: 100,
-};
+/* The schematic golfer, in stage units: a right-handed golfer seen face-on, so the target is to the
+   viewer's RIGHT, the backswing goes left and the finish right. The hands ride an arc about the
+   address shoulder centre, set so the clubhead sits on the ball at the ground line at address and
+   comes back to it whenever the measured angle does. None of this is measured: only the club ANGLE
+   that drives it is, and the swing's own top and impact times, which is what the card beside it says.
 
-/* The hands at a club angle. Clamped so a long swing cannot fold the arms through the golfer. */
-function scHandsAt(angleDeg) {
-  const phi = Math.max(-SC_G.PHI_MAX, Math.min(SC_G.PHI_MAX, SC_G.PHI0 - angleDeg * SC_G.PHI_K)) * Math.PI / 180;
-  return { x: SC_G.SH.x + SC_G.R_ARM * Math.sin(phi), y: SC_G.SH.y + SC_G.R_ARM * Math.cos(phi) };
+   The turn constants are the drawing's, chosen so a 200-degree club angle (the reference session's
+   top) reads as a full shoulder turn. They are not a model of any golfer's turn and must not become
+   one: the hip and head turn the sensors DO measure are in the table under the stage, not here. */
+const SC_G = {
+  HIP: { x: 179, y: 176 },          // pelvis centre at address
+  SPINE: 54, TILT0: 6,              // pelvis to shoulder centre; spine tilt away from the target at address, deg
+  SH_HALF: 23, HIP_HALF: 13,        // half-widths of the shoulder and hip lines, face-on
+  BEND_SH: 0.57, BEND_HIP: 0.3,     // how much of a turn shows as a vertical drop (sin of the forward bend)
+  HEAD_UP: 17, HEAD_R: 15,
+  FOOT_TRAIL: { x: 157, y: 260 }, FOOT_LEAD: { x: 201, y: 260 },
+  ARM_R0: 42, ARM_R1: 8,            // hands' radius about the shoulder centre: hanging, plus overhead
+  PHI0: 29, PHI_K: 0.72,            // arm angle at address, and its share of the club angle
+  PHI_KNEE_BACK: -95, PHI_MAX_BACK: -132, PHI_KNEE_THRU: 70, PHI_MAX_THRU: 100, PHI_FINISH: 35,
+  TILT: 5, SHAFT: 94, R_TIP: 100,
+};
+/* The shoulder centre at address, which is also the centre the hands swing about. Fixed rather than
+   moving with the body, so the club returns to the ball at impact however the drawn hips have shifted. */
+SC_G.SH = { x: SC_G.HIP.x - SC_G.SPINE * Math.sin(SC_G.TILT0 * Math.PI / 180), y: SC_G.HIP.y - SC_G.SPINE * Math.cos(SC_G.TILT0 * Math.PI / 180) };
+SC_G.HEAD = { x: SC_G.SH.x, y: SC_G.SH.y - SC_G.HEAD_UP };
+
+/* `x` unchanged up to `knee`, then eased toward `limit` and never past it. A hard clamp stops the
+   hands dead at the limit while the club keeps turning, which reads as the arms hitting a wall. */
+function scSoftLimit(x, knee, limit) {
+  const span = limit - knee;
+  if ((x - knee) / span <= 0) return x;
+  return knee + span * Math.tanh((x - knee) / span);
 }
+
+/* The hands at a club angle. The arms carry most of the club's turn and the wrists hinge the rest,
+   and the limits keep a long swing from folding the arms through the golfer or the club off the stage:
+   with the club pointing straight up the hands stay about shoulder high, and only once the clubhead
+   is coming back down behind the golfer do they rise into the finish. */
+function scHandsAt(angleDeg) {
+  let phi = SC_G.PHI0 - angleDeg * SC_G.PHI_K;
+  if (phi < 0) phi = scSoftLimit(phi, SC_G.PHI_KNEE_BACK, SC_G.PHI_MAX_BACK);
+  else {
+    const f = Math.max(0, Math.min(1, (-angleDeg - 175) / 85));
+    phi = scSoftLimit(phi, SC_G.PHI_KNEE_THRU, SC_G.PHI_MAX_THRU) + SC_G.PHI_FINISH * f * f * (3 - 2 * f);
+  }
+  const p = phi * Math.PI / 180;
+  const r = SC_G.ARM_R0 + SC_G.ARM_R1 * (1 - Math.cos(p)) / 2;
+  return { x: SC_G.SH.x + r * Math.sin(p), y: SC_G.SH.y + r * Math.cos(p) };
+}
+
+/* Where the ball sits: wherever the clubhead is at address. Derived rather than typed in, so moving
+   the hands can never leave the club hovering beside the ball. */
+SC_G.BALL = scClubTip(scHandsAt(0), 0, SC_G.R_TIP);
 
 /* The clubhead at phase u of a measured trace, hands and all. */
 function scTipAt(path, u) {
   const a = scAngleAt(path, u);
   return scClubTip(scHandsAt(a), a, SC_G.R_TIP);
+}
+
+/* The clubhead's whole path for one swing, sampled finely enough that the downswing reads as an arc.
+   It was 40 samples across the swing, which left the downswing (about a fifth of it) seven straight
+   chords and drew an octagon. Cached per trace, because it is redrawn sixty times a second and the
+   ghost arcs need every other swing's too. `vmax` is the longest step, the scale the trail's speed
+   colours are read against. */
+const SC_TRAIL_N = 128;
+const _scTrailCache = new WeakMap();
+function scTrailTrack(path) {
+  let t = _scTrailCache.get(path);
+  if (t) return t;
+  const pts = [];
+  for (let i = 0; i <= SC_TRAIL_N; i++) pts.push(scTipAt(path, i / SC_TRAIL_N));
+  let vmax = 0;
+  for (let i = 1; i <= SC_TRAIL_N; i++) vmax = Math.max(vmax, Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  t = { pts, vmax };
+  _scTrailCache.set(path, t);
+  return t;
+}
+
+/* How far the body has wound and unwound at phase u, read from the measured club angle and the
+   swing's own top: `coil` winds with the backswing and unwinds with the club, `release` runs 0 to 1
+   as the club comes back down to the ball, and `thru` grows with the club past impact. The body
+   follows the club; it never leads or lags it, because nothing here measured whether it did. */
+function scBodyPhase(path, u, ang) {
+  const topU = path.topFrac != null ? path.topFrac : 0.6;
+  const top = Math.max(...path.deg);
+  const coil = Math.max(0, Math.min(1.15, ang / 180));
+  const release = u > topU ? (top > 0 ? 1 - Math.max(0, Math.min(1, ang / top)) : 1) : 0;
+  const thru = Math.max(0, Math.min(1.15, -ang / 200));
+  return { coil, release, thru };
+}
+
+/* An elbow for a shoulder-to-hands reach of two `len` segments: straight (and stretched, which is the
+   face-on projection lengthening as the arm swings out of the line of sight) when it cannot reach,
+   bent otherwise. It hangs below the line, leaning to the arm's own side (`side` +1 toward the target
+   for the lead arm, -1 for the trail).
+
+   When the reach passes vertical the two sides tie, and choosing one outright flipped the trail elbow
+   45 units across the arm between two frames of the downswing. The bend fades out through the tie
+   instead, so the arm straightens for an instant and folds again on the other side. */
+function scElbow(sh, hand, len, side) {
+  const dx = hand.x - sh.x, dy = hand.y - sh.y, d = Math.hypot(dx, dy) || 1e-6;
+  const mid = { x: (sh.x + hand.x) / 2, y: (sh.y + hand.y) / 2 };
+  if (d >= 2 * len) return mid;
+  let px = -dy / d, py = dx / d, score = py + 0.15 * side * px;
+  if (score < 0) { px = -px; py = -py; score = -score; }
+  const w = Math.min(1, score / 0.4);
+  const h = Math.sqrt(len * len - (d / 2) * (d / 2)) * w * w * (3 - 2 * w);
+  return { x: mid.x + px * h, y: mid.y + py * h };
+}
+
+/* The schematic golfer at phase u: every joint the drawing needs, in stage units. Shoulders and hips
+   TURN about a spine that is bent toward the ball, so a turn shows face-on as the line shortening and
+   one end dropping, not as a bar tilting in the plane of the screen. The weight moves to the trail
+   side going back, onto the lead side through the ball, and up over the lead foot at the finish; the
+   trail heel comes up and the trail knee kicks in; the elbows fold where the hands come in. The head
+   holds still to impact (the AirPods measure that, and a drawing that moved it would read as a
+   finding) and rides up with the body only in the follow-through. */
+function scPose(path, u) {
+  const ang = scAngleAt(path, u);
+  const { coil, release, thru } = scBodyPhase(path, u, ang);
+  const c = Math.min(1, coil), t = Math.min(1, thru);
+  const rad = Math.PI / 180;
+  const shTurn = Math.max(-110, Math.min(100, 88 * coil - 6 * release - 90 * thru)) * rad;
+  const hipTurn = Math.max(-95, Math.min(50, 40 * coil - 32 * release - 50 * thru)) * rad;
+  const tilt = (SC_G.TILT0 + 3 * c + 9 * release - 15 * thru) * rad;
+  const pelvis = { x: SC_G.HIP.x - 3 * c + 7 * release + 9 * thru, y: SC_G.HIP.y - 3 * thru };
+  const sh = { x: pelvis.x - SC_G.SPINE * Math.sin(tilt), y: pelvis.y - SC_G.SPINE * Math.cos(tilt) };
+  /* `e` is across the body toward the target, `n` down the spine. */
+  const across = (axisTilt, half, turn, bend, centre) => {
+    const e = { x: Math.cos(axisTilt), y: -Math.sin(axisTilt) }, n = { x: Math.sin(axisTilt), y: Math.cos(axisTilt) };
+    const ox = half * (Math.cos(turn) * e.x + bend * Math.sin(turn) * n.x);
+    const oy = half * (Math.cos(turn) * e.y + bend * Math.sin(turn) * n.y);
+    return [{ x: centre.x + ox, y: centre.y + oy }, { x: centre.x - ox, y: centre.y - oy }];
+  };
+  const [leadSh, trailSh] = across(tilt, SC_G.SH_HALF, shTurn, SC_G.BEND_SH, sh);
+  const [leadHip, trailHip] = across(tilt * 0.4, SC_G.HIP_HALF, hipTurn, SC_G.BEND_HIP, pelvis);
+  const leadAnkle = { x: SC_G.FOOT_LEAD.x, y: SC_G.FOOT_LEAD.y };
+  const trailAnkle = { x: SC_G.FOOT_TRAIL.x + 5 * t, y: SC_G.FOOT_TRAIL.y - 7 * t };
+  const knee = (hip, ankle, dx, dy) => ({ x: (hip.x + ankle.x) / 2 + dx, y: (hip.y + ankle.y) / 2 + dy });
+  const leadKnee = knee(leadHip, leadAnkle, -1.5 * (1 - t) - 6 * c, 0);
+  const trailKnee = knee(trailHip, trailAnkle, 1.5 + 12 * t, 2 * t);
+  const hands = scHandsAt(ang);
+  const arms = scArmLengths();
+  const head = { x: SC_G.HEAD.x + (sh.x - SC_G.SH.x) * (0.3 + 0.7 * t), y: sh.y - SC_G.HEAD_UP };
+  return {
+    ang, shTurnDeg: shTurn / rad, pelvis, sh, head, leadSh, trailSh, leadHip, trailHip,
+    leadKnee, trailKnee, leadAnkle, trailAnkle, hands,
+    leadElbow: scElbow(leadSh, hands, arms.lead, 1),
+    trailElbow: scElbow(trailSh, hands, arms.trail, -1),
+    trailToe: { x: SC_G.FOOT_TRAIL.x + 5 + 4 * t, y: SC_G.FOOT_TRAIL.y + 1 },
+    trailHeel: { x: SC_G.FOOT_TRAIL.x - 6 + 11 * t, y: SC_G.FOOT_TRAIL.y + 1 - 9 * t },
+  };
+}
+
+/* Upper arm and forearm lengths, from the address pose: the lead arm all but straight, the trail arm
+   a touch soft, as they hang. Computed once, the first time a pose is drawn. */
+let _scArms = null;
+function scArmLengths() {
+  if (_scArms) return _scArms;
+  const tilt = SC_G.TILT0 * Math.PI / 180;
+  const e = { x: Math.cos(tilt), y: -Math.sin(tilt) };
+  const lead = { x: SC_G.SH.x + SC_G.SH_HALF * e.x, y: SC_G.SH.y + SC_G.SH_HALF * e.y };
+  const trail = { x: SC_G.SH.x - SC_G.SH_HALF * e.x, y: SC_G.SH.y - SC_G.SH_HALF * e.y };
+  const h = scHandsAt(0);
+  _scArms = { lead: 0.51 * Math.hypot(h.x - lead.x, h.y - lead.y), trail: 0.53 * Math.hypot(h.x - trail.x, h.y - trail.y) };
+  return _scArms;
 }
 
 /*
@@ -29598,9 +29749,10 @@ function swingCamSVG(sw, u, ghosts) {
     label = `<text x="10" y="${H - 10}" fill="var(--sc-faint)" font-family="'JetBrains Mono',monospace" font-size="9" letter-spacing="0.1">${loamT('body: your video, estimated pose &middot; club: measured')}</text>`;
   } else {
     movingHands = true;
-    hands = scHandsAt(ang);
+    const pose = scPose(sw.path, u);
+    hands = pose.hands;
     shaft = SC_G.SHAFT;
-    body = scMannequin(ang, line);
+    body = scMannequin(pose, line);
   }
 
   /* The clubhead so far, cut into segments whose weight and colour carry angular speed: the backswing
@@ -29610,25 +29762,37 @@ function swingCamSVG(sw, u, ghosts) {
      The scale is the WHOLE swing's fastest segment, not the fastest one drawn so far. Normalising as
      it goes is the obvious thing and it is wrong here: mid-backswing the fastest segment yet IS the
      backswing, so the slowest part of the swing came out amber and then cooled as the downswing
-     arrived. A colour that means a different speed at every moment of playback is not a reading. */
-  const tipAt = (uu) => movingHands
-    ? scTipAt(sw.path, uu)
-    : scClubTip(hands, scAngleAt(sw.path, uu), shaft);
+     arrived. A colour that means a different speed at every moment of playback is not a reading.
+
+     Segments are a fixed step of PHASE (1/SC_TRAIL_N), so their lengths are speeds as they stand; the
+     last one stops at u and is scaled back up by the share of its step it covers. A posed body moves
+     the hands with the video, so its path is walked here on the same grid rather than cached. */
   let trail = '';
   if (u > 0.001) {
-    const n = 40;
-    const seg = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
-    let vmax = 0, prev = tipAt(0);
-    for (let i = 1; i <= n; i++) { const p = tipAt(i / n); vmax = Math.max(vmax, seg(prev, p) * (u / 1)); prev = p; }
-    /* Both loops walk n segments, so the scale and the drawn speeds are measured over the same
-       segment LENGTH in phase: without the `u` factor above, a quarter-drawn trail would be compared
-       against segments four times longer and never reach amber at all. */
-    const pts = [];
-    for (let i = 0; i <= n; i++) pts.push(tipAt(u * i / n));
-    for (let i = 1; i <= n; i++) {
-      const k = vmax ? Math.min(1, seg(pts[i - 1], pts[i]) / vmax) : 0;
+    const N = SC_TRAIL_N, n = Math.min(N, Math.floor(u * N));
+    let pts, vmax;
+    if (movingHands) {
+      const track = scTrailTrack(sw.path);
+      pts = track.pts.slice(0, n + 1); vmax = track.vmax;
+    } else {
+      pts = []; vmax = 0;
+      let prev = null;
+      for (let i = 0; i <= N; i++) {
+        const p = scClubTip(hands, scAngleAt(sw.path, i / N), shaft);
+        if (prev) vmax = Math.max(vmax, Math.hypot(p.x - prev.x, p.y - prev.y));
+        if (i <= n) pts.push(p);
+        prev = p;
+      }
+    }
+    const frac = u * N - n;
+    if (n < N && frac > 1e-3) pts.push(movingHands ? scTipAt(sw.path, u) : scClubTip(hands, ang, shaft));
+    const last = pts.length - 1;
+    for (let i = 1; i <= last; i++) {
+      const step = i === last && frac > 1e-3 && n < N ? frac : 1;
+      const seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) / step;
+      const k = vmax ? Math.min(1, seg / vmax) : 0;
       const col = k > 0.62 ? 'var(--amber)' : k > 0.34 ? 'var(--moss)' : 'var(--sc-slow)';
-      trail += line(pts[i - 1], pts[i], (1.2 + 3.4 * k * k).toFixed(2), col, (0.22 + 0.7 * (i / n)).toFixed(2));
+      trail += line(pts[i - 1], pts[i], (1.2 + 3.4 * k * k).toFixed(2), col, (0.22 + 0.7 * (i / last)).toFixed(2));
     }
   }
 
@@ -29636,8 +29800,7 @@ function swingCamSVG(sw, u, ghosts) {
      body is posed: these are nine other swings, and there is one posed body. */
   let arcs = '';
   for (const g of ghostList) {
-    const n = 46, pts = [];
-    for (let i = 0; i <= n; i++) { const p = scTipAt(g.path, i / n); pts.push(p.x.toFixed(1) + ' ' + p.y.toFixed(1)); }
+    const pts = scTrailTrack(g.path).pts.map(p => p.x.toFixed(1) + ' ' + p.y.toFixed(1));
     arcs += `<path d="M ${pts.join(' L ')}" fill="none" stroke="var(--sc-arc)" stroke-width="1" opacity="0.85"/>`;
   }
   /* The reference swing's club at the SAME instant: two swings compared beat for beat. */
@@ -29658,29 +29821,30 @@ function swingCamSVG(sw, u, ghosts) {
   if (movingHands) {
     [[0.035, 0.200], [0.07, 0.145], [0.11, 0.090]].forEach(([d, o]) => {
       if (u - d <= 0.02) return;
-      const a = scAngleAt(sw.path, u - d);
-      const h = scHandsAt(a);
-      const sh = -a * 0.115 * Math.PI / 180;
-      const shL = { x: SC_G.SH.x - 26 * Math.cos(sh), y: SC_G.SH.y - 26 * Math.sin(sh) };
-      const shR = { x: SC_G.SH.x + 26 * Math.cos(sh), y: SC_G.SH.y + 26 * Math.sin(sh) };
-      mghost += `<g opacity="${o}">` + line(shL, h, 9, '#c3bda9') + line(shR, h, 9, '#8b9179')
-        + line(h, scClubTip(h, a, SC_G.SHAFT), 3, '#e8e2cf') + `</g>`;
+      const p = scPose(sw.path, u - d);
+      mghost += `<g opacity="${o}">`
+        + line(p.leadSh, p.leadElbow, 9, '#c3bda9') + line(p.leadElbow, p.hands, 8, '#c3bda9')
+        + line(p.trailSh, p.trailElbow, 9, '#8b9179') + line(p.trailElbow, p.hands, 8, '#8b9179')
+        + line(p.hands, scClubTip(p.hands, p.ang, SC_G.SHAFT), 3, '#e8e2cf') + `</g>`;
     });
   }
 
-  const club = movingHands ? scClubTip(hands, ang, SC_G.SHAFT) : scClubTip(hands, ang, shaft);
-  const clubTf = `translate(${hands.x.toFixed(1)} ${hands.y.toFixed(1)}) rotate(${(-ang - SC_G.TILT).toFixed(2)})`;
+  const clubTf = `translate(${hands.x.toFixed(1)} ${hands.y.toFixed(1)}) rotate(${(ang + SC_G.TILT).toFixed(2)})`;
   const clubLen = movingHands ? SC_G.SHAFT : shaft;
   /* Impact ring: a pulse at the ball as the measured impact phase goes past, and nothing at all the
      rest of the time. It marks WHEN, never how well. */
+  const ball = SC_G.BALL;
   const flash = Math.max(0, 1 - Math.abs(u - (sw.path.impactFrac != null ? sw.path.impactFrac : 0.78)) / 0.09);
   const ring = flash > 0.01
-    ? `<circle cx="${SC_G.BALL.x}" cy="${SC_G.BALL.y}" r="${(5 + 13 * (1 - flash)).toFixed(1)}" fill="none" stroke="var(--amber)" stroke-width="1.6" opacity="${(0.8 * flash).toFixed(2)}"/>` : '';
+    ? `<circle cx="${ball.x.toFixed(1)}" cy="${ball.y.toFixed(1)}" r="${(5 + 13 * (1 - flash)).toFixed(1)}" fill="none" stroke="var(--amber)" stroke-width="1.6" opacity="${(0.8 * flash).toFixed(2)}"/>` : '';
 
+  /* The plumb line runs through the head at address, so a head that stays put through impact is seen
+     to, and the ground shadow sits under the stance. */
+  const midStance = (SC_G.FOOT_TRAIL.x + SC_G.FOOT_LEAD.x) / 2;
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Animated golf swing, schematic body with the measured club angle">
     <line x1="0" y1="${groundY}" x2="${W}" y2="${groundY}" stroke="var(--border)" stroke-width="1"/>
-    <line x1="${SC_G.SH.x}" y1="${groundY}" x2="${SC_G.SH.x}" y2="30" stroke="var(--sc-plumb)" stroke-width="1" stroke-dasharray="2 6"/>
-    <ellipse cx="184" cy="${groundY}" rx="46" ry="5" fill="var(--moss)" opacity="0.06"/>
+    <line x1="${SC_G.HEAD.x.toFixed(1)}" y1="${groundY}" x2="${SC_G.HEAD.x.toFixed(1)}" y2="30" stroke="var(--sc-plumb)" stroke-width="1" stroke-dasharray="2 6"/>
+    <ellipse cx="${midStance}" cy="${groundY}" rx="46" ry="5" fill="var(--moss)" opacity="0.06"/>
     ${arcs}${mghost}${body}${refGhost}${trail}
     <g class="sc-club" transform="${clubTf}">
       <line x1="0" y1="0" x2="0" y2="${clubLen}" stroke="#3f4838" stroke-width="5" stroke-linecap="round"/>
@@ -29688,58 +29852,62 @@ function swingCamSVG(sw, u, ghosts) {
       <path d="M -7 ${clubLen} L 7 ${clubLen} L 5 ${clubLen + 6} L -5 ${clubLen + 6} Z" fill="var(--text)"/>
     </g>
     <circle cx="${hands.x.toFixed(1)}" cy="${hands.y.toFixed(1)}" r="6" fill="var(--text)"/>
-    <circle cx="${SC_G.BALL.x}" cy="${SC_G.BALL.y}" r="3.4" fill="var(--text)" opacity="0.75"/>
+    <circle cx="${ball.x.toFixed(1)}" cy="${ball.y.toFixed(1)}" r="3.4" fill="var(--text)" opacity="0.75"/>
     ${ring}
     ${label}
   </svg>`;
 }
 
 /*
- * The schematic golfer at one club angle: the Spotter Cam's cylinder idiom, where every limb is two
- * stacked round-capped lines (a wide dark casing under a narrower light core) so it reads as a shaded
- * cylinder rather than a stick. The limb literals stay literals in both themes on purpose: every light
- * core sits inside a darker casing, so the figure carries its own contrast whatever it stands on.
+ * The schematic golfer in one pose (`scPose`): the Spotter Cam's cylinder idiom, where every limb is
+ * two stacked round-capped lines (a wide dark casing under a narrower light core) so it reads as a
+ * shaded cylinder rather than a stick. The limb literals stay literals in both themes on purpose:
+ * every light core sits inside a darker casing, so the figure carries its own contrast whatever it
+ * stands on.
  *
- * The body FOLLOWS the club rather than being measured: shoulders turn a fraction of the club angle,
- * hips less, the head barely at all. That last one is deliberate and not a shortcut -- the measured
- * head turn on the reference session is about 4 degrees, and a drawing that swung the head around
- * would imply a great deal more than the AirPods ever saw.
+ * Drawn back to front. Face-on both arms hang in front of the body, but once the shoulders have
+ * turned past ~35 degrees one arm is behind it: the trail arm going back, the lead arm in the finish.
+ * The lead arm is the light one and carries the watch, which is where the club angle comes from.
+ *
+ * The body FOLLOWS the club rather than being measured, and the head holds still to impact: the
+ * measured head turn on the reference session is about 4 degrees, and a drawing that swung the head
+ * around would imply a great deal more than the AirPods ever saw.
  */
-function scMannequin(ang, line) {
-  const sh = -ang * 0.115, hip = -ang * 0.05;
-  const shR = sh * Math.PI / 180, hipR = hip * Math.PI / 180;
-  const hands = scHandsAt(ang);
-  const shL = { x: SC_G.SH.x - 26 * Math.cos(shR), y: SC_G.SH.y - 26 * Math.sin(shR) };
-  const shRt = { x: SC_G.SH.x + 26 * Math.cos(shR), y: SC_G.SH.y + 26 * Math.sin(shR) };
-  const hipL = { x: SC_G.HIP.x - 13 * Math.cos(hipR), y: SC_G.HIP.y };
-  const hipRt = { x: SC_G.HIP.x + 13 * Math.cos(hipR), y: SC_G.HIP.y };
-  const g = (tf, inner) => `<g transform="${tf}">${inner}</g>`;
+function scMannequin(p, line) {
+  const limb = (a, b, w, casing, core) => line(a, b, w, casing) + line(a, b, (w * 0.5).toFixed(1), core);
+  const joint = (q, r, fill) => `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="${r}" fill="${fill}"/>`;
+  const leadArm = limb(p.leadSh, p.leadElbow, 13, '#4d5643', '#c3bda9') + limb(p.leadElbow, p.hands, 12, '#4d5643', '#c3bda9')
+    + (() => {
+      /* The watch, a band on the lead forearm a little above the grip. */
+      const dx = p.leadElbow.x - p.hands.x, dy = p.leadElbow.y - p.hands.y, d = Math.hypot(dx, dy) || 1;
+      const at = { x: p.hands.x + dx / d * 9, y: p.hands.y + dy / d * 9 };
+      return `<circle cx="${at.x.toFixed(1)}" cy="${at.y.toFixed(1)}" r="4.2" fill="#2c3327"/>`;
+    })()
+    + joint(p.leadElbow, 4.5, '#d5cfbb');
+  const trailArm = limb(p.trailSh, p.trailElbow, 13, '#3f4838', '#8b9179') + limb(p.trailElbow, p.hands, 12, '#3f4838', '#8b9179')
+    + joint(p.trailElbow, 4.5, '#95a084');
+  const turn = p.shTurnDeg;
+  const back = turn > 35 ? trailArm : turn < -35 ? leadArm : '';
+  const front = turn > 35 ? leadArm : turn < -35 ? trailArm : trailArm + leadArm;
   return ''
-    /* hips, legs */
-    + g(`translate(${SC_G.HIP.x} ${SC_G.HIP.y}) rotate(${hip.toFixed(2)})`,
-        `<line x1="-26" y1="0" x2="26" y2="0" stroke="#4d5643" stroke-width="15" stroke-linecap="round"/>`
-      + `<line x1="-26" y1="-1.5" x2="26" y2="-1.5" stroke="#8b9179" stroke-width="7" stroke-linecap="round"/>`)
-    + line(hipL, SC_G.FOOT_L, 16, '#4d5643') + line(hipL, SC_G.FOOT_L, 8, '#8b9179')
-    + line(hipRt, SC_G.FOOT_R, 16, '#4d5643') + line(hipRt, SC_G.FOOT_R, 8, '#8b9179')
-    /* torso */
-    + `<line x1="179" y1="177" x2="179" y2="121" stroke="#5c6551" stroke-width="26" stroke-linecap="round"/>`
-    + `<line x1="177" y1="177" x2="177" y2="121" stroke="#c3bda9" stroke-width="13" stroke-linecap="round"/>`
-    + g(`translate(${SC_G.SH.x} ${SC_G.SH.y}) rotate(${sh.toFixed(2)})`,
-        `<line x1="-30" y1="0" x2="30" y2="0" stroke="#5c6551" stroke-width="18" stroke-linecap="round"/>`
-      + `<line x1="-30" y1="-2" x2="30" y2="-2" stroke="#c3bda9" stroke-width="9" stroke-linecap="round"/>`)
-    /* head */
-    + g(`translate(${(SC_G.HEAD.x - ang * 0.008).toFixed(2)} ${SC_G.HEAD.y}) rotate(${(-ang * 0.021).toFixed(2)})`,
-        `<circle cx="0" cy="0" r="${SC_G.HEAD_R}" fill="#5c6551"/><circle cx="-1.5" cy="-1.5" r="12" fill="#e8e2cf"/>`)
-    /* arms to the single grip point */
-    + line(shL, hands, 13, '#4d5643') + line(shL, hands, 6.5, '#c3bda9')
-    + line(shRt, hands, 13, '#3f4838') + line(shRt, hands, 6.5, '#8b9179')
-    /* ball joints */
-    + `<circle cx="${shL.x.toFixed(1)}" cy="${shL.y.toFixed(1)}" r="6" fill="#d5cfbb"/>`
-    + `<circle cx="${shRt.x.toFixed(1)}" cy="${shRt.y.toFixed(1)}" r="6" fill="#95a084"/>`
-    + `<circle cx="${hipL.x.toFixed(1)}" cy="${hipL.y}" r="5.5" fill="#95a084"/>`
-    + `<circle cx="${hipRt.x.toFixed(1)}" cy="${hipRt.y}" r="5.5" fill="#95a084"/>`
-    + `<circle cx="${SC_G.FOOT_L.x}" cy="${SC_G.FOOT_L.y}" r="4.5" fill="#95a084"/>`
-    + `<circle cx="${SC_G.FOOT_R.x}" cy="${SC_G.FOOT_R.y}" r="4.5" fill="#95a084"/>`;
+    /* legs: thigh, shin and shoe, trail side first */
+    + limb(p.trailHip, p.trailKnee, 16, '#4d5643', '#8b9179') + limb(p.trailKnee, p.trailAnkle, 14, '#4d5643', '#8b9179')
+    + line(p.trailHeel, p.trailToe, 7, '#2c3327')
+    + limb(p.leadHip, p.leadKnee, 16, '#4d5643', '#8b9179') + limb(p.leadKnee, p.leadAnkle, 14, '#4d5643', '#8b9179')
+    + line({ x: SC_G.FOOT_LEAD.x - 6, y: SC_G.FOOT_LEAD.y + 1 }, { x: SC_G.FOOT_LEAD.x + 6, y: SC_G.FOOT_LEAD.y + 1 }, 7, '#2c3327')
+    + joint(p.trailKnee, 5, '#95a084') + joint(p.leadKnee, 5, '#95a084')
+    /* hips: the line between the hip joints shortens as the pelvis turns */
+    + line(p.trailHip, p.leadHip, 15, '#4d5643') + line(p.trailHip, p.leadHip, 7, '#8b9179')
+    + joint(p.leadHip, 5.5, '#95a084') + joint(p.trailHip, 5.5, '#95a084')
+    + back
+    /* torso, then the shoulder line, which shortens and drops at one end as the shoulders turn */
+    + line(p.pelvis, p.sh, 26, '#5c6551') + line(p.pelvis, p.sh, 13, '#c3bda9')
+    + `<g class="sc-shoulders">${line(p.trailSh, p.leadSh, 18, '#5c6551') + line(p.trailSh, p.leadSh, 9, '#c3bda9')}</g>`
+    + joint(p.leadSh, 6, '#d5cfbb') + joint(p.trailSh, 6, '#95a084')
+    /* head, over the shoulders: turned 90 degrees at the top, the trail shoulder is behind it */
+    + `<circle cx="${p.head.x.toFixed(1)}" cy="${p.head.y.toFixed(1)}" r="${SC_G.HEAD_R}" fill="#5c6551"/>`
+    + `<circle cx="${(p.head.x - 1.5).toFixed(1)}" cy="${(p.head.y - 1.5).toFixed(1)}" r="12" fill="#e8e2cf"/>`
+    + front;
 }
 
 /*
@@ -55214,7 +55382,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'b99e0f2e8 · 2026-10-20';
+const LOAM_BUILD = '69c3935ea · 2026-10-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
