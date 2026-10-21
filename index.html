@@ -2450,6 +2450,10 @@
            `change` event and a checklist in a 190-300px box capped to the room under the button is
            the wrong shape for this; the button closes the popover itself. -->
       <button type="button" id="dashboardBtn">Dashboard&hellip;</button>
+      <!-- The ride page switch lives in the popover rather than on the View bar: on a phone a third
+           control on that row wraps it and pushes the session summary below the first screen
+           (session-ux pins the summary under 300 px). Offered on the MTB family only. -->
+      <label id="mtbPageToggleLabel" class="mtb-page-toggle hidden" title="Try the descents-first ride layout on this ride; the classic layout stays one tap away"><input type="checkbox" id="mtbPageToggle" onchange="setMtbPage(this.checked)"> New ride page</label>
         <label>Map
           <select id="mapHeightSel" onchange="setMapHeight(this.value)">
             <option value="sm">Compact</option>
@@ -3059,6 +3063,148 @@
   </div>
 </div>
 
+<style>
+  /* ===== The ride page (MTB / e-MTB): a second results layout over the same analysis. =====
+     Every colour is a page token, so it follows the theme; the lap hues on the run cards are the
+     palette the lap-compare charts already use. Class prefix mp-. */
+  .mtb-page-toggle, .prefs-pop .mtb-page-toggle { display:flex; align-items:center; gap:8px; color:var(--text); font-size:13px; cursor:pointer; min-height:44px; }
+  .mtb-page-toggle input { width:18px; height:18px; accent-color:var(--accent); margin:0; }
+  #mtbPage { display:flex; flex-direction:column; gap:40px; margin:4px 0 48px; }
+  #mtbPage section { margin-bottom:0; }
+  #mtbPage .mp-slot:empty { display:none; }
+  #mtbPage .mp-slot > section { margin-bottom:0; }
+  #mtbPage .mp-slot + .mp-slot:not(:empty) { margin-top:28px; }
+  #mtbPage .mp-section > .mp-slot:not(:empty) { margin-top:28px; }
+  body.mtb-page #sessionOverview, body.mtb-page .session-lead { display:none; }
+  body.mtb-page #statsPanel { display:none; }
+  body.mtb-page #mtbPage .hero-grid { grid-template-columns:1fr; margin-bottom:0; }
+  body.mtb-page #mtbPage #overviewSection { margin:0; }
+  .mp-section { display:flex; flex-direction:column; gap:16px; }
+  .mp-section-head { display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:12px; }
+  .mp-h2 { margin:0; font-family:'Bricolage Grotesque', sans-serif; font-weight:600; font-size:22px; letter-spacing:-0.01em; color:var(--text); }
+  .mp-h3 { margin:0; font-size:17px; font-weight:600; color:var(--text); display:flex; align-items:center; gap:8px; }
+  .mp-sub { margin:4px 0 0; color:var(--text-dim); font-size:14px; line-height:1.45; }
+  .mp-muted { color:var(--text-dim); font-size:12.5px; line-height:1.45; margin:0; }
+  .mp-strong { font-weight:600; color:var(--text); font-size:13px; }
+  .mp-big { font-size:28px; font-weight:600; line-height:1.1; color:var(--text); font-variant-numeric:tabular-nums; }
+  .mp-unit { font-size:14px; font-weight:500; color:var(--text-dim); }
+  .mp-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:14px; min-width:0; }
+  .mp-card-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px 14px; flex-wrap:wrap; }
+  .mp-note { font-size:13px; color:var(--text); background:var(--surface-2); border-radius:8px; padding:10px 12px; line-height:1.45; }
+  .mp-grid3 { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:14px; }
+  .mp-grid2cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:14px; }
+  .mp-grid2 { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px 16px; font-size:13px; }
+  /* header */
+  .mp-header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-end; gap:16px 20px; }
+  .mp-header-main { display:flex; flex-direction:column; gap:10px; min-width:0; flex:1 1 520px; }
+  .mp-eyebrow { font-size:13px; color:var(--text-dim); }
+  .mp-h1 { margin:0; font-family:'Bricolage Grotesque', sans-serif; font-size:32px; font-weight:700; letter-spacing:-0.02em; line-height:1.1; color:var(--text); display:flex; align-items:center; gap:12px; min-width:0; }
+  .mp-h1 svg { width:30px; height:30px; flex:none; }
+  .mp-chips { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .mp-sport { display:inline-flex; align-items:center; background:var(--text); color:var(--bg); font-weight:600; font-size:12px; padding:6px 10px; border-radius:999px; letter-spacing:0.02em; }
+  .mp-chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text); background:var(--surface); border:1px solid var(--border); padding:6px 10px; border-radius:999px; }
+  .mp-local { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); padding:6px 2px; }
+  .mp-header-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .mp-btn { background:var(--text); color:var(--bg); border:0; border-radius:8px; padding:0 16px; min-height:44px; font:inherit; font-weight:600; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; gap:8px; }
+  .mp-btn-ghost { background:var(--surface); color:var(--text); border:1px solid var(--border); font-weight:500; }
+  .mp-btn-small { min-height:36px; padding:0 12px; font-size:13px; }
+  .mp-btn:hover { filter:brightness(1.08); }
+  .mp-link { background:none; border:0; padding:6px 0; font:inherit; font-size:13px; font-weight:600; color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
+  /* headline */
+  .mp-tiles { display:flex; flex-wrap:wrap; gap:12px; }
+  .mp-hero { flex:2 1 320px; background:var(--text); color:var(--bg); border-radius:12px; padding:22px 24px; display:flex; flex-direction:column; gap:6px; min-width:0; }
+  .mp-hero-label { font-size:13px; opacity:.8; }
+  .mp-hero-value { font-family:'Bricolage Grotesque', sans-serif; font-size:52px; font-weight:800; line-height:1; letter-spacing:-0.02em; font-variant-numeric:tabular-nums; }
+  .mp-hero-sub { font-size:14px; opacity:.85; margin-top:6px; line-height:1.4; }
+  .mp-tile { flex:1 1 150px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 20px; display:flex; flex-direction:column; gap:4px; min-width:0; }
+  .mp-tiles-plain .mp-tile { flex-basis:170px; }
+  .mp-tile-label { font-size:12px; color:var(--text-dim); }
+  .mp-tile-value { font-size:30px; font-weight:600; line-height:1.1; color:var(--text); font-variant-numeric:tabular-nums; }
+  .mp-tile-sub { font-size:12px; color:var(--text-dim); min-height:1.2em; }
+  .mp-facts { display:flex; flex-wrap:wrap; gap:6px 22px; font-size:13px; color:var(--text-dim); padding:0 4px; }
+  .mp-facts strong { color:var(--text); font-weight:500; }
+  .mp-facts-tight { padding:0; }
+  /* map row */
+  .mp-map-row { display:flex; flex-wrap:wrap; gap:16px; align-items:stretch; }
+  .mp-slot-map { flex:1.6 1 460px; min-width:0; }
+  .mp-selected { flex:1 1 280px; align-self:flex-start; }
+  .mp-sel-facts { font-size:13px; }
+  /* run cards */
+  .mp-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:14px; }
+  .mp-run { cursor:pointer; gap:12px; padding:18px; }
+  .mp-run-active { border-color:var(--text); }
+  .mp-run-skipped { opacity:.6; }
+  .mp-run-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .mp-run-name { font-weight:600; color:var(--text); }
+  .mp-dot { width:10px; height:10px; border-radius:50%; flex:none; display:inline-block; }
+  .mp-dot-sq { border-radius:3px; width:12px; height:12px; }
+  .mp-badge { font-size:11px; color:var(--text-dim); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
+  .mp-badge-muted { background:var(--surface-2); }
+  .mp-run-best { margin-left:auto; font-size:11px; font-weight:700; letter-spacing:0.04em; color:var(--amber); }
+  .mp-run-best:empty { display:none; }
+  .mp-run-time { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .mp-run-clock { font-size:32px; font-weight:600; line-height:1; color:var(--text); font-variant-numeric:tabular-nums; }
+  .mp-run-delta { font-size:13px; color:var(--text-dim); font-weight:500; }
+  .mp-run-delta.mp-delta-good { color:var(--moss); font-weight:600; }
+  .mp-run-stats { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:6px 12px; font-size:13px; color:var(--text-dim); }
+  .mp-run-stats strong { color:var(--text); font-weight:500; }
+  .mp-run-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-top:auto; }
+  .mp-run-actions { display:inline-flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+  /* cornering */
+  .mp-split { display:flex; flex-direction:column; gap:6px; }
+  .mp-split-labels { display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
+  .mp-split-bar { display:flex; gap:2px; height:10px; border-radius:4px; overflow:hidden; }
+  .mp-split-bar > span { display:block; height:100%; min-width:2px; }
+  .mp-legend { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--text-dim); }
+  .mp-legend .mp-dot { width:9px; height:9px; margin-left:6px; }
+  .mp-legend .mp-dot:first-child { margin-left:0; }
+  .mp-legend-row { display:inline-flex; flex-wrap:wrap; gap:6px 12px; }
+  .mp-chart-text text { font-family:'IBM Plex Sans', system-ui, sans-serif; font-size:13px; }
+  /* corner strips */
+  .mp-strips { display:flex; flex-direction:column; gap:8px; }
+  .mp-strip-row { display:flex; align-items:center; gap:10px; }
+  .mp-strip-label { width:88px; font-size:12px; color:var(--text-dim); flex:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mp-strip { position:relative; flex:1; height:24px; background:var(--surface-2); border-radius:4px; min-width:0; }
+  .mp-tick { position:absolute; top:5px; width:3px; height:14px; border-radius:1px; margin-left:-1px; }
+  .mp-tick-carried { background:var(--moss); }
+  .mp-tick-held { background:var(--amber); top:6px; height:12px; }
+  .mp-tick-scrubbed { background:var(--clay); top:3px; height:18px; width:4px; }
+  .mp-tick-none { background:var(--border); }
+  .mp-tick-key { display:inline-block; width:3px; height:12px; border-radius:1px; }
+  .mp-tick-key.mp-tick-carried, .mp-tick-key.mp-tick-held, .mp-tick-key.mp-tick-scrubbed { position:static; }
+  .mp-strip-pct { width:48px; font-size:12px; color:var(--text); font-weight:600; text-align:right; flex:none; font-variant-numeric:tabular-nums; }
+  .mp-exp { font-family:'JetBrains Mono', monospace; font-size:10px; letter-spacing:0.12em; color:var(--amber); font-weight:700; }
+  .mp-bars { display:flex; flex-direction:column; gap:8px; }
+  .mp-bar-row { display:flex; align-items:center; gap:10px; }
+  .mp-bar-label { width:140px; font-size:12px; color:var(--text-dim); flex:none; }
+  .mp-bar { flex:1; height:12px; background:var(--surface-2); border-radius:4px; min-width:0; overflow:hidden; }
+  .mp-bar-fill { height:100%; border-radius:4px; }
+  .mp-bar-val { width:52px; font-size:12px; font-weight:600; color:var(--text); flex:none; text-align:right; font-variant-numeric:tabular-nums; }
+  /* motor */
+  .mp-modes { display:flex; flex-direction:column; gap:8px; }
+  .mp-plot { min-height:220px; }
+  .mp-table-wrap { overflow-x:auto; }
+  .mp-table { border-collapse:collapse; width:100%; font-size:13px; font-variant-numeric:tabular-nums; min-width:520px; color:var(--text); }
+  .mp-table th { text-align:left; font-weight:500; font-size:12px; color:var(--text-dim); padding:6px 8px; border-bottom:1px solid var(--border); }
+  .mp-table td { padding:8px; border-bottom:1px solid var(--surface-2); }
+  .mp-table .mp-num { text-align:right; }
+  /* trust */
+  .mp-trust { border-top:1px solid var(--border); padding-top:28px; }
+  .mp-facts-row { display:flex; flex-wrap:wrap; gap:8px; }
+  .mp-fact { display:inline-flex; align-items:center; gap:7px; font-size:13px; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:8px 12px; }
+  .mp-fact-ok svg { color:var(--moss); }
+  .mp-fact-warn svg { color:var(--amber); }
+  .mp-fact .mp-link { padding:0; }
+  .mp-local-line { margin:4px 0 0; font-size:13px; color:var(--text-dim); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  @media (max-width: 640px) {
+    #mtbPage { gap:32px; }
+    .mp-hero-value { font-size:44px; }
+    .mp-h1 { font-size:26px; }
+    .mp-card { padding:16px; }
+    .mp-bar-label { width:110px; }
+  }
+</style>
+
 <div id="results" class="hidden">
   <div class="session-lead">
   <section id="sessionOverview" class="session-overview hidden" aria-label="Session summary"></section>
@@ -3089,6 +3235,10 @@
       traces and lap tables all get more room in landscape.</span>
     <button type="button" id="landscapeTipDismiss">Got it</button>
   </div>
+
+  <!-- The ride page: the descents-first layout for MTB / e-MTB, filled by renderMtbPage when the
+       athlete has switched it on (View bar). Its slots borrow the classic sections below. -->
+  <div id="mtbPage" class="hidden"></div>
 
   <!-- A track this page repaired is a track this page is making a claim about, so it says so on its
        face: how much was missing, where it came from, and that the rest is the phone's own. No
@@ -27746,6 +27896,9 @@ function hideAllSections() {
   hide('roadTimelineAxisLabel');
   restoreRunUpsellHome();
   restoreBikeSections();
+  /* The ride page borrows sections through bikeSectionHomes, so they are home by now; the host is
+     emptied here and never before, or the sections inside it would go with it. */
+  teardownMtbPage();
   /* Back to Loam's own ground before anything is shown. See applyPalette: this is the half that
      makes the stamp safe, because every render path passes through here and a winter view is the
      only thing that stamps it back on. */
@@ -29485,6 +29638,31 @@ function scAngleAt(path, u) {
   return i + 1 < n ? d[i] + (d[i + 1] - d[i]) * f : d[n - 1];
 }
 
+/* The swing as the Swing Cam plays it: the measured trace, cut at the finish when the club comes back
+   down after it. The detector closes a swing when the watch has been still for 0.2 s, and a golfer who
+   swings through and then lowers the club never is, so the window runs to its 1.2 s cap and carries
+   the return. On the 2026-07-24 backyard session that was 7 swings of 10: through to -190..-203
+   degrees, then back to within 12 of zero, so every one of them was drawn swinging back down to the
+   ball and ending there, which reads as the swing stopping at impact (owner, 2026-10-20). The
+   detector's window is left alone (its count and tempo are graded against video); this is the
+   animation's end only, applied when the panel is built so a cached session gets it too.
+
+   A swing is cut only when the club comes back by SC_RETURN_DEG or more from its furthest point past
+   impact; one that ends at its finish is played as measured. The shortened trace keeps its impact
+   time and start, so the clock the clip and the posed body are aligned to does not move. */
+const SC_RETURN_DEG = 30;
+function scSwingForCam(sw) {
+  const p = sw.path, d = p.deg, n = d.length;
+  const i0 = Math.max(0, Math.ceil((p.impactFrac != null ? p.impactFrac : 0) * (n - 1)));
+  let iF = i0, back = -Infinity;
+  for (let i = i0; i < n; i++) if (d[i] < d[iF]) iF = i;
+  for (let i = iF; i < n; i++) back = Math.max(back, d[i]);
+  if (iF >= n - 1 || iF <= i0 || back - d[iF] < SC_RETURN_DEG) return sw;
+  const uEnd = iF / (n - 1);
+  const deg = Array.from({ length: n }, (_, i) => +scAngleAt(p, uEnd * i / (n - 1)).toFixed(1));
+  return { ...sw, path: { ...p, deg, topFrac: +(p.topFrac / uEnd).toFixed(4), impactFrac: +(p.impactFrac / uEnd).toFixed(4), durationS: +(p.durationS * uEnd).toFixed(4) } };
+}
+
 /* Where the clubhead sits for a given club angle, in stage coordinates. The shaft leaves the hands
    pointing down at the ball (angle 0) and turns the way the backswing goes: away from the target
    (screen left), up, and over the top toward the target, so a full swing's 270 degrees is the shaft
@@ -30505,7 +30683,7 @@ function swingCamVideoBarHtml() {
    attitude: pre-watch sessions, Sensor Logger exports), so the panel is simply absent rather than
    inventing a canned animation. */
 function golfSwingCamSection(D) {
-  const swings = ((D.golf && D.golf.swings) || []).filter(s => s.path && s.path.deg && s.path.deg.length);
+  const swings = ((D.golf && D.golf.swings) || []).filter(s => s.path && s.path.deg && s.path.deg.length).map(scSwingForCam);
   /* Clearing on the way out matters as much as claiming on the way in: the Tempo rhythm panel reads
      `_swingCam.swings` to know which swing is selected, so a session with no wrist attitude would
      otherwise have found the PREVIOUS session's swings still sitting there and selected one of them. */
@@ -36067,6 +36245,190 @@ function setLoamAthlete(patch) {
    number, so `analyzer/core/i18n/analyzer-nb.test.js` fails on any entry whose placeholders do not
    match its English key's. */
 const LOAM_NB = {
+  /* ---- The ride page (MTB / e-MTB), 2026-10-20: every string the new results layout prints ---- */
+  'Speed along this run': 'Fart langs denne kjøringen',
+  'Tight, under {r}': 'Krappe, under {r}',
+  'Medium, {a} to {b}': 'Middels, {a} til {b}',
+  'Open, over {r}': 'Åpne, over {r}',
+  '{n} corners · median apex {v}': '{n} svinger · median apex {v}',
+  'Left · {n} corners · median apex {v}': 'Venstre · {n} svinger · median apex {v}',
+  'Right · {n} corners · median apex {v}': 'Høyre · {n} svinger · median apex {v}',
+  'L {l} · R {r}': 'V {l} · H {r}',
+  'Median apex speed by corner size and side': 'Median apexfart etter svingstørrelse og side',
+  'Jump {i} · {hang} s hang{where}{dist}{land}': 'Hopp {i} · {hang} s svev{where}{dist}{land}',
+  'landed {g} g': 'landet {g} g',
+  'Hang time of every jump, in ride order': 'Svevetid for hvert hopp, i turens rekkefølge',
+  'Corner {n} · {kind}': 'Sving {n} · {kind}',
+  'scrubbed {v}': 'skrubbet {v}',
+  'speed carried': 'farten tatt med',
+  'speed held': 'farten holdt',
+  'no speed read': 'ingen fartsmåling',
+  '{n} corners along {run}': '{n} svinger langs {run}',
+  'Share of corners whose speed was carried or held': 'Andel svinger der farten ble tatt med eller holdt',
+  'handlebar mount': 'styremontert',
+  'on the body': 'på kroppen',
+  'phone moved': 'telefonen flyttet seg',
+  'borrowed calibration': 'lånt kalibrering',
+  'pose mismatch': 'feil kalibreringsstilling',
+  'calibrated': 'kalibrert',
+  'AirPods · head motion': 'AirPods · hodebevegelse',
+  'Bike FIT · motor and rider power': 'Sykkel-FIT · motor- og rytterwatt',
+  'Bike FIT · jumps and wheel speed': 'Sykkel-FIT · hopp og hjulfart',
+  'Watch · heart rate and wrist motion': 'Klokke · puls og håndleddsbevegelse',
+  'Watch · heart rate': 'Klokke · puls',
+  'Watch · wrist motion': 'Klokke · håndleddsbevegelse',
+  'Analysed on this device. Nothing uploaded.': 'Analysert på denne enheten. Ingenting lastet opp.',
+  'Switch back to the classic results layout': 'Bytt tilbake til det klassiske resultatoppsettet',
+  'Classic layout': 'Klassisk oppsett',
+  'Time on laps': 'Tid på runder',
+  'Time in marked runs': 'Tid i markerte kjøringer',
+  'Time in reps': 'Tid i drag',
+  'Time descending': 'Tid nedover',
+  '{n} run': '{n} kjøring',
+  '{n} runs': '{n} kjøringer',
+  '{dist} downhill': '{dist} nedover',
+  '{drop} dropped': '{drop} høydetap',
+  'of {t} moving': 'av {t} i bevegelse',
+  'No descent found in this recording.': 'Fant ingen nedkjøring i dette opptaket.',
+  'fastest moment of the ride': 'turens raskeste øyeblikk',
+  '{l} left · {r} right': '{l} venstre · {r} høyre',
+  'biggest {d}': 'lengste {d}',
+  'longest hang {ms} ms': 'lengste svev {ms} ms',
+  'phone estimate · longest {s} s': 'telefonanslag · lengste {s} s',
+  'none in the bike computer\'s file': 'ingen i sykkelcomputerens fil',
+  'none felt by the phone': 'ingen kjent av telefonen',
+  'Scrubbed corners': 'Skrubbede svinger',
+  'of {n} corners · worst lost {v}': 'av {n} svinger · verste tapte {v}',
+  'of {n} corners · none lost more than {v}': 'av {n} svinger · ingen tapte mer enn {v}',
+  'needs a speed read at each corner': 'trenger fartsmåling i hver sving',
+  'Speed kept': 'Fart beholdt',
+  'corners carried or held': 'svinger med farten tatt med eller holdt',
+  'climbed': 'klatret',
+  'elapsed': 'medgått',
+  'avg · max heart rate': 'snitt · makspuls',
+  'battery': 'batteri',
+  'assist ratio': 'assistforhold',
+  'Headline numbers': 'Hovedtall',
+  'avg': 'snitt',
+  'max': 'maks',
+  '{p} % kept': '{p} % beholdt',
+  'jump': 'hopp',
+  'jumps': 'hopp',
+  'lean {d}°': 'helling {d}°',
+  'Show on map': 'Vis på kartet',
+  'Open corners': 'Åpne svingene',
+  'Cornering': 'Svingteknikk',
+  'No corners were detected on this ride.': 'Ingen svinger ble funnet på denne turen.',
+  'Left and right are withheld on this ride: the calibration pose does not match the riding pose.': 'Venstre og høyre holdes tilbake på denne turen: kalibreringsstillingen stemmer ikke med sykkelstillingen.',
+  'Left {n}': 'Venstre {n}',
+  'Right {n}': 'Høyre {n}',
+  '{band} corners: {slow} run {gap} {unit} slower than {fast}. Trail shape and line explain part of that; it is a difference, not a verdict.': '{band} svinger: {slow} går {gap} {unit} saktere enn {fast}. Stiens form og linjevalg forklarer noe av det; det er en forskjell, ikke en dom.',
+  'lefts': 'venstresvingene',
+  'rights': 'høyresvingene',
+  '{p} % of corners carried or held their speed; {n} scrubbed more than {v}.': '{p} % av svingene tok med eller holdt farten; {n} skrubbet mer enn {v}.',
+  'Left': 'Venstre',
+  'Right': 'Høyre',
+  '{n} corners · phone yaw, {src} speed': '{n} svinger · telefonens giring, {src}-fart',
+  'bike': 'sykkel',
+  'Median apex speed': 'Median apexfart',
+  'median radius {r}': 'medianradius {r}',
+  'max lean {d}°': 'maks helling {d}°',
+  'Apex speed by corner size': 'Apexfart etter svingstørrelse',
+  '{n} · bike computer airtime, phone landings': '{n} · svevetid fra sykkelcomputeren, landinger fra telefonen',
+  '{n} · phone freefall estimate': '{n} · anslag fra telefonens frie fall',
+  'The bike computer logged no jumps inside this recording.': 'Sykkelcomputeren loggførte ingen hopp i dette opptaket.',
+  'The phone felt no airtime on this ride. A Specialized bike computer\'s FIT adds native jumps.': 'Telefonen kjente ingen svevetid på denne turen. FIT-filen fra en Specialized-sykkelcomputer gir ekte hopp.',
+  '{speed} takeoff × {ms} ms hang': '{speed} i satsen × {ms} ms svev',
+  'Longest hang': 'Lengste svev',
+  'freefall felt by the phone, not measured airtime': 'fritt fall kjent av telefonen, ikke målt svevetid',
+  '{n} measured': '{n} målt',
+  'over {bar}': 'lengre enn {bar}',
+  'Hang time per jump, in ride order': 'Svevetid per hopp, i turens rekkefølge',
+  'Jumps are reported, not scored: hang and distance describe the trail as much as the rider, so the coach never tells you to go bigger.': 'Hopp rapporteres, ikke bedømmes: svevetid og lengde beskriver stien like mye som rytteren, så treneren ber deg aldri hoppe lengre.',
+  'Where the speed went': 'Hvor farten ble av',
+  'Corner speeds need a GPS or bike-computer speed read at each corner; this ride has none to judge.': 'Svingfart trenger en fartsmåling fra GPS eller sykkelcomputer i hver sving; denne turen har ingen å bedømme.',
+  '{run} scrubbed {n} corners, the most on this ride.': '{run} skrubbet {n} svinger, flest på denne turen.',
+  '{runs}: no corner scrubbed more than {v}.': '{runs}: ingen sving skrubbet mer enn {v}.',
+  'Longest clean stretch: {t} on {run}.': 'Lengste rene strekk: {t} på {run}.',
+  'entry speed against the slowest of apex and exit': 'inngangsfart mot det tregeste av apex og utgang',
+  'of {n}': 'av {n}',
+  'a corner is scrubbed when it loses more than {v} between entry and apex or exit': 'en sving er skrubbet når den taper mer enn {v} mellom inngang og apex eller utgang',
+  'Every corner, along each run': 'Hver sving, langs hver kjøring',
+  '{n} more in the table below': '{n} til i tabellen under',
+  'Heart rate at the top of each run': 'Puls på toppen av hver kjøring',
+  'Rest before dropping in': 'Hvile før start',
+  'Pedalling on the descents': 'Tråkking i nedkjøringene',
+  'of descending time': 'av tiden nedover',
+  'Your own work': 'Ditt eget arbeid',
+  '{run} started at {bpm} bpm, the highest of the ride, and it is also the run with the most scrubbed corners.': '{run} startet på {bpm} slag, turens høyeste, og det er også kjøringen med flest skrubbede svinger.',
+  'Heart': 'Hjerte',
+  'watch heart rate': 'puls fra klokken',
+  'Average heart rate': 'Gjennomsnittspuls',
+  'max {bpm}': 'maks {bpm}',
+  'AirPods worn {p} % of the ride': 'AirPods på {p} % av turen',
+  'Head': 'Hode',
+  'Not enough corners with a head read to say when the head turned in.': 'For få svinger med hodemåling til å si når hodet vendte inn.',
+  'Head turned in before the bike by': 'Hodet vendte inn før sykkelen med',
+  'in {band} corners · looked in before the apex on {p} % of corners': 'i {band} svinger · så inn før apex i {p} % av svingene',
+  'The AirPods measure where the head points, not where the eyes look. Descriptive only: no corner here is graded on it.': 'AirPods måler hvor hodet peker, ikke hvor øynene ser. Kun beskrivende: ingen sving her bedømmes ut fra det.',
+  'Assist ratio': 'Assistforhold',
+  'motor {m} kJ · you {r} kJ': 'motor {m} kJ · du {r} kJ',
+  'Battery': 'Batteri',
+  '{used} % used': '{used} % brukt',
+  '{rate} %/h': '{rate} %/t',
+  'Motor energy': 'Motorenergi',
+  'about {dist} left at this pace': 'omtrent {dist} igjen i dette tempoet',
+  'Motor on the descents': 'Motor i nedkjøringene',
+  'average while descending': 'snitt nedover',
+  'Assist mode': 'Assistmodus',
+  'share of moving time, as this bike labels its modes': 'andel av tiden i bevegelse, slik denne sykkelen navngir modusene',
+  'Mode {n}': 'Modus {n}',
+  'Each climb': 'Hver stigning',
+  'sustained grade above 3 %, from the bike computer': 'jevn stigning over 3 %, fra sykkelcomputeren',
+  'Mode': 'Modus',
+  'You': 'Du',
+  'Motor': 'Motor',
+  'What the bike did and what you did, from the bike computer\'s own power channels.': 'Hva sykkelen gjorde og hva du gjorde, fra sykkelcomputerens egne effektkanaler.',
+  'Rider and motor power': 'Rytter- og motoreffekt',
+  'Rider': 'Rytter',
+  'Motor, stacked on top': 'Motor, stablet oppå',
+  'minutes into the ride': 'minutter ut i turen',
+  'The phone moved during the recording: lean comparisons and form replay are withheld.': 'Telefonen flyttet seg under opptaket: hellingssammenligninger og form-avspilling holdes tilbake.',
+  'Calibration pose does not match the riding pose: left/right comparisons are withheld.': 'Kalibreringsstillingen stemmer ikke med sykkelstillingen: venstre/høyre-sammenligninger holdes tilbake.',
+  'Mount calibrated ({how})': 'Festet kalibrert ({how})',
+  'borrowed from an earlier ride': 'lånt fra en tidligere tur',
+  'still window': 'stillestående vindu',
+  'GPS · median accuracy {m}': 'GPS · median nøyaktighet {m}',
+  'Bike computer file lined up with the phone': 'Sykkelcomputerens fil passet med telefonen',
+  'Bike computer file does not overlap this recording': 'Sykkelcomputerens fil overlapper ikke dette opptaket',
+  'Heart rate {p} % of the ride': 'Puls {p} % av turen',
+  'How much to trust this page': 'Hvor mye du kan stole på denne siden',
+  'Every claim above rests on one of these. A caution lowers the confidence of the reads it touches; nothing is hidden.': 'Hver påstand over hviler på ett av disse. En advarsel senker tilliten til målingene den berører; ingenting skjules.',
+  'Every number on this page was computed on this device. Nothing was uploaded; sharing a card or an export is always your choice.': 'Hvert tall på denne siden ble beregnet på denne enheten. Ingenting ble lastet opp; å dele et kort eller en eksport er alltid ditt valg.',
+  'Skills': 'Ferdigheter',
+  'The same ride, grouped by what you would practise: cornering, jumping, keeping speed.': 'Samme tur, gruppert etter det du ville trent på: svinger, hopp, å beholde fart.',
+  'Heart and head': 'Hjerte og hode',
+  'What the watch saw your heart do, and what the AirPods saw your head do.': 'Hva klokken så hjertet ditt gjøre, og hva AirPods så hodet ditt gjøre.',
+  'Map and timeline': 'Kart og tidslinje',
+  'Where it happened': 'Hvor det skjedde',
+  'Tap a descent to focus the map and the timeline on it.': 'Trykk på en nedkjøring for å fokusere kartet og tidslinjen på den.',
+  'The downhill is the ride. Every run is timed and graded on its own; name a trail once and Loam compares it with your past laps.': 'Nedoverkjøringen er turen. Hver kjøring tas tid på og bedømmes for seg; gi en sti navn én gang, så sammenligner Loam den med dine tidligere runder.',
+  'All actions': 'Alle handlinger',
+  'Compare': 'Sammenlign',
+  'Two runs of the same trail, aligned by position, so the gap shows where it was made. Name a trail to compare it across rides; ride it twice in one session for the play-by-play.': 'To kjøringer av samme sti, justert etter posisjon, så avstanden viser hvor den oppsto. Gi en sti navn for å sammenligne den på tvers av turer; kjør den to ganger i én økt for sving-for-sving.',
+  'The number, the mechanism behind it, and what to try next lap. The coach only talks about what the sensors measured.': 'Tallet, mekanismen bak det, og hva du kan prøve neste runde. Treneren snakker bare om det sensorene målte.',
+  'Climbed': 'Klatret',
+  'Dropped': 'Høydetap',
+  'Tap a descent below, or a point on the timeline, to see that part of the ride here and on the map.': 'Trykk på en nedkjøring under, eller et punkt på tidslinjen, for å se den delen av turen her og på kartet.',
+  '{n} scrubbed': '{n} skrubbet',
+  'Max lean': 'Maks helling',
+  'Heart rate at the top': 'Puls på toppen',
+  '{delta} vs {when}': '{delta} mot {when}',
+  'BEST YET': 'BESTE HITTIL',
+  'level with {when}': 'likt med {when}',
+  '{n} laps of this trail in your library': '{n} runder av denne stien i biblioteket ditt',
+  'min': 'min',
+  'New ride page': 'Ny turside',
   'Brisk minutes': 'Raske minutter',
   '{v} min at {vig}+ spm · {mod}+ spm counts': '{v} min på {vig}+ spm · {mod}+ spm teller',
   '{min} of {target} min this week, from {n} walks': '{min} av {target} min denne uken, fra {n} turer',
@@ -40489,6 +40851,7 @@ function localizeStaticChrome() {
   { const tb = document.getElementById('themeBtn');
     if (tb) tb.textContent = loamT(THEME_LABELS[document.documentElement.dataset.theme || 'auto']); }
   title('#themeBtn', 'Theme: follows system by default');
+  text('#mtbPageToggleLabel', 'New ride page');
   /* For the one static sentence whose emphasis sits INSIDE it. A word-by-word table cannot translate
      a sentence whose words move, so the key carries the markup and the whole run is replaced. */
   const html = (sel, srcHtml) => {
@@ -48746,7 +49109,968 @@ function renderAll(D) {
   renderCoachPanel(D, isRoadAnalysis(D) ? 'road' : rSport);
   updateAttachFitVisibility(rSport, D.hasFit);
   renderRoadExperience(D);
+  /* The ride page, when it is switched on: built from this same D and placed before the nav is
+     measured, so the chips follow the page order. A no-op (and a teardown) otherwise. */
+  renderMtbPage(D);
   buildSectionNav();
+}
+
+/* ======================= The ride page: MTB and e-MTB (2026-10-20) =======================
+   A SECOND LAYOUT for the descents-and-turns results, built from the same `D` that renderAll just
+   rendered -- nothing here recomputes an algorithm. It is organised the way a rider reads a ride
+   rather than the way the pipeline computes it: the downhill first (one hero numeral, one card per
+   descent), then the skills (corners, jumps, where the speed went), then the body (heart, head),
+   then the motor on an e-bike, then compare, coach and what the page was measured from.
+
+   The legacy sections are NOT duplicated: the map, the timeline, the runs table (which holds the
+   tag / compare / rename actions and the play-by-play), the corner ledger, the jumps, the Form
+   Replay, HR zones, the motor panels, the compare charts, the coach and the data-quality panel are
+   MOVED into slots of this page, registered in `bikeSectionHomes` so `restoreBikeSections` (every
+   render passes through hideAllSections) puts them back where the classic layout expects them.
+   What this file adds on top is the summary layer those sections never had.
+
+   Opt-in through the "New ride page" box in the View bar (`loam_mtb_page` in localStorage), so the
+   owner can flip between the two layouts on the same real ride; it applies to the MTB family only
+   and leaves a ski day and a road FIT on the classic layout. */
+const MTB_PAGE_LS = 'loam_mtb_page';
+/* The lap-compare hues, in the fixed order the dataviz palette validates them (never cycled: a
+   ninth descent wears the muted ink and is told apart by its number). */
+const MP_RUN_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+let _mpRenderSeq = 0;
+
+function mtbPageWanted() {
+  try { const v = localStorage.getItem(MTB_PAGE_LS); return v === '1' || v === '"1"' || v === 'true'; }
+  catch (e) { return false; }
+}
+function mtbPageApplies(D) {
+  return !!D && isMtbFamily(displaySport(D)) && !isRoadAnalysis(D);
+}
+function setMtbPage(on) {
+  try { localStorage.setItem(MTB_PAGE_LS, on ? '1' : '0'); } catch (e) { /* session-only */ }
+  const box = document.getElementById('mtbPageToggle');
+  if (box) box.checked = !!on;
+  if (_lastRender && _lastRender.fn === renderAll && mtbPageApplies(_lastRender.D)) {
+    _lastRender.fn(_lastRender.D);
+    requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+  }
+}
+function syncMtbPageToggle(D) {
+  const lbl = document.getElementById('mtbPageToggleLabel');
+  if (!lbl) return;
+  const applies = mtbPageApplies(D);
+  lbl.classList.toggle('hidden', !applies);
+  const box = document.getElementById('mtbPageToggle');
+  if (box) box.checked = applies && mtbPageWanted();
+}
+/* Called from hideAllSections right after restoreBikeSections, so every section this page borrowed
+   is already home when the host is emptied. The segment page records where it borrowed the Form
+   Replay and the coach FROM; if that was a slot of this page, the slot is about to be destroyed and
+   the record must go with it, or the next Back would push those sections into a detached node. */
+function teardownMtbPage() {
+  document.body.classList.remove('mtb-page');
+  const host = document.getElementById('mtbPage');
+  if (!host) return;
+  if (host.querySelector('section[id]')) restoreBikeSections();
+  try { if (_segFormHome && host.contains(_segFormHome.parent)) _segFormHome = null; } catch (e) {}
+  try { if (_segCoachHome && host.contains(_segCoachHome.parent)) _segCoachHome = null; } catch (e) {}
+  host.innerHTML = '';
+  host.classList.add('hidden');
+}
+function mtbPageHome(el) {
+  if (!el || bikeSectionHomes.has(el) || !el.parentNode) return;
+  const marker = document.createComment(el.id || 'mtb-page');
+  el.before(marker);
+  bikeSectionHomes.set(el, marker);
+}
+function mtbPageSlot(host, slotId, sectionId) {
+  const slot = host.querySelector('#' + slotId);
+  const el = document.getElementById(sectionId);
+  if (!slot || !el) return;
+  mtbPageHome(el);
+  slot.appendChild(el);
+}
+
+/* ---- the numbers ---- */
+/* The same three-way read the map's turn ring and the ledger's bar make (turnRingColor), named. A
+   corner with no entry or exit speed is unjudged rather than painted "held". */
+function mpKept(T) {
+  if (!T || T.vExit == null || T.vEntry == null) return null;
+  if (turnScrubMph(T) >= FORM_SCRUB_MIN_MPH) return 'scrubbed';
+  return T.vExit >= T.vEntry ? 'carried' : 'held';
+}
+const MP_BAND_TIGHT_M = 4, MP_BAND_OPEN_M = 8;
+function mpBand(T) {
+  const r = T && T.radius;
+  if (!Number.isFinite(r)) return null;
+  return r < MP_BAND_TIGHT_M ? 'tight' : r <= MP_BAND_OPEN_M ? 'medium' : 'open';
+}
+function mpMedian(a) { const v = (a || []).filter(Number.isFinite); return v.length ? median(v) : null; }
+function mpTime(sec) { return !Number.isFinite(sec) ? '—' : sec >= 3600 ? fmtDuration(sec) : fmtClock(sec); }
+function mpDelta(sec) { const a = Math.abs(sec); return (sec < 0 ? '−' : '+') + mpTime(a); }
+function mpPct(n, d) { return d > 0 ? Math.round(n / d * 100) : null; }
+/* Elevation gained inside the ride window: a 3 m hysteresis walk over the barometer, else 6 m over
+   GPS altitude. An estimate (the tilde on the tile says so), never the headline. */
+function mpClimbGain(D) {
+  const s = D.sensors || {}, ride = D.ride;
+  const baro = (s.baro || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.relativeAltitude != null);
+  let rows, key, hyst;
+  if (baro.length > 20) { rows = baro; key = 'relativeAltitude'; hyst = 3; }
+  else {
+    rows = (s.location || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.altitude != null);
+    key = 'altitude'; hyst = 6;
+    if (rows.length <= 20) return null;
+  }
+  let ref = rows[0][key], gain = 0;
+  for (const r of rows) {
+    const a = r[key];
+    if (a > ref + hyst) { gain += a - ref; ref = a; }
+    else if (a < ref - hyst) ref = a;
+  }
+  return gain;
+}
+function mpHeadCoverage(D) {
+  const ride = D.ride, rows = (D.sensors && D.sensors.headphone) || [];
+  const span = ride.end - ride.start;
+  if (!(span > 0) || rows.length < 50) return null;
+  const secs = new Set();
+  for (const r of rows) if (r.t >= ride.start && r.t <= ride.end) secs.add(Math.floor(r.t));
+  return Math.min(1, secs.size / span);
+}
+function mpMean(a) { const v = (a || []).filter(Number.isFinite); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; }
+/* Watt-seconds of a FIT channel over the rows, trapezoidal, gaps over 5 s refused as the cadence /
+   power panel refuses them. */
+function mpEnergyWh(rows, key) {
+  let ws = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1], b = rows[i];
+    if (a[key] == null || b[key] == null) continue;
+    const dt = b.t_phone - a.t_phone;
+    if (!(dt > 0) || dt > 5) continue;
+    ws += (a[key] + b[key]) / 2 * dt;
+  }
+  return ws / 3600;
+}
+const MP_ASSIST_MODE_NAMES = { 1: 'Eco', 2: 'Trail', 3: 'Turbo' };
+
+function mtbPageModel(D) {
+  const ride = D.ride || { start: 0, end: 0 };
+  const s = D.summary || {};
+  const sensors = D.sensors || {};
+  const loc = sensors.location || [];
+  const inRide = (t) => t >= ride.start && t <= ride.end;
+  const sidesBad = !!sidesUnreliableFor(D);
+  const sport = displaySport(D);
+  const seg = segmentRuns(D, runsPanelMode(D));
+  const mode = seg.mode;
+  const skipWins = skippedRunWindows(D);
+  const turnsAll = D.turns || [];
+  const fitJumps = D.ridingJumps || [];
+  const phoneJumps = fitJumps.length ? [] : ((D.airtime && D.airtime.jumps) || []);
+  const jumpsAll = fitJumps.length ? fitJumps : phoneJumps;
+  const locSpeed = loc.filter(x => x.speed != null);
+  const runs = (seg.runs || []).map((r, i) => {
+    const rt = turnsAll.filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
+    const kept = rt.map(mpKept);
+    const scrubbed = kept.filter(k => k === 'scrubbed').length;
+    const judged = kept.filter(Boolean).length;
+    const leans = rt.map(T => Math.abs(T.leanDelta)).filter(Number.isFinite);
+    const scrubT = rt.filter((T, k) => kept[k] === 'scrubbed').map(T => T.tPeak).sort((a, b) => a - b);
+    let clean = 0, prev = r.tStart;
+    for (const t of scrubT) { clean = Math.max(clean, t - prev); prev = t; }
+    clean = Math.max(clean, r.tEnd - prev);
+    const jumps = jumpsAll.filter(j => j.t_phone >= r.tStart && j.t_phone <= r.tEnd);
+    let speed = [];
+    try { speed = resample1Hz(locSpeed, r.tStart, r.tEnd, 'speed') || []; } catch (e) { speed = []; }
+    return {
+      ...r, i, label: runDisplayLabel(r), skipped: runIsSkipped(r, skipWins),
+      color: i < MP_RUN_COLORS.length ? MP_RUN_COLORS[i] : null,
+      turns: rt, kept, scrubbed, judged,
+      keptPct: judged ? Math.round((judged - scrubbed) / judged * 100) : null,
+      maxLean: leans.length ? Math.max(...leans) : null,
+      cleanS: scrubT.length ? clean : null,
+      jumps, speed,
+    };
+  });
+  const active = runs.filter(r => !r.skipped);
+  const downSegs = (D.gradeSegments || []).filter(g => g.dir === 'down');
+  const onDescent = (T) => downSegs.some(g => T.tPeak >= g.tStart && T.tPeak <= g.tEnd);
+  const turns = s.turnsScopedToDescents ? turnsAll.filter(onDescent) : turnsAll;
+  const keptAll = turns.map(mpKept);
+  const scrubbedN = keptAll.filter(k => k === 'scrubbed').length;
+  const judgedN = keptAll.filter(Boolean).length;
+  const worstScrub = turns.reduce((m, T) => Math.max(m, turnScrubMph(T)), 0);
+  const hr = (sensors.heartRate || []).filter(r => r && r.bpm > 0 && Number.isFinite(r.t) && inRide(r.t));
+  const headCoverage = mpHeadCoverage(D);
+  const wristRows = (sensors.wrist || []).filter(r => inRide(r.t)).length;
+  const fitRows = (D.fitInRide || []).filter(r => r.t_phone >= ride.start && r.t_phone <= ride.end);
+  const motorRows = fitRows.filter(r => r.motorPower != null);
+  const hasMotor = motorRows.length >= 20;
+  const riderWh = hasMotor ? mpEnergyWh(fitRows, 'power') : null;
+  const motorWh = hasMotor ? mpEnergyWh(fitRows, 'motorPower') : null;
+  const battery = hasMotor ? batteryUse(fitRows) : null;
+  /* Apex speed by turn size and side. Sides are WITHHELD on a twisted body frame (sidesUnreliable)
+     for the reason turnMechanics gives: the side is exactly what the tilt invents. */
+  const bands = ['tight', 'medium', 'open'].map(b => {
+    const bt = turns.filter(T => mpBand(T) === b && T.vPeak != null);
+    const L = bt.filter(T => T.direction === 'L'), R = bt.filter(T => T.direction === 'R');
+    return { band: b, n: bt.length, all: mpMedian(bt.map(T => T.vPeak)),
+      L: sidesBad ? null : mpMedian(L.map(T => T.vPeak)), R: sidesBad ? null : mpMedian(R.map(T => T.vPeak)),
+      nL: L.length, nR: R.length };
+  }).filter(b => b.n >= 2);
+  const jm = fitJumps.length ? jumpStatsModel(D) : null;
+  const landings = jumpsAll.map(j => j.landingG).filter(Number.isFinite);
+  const hero = active.length
+    ? { sec: active.reduce((a, r) => a + (r.metrics.duration || 0), 0), n: active.length,
+        dist: active.reduce((a, r) => a + (r.metrics.distance || 0), 0),
+        drop: active.reduce((a, r) => a + (r.metrics.drop || 0), 0) }
+    : null;
+  /* Heart rate at the top of each run (the 20 s before the drop-in) and the rest before it: the time
+     since the climb that ended last, read off the grade segments. */
+  const upSegs = (D.gradeSegments || []).filter(g => g.dir === 'up');
+  const runHr = runs.map(r => {
+    const win = hr.filter(x => x.t >= r.tStart - 20 && x.t <= r.tStart + 5).map(x => x.bpm);
+    const lastUp = upSegs.filter(g => g.tEnd <= r.tStart + 1).sort((a, b) => b.tEnd - a.tEnd)[0];
+    const rest = lastUp ? r.tStart - lastUp.tEnd : null;
+    return { top: win.length >= 3 ? Math.round(mpMean(win)) : null, restS: rest != null && rest >= 0 && rest < 3600 ? rest : null };
+  });
+  /* Pedalling on the descents: seconds with cadence above the coasting floor, from the bike computer
+     when it is there. */
+  let pedalPct = null;
+  if (fitRows.some(r => r.cad != null)) {
+    const inDown = fitRows.filter(r => downSegs.some(g => r.t_phone >= g.tStart && r.t_phone <= g.tEnd) && r.cad != null);
+    if (inDown.length >= 20) pedalPct = mpPct(inDown.filter(r => r.cad >= 25).length, inDown.length);
+  }
+  return {
+    ride, s, sport, mode, runs, active, turns, turnsAll, sidesBad, scrubbedN, judgedN, worstScrub,
+    keptPct: judgedN ? Math.round((judgedN - scrubbedN) / judgedN * 100) : null,
+    hero, hr, hrAvg: hr.length ? Math.round(mpMean(hr.map(x => x.bpm))) : null,
+    hrMax: hr.length ? Math.max(...hr.map(x => x.bpm)) : null,
+    headCoverage, hasHead: headCoverage != null && headCoverage > 0.05, hasWrist: wristRows > 100,
+    hasFit: !!D.hasFit, fitUsed: fitRows.length > 0, fitRows, hasMotor, riderWh, motorWh, battery,
+    assistRatio: hasMotor && riderWh > 0 ? motorWh / riderWh : null,
+    climbGain: mpClimbGain(D), elapsed: ride.end - ride.start, moving: s.duration,
+    bands, jm, fitJumps, phoneJumps, jumpsAll, landings,
+    maxLanding: landings.length ? Math.max(...landings) : null,
+    medianApex: mpMedian(turns.map(T => T.vPeak)),
+    maxLean: mpMedian([]) == null ? (turns.map(T => Math.abs(T.leanDelta)).filter(Number.isFinite).reduce((m, v) => Math.max(m, v), 0) || null) : null,
+    runHr, pedalPct,
+    shifted: !!(D.calibWin && D.calibWin.mountShift),
+    calib: D.calibWin || null,
+    gaze: null,
+  };
+}
+
+/* "Where you looked" per turn-size band, from the Form Replay's own series: the first instant the
+   head is 8 degrees into the corner, against the instant the bike turned in. EXPERIMENTAL and
+   descriptive, like the tile it mirrors (see gaze.js); the coach is not fed it. Capped so a
+   200-corner day does not stall the render. */
+function mpGazeBands(D, M) {
+  if (!M.hasHead || typeof formTurnSeries !== 'function' || typeof gazeLead !== 'function') return null;
+  const by = { tight: [], medium: [], open: [] };
+  let n = 0, looked = 0;
+  for (const T of M.turns.slice(0, 120)) {
+    const b = mpBand(T);
+    if (!b) continue;
+    let g = null;
+    try { const S = formTurnSeries(D, T); g = S ? gazeLead(S, T) : null; } catch (e) { g = null; }
+    if (!g) continue;
+    n++;
+    if (g.looked) looked++;
+    if (g.leadS != null) by[b].push(g.leadS);
+  }
+  if (n < 4) return null;
+  const rows = ['open', 'medium', 'tight'].map(b => ({ band: b, n: by[b].length, lead: mpMedian(by[b]) })).filter(r => r.n >= 2);
+  return rows.length ? { rows, n, lookedPct: mpPct(looked, n) } : null;
+}
+
+/* ---- the drawings ---- */
+function mpSparkSVG(series, color) {
+  const v = (series || []).map(x => (x == null ? null : +x));
+  const vals = v.filter(x => x != null && Number.isFinite(x));
+  if (vals.length < 3) return '';
+  const max = Math.max(...vals, 0.1);
+  const n = v.length;
+  const pts = [];
+  v.forEach((x, i) => { if (x != null && Number.isFinite(x)) pts.push(`${(2 + i * (156 / Math.max(1, n - 1))).toFixed(1)},${(38 - (x / max) * 34).toFixed(1)}`); });
+  const last = pts[pts.length - 1].split(',');
+  const c = color || 'var(--text-muted)';
+  return `<svg viewBox="0 0 160 40" width="100%" height="40" role="img" aria-label="${escapeHtml(loamT('Speed along this run'))}" style="display:block">
+    <line x1="2" y1="38" x2="158" y2="38" style="stroke:var(--chart-grid)"></line>
+    <polyline points="${pts.join(' ')}" fill="none" style="stroke:${c}" stroke-width="2" stroke-linejoin="round"></polyline>
+    <circle cx="${last[0]}" cy="${last[1]}" r="3.5" style="fill:${c};stroke:var(--surface)" stroke-width="1.5"></circle></svg>`;
+}
+function mpBandLabel(b) {
+  const tight = U.small(MP_BAND_TIGHT_M), open = U.small(MP_BAND_OPEN_M);
+  return b === 'tight' ? loamT('Tight, under {r}', { r: tight })
+    : b === 'medium' ? loamT('Medium, {a} to {b}', { a: tight, b: open })
+    : loamT('Open, over {r}', { r: open });
+}
+function mpDumbbellSVG(M) {
+  const rows = M.bands;
+  if (!rows.length) return '';
+  const vals = [];
+  for (const r of rows) for (const k of ['all', 'L', 'R']) if (r[k] != null) vals.push(U.speedNum(r[k]));
+  if (!vals.length) return '';
+  let lo = Math.floor(Math.min(...vals) / 5) * 5 - 5, hi = Math.ceil(Math.max(...vals) / 5) * 5 + 5;
+  if (lo < 0) lo = 0;
+  if (hi - lo < 10) hi = lo + 10;
+  const X = (v) => 120 + (U.speedNum(v) - lo) / (hi - lo) * 320;
+  const ticks = [];
+  for (let v = lo; v <= hi; v += 5) ticks.push(v);
+  const H = 24 + rows.length * 30 + 10;
+  const grid = ticks.map(v => `<line x1="${(120 + (v - lo) / (hi - lo) * 320).toFixed(1)}" y1="6" x2="${(120 + (v - lo) / (hi - lo) * 320).toFixed(1)}" y2="${H - 28}" style="stroke:var(--chart-grid)"></line>`).join('');
+  const tickText = ticks.map((v, i) => `<text x="${(120 + (v - lo) / (hi - lo) * 320).toFixed(1)}" y="${H - 12}" text-anchor="middle">${v}${i === ticks.length - 1 ? ' ' + U.speedUnit() : ''}</text>`).join('');
+  const body = rows.map((r, i) => {
+    const y = 20 + i * 30;
+    const label = `<text x="0" y="${y + 4}" style="fill:var(--text)">${escapeHtml(mpBandLabel(r.band))}</text>`;
+    if (M.sidesBad || r.L == null || r.R == null) {
+      const x = X(r.all);
+      return label + `<circle cx="${x.toFixed(1)}" cy="${y}" r="5.5" style="fill:var(--moss);stroke:var(--surface)" stroke-width="2"><title>${escapeHtml(loamT('{n} corners · median apex {v}', { n: r.n, v: U.speed(r.all) }))}</title></circle>
+        <text x="${(x + 10).toFixed(1)}" y="${y + 4}" style="fill:var(--text)">${U.speedNum(r.all).toFixed(1)}</text>`;
+    }
+    const xl = X(r.L), xr = X(r.R);
+    const left = Math.min(xl, xr), right = Math.max(xl, xr);
+    const lbl = (x, v, anchor) => `<text x="${x.toFixed(1)}" y="${y + 4}" text-anchor="${anchor}" style="fill:var(--text)">${U.speedNum(v).toFixed(1)}</text>`;
+    const sep = Math.abs(xl - xr) > 36;
+    return label
+      + `<line x1="${left.toFixed(1)}" y1="${y}" x2="${right.toFixed(1)}" y2="${y}" style="stroke:var(--border)" stroke-width="2"></line>`
+      + `<circle cx="${xl.toFixed(1)}" cy="${y}" r="5.5" style="fill:var(--sky);stroke:var(--surface)" stroke-width="2"><title>${escapeHtml(loamT('Left · {n} corners · median apex {v}', { n: r.nL, v: U.speed(r.L) }))}</title></circle>`
+      + `<circle cx="${xr.toFixed(1)}" cy="${y}" r="5.5" style="fill:var(--clay);stroke:var(--surface)" stroke-width="2"><title>${escapeHtml(loamT('Right · {n} corners · median apex {v}', { n: r.nR, v: U.speed(r.R) }))}</title></circle>`
+      + (sep
+        ? lbl(left - 9, xl < xr ? r.L : r.R, 'end') + lbl(right + 9, xl < xr ? r.R : r.L, 'start')
+        : `<text x="${(right + 9).toFixed(1)}" y="${y + 4}" style="fill:var(--text)">${escapeHtml(loamT('L {l} · R {r}', { l: U.speedNum(r.L).toFixed(1), r: U.speedNum(r.R).toFixed(1) }))}</text>`);
+  }).join('');
+  return `<svg viewBox="0 0 470 ${H}" width="100%" role="img" aria-label="${escapeHtml(loamT('Median apex speed by corner size and side'))}" class="mp-chart-text" style="display:block;overflow:visible">${grid}${body}<g style="fill:var(--text-muted)">${tickText}</g></svg>`;
+}
+function mpJumpBarsSVG(M) {
+  const J = M.jumpsAll.filter(j => j.hang != null);
+  if (!J.length) return '';
+  const n = J.length;
+  const W = 420, left = 44, right = 8, baseY = 100, top = 10;
+  const slot = (W - left - right) / n;
+  const bar = Math.max(3, Math.min(22, slot - 4));
+  const maxHang = Math.max(...J.map(j => j.hang), 0.3);
+  const scale = (baseY - top) / (Math.ceil(maxHang / 0.4) * 0.4);
+  const gridVals = [];
+  for (let v = 0.4; v <= maxHang + 0.39; v += 0.4) gridVals.push(+v.toFixed(1));
+  const grid = gridVals.map(v => `<line x1="${left}" y1="${(baseY - v * scale).toFixed(1)}" x2="${W - right}" y2="${(baseY - v * scale).toFixed(1)}" style="stroke:var(--chart-grid)"></line><text x="${left - 6}" y="${(baseY - v * scale + 4).toFixed(1)}" text-anchor="end" style="fill:var(--text-muted)">${v.toFixed(1)} s</text>`).join('');
+  const runOf = (j) => M.runs.find(r => j.t_phone >= r.tStart && j.t_phone <= r.tEnd);
+  let best = -1;
+  J.forEach((j, i) => { if (best < 0 || j.hang > J[best].hang) best = i; });
+  const bars = J.map((j, i) => {
+    const x = left + i * slot + (slot - bar) / 2, h = j.hang * scale, y = baseY - h;
+    const r = runOf(j);
+    const c = r && r.color ? r.color : 'var(--text-muted)';
+    const rad = Math.min(4, bar / 2);
+    const title = loamT('Jump {i} · {hang} s hang{where}{dist}{land}', {
+      i: i + 1, hang: j.hang.toFixed(2),
+      where: r ? ' · ' + r.label : '',
+      dist: j.dist != null ? ' · ' + U.small(j.dist) : '',
+      land: j.landingG != null ? ' · ' + loamT('landed {g} g', { g: j.landingG.toFixed(1) }) : '',
+    });
+    return `<path d="M${x.toFixed(1)},${baseY} V${(y + rad).toFixed(1)} Q${x.toFixed(1)},${y.toFixed(1)} ${(x + rad).toFixed(1)},${y.toFixed(1)} H${(x + bar - rad).toFixed(1)} Q${(x + bar).toFixed(1)},${y.toFixed(1)} ${(x + bar).toFixed(1)},${(y + rad).toFixed(1)} V${baseY} Z" style="fill:${c}"><title>${escapeHtml(title)}</title></path>`;
+  }).join('');
+  const bx = left + best * slot + slot / 2;
+  const label = `<text x="${bx.toFixed(1)}" y="${(baseY - J[best].hang * scale - 5).toFixed(1)}" text-anchor="middle" style="fill:var(--text)" font-weight="600">${J[best].hang.toFixed(2)} s</text>`;
+  return `<svg viewBox="0 0 ${W} 112" width="100%" role="img" aria-label="${escapeHtml(loamT('Hang time of every jump, in ride order'))}" class="mp-chart-text" style="display:block;overflow:visible">${grid}${bars}<line x1="${left}" y1="${baseY}" x2="${W - right}" y2="${baseY}" style="stroke:var(--border)"></line>${label}</svg>`;
+}
+function mpStripHTML(r) {
+  const span = Math.max(1e-6, r.tEnd - r.tStart);
+  const ticks = r.turns.map((T, k) => {
+    const left = Math.max(0, Math.min(100, (T.tPeak - r.tStart) / span * 100));
+    const kind = r.kept[k];
+    const title = loamT('Corner {n} · {kind}', { n: T.n, kind: kind === 'scrubbed' ? loamT('scrubbed {v}', { v: U.speed(turnScrubMph(T) / 2.23694) }) : kind === 'carried' ? loamT('speed carried') : kind === 'held' ? loamT('speed held') : loamT('no speed read') });
+    return `<span class="mp-tick mp-tick-${kind || 'none'}" style="left:${left.toFixed(1)}%" title="${escapeHtml(title)}"></span>`;
+  }).join('');
+  const pct = r.keptPct != null ? `${r.keptPct} %` : '—';
+  return `<div class="mp-strip-row">
+      <span class="mp-dot" style="background:${r.color || 'var(--text-muted)'}"></span>
+      <span class="mp-strip-label">${escapeHtml(r.label)}</span>
+      <div class="mp-strip" aria-label="${escapeHtml(loamT('{n} corners along {run}', { n: r.turns.length, run: r.label }))}">${ticks}</div>
+      <span class="mp-strip-pct" title="${escapeHtml(loamT('Share of corners whose speed was carried or held'))}">${pct}</span>
+    </div>`;
+}
+
+/* ---- the markup ---- */
+function mpTile(label, value, sub, opts = {}) {
+  return `<div class="mp-tile${opts.cls ? ' ' + opts.cls : ''}">
+      <div class="mp-tile-label">${label}</div>
+      <div class="mp-tile-value">${value}</div>
+      <div class="mp-tile-sub">${sub || ''}</div>
+    </div>`;
+}
+function mpUnit(v, unit) { return `${v} <span class="mp-unit">${unit}</span>`; }
+function mpSectionHead(title, sub, right) {
+  /* The subtitle is prose about the section, so the Simple view's budget hides it the way it hides
+     every classic section's `.analysis-explanation` subtitle. */
+  return `<div class="mp-section-head"><div><h2 class="mp-h2">${title}</h2>${sub ? `<p class="mp-sub analysis-explanation">${sub}</p>` : ''}</div>${right || ''}</div>`;
+}
+function mpChip(icon, text, cls) {
+  return `<span class="mp-chip${cls ? ' ' + cls : ''}">${icon || ''}${text}</span>`;
+}
+const MP_ICON = {
+  lock: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>',
+  phone: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"></rect><circle cx="12" cy="18" r="1"></circle></svg>',
+  head: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0v4a2 2 0 0 1-2 2h-1v-6h3M4 12v4a2 2 0 0 0 2 2h1v-6H4"></path></svg>',
+  bolt: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6z"></path></svg>',
+  heart: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20.8 8.6a5 5 0 0 0-8.8-2.4A5 5 0 0 0 3.2 8.6c0 5 8.8 10.4 8.8 10.4s8.8-5.4 8.8-10.4z"></path></svg>',
+  check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="m5 12 5 5L20 7"></path></svg>',
+  warn: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3 2 20h20z"></path><path d="M12 10v4M12 17v.5"></path></svg>',
+  play: '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13-8z"></path></svg>',
+};
+function mpTitle(D) {
+  const app = appSessionContext(D);
+  const label = rsLabel(D.title);
+  return app && app.title ? app.title : label && label !== 'RECORDING' ? label
+    : loamT('{activity} session', { activity: lexNounT(sportLex(displaySport(D)), { cap: true }) });
+}
+function mpWhen(D) {
+  const date = D.recordedAt || parseUTCFromFilename(D.title || '');
+  const d = date ? new Date(date) : null;
+  if (!d || !Number.isFinite(d.getTime())) return '';
+  const lang = loamLang() === 'en' ? undefined : loamLang();
+  const day = d.toLocaleDateString(lang, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const ride = D.ride;
+  if (!ride || !Number.isFinite(ride.start) || !Number.isFinite(ride.end)) return day;
+  const clock = (t) => new Date(d.getTime() + t * 1000).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
+  return `${day} · ${clock(ride.start)} – ${clock(ride.end)}`;
+}
+function mpHeaderHTML(D, M) {
+  const chips = [];
+  const mount = D.phoneMount === 'handlebar' ? loamT('handlebar mount') : loamT('on the body');
+  const strat = M.calib && M.calib.strategy;
+  const calibWord = M.shifted ? loamT('phone moved') : strat === 'borrowed' ? loamT('borrowed calibration') : M.sidesBad ? loamT('pose mismatch') : strat ? loamT('calibrated') : '';
+  chips.push(mpChip(MP_ICON.phone, escapeHtml(`iPhone · ${mount}${calibWord ? ', ' + calibWord : ''}`)));
+  if (M.hasHead) chips.push(mpChip(MP_ICON.head, escapeHtml(loamT('AirPods · head motion'))));
+  if (M.hasFit) chips.push(mpChip(MP_ICON.bolt, escapeHtml(M.hasMotor ? loamT('Bike FIT · motor and rider power') : loamT('Bike FIT · jumps and wheel speed'))));
+  if (M.hr.length) chips.push(mpChip(MP_ICON.heart, escapeHtml(M.hasWrist ? loamT('Watch · heart rate and wrist motion') : loamT('Watch · heart rate'))));
+  else if (M.hasWrist) chips.push(mpChip(MP_ICON.heart, escapeHtml(loamT('Watch · wrist motion'))));
+  const sig = document.getElementById('rideSignatureSection');
+  const canShare = sig && !sig.classList.contains('hidden');
+  return `<section class="mp-header" aria-label="${escapeHtml(loamT('Ride'))}">
+      <div class="mp-header-main">
+        <div class="mp-eyebrow">${escapeHtml(mpWhen(D))}</div>
+        <h1 class="mp-h1">${activityIcon(M.sport)}<span>${escapeHtml(mpTitle(D))}</span></h1>
+        <div class="mp-chips">
+          <span class="mp-sport">${escapeHtml(sessionSportLabel(M.sport))}</span>
+          ${chips.join('')}
+          <span class="mp-local">${MP_ICON.lock}${escapeHtml(loamT('Analysed on this device. Nothing uploaded.'))}</span>
+        </div>
+      </div>
+      <div class="mp-header-actions">
+        ${canShare ? `<button type="button" class="mp-btn" id="mpShareBtn">${escapeHtml(loamT('Share card'))}</button>` : ''}
+        <button type="button" class="mp-btn mp-btn-ghost" id="mpClassicBtn" title="${escapeHtml(loamT('Switch back to the classic results layout'))}">${escapeHtml(loamT('Classic layout'))}</button>
+      </div>
+    </section>`;
+}
+function mpHeadlineHTML(D, M) {
+  const s = M.s;
+  const heroLabel = M.mode === 'laps' ? loamT('Time on laps') : M.mode === 'marks' ? loamT('Time in marked runs')
+    : M.mode === 'intervals' ? loamT('Time in reps') : loamT('Time descending');
+  const nounOf = (n) => M.mode === 'laps' ? loamT(n === 1 ? '{n} lap' : '{n} laps', { n })
+    : M.mode === 'marks' || M.mode === 'intervals' ? loamT(n === 1 ? '{n} run' : '{n} runs', { n })
+    : loamT(n === 1 ? '{n} descent' : '{n} descents', { n });
+  const hero = M.hero
+    ? `<div class="mp-hero"><div class="mp-hero-label">${heroLabel}</div><div class="mp-hero-value">${mpTime(M.hero.sec)}</div>
+        <div class="mp-hero-sub">${escapeHtml(nounOf(M.hero.n))} · ${escapeHtml(loamT('{dist} downhill', { dist: U.dist(M.hero.dist) }))}${M.hero.drop > 0 ? ' · ' + escapeHtml(loamT('{drop} dropped', { drop: U.elev(M.hero.drop) })) : ''}${Number.isFinite(M.moving) ? ' · ' + escapeHtml(loamT('of {t} moving', { t: mpTime(M.moving) })) : ''}</div></div>`
+    : `<div class="mp-hero"><div class="mp-hero-label">${escapeHtml(loamT('Moving time'))}</div><div class="mp-hero-value">${mpTime(M.moving)}</div>
+        <div class="mp-hero-sub">${escapeHtml(loamT('No descent found in this recording.'))}</div></div>`;
+  const tiles = [];
+  tiles.push(mpTile(escapeHtml(loamT('Top speed')), U.speed(s.maxSpeed), escapeHtml(loamT('fastest moment of the ride'))));
+  const turnSub = !s.nTurns ? '' : M.sidesBad ? escapeHtml(loamT('Turn sides uncertain'))
+    : escapeHtml(loamT('{l} left · {r} right', { l: s.leftTurns, r: s.rightTurns })) + (s.turnsScopedToDescents ? escapeHtml(loamT(' · on descents')) : '');
+  tiles.push(mpTile(escapeHtml(loamT('Turns')), s.nTurns != null ? s.nTurns : '—', turnSub));
+  if (M.jm) tiles.push(mpTile(escapeHtml(loamT('Jumps')), M.jm.n, escapeHtml(M.jm.maxDist != null ? loamT('biggest {d}', { d: U.small(M.jm.maxDist) }) : loamT('longest hang {ms} ms', { ms: M.jm.heroMs }))));
+  else if (M.phoneJumps.length) tiles.push(mpTile(escapeHtml(loamT('Jumps')), '~' + M.phoneJumps.length, escapeHtml(loamT('phone estimate · longest {s} s', { s: Math.max(...M.phoneJumps.map(j => j.hang || 0)).toFixed(2) }))));
+  else tiles.push(mpTile(escapeHtml(loamT('Jumps')), '0', escapeHtml(M.hasFit ? loamT('none in the bike computer\'s file') : loamT('none felt by the phone'))));
+  tiles.push(mpTile(escapeHtml(loamT('Scrubbed corners')), M.judgedN ? M.scrubbedN : '—',
+    !M.judgedN ? escapeHtml(loamT('needs a speed read at each corner'))
+      : M.scrubbedN ? escapeHtml(loamT('of {n} corners · worst lost {v}', { n: M.judgedN, v: U.speed(M.worstScrub / 2.23694) }))
+      : escapeHtml(loamT('of {n} corners · none lost more than {v}', { n: M.judgedN, v: U.speed(FORM_SCRUB_MIN_MPH / 2.23694) }))));
+  tiles.push(mpTile(escapeHtml(loamT('Speed kept')), M.keptPct != null ? mpUnit(M.keptPct, '%') : '—',
+    escapeHtml(loamT('corners carried or held'))));
+  const facts = [];
+  const fact = (v, l) => facts.push(`<span><strong>${v}</strong> ${escapeHtml(l)}</span>`);
+  if (Number.isFinite(s.distance)) fact(U.dist(s.distance), loamT('distance'));
+  if (M.climbGain != null && M.climbGain >= 5) fact('~' + U.elev(M.climbGain), loamT('climbed'));
+  if (Number.isFinite(M.elapsed) && Math.abs(M.elapsed - (M.moving || 0)) > 30) fact(mpTime(M.elapsed), loamT('elapsed'));
+  if (Number.isFinite(M.moving)) fact(mpTime(M.moving), loamT('moving'));
+  if (M.hrAvg != null) fact(`${M.hrAvg} · ${M.hrMax}`, loamT('avg · max heart rate'));
+  if (M.battery) fact(`${M.battery.startPct} → ${M.battery.endPct} %`, loamT('battery'));
+  if (M.assistRatio != null) fact(M.assistRatio.toFixed(1) + '×', loamT('assist ratio'));
+  return `<section class="mp-headline" aria-label="${escapeHtml(loamT('Headline numbers'))}">
+      <div class="mp-tiles">${hero}${tiles.join('')}</div>
+      <div class="mp-facts">${facts.join('')}</div>
+    </section>`;
+}
+function mpRunCardHTML(r, M) {
+  const m = r.metrics || {};
+  const tag = r.src && r.src.autoTag;
+  const badge = tag && tag.name && tag.name !== r.label ? `<span class="mp-badge">${escapeHtml(tag.name)}</span>` : '';
+  const skipBadge = r.skipped ? `<span class="mp-badge mp-badge-muted">${escapeHtml(loamT('not a trail'))}</span>` : '';
+  const hasTurns = r.turns.length > 0;
+  const gate = tag ? tagLapGate(tag) : null;
+  let actions = '';
+  if (r.src) {
+    actions = (tag
+      ? (gate === 'compare' ? `<button type="button" class="mp-btn mp-btn-small" data-act="compare" data-i="${r.i}">${escapeHtml(loamT('Compare laps'))}</button>` : '')
+        + `<button type="button" class="mp-btn mp-btn-small mp-btn-ghost" data-act="tag" data-i="${r.i}">${escapeHtml(loamT('Retag'))}</button>`
+      : `<button type="button" class="mp-btn mp-btn-small mp-btn-ghost" data-act="tag" data-i="${r.i}">${escapeHtml(loamT('Name this trail'))}</button>`);
+  }
+  const sides = M.sidesBad ? '' : ` · ${m.leftTurns}L/${m.rightTurns}R`;
+  return `<article class="mp-card mp-run${r.skipped ? ' mp-run-skipped' : ''}" data-i="${r.i}">
+      <div class="mp-run-head"><span class="mp-dot" style="background:${r.color || 'var(--text-muted)'}"></span><span class="mp-run-name">${escapeHtml(r.label)}</span>${badge}${skipBadge}<span class="mp-run-best" id="mpBest${r.i}"></span></div>
+      <div class="mp-run-time"><span class="mp-run-clock">${mpTime(m.duration)}</span><span class="mp-run-delta" id="mpDelta${r.i}"></span></div>
+      ${mpSparkSVG(r.speed, r.color)}
+      <div class="mp-run-stats">
+        <span><strong>${U.dist(m.distance)}</strong>${m.drop != null ? ' · −' + U.elev(m.drop) : ''}</span>
+        <span><strong>${U.speed(m.avgSpeed)}</strong> ${escapeHtml(loamT('avg'))}</span>
+        <span><strong>${m.nTurns}</strong> ${escapeHtml(loamT('turns'))}${escapeHtml(sides)}</span>
+        <span><strong>${U.speed(m.maxSpeed)}</strong> ${escapeHtml(loamT('max'))}</span>
+        <span><strong>${r.judged ? r.scrubbed : '—'}</strong> ${escapeHtml(loamT('scrubbed'))}${r.keptPct != null ? ' · ' + escapeHtml(loamT('{p} % kept', { p: r.keptPct })) : ''}</span>
+        <span><strong>${r.jumps.length}</strong> ${escapeHtml(r.jumps.length === 1 ? loamT('jump') : loamT('jumps'))}${r.maxLean != null ? ' · ' + escapeHtml(loamT('lean {d}°', { d: Math.round(r.maxLean) })) : ''}</span>
+      </div>
+      <div class="mp-run-foot">
+        <button type="button" class="mp-link" data-act="focus" data-i="${r.i}">${escapeHtml(loamT('Show on map'))}</button>
+        ${hasTurns ? `<button type="button" class="mp-link" data-act="open" data-i="${r.i}">${escapeHtml(loamT('Open corners'))} ›</button>` : ''}
+        <span class="mp-run-actions">${actions}</span>
+      </div>
+    </article>`;
+}
+function mpCorneringHTML(M) {
+  const n = M.turns.length;
+  if (!n) return `<article class="mp-card"><h3 class="mp-h3">${escapeHtml(loamT('Cornering'))}</h3><p class="mp-muted">${escapeHtml(loamT('No corners were detected on this ride.'))}</p></article>`;
+  const sidesLine = M.sidesBad
+    ? `<p class="mp-muted analysis-explanation">${escapeHtml(loamT('Left and right are withheld on this ride: the calibration pose does not match the riding pose.'))}</p>`
+    : `<div class="mp-split"><div class="mp-split-labels"><span>${escapeHtml(loamT('Left {n}', { n: M.s.leftTurns }))}</span><span>${escapeHtml(loamT('Right {n}', { n: M.s.rightTurns }))}</span></div>
+        <div class="mp-split-bar"><span style="flex:${Math.max(1, M.s.leftTurns || 0)} 0 0;background:var(--sky)"></span><span style="flex:${Math.max(1, M.s.rightTurns || 0)} 0 0;background:var(--clay)"></span></div></div>`;
+  /* The one sentence: the band where the two sides differ most, when both sides have a say. */
+  let callout = '';
+  if (!M.sidesBad) {
+    const diffs = M.bands.filter(b => b.L != null && b.R != null && b.nL >= 3 && b.nR >= 3)
+      .map(b => ({ b, gap: U.speedNum(b.L) - U.speedNum(b.R) })).sort((a, c) => Math.abs(c.gap) - Math.abs(a.gap));
+    if (diffs.length && Math.abs(diffs[0].gap) >= 1) {
+      const d = diffs[0];
+      callout = loamT('{band} corners: {slow} run {gap} {unit} slower than {fast}. Trail shape and line explain part of that; it is a difference, not a verdict.', {
+        band: mpBandLabel(d.b.band), slow: d.gap > 0 ? loamT('right-handers') : loamT('left-handers'),
+        gap: Math.abs(d.gap).toFixed(1), unit: U.speedUnit(), fast: d.gap > 0 ? loamT('lefts') : loamT('rights') });
+    }
+  }
+  if (!callout && M.keptPct != null) callout = loamT('{p} % of corners carried or held their speed; {n} scrubbed more than {v}.', { p: M.keptPct, n: M.scrubbedN, v: U.speed(FORM_SCRUB_MIN_MPH / 2.23694) });
+  const legend = M.sidesBad ? '' : `<span class="mp-legend"><span class="mp-dot" style="background:var(--sky)"></span>${escapeHtml(loamT('Left'))}<span class="mp-dot" style="background:var(--clay)"></span>${escapeHtml(loamT('Right'))}</span>`;
+  return `<article class="mp-card">
+      <div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Cornering'))}</h3><span class="mp-muted">${escapeHtml(loamT('{n} corners · phone yaw, {src} speed', { n, src: M.fitUsed ? loamT('bike') : 'GPS' }))}</span></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Median apex speed'))}</div><div class="mp-big">${U.speed(M.medianApex)}</div>
+        <div class="mp-muted">${escapeHtml(loamT('median radius {r}', { r: M.s.medianRadius != null ? U.small(M.s.medianRadius) : '—' }))}${M.maxLean ? ' · ' + escapeHtml(loamT('max lean {d}°', { d: Math.round(M.maxLean) })) : ''}</div></div>
+      ${sidesLine}
+      ${M.bands.length ? `<div><div class="mp-card-head"><span class="mp-strong">${escapeHtml(loamT('Apex speed by corner size'))}</span>${legend}</div>${mpDumbbellSVG(M)}</div>` : ''}
+      ${callout ? `<div class="mp-note analysis-explanation">${escapeHtml(callout)}</div>` : ''}
+    </article>`;
+}
+function mpJumpsHTML(M) {
+  const head = `<div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Jumps'))}</h3><span class="mp-muted">${escapeHtml(M.jm ? loamT('{n} · bike computer airtime, phone landings', { n: M.jm.n }) : M.phoneJumps.length ? loamT('{n} · phone freefall estimate', { n: M.phoneJumps.length }) : '')}</span></div>`;
+  if (!M.jumpsAll.length) {
+    return `<article class="mp-card">${head}<p class="mp-muted analysis-explanation">${escapeHtml(M.hasFit ? loamT('The bike computer logged no jumps inside this recording.') : loamT('The phone felt no airtime on this ride. A Specialized bike computer\'s FIT adds native jumps.'))}</p></article>`;
+  }
+  const lead = M.jm && M.jm.maxDist != null
+    ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Longest jump'))}</div><div class="mp-big">${U.small(M.jm.maxDist)}</div><div class="mp-muted">${escapeHtml(loamT('{speed} takeoff × {ms} ms hang', { speed: U.speed(M.jm.longest.speed_mps), ms: Math.round(M.jm.longest.hang * 1000) }))}</div></div>`
+    : `<div><div class="mp-tile-label">${escapeHtml(loamT('Longest hang'))}</div><div class="mp-big">${mpUnit(Math.max(...M.jumpsAll.map(j => j.hang || 0)).toFixed(2), 's')}</div><div class="mp-muted">${escapeHtml(M.jm ? '' : loamT('freefall felt by the phone, not measured airtime'))}</div></div>`;
+  const facts = [];
+  const total = M.jumpsAll.reduce((a, j) => a + (j.hang || 0), 0);
+  facts.push(`<span>${escapeHtml(loamT('Total airtime'))} <strong>${total.toFixed(1)} s</strong></span>`);
+  if (M.landings.length) facts.push(`<span>${escapeHtml(loamT('Hardest landing'))} <strong>${M.maxLanding.toFixed(1)} g</strong> · ${escapeHtml(loamT('{n} measured', { n: M.landings.length }))}</span>`);
+  if (M.jm && M.jm.nBig) facts.push(`<span><strong>${M.jm.nBig}</strong> ${escapeHtml(loamT('over {bar}', { bar: U.small(JUMP_BIG_M) }))}</span>`);
+  const legend = M.runs.filter(r => r.jumps.length).slice(0, 8).map(r => `<span class="mp-legend"><span class="mp-dot" style="background:${r.color || 'var(--text-muted)'}"></span>${escapeHtml(r.label)}</span>`).join('');
+  return `<article class="mp-card">${head}${lead}
+      <div><div class="mp-card-head"><span class="mp-strong">${escapeHtml(loamT('Hang time per jump, in ride order'))}</span><span class="mp-legend-row">${legend}</span></div>${mpJumpBarsSVG(M)}</div>
+      <div class="mp-facts mp-facts-tight">${facts.join('')}</div>
+      <div class="mp-note analysis-explanation">${escapeHtml(loamT('Jumps are reported, not scored: hang and distance describe the trail as much as the rider, so the coach never tells you to go bigger.'))}</div>
+    </article>`;
+}
+function mpBrakingHTML(M) {
+  const shown = M.runs.filter(r => r.turns.length).slice(0, 10);
+  if (!M.judgedN) return `<article class="mp-card"><h3 class="mp-h3">${escapeHtml(loamT('Where the speed went'))}</h3><p class="mp-muted analysis-explanation">${escapeHtml(loamT('Corner speeds need a GPS or bike-computer speed read at each corner; this ride has none to judge.'))}</p></article>`;
+  const worst = M.runs.filter(r => r.scrubbed).sort((a, b) => b.scrubbed - a.scrubbed)[0];
+  const cleanest = M.runs.filter(r => r.cleanS != null).sort((a, b) => b.cleanS - a.cleanS)[0];
+  const noScrub = M.runs.filter(r => r.judged && !r.scrubbed);
+  const lines = [];
+  if (worst) lines.push(loamT('{run} scrubbed {n} corners, the most on this ride.', { run: worst.label, n: worst.scrubbed }));
+  if (noScrub.length) lines.push(loamT('{runs}: no corner scrubbed more than {v}.', { runs: noScrub.map(r => r.label).join(', '), v: U.speed(FORM_SCRUB_MIN_MPH / 2.23694) }));
+  else if (cleanest) lines.push(loamT('Longest clean stretch: {t} on {run}.', { t: mpTime(cleanest.cleanS), run: cleanest.label }));
+  return `<article class="mp-card">
+      <div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Where the speed went'))}</h3><span class="mp-muted">${escapeHtml(loamT('entry speed against the slowest of apex and exit'))}</span></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Scrubbed corners'))}</div><div class="mp-big">${M.scrubbedN} <span class="mp-unit">${escapeHtml(loamT('of {n}', { n: M.judgedN }))}</span></div>
+        <div class="mp-muted analysis-explanation">${escapeHtml(loamT('a corner is scrubbed when it loses more than {v} between entry and apex or exit', { v: U.speed(FORM_SCRUB_MIN_MPH / 2.23694) }))}</div></div>
+      <div class="mp-card-head"><span class="mp-strong">${escapeHtml(loamT('Every corner, along each run'))}</span>
+        <span class="mp-legend-row"><span class="mp-legend"><span class="mp-tick-key mp-tick-carried"></span>${escapeHtml(loamT('carried'))}</span><span class="mp-legend"><span class="mp-tick-key mp-tick-held"></span>${escapeHtml(loamT('held'))}</span><span class="mp-legend"><span class="mp-tick-key mp-tick-scrubbed"></span>${escapeHtml(loamT('scrubbed'))}</span></span></div>
+      <div class="mp-strips">${shown.map(mpStripHTML).join('')}${M.runs.filter(r => r.turns.length).length > shown.length ? `<div class="mp-muted">${escapeHtml(loamT('{n} more in the table below', { n: M.runs.filter(r => r.turns.length).length - shown.length }))}</div>` : ''}</div>
+      ${lines.length ? `<div class="mp-note analysis-explanation">${escapeHtml(lines.join(' '))}</div>` : ''}
+    </article>`;
+}
+function mpHeartHTML(M) {
+  if (!M.hr.length) return '';
+  const tops = M.runHr.map(h => h.top).filter(v => v != null);
+  const rests = M.runHr.map(h => h.restS).filter(v => v != null);
+  const rows = [];
+  if (tops.length) rows.push(`<div><div class="mp-tile-label">${escapeHtml(loamT('Heart rate at the top of each run'))}</div><div class="mp-strong">${M.runHr.map(h => h.top != null ? h.top : '—').join(' · ')}</div></div>`);
+  if (rests.length) rows.push(`<div><div class="mp-tile-label">${escapeHtml(loamT('Rest before dropping in'))}</div><div class="mp-strong">${M.runHr.map(h => h.restS != null ? Math.round(h.restS / 60) : '—').join(' · ')} ${escapeHtml(loamT('min'))}</div></div>`);
+  if (M.pedalPct != null) rows.push(`<div><div class="mp-tile-label">${escapeHtml(loamT('Pedalling on the descents'))}</div><div class="mp-strong">${M.pedalPct} % ${escapeHtml(loamT('of descending time'))}</div></div>`);
+  if (M.riderWh != null && M.riderWh > 0) rows.push(`<div><div class="mp-tile-label">${escapeHtml(loamT('Your own work'))}</div><div class="mp-strong">${Math.round(M.riderWh * 3.6)} kJ</div></div>`);
+  let note = '';
+  const hardest = M.runHr.map((h, i) => ({ ...h, r: M.runs[i] })).filter(h => h.top != null).sort((a, b) => b.top - a.top)[0];
+  if (hardest && hardest.r && hardest.r.judged && M.runs.filter(r => r.judged).length > 1) {
+    const mostScrub = M.runs.filter(r => r.judged).sort((a, b) => b.scrubbed - a.scrubbed)[0];
+    if (mostScrub && mostScrub.i === hardest.r.i && mostScrub.scrubbed > 0) {
+      note = loamT('{run} started at {bpm} bpm, the highest of the ride, and it is also the run with the most scrubbed corners.', { run: hardest.r.label, bpm: hardest.top });
+    }
+  }
+  return `<article class="mp-card">
+      <div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Heart'))}</h3><span class="mp-muted">${escapeHtml(loamT('watch heart rate'))}</span></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Average heart rate'))}</div><div class="mp-big">${mpUnit(M.hrAvg, 'bpm')}</div><div class="mp-muted">${escapeHtml(loamT('max {bpm}', { bpm: M.hrMax }))}</div></div>
+      ${rows.length ? `<div class="mp-grid2">${rows.join('')}</div>` : ''}
+      ${note ? `<div class="mp-note analysis-explanation">${escapeHtml(note)}</div>` : ''}
+    </article>`;
+}
+function mpHeadHTML(M) {
+  if (!M.hasHead) return '';
+  const g = M.gaze;
+  const cover = M.headCoverage != null ? loamT('AirPods worn {p} % of the ride', { p: Math.round(M.headCoverage * 100) }) : '';
+  if (!g) return `<article class="mp-card"><div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Head'))}</h3><span class="mp-muted">${escapeHtml(cover)}</span></div><p class="mp-muted analysis-explanation">${escapeHtml(loamT('Not enough corners with a head read to say when the head turned in.'))}</p></article>`;
+  const maxLead = Math.max(0.3, ...g.rows.map(r => Math.abs(r.lead || 0)));
+  const bars = g.rows.map(r => {
+    const v = r.lead || 0;
+    const w = Math.round(Math.abs(v) / maxLead * 100);
+    return `<div class="mp-bar-row"><span class="mp-bar-label">${escapeHtml(mpBandLabel(r.band))}</span><div class="mp-bar"><div class="mp-bar-fill" style="width:${w}%;background:${v >= 0 ? 'var(--sky)' : 'var(--clay)'}"></div></div><span class="mp-bar-val">${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)} s</span></div>`;
+  }).join('');
+  const lead = g.rows[0];
+  return `<article class="mp-card">
+      <div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Head'))} <span class="mp-exp">${escapeHtml(loamT('EXPERIMENTAL'))}</span></h3><span class="mp-muted">${escapeHtml(cover)}</span></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Head turned in before the bike by'))}</div><div class="mp-big">${lead.lead != null ? (lead.lead >= 0 ? '+' : '−') + Math.abs(lead.lead).toFixed(1) + ' s' : '—'}</div><div class="mp-muted">${escapeHtml(loamT('in {band} corners · looked in before the apex on {p} % of corners', { band: mpBandLabel(lead.band).toLowerCase(), p: g.lookedPct }))}</div></div>
+      <div class="mp-bars">${bars}</div>
+      <div class="mp-note analysis-explanation">${escapeHtml(loamT('The AirPods measure where the head points, not where the eyes look. Descriptive only: no corner here is graded on it.'))}</div>
+    </article>`;
+}
+function mpMotorHTML(M) {
+  if (!M.hasMotor) return '';
+  const tiles = [];
+  tiles.push(mpTile(escapeHtml(loamT('Assist ratio')), M.assistRatio != null ? M.assistRatio.toFixed(1) + '×' : '—',
+    escapeHtml(loamT('motor {m} kJ · you {r} kJ', { m: Math.round((M.motorWh || 0) * 3.6), r: Math.round((M.riderWh || 0) * 3.6) }))));
+  if (M.battery) {
+    tiles.push(mpTile(escapeHtml(loamT('Battery')), `${M.battery.startPct} → ${M.battery.endPct} <span class="mp-unit">%</span>`,
+      escapeHtml(loamT('{used} % used', { used: M.battery.usedPct })) + (M.battery.perHourPct != null ? ' · ' + escapeHtml(loamT('{rate} %/h', { rate: M.battery.perHourPct.toFixed(0) })) : '')));
+    const km = M.s.distance / 1000;
+    if (km > 1 && M.battery.usedPct >= 5) {
+      const whPerKm = M.motorWh / km;
+      const leftM = M.s.distance * (M.battery.endPct / M.battery.usedPct);
+      tiles.push(mpTile(escapeHtml(loamT('Motor energy')), mpUnit(whPerKm.toFixed(0), U.metric() ? 'Wh/km' : 'Wh/mi'),
+        escapeHtml(loamT('about {dist} left at this pace', { dist: U.dist(leftM) }))));
+    }
+  }
+  const stats = cadPowerStats(M.fitRows.length ? M.fitRows : null);
+  const downRows = M.fitRows.filter(r => r.motorPower != null && (M.ride && (M.runs.some(x => r.t_phone >= x.tStart && r.t_phone <= x.tEnd))));
+  if (downRows.length >= 20) tiles.push(mpTile(escapeHtml(loamT('Motor on the descents')), mpUnit(Math.round(mpMean(downRows.map(r => r.motorPower))), 'W'), escapeHtml(loamT('average while descending'))));
+  /* Assist mode share by moving sample, labelled as this bike labels them (Levo: 1 Eco, 2 Trail,
+     3 Turbo). The OFF value is unknown and is not guessed. */
+  const modes = new Map();
+  let moving = 0;
+  for (const r of M.fitRows) {
+    if (r.assistMode == null) continue;
+    if (!((r.cad != null && r.cad >= 25) || (r.speed != null && r.speed > 1))) continue;
+    moving++;
+    modes.set(r.assistMode, (modes.get(r.assistMode) || 0) + 1);
+  }
+  let modeBar = '';
+  if (moving >= 20 && modes.size) {
+    const order = [...modes.entries()].sort((a, b) => a[0] - b[0]);
+    const steps = ['#86b6ef', '#2a78d6', '#104281', '#0a2a52', '#7b5fc0', '#8f7ad6'];
+    modeBar = `<div class="mp-modes"><div class="mp-card-head"><span class="mp-strong">${escapeHtml(loamT('Assist mode'))}</span><span class="mp-muted">${escapeHtml(loamT('share of moving time, as this bike labels its modes'))}</span></div>
+      <div class="mp-split-bar">${order.map(([m, n], i) => `<span style="flex:${n} 0 0;background:${steps[i % steps.length]}" title="${escapeHtml((MP_ASSIST_MODE_NAMES[m] || loamT('Mode {n}', { n: m })) + ' ' + Math.round(n / moving * 100) + ' %')}"></span>`).join('')}</div>
+      <div class="mp-legend-row">${order.map(([m, n], i) => `<span class="mp-legend"><span class="mp-dot mp-dot-sq" style="background:${steps[i % steps.length]}"></span>${escapeHtml(MP_ASSIST_MODE_NAMES[m] || loamT('Mode {n}', { n: m }))} ${Math.round(n / moving * 100)} %</span>`).join('')}</div></div>`;
+  }
+  let table = '';
+  if (stats && stats.climbs && stats.climbs.length) {
+    const rows = stats.climbs.map((c, i) => {
+      const win = M.fitRows.filter(r => r.t_phone >= c.tStart && r.t_phone <= c.tEnd);
+      const hr = M.hr.filter(x => x.t >= c.tStart && x.t <= c.tEnd).map(x => x.bpm);
+      const bat = win.filter(r => r.batteryPct != null);
+      const batDelta = bat.length >= 2 ? bat[0].batteryPct - bat[bat.length - 1].batteryPct : null;
+      const rider = win.map(r => r.power).filter(Number.isFinite);
+      const modeCounts = new Map();
+      for (const r of win) if (r.assistMode != null) modeCounts.set(r.assistMode, (modeCounts.get(r.assistMode) || 0) + 1);
+      const modeNames = [...modeCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([m]) => MP_ASSIST_MODE_NAMES[m] || loamT('Mode {n}', { n: m }));
+      return `<tr><td>${i + 1}${c.gain != null ? ' · ' + U.elev(c.gain) : ''}</td><td>${escapeHtml(modeNames.join(', ') || '—')}</td><td class="mp-num">${mpTime(c.duration)}</td><td class="mp-num">${rider.length ? Math.round(mpMean(rider)) + ' W' : '—'}</td><td class="mp-num">${c.avgAssist != null ? Math.round(c.avgAssist) + ' W' : '—'}</td><td class="mp-num">${c.avgCad != null ? Math.round(c.avgCad) : '—'}</td><td class="mp-num">${hr.length ? Math.round(mpMean(hr)) : '—'}</td><td class="mp-num">${batDelta != null && batDelta > 0 ? '−' + batDelta + ' %' : '—'}</td></tr>`;
+    }).join('');
+    table = `<div class="mp-card"><div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Each climb'))}</h3><span class="mp-muted">${escapeHtml(loamT('sustained grade above 3 %, from the bike computer'))}</span></div>
+      <div class="mp-table-wrap"><table class="mp-table"><thead><tr><th>${escapeHtml(loamT('Climb'))}</th><th>${escapeHtml(loamT('Mode'))}</th><th class="mp-num">${escapeHtml(loamT('Time'))}</th><th class="mp-num">${escapeHtml(loamT('You'))}</th><th class="mp-num">${escapeHtml(loamT('Motor'))}</th><th class="mp-num">${escapeHtml(loamT('Cadence'))}</th><th class="mp-num">${escapeHtml(loamT('HR'))}</th><th class="mp-num">${escapeHtml(loamT('Battery'))}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+  return `<section class="mp-section" aria-label="${escapeHtml(loamT('Motor'))}">
+      ${mpSectionHead(escapeHtml(loamT('Motor')), escapeHtml(loamT('What the bike did and what you did, from the bike computer\'s own power channels.')))}
+      <div class="mp-tiles mp-tiles-plain">${tiles.join('')}</div>
+      <div class="mp-card"><div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Rider and motor power'))}</h3><span class="mp-legend-row"><span class="mp-legend"><span class="mp-dot mp-dot-sq" style="background:#557a2f"></span>${escapeHtml(loamT('Rider'))}</span><span class="mp-legend"><span class="mp-dot mp-dot-sq" style="background:#1f7ba6"></span>${escapeHtml(loamT('Motor, stacked on top'))}</span></span></div>
+        <div id="mpMotorChart" class="mp-plot"></div></div>
+      ${modeBar}
+      ${table}
+      <div id="mpSlotCadPower" class="mp-slot"></div>
+      <div id="mpSlotAnalog" class="mp-slot"></div>
+    </section>`;
+}
+function mpTrustHTML(D, M) {
+  const chips = [];
+  const ok = (t) => chips.push(`<span class="mp-fact mp-fact-ok">${MP_ICON.check}${escapeHtml(t)}</span>`);
+  const warn = (t, action) => chips.push(`<span class="mp-fact mp-fact-warn">${MP_ICON.warn}${escapeHtml(t)}${action || ''}</span>`);
+  const review = `<button type="button" class="mp-link" id="mpReviewCalib">${escapeHtml(loamT('Review calibration'))}</button>`;
+  if (M.shifted) warn(loamT('The phone moved during the recording: lean comparisons and form replay are withheld.'), review);
+  else if (M.sidesBad) warn(loamT('Calibration pose does not match the riding pose: left/right comparisons are withheld.'), review);
+  else if (M.calib && M.calib.strategy) ok(loamT('Mount calibrated ({how})', { how: M.calib.strategy === 'borrowed' ? loamT('borrowed from an earlier ride') : M.calib.strategy === 'riding' ? loamT('riding pose') : loamT('still window') }));
+  const acc = ((D.sensors && D.sensors.location) || []).filter(r => r.t >= M.ride.start && r.t <= M.ride.end && Number.isFinite(r.horizontalAccuracy) && r.horizontalAccuracy >= 0).map(r => r.horizontalAccuracy);
+  if (acc.length >= 20) {
+    const med = median(acc);
+    (med <= 10 ? ok : warn)(loamT('GPS · median accuracy {m}', { m: U.small(med) }));
+  }
+  if (M.headCoverage != null) (M.headCoverage >= 0.8 ? ok : warn)(loamT('AirPods worn {p} % of the ride', { p: Math.round(M.headCoverage * 100) }));
+  if (M.hasFit) (M.fitUsed ? ok : warn)(M.fitUsed ? loamT('Bike computer file lined up with the phone') : loamT('Bike computer file does not overlap this recording'));
+  if (M.hr.length) {
+    let cov = null;
+    try { cov = timeInHrZones(M.hr, { maxHR: loamMaxHR().bpm, start: M.ride.start, end: M.ride.end, pausedSpans: M.ride.pausedSpans || [] }).coverage; } catch (e) { cov = null; }
+    if (cov != null) (cov >= 0.8 ? ok : warn)(loamT('Heart rate {p} % of the ride', { p: Math.round(cov * 100) }));
+  }
+  return `<section class="mp-section mp-trust" aria-label="${escapeHtml(loamT('What this was measured from'))}">
+      ${mpSectionHead(escapeHtml(loamT('How much to trust this page')), escapeHtml(loamT('Every claim above rests on one of these. A caution lowers the confidence of the reads it touches; nothing is hidden.')))}
+      <div class="mp-facts-row">${chips.join('')}</div>
+      <div id="mpSlotQuality" class="mp-slot"></div>
+      <p class="mp-local-line analysis-explanation">${MP_ICON.lock}${escapeHtml(loamT('Every number on this page was computed on this device. Nothing was uploaded; sharing a card or an export is always your choice.'))}</p>
+    </section>`;
+}
+function mtbPageHTML(D, M) {
+  const runsNoun = M.mode === 'laps' ? loamT('Laps') : M.mode === 'marks' ? loamT('Runs') : M.mode === 'intervals' ? loamT('Reps') : loamT('Descents');
+  const cards = M.runs.map(r => mpRunCardHTML(r, M)).join('');
+  const skills = `<section class="mp-section" aria-label="${escapeHtml(loamT('Skills'))}">
+      ${mpSectionHead(escapeHtml(loamT('Skills')), escapeHtml(loamT('The same ride, grouped by what you would practise: cornering, jumping, keeping speed.')))}
+      <div class="mp-grid3">${mpCorneringHTML(M)}${mpJumpsHTML(M)}${mpBrakingHTML(M)}</div>
+      <div id="mpSlotTurns" class="mp-slot"></div>
+      <div id="mpSlotRadius" class="mp-slot"></div>
+      <div id="mpSlotJumps" class="mp-slot"></div>
+      <div id="mpSlotAirtime" class="mp-slot"></div>
+      <div id="mpSlotReplay" class="mp-slot"></div>
+    </section>`;
+  const heart = mpHeartHTML(M), head = mpHeadHTML(M);
+  const body = (heart || head) ? `<section class="mp-section" data-optional="1" aria-label="${escapeHtml(loamT('Heart and head'))}">
+      ${mpSectionHead(escapeHtml(loamT('Heart and head')), escapeHtml(loamT('What the watch saw your heart do, and what the AirPods saw your head do.')))}
+      <div class="mp-grid2cards">${heart}${head}</div>
+      <div id="mpSlotHr" class="mp-slot"></div>
+      <div id="mpSlotEstPower" class="mp-slot"></div>
+    </section>` : `<section class="mp-section" data-optional="1" aria-label="${escapeHtml(loamT('Heart and head'))}"><div id="mpSlotHr" class="mp-slot"></div><div id="mpSlotEstPower" class="mp-slot"></div></section>`;
+  return `${mpHeaderHTML(D, M)}
+    ${mpHeadlineHTML(D, M)}
+    <section class="mp-section" aria-label="${escapeHtml(loamT('Map and timeline'))}">
+      ${mpSectionHead(escapeHtml(loamT('Where it happened')), escapeHtml(loamT('Tap a descent to focus the map and the timeline on it.')))}
+      <div class="mp-map-row">
+        <div id="mpSlotMap" class="mp-slot mp-slot-map"></div>
+        <div class="mp-card mp-selected" id="mpSelected"></div>
+      </div>
+      <div id="mpSlotTimeline" class="mp-slot"></div>
+      <div id="mpSlotSignature" class="mp-slot"></div>
+    </section>
+    <section class="mp-section" aria-label="${escapeHtml(runsNoun)}">
+      ${mpSectionHead(escapeHtml(runsNoun), escapeHtml(loamT('The downhill is the ride. Every run is timed and graded on its own; name a trail once and Loam compares it with your past laps.')), `<button type="button" class="mp-btn mp-btn-ghost" id="mpToTable">${escapeHtml(loamT('All actions'))} ↓</button>`)}
+      ${cards ? `<div class="mp-cards">${cards}</div>` : `<p class="mp-muted">${escapeHtml(loamT('No descent found in this recording.'))}</p>`}
+      <div id="mpSlotRuns" class="mp-slot"></div>
+    </section>
+    ${skills}
+    ${body}
+    ${mpMotorHTML(M)}
+    <section class="mp-section" data-optional="1" aria-label="${escapeHtml(loamT('Compare'))}">
+      ${mpSectionHead(escapeHtml(loamT('Compare')), escapeHtml(loamT('Two runs of the same trail, aligned by position, so the gap shows where it was made. Name a trail to compare it across rides; ride it twice in one session for the play-by-play.')))}
+      <div id="mpSlotCompare" class="mp-slot"></div>
+    </section>
+    <section class="mp-section" aria-label="${escapeHtml(loamT('Coach'))}">
+      ${mpSectionHead(escapeHtml(loamT('Coach')), escapeHtml(loamT('The number, the mechanism behind it, and what to try next lap. The coach only talks about what the sensors measured.')))}
+      <div id="mpSlotHighlights" class="mp-slot"></div>
+      <div id="mpSlotCoach" class="mp-slot"></div>
+    </section>
+    ${mpTrustHTML(D, M)}
+    <div id="mpSlotGeek" class="mp-slot"></div>`;
+}
+
+/* ---- behaviour ---- */
+function mpSelectRun(host, D, M, i) {
+  const panel = host.querySelector('#mpSelected');
+  if (!panel) return;
+  host.querySelectorAll('.mp-run').forEach(c => c.classList.toggle('mp-run-active', c.dataset.i === String(i)));
+  const r = i != null ? M.runs[i] : null;
+  if (!r) {
+    panel.innerHTML = `<div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Whole ride'))}</h3></div>
+      <div class="mp-grid2 mp-sel-facts">
+        <div><div class="mp-tile-label">${escapeHtml(loamT('Distance'))}</div><div class="mp-strong">${U.dist(M.s.distance)}</div></div>
+        <div><div class="mp-tile-label">${escapeHtml(loamT('Moving time'))}</div><div class="mp-strong">${mpTime(M.moving)}</div></div>
+        ${M.climbGain != null ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Climbed'))}</div><div class="mp-strong">~${U.elev(M.climbGain)}</div></div>` : ''}
+        ${M.hero ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Dropped'))}</div><div class="mp-strong">${U.elev(M.hero.drop)}</div></div>` : ''}
+        <div><div class="mp-tile-label">${escapeHtml(loamT('Top speed'))}</div><div class="mp-strong">${U.speed(M.s.maxSpeed)}</div></div>
+        <div><div class="mp-tile-label">${escapeHtml(loamT('Corners'))}</div><div class="mp-strong">${M.s.nTurns != null ? M.s.nTurns : '—'}${M.judgedN ? ` · ${escapeHtml(loamT('{n} scrubbed', { n: M.scrubbedN }))}` : ''}</div></div>
+        ${M.hrAvg != null ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Average heart rate'))}</div><div class="mp-strong">${M.hrAvg} bpm</div></div>` : ''}
+        ${M.battery ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Battery'))}</div><div class="mp-strong">${M.battery.startPct} → ${M.battery.endPct} %</div></div>` : ''}
+      </div>
+      <p class="mp-muted analysis-explanation">${escapeHtml(loamT('Tap a descent below, or a point on the timeline, to see that part of the ride here and on the map.'))}</p>`;
+    return;
+  }
+  const m = r.metrics || {};
+  panel.innerHTML = `<div class="mp-card-head"><h3 class="mp-h3"><span class="mp-dot" style="background:${r.color || 'var(--text-muted)'}"></span>${escapeHtml(r.label)}</h3><button type="button" class="mp-link" id="mpSelReset">${escapeHtml(loamT('Show full ride'))}</button></div>
+    <div><div class="mp-tile-label">${escapeHtml(loamT('Time'))}</div><div class="mp-big">${mpTime(m.duration)}</div><div class="mp-muted">${U.dist(m.distance)}${m.drop != null ? ' · −' + U.elev(m.drop) : ''}</div></div>
+    <div class="mp-grid2 mp-sel-facts">
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Speed'))}</div><div class="mp-strong">${U.speed(m.avgSpeed)} ${escapeHtml(loamT('avg'))} · ${U.speed(m.maxSpeed)} ${escapeHtml(loamT('max'))}</div></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Corners'))}</div><div class="mp-strong">${m.nTurns}${M.sidesBad || !m.nTurns ? '' : ` · ${m.leftTurns}L/${m.rightTurns}R`}${r.judged ? ` · ${escapeHtml(loamT('{n} scrubbed', { n: r.scrubbed }))}` : ''}</div></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Jumps'))}</div><div class="mp-strong">${r.jumps.length}</div></div>
+      ${r.maxLean != null ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Max lean'))}</div><div class="mp-strong">${Math.round(r.maxLean)}°</div></div>` : ''}
+      ${M.runHr[r.i] && M.runHr[r.i].top != null ? `<div><div class="mp-tile-label">${escapeHtml(loamT('Heart rate at the top'))}</div><div class="mp-strong">${M.runHr[r.i].top} bpm</div></div>` : ''}
+    </div>
+    ${r.turns.length ? `<button type="button" class="mp-btn mp-btn-small" id="mpSelOpen">${escapeHtml(loamT('Open corners'))} ›</button>` : ''}`;
+  const reset = panel.querySelector('#mpSelReset');
+  if (reset) reset.onclick = () => { try { resetSegmentFocus(D.ride); } catch (e) {} mpSelectRun(host, D, M, null); };
+  const open = panel.querySelector('#mpSelOpen');
+  if (open) open.onclick = () => openSegmentPage(r, D);
+}
+function mpDrawMotorChart(host, D, M) {
+  const el = host.querySelector('#mpMotorChart');
+  if (!el || !M.hasMotor || typeof Plotly === 'undefined') return;
+  const rows = M.fitRows.filter(r => r.motorPower != null || r.power != null);
+  if (rows.length < 20) { el.remove(); return; }
+  /* 20 s moving mean on both channels: the cadence / power panel smooths at 30, the timeline at 30,
+     and at 1 Hz anything shorter leaves the box with no visible effect. */
+  const smooth = (key) => {
+    const out = []; const win = [];
+    let sum = 0;
+    for (const r of rows) {
+      const v = r[key] == null ? 0 : r[key];
+      win.push({ t: r.t_phone, v }); sum += v;
+      while (win.length && r.t_phone - win[0].t > 20) sum -= win.shift().v;
+      out.push(sum / win.length);
+    }
+    return out;
+  };
+  const x = rows.map(r => (r.t_phone - M.ride.start) / 60);
+  const rider = smooth('power'), motor = smooth('motorPower');
+  const hover = `%{y:.0f} W<extra>%{fullData.name}</extra>`;
+  const traces = [
+    { type: 'scatter', mode: 'lines', name: loamT('Rider'), x, y: rider, stackgroup: 'mp', line: { width: 1, color: '#557a2f' }, fillcolor: 'rgba(85,122,47,0.85)', hovertemplate: hover },
+    { type: 'scatter', mode: 'lines', name: loamT('Motor'), x, y: motor, stackgroup: 'mp', line: { width: 1, color: '#1f7ba6' }, fillcolor: 'rgba(31,123,166,0.55)', hovertemplate: hover },
+  ];
+  const layout = {
+    margin: { l: 46, r: 12, t: 8, b: 36 }, height: 220, showlegend: false, hovermode: 'x unified',
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans, system-ui, sans-serif', size: 11, color: '#475569' },
+    xaxis: { title: { text: loamT('minutes into the ride'), font: { size: 11 } }, gridcolor: '#e2e8f0', zeroline: false },
+    yaxis: { title: { text: 'W', font: { size: 11 } }, gridcolor: '#e2e8f0', zeroline: false, rangemode: 'tozero' },
+  };
+  try { loamPlot(el, traces, layout, { displayModeBar: false, responsive: true }); } catch (e) { el.remove(); }
+}
+async function mtbPageEnrichTags(host, D, M, seq) {
+  const tagged = M.runs.filter(r => r.src && r.src.autoTag && r.src.autoTag.taggedSegmentId);
+  if (!tagged.length || D.libraryRideId == null) return;
+  let rides, tags;
+  try { [rides, tags] = await Promise.all([listRides(), listTaggedSegments()]); } catch (e) { return; }
+  if (host.dataset.mpRender !== String(seq)) return;
+  const lang = loamLang() === 'en' ? undefined : loamLang();
+  const byTag = new Map();
+  for (const r of tagged) {
+    const id = r.src.autoTag.taggedSegmentId;
+    if (!byTag.has(id)) {
+      const tag = tags.find(t => t.id === id);
+      let members = [];
+      try { members = tag ? buildTagMembers(tag, rides) : []; } catch (e) { members = []; }
+      byTag.set(id, members);
+    }
+    const members = byTag.get(id);
+    const mine = members.find(m => m.rideId === D.libraryRideId && Math.abs((m.tStart != null ? m.tStart : -1e9) - r.src.tStart) < 3)
+      || members.find(m => m.rideId === D.libraryRideId);
+    const others = members.filter(m => m !== mine && Number.isFinite(m.duration));
+    if (!mine || !Number.isFinite(mine.duration) || !others.length) continue;
+    const best = others.reduce((a, b) => (b.duration < a.duration ? b : a));
+    const delta = mine.duration - best.duration;
+    const when = best.recordedAt ? new Date(best.recordedAt) : null;
+    const dateText = when && Number.isFinite(when.getTime()) ? when.toLocaleDateString(lang, { day: 'numeric', month: 'short' }) : loamT('best');
+    const deltaEl = host.querySelector('#mpDelta' + r.i), bestEl = host.querySelector('#mpBest' + r.i);
+    if (!deltaEl) continue;
+    if (delta <= -0.5) {
+      deltaEl.textContent = loamT('{delta} vs {when}', { delta: mpDelta(delta), when: dateText });
+      deltaEl.classList.add('mp-delta-good');
+      if (bestEl) bestEl.textContent = loamT('BEST YET');
+    } else if (delta >= 0.5) {
+      deltaEl.textContent = loamT('{delta} vs {when}', { delta: mpDelta(delta), when: dateText });
+    } else {
+      deltaEl.textContent = loamT('level with {when}', { when: dateText });
+    }
+    deltaEl.title = loamT('{n} laps of this trail in your library', { n: members.length });
+  }
+}
+function wireMtbPage(host, D, M) {
+  host.querySelectorAll('[data-act]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const r = M.runs[+btn.dataset.i];
+      if (!r) return;
+      const act = btn.dataset.act;
+      if (act === 'focus') {
+        try { focusSegment({ ...r, polyline: r.polyline || (r.src && r.src.polyline) }, D.ride); } catch (e2) { console.warn('focus failed', e2); }
+        mpSelectRun(host, D, M, r.i);
+        const map = document.getElementById('map');
+        if (map && map.scrollIntoView) map.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else if (act === 'open') openSegmentPage(r, D);
+      else if (act === 'compare' && r.src) compareWithPastLaps(r.src, { sport: displaySport(D), rowNoun: M.mode === 'laps' ? 'lap' : 'descent' });
+      else if (act === 'tag' && r.src) promptTagDescent(r.src, D.libraryRideId);
+    };
+  });
+  host.querySelectorAll('.mp-run').forEach(card => {
+    card.onclick = (e) => {
+      if (e.target.closest('button, a, details, summary')) return;
+      const r = M.runs[+card.dataset.i];
+      if (!r) return;
+      try { focusSegment({ ...r, polyline: r.polyline || (r.src && r.src.polyline) }, D.ride); } catch (e2) {}
+      mpSelectRun(host, D, M, r.i);
+    };
+  });
+  const share = host.querySelector('#mpShareBtn');
+  if (share) share.onclick = () => { try { saveRideSignature(); } catch (e) {} };
+  const classic = host.querySelector('#mpClassicBtn');
+  if (classic) classic.onclick = () => setMtbPage(false);
+  const toTable = host.querySelector('#mpToTable');
+  if (toTable) toTable.onclick = () => { const t = document.getElementById('runsSection'); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  const review = host.querySelector('#mpReviewCalib');
+  if (review) review.onclick = () => { try { openCalibrationDetails(); } catch (e) {} };
+  mpSelectRun(host, D, M, null);
+}
+const MP_SLOTS = [
+  ['mpSlotSignature', 'rideSignatureSection'], ['mpSlotMap', 'overviewSection'], ['mpSlotTimeline', 'timelineSection'],
+  ['mpSlotRuns', 'runsSection'], ['mpSlotTurns', 'turnSection'], ['mpSlotRadius', 'radiusSection'],
+  ['mpSlotJumps', 'jumpsSection'], ['mpSlotAirtime', 'airtimeSection'], ['mpSlotReplay', 'formReplaySection'],
+  ['mpSlotHr', 'hrZonesSection'], ['mpSlotEstPower', 'estPowerSection'], ['mpSlotCadPower', 'cadPowerSection'],
+  ['mpSlotAnalog', 'analogSection'], ['mpSlotCompare', 'runCompareSection'], ['mpSlotHighlights', 'coachHighlights'],
+  ['mpSlotCoach', 'coachSection'], ['mpSlotQuality', 'recordingQualitySection'], ['mpSlotGeek', 'geekStatsSection'],
+];
+function renderMtbPage(D) {
+  const host = document.getElementById('mtbPage');
+  syncMtbPageToggle(D);
+  if (!host || !mtbPageApplies(D) || !mtbPageWanted()) { teardownMtbPage(); return; }
+  let M;
+  try { M = mtbPageModel(D); } catch (e) { console.warn('mtb page model failed', e); teardownMtbPage(); return; }
+  try { M.gaze = mpGazeBands(D, M); } catch (e) { M.gaze = null; }
+  const seq = ++_mpRenderSeq;
+  host.dataset.mpRender = String(seq);
+  host.innerHTML = mtbPageHTML(D, M);
+  for (const [slot, id] of MP_SLOTS) mtbPageSlot(host, slot, id);
+  /* The motor panels borrowed above live inside the Motor section, which only exists on an e-bike;
+     on an analog bike they stay home (hidden there). A wrapper whose only content is borrowed
+     sections that are hidden is a heading over nothing, so it goes too. */
+  host.querySelectorAll('.mp-section[data-optional]').forEach(sec => {
+    const shown = !!sec.querySelector('.mp-card')
+      || [...sec.querySelectorAll('.mp-slot > section')].some(s => !s.classList.contains('hidden'));
+    sec.classList.toggle('hidden', !shown);
+  });
+  host.classList.remove('hidden');
+  document.body.classList.add('mtb-page');
+  wireMtbPage(host, D, M);
+  mpDrawMotorChart(host, D, M);
+  try { if (typeof mapInstance !== 'undefined' && mapInstance) setTimeout(() => mapInstance.invalidateSize(), 0); } catch (e) {}
+  try { resizeChartsSoon(); } catch (e) {}
+  mtbPageEnrichTags(host, D, M, seq).catch(() => {});
 }
 
 function focusSegment(descent, ride, animate = true) {
@@ -55091,10 +56415,13 @@ window.loamAnalyzeCSV = function (text, filename) {
 };
 
 /* The Progress page (trends and the training plan) for the app, which has no header button to reach
-   it: a library view over IndexedDB rather than an analysis of a recording, so nothing is fetched. */
+   it: a library view over IndexedDB rather than an analysis of a recording, so nothing is fetched.
+   Opens at the TOP (owner, 2026-10-17), not at the plan: the section links up there reach the plan in
+   one tap. Scrolled after the render because openProgress returns early, without scrolling, when the
+   page is already open. */
 window.loamOpenProgress = async function () {
   await openProgress();
-  document.getElementById('progressPlanSection').scrollIntoView({ block: 'start' });
+  window.scrollTo({ top: 0, behavior: 'instant' });
   return true;
 };
 
@@ -55417,7 +56744,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'de8880287 · 2026-10-20';
+const LOAM_BUILD = '6b5ef160f · 2026-10-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
