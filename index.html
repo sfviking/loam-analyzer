@@ -3210,6 +3210,7 @@
   .mp-bar { flex:1; height:12px; background:var(--surface-2); border-radius:4px; min-width:0; overflow:hidden; }
   .mp-bar-fill { height:100%; border-radius:4px; }
   .mp-bar-val { width:52px; font-size:12px; font-weight:600; color:var(--text); flex:none; text-align:right; font-variant-numeric:tabular-nums; }
+  .mp-head .mp-bar-val { width:86px; }
   /* motor */
   .mp-modes { display:flex; flex-direction:column; gap:8px; }
   .mp-plot { min-height:220px; }
@@ -8814,10 +8815,16 @@ function syncSegTurnMarkers(shown) {
 /* focusN (optional): a ride-wide turn number to land on, used when the rider arrived from a corner
    link elsewhere on the page rather than from the runs table. That corner is pinned into the ledger
    (so it is listed and marked even when it is not one of the top scrubbers), framed on the map, and
-   loaded into the borrowed form replay. */
+   loaded into the borrowed form replay. landing='corners' opens the ledger directly. */
 let _openRideSegment = null;
-function openSegmentPage(r, D, focusN) {
-  _openRideSegment = { tStart: r.tStart, tEnd: r.tEnd };
+function openSegmentPage(r, D, focusN, landing) {
+  _openRideSegment = { tStart: r.tStart, tEnd: r.tEnd, landing };
+  const grid = document.querySelector('#segmentPage .seg-grid');
+  const past = document.getElementById('segPast');
+  /* A late library read must not push the requested corners below the viewport.
+     General trail entry still leads with lap history. */
+  if (landing === 'corners') grid.after(past);
+  else grid.before(past);
   const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
   _segTurns = turns;
   _segPinnedN = focusN != null && turns.some(T => T.n === focusN) ? focusN : null;
@@ -8974,6 +8981,14 @@ function openSegmentPage(r, D, focusN) {
       }
     } catch (e) {}
   }, 60);
+  if (landing === 'corners') {
+    const ledger = document.getElementById('segLedger');
+    const target = ledger.classList.contains('hidden') ? grid : ledger;
+    const bar = document.querySelector('#segmentPage .page-back-bar');
+    target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+    window.scrollTo({ top: window.scrollY + target.getBoundingClientRect().top - bar.offsetHeight - 12, behavior: 'instant' });
+  }
 }
 /* Fade strip: one row per lap of THIS segment in this ride (runsSameSegment gate),
    time-ordered, each with an apex-speed sparkline (clay dots on scrubbed turns) and
@@ -36504,7 +36519,9 @@ const LOAM_NB = {
   'AirPods worn {p} % of the ride': 'AirPods på {p} % av turen',
   'Head': 'Hode',
   'Not enough corners with a head read to say when the head turned in.': 'For få svinger med hodemåling til å si når hodet vendte inn.',
-  'Head turned in before the bike by': 'Hodet vendte inn før sykkelen med',
+  'Head turn-in relative to the bike': 'Når hodet vendte inn i forhold til sykkelen',
+  '{s} s before': '{s} s før',
+  '{s} s after': '{s} s etter',
   'in {band} corners · looked in before the apex on {p} % of corners': 'i {band} svinger · så inn før apex i {p} % av svingene',
   'The AirPods measure where the head points, not where the eyes look. Descriptive only: no corner here is graded on it.': 'AirPods måler hvor hodet peker, ikke hvor øynene ser. Kun beskrivende: ingen sving her bedømmes ut fra det.',
   'Assist ratio': 'Assistforhold',
@@ -48696,7 +48713,7 @@ function restoreRidePosition(segment, scroll) {
   const D = _lastRender && _lastRender.D;
   if (segment && D && D.turns && D.turns.length) {
     const r = (segmentRuns(D, 'auto').runs || []).find(r => Math.abs(r.tStart - segment.tStart) < 5);
-    if (r) { openSegmentPage(r, D); return; }
+    if (r) { openSegmentPage(r, D, null, segment.landing); return; }
   }
   window.scrollTo(0, scroll);
 }
@@ -48833,6 +48850,13 @@ function hideCalibNotice() {
   try { localStorage.setItem(calibNoticeKey(), '1'); } catch (e) {}
   const sec = document.getElementById('mtbCalibNotice');
   if (sec) sec.classList.add('hidden');
+  const pageDetails = document.querySelector('#mtbPage #rideCalibrationDetails');
+  if (pageDetails) {
+    pageDetails.classList.add('hidden');
+    document.getElementById('mpReviewCalib')?.remove();
+    // Keep the overview's home marker until the borrowed fold is restored on the next render.
+    return;
+  }
   document.querySelector('#sessionOverview .session-quality')?.remove();
 }
 
@@ -49687,6 +49711,8 @@ function arrangeBikeDashboard() {
     let details = document.getElementById('rideCalibrationDetails');
     if (!details) { details = document.createElement('details'); details.id = 'rideCalibrationDetails'; details.dataset.detailedStayClosed = '1'; details.innerHTML = `<summary>${loamT('Calibration details and actions')}</summary>`; quality.append(details); }
     details.append(notice);
+    // The new ride page hides the overview that normally owns this fold.
+    if (document.body.classList.contains('mtb-page')) mtbPageSlot(document.getElementById('mtbPage'), 'mpSlotCalibration', details.id);
   }
   for (const id of ['radiusSection', 'cadPowerSection', 'analogSection']) {
     const section = document.getElementById(id);
@@ -50592,6 +50618,12 @@ function mpHeartHTML(M) {
       ${note ? `<div class="mp-note analysis-explanation">${escapeHtml(note)}</div>` : ''}
     </article>`;
 }
+function mpHeadTiming(lead) {
+  if (lead == null) return '—';
+  const s = Math.abs(lead).toFixed(1);
+  if (s === '0.0') return loamT('together');
+  return loamT(lead > 0 ? '{s} s before' : '{s} s after', { s });
+}
 function mpHeadHTML(M) {
   if (!M.hasHead) return '';
   const g = M.gaze;
@@ -50601,12 +50633,12 @@ function mpHeadHTML(M) {
   const bars = g.rows.map(r => {
     const v = r.lead || 0;
     const w = Math.round(Math.abs(v) / maxLead * 100);
-    return `<div class="mp-bar-row"><span class="mp-bar-label">${escapeHtml(mpBandLabel(r.band))}</span><div class="mp-bar"><div class="mp-bar-fill" style="width:${w}%;background:${v >= 0 ? 'var(--sky)' : 'var(--clay)'}"></div></div><span class="mp-bar-val">${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)} s</span></div>`;
+    return `<div class="mp-bar-row"><span class="mp-bar-label">${escapeHtml(mpBandLabel(r.band))}</span><div class="mp-bar"><div class="mp-bar-fill" style="width:${w}%;background:var(--sky)"></div></div><span class="mp-bar-val">${escapeHtml(mpHeadTiming(r.lead))}</span></div>`;
   }).join('');
   const lead = g.rows[0];
-  return `<article class="mp-card">
+  return `<article class="mp-card mp-head">
       <div class="mp-card-head"><h3 class="mp-h3">${escapeHtml(loamT('Head'))} <span class="mp-exp">${escapeHtml(loamT('EXPERIMENTAL'))}</span></h3><span class="mp-muted">${escapeHtml(cover)}</span></div>
-      <div><div class="mp-tile-label">${escapeHtml(loamT('Head turned in before the bike by'))}</div><div class="mp-big">${lead.lead != null ? (lead.lead >= 0 ? '+' : '−') + Math.abs(lead.lead).toFixed(1) + ' s' : '—'}</div><div class="mp-muted">${escapeHtml(loamT('in {band} corners · looked in before the apex on {p} % of corners', { band: mpBandLabel(lead.band).toLowerCase(), p: g.lookedPct }))}</div></div>
+      <div><div class="mp-tile-label">${escapeHtml(loamT('Head turn-in relative to the bike'))}</div><div class="mp-big">${escapeHtml(mpHeadTiming(lead.lead))}</div><div class="mp-muted">${escapeHtml(loamT('in {band} corners · looked in before the apex on {p} % of corners', { band: mpBandLabel(lead.band).toLowerCase(), p: g.lookedPct }))}</div></div>
       <div class="mp-bars">${bars}</div>
       <div class="mp-note analysis-explanation">${escapeHtml(loamT('The AirPods measure where the head points, not where the eyes look. Descriptive only: no corner here is graded on it.'))}</div>
     </article>`;
@@ -50679,7 +50711,7 @@ function mpTrustHTML(D, M) {
   const chips = [];
   const ok = (t) => chips.push(`<span class="mp-fact mp-fact-ok">${MP_ICON.check}${escapeHtml(t)}</span>`);
   const warn = (t, action) => chips.push(`<span class="mp-fact mp-fact-warn">${MP_ICON.warn}${escapeHtml(t)}${action || ''}</span>`);
-  const review = `<button type="button" class="mp-link" id="mpReviewCalib">${escapeHtml(loamT('Review calibration'))}</button>`;
+  const review = calibNoticeHidden() ? '' : `<button type="button" class="mp-link" id="mpReviewCalib">${escapeHtml(loamT('Review calibration'))}</button>`;
   if (M.shifted) warn(loamT('The phone moved during the recording: lean comparisons and form replay are withheld.'), review);
   else if (M.sidesBad) warn(loamT('Calibration pose does not match the riding pose: left/right comparisons are withheld.'), review);
   else if (M.calib && M.calib.strategy) ok(loamT('Mount calibrated ({how})', { how: M.calib.strategy === 'borrowed' ? loamT('borrowed from an earlier ride') : M.calib.strategy === 'riding' ? loamT('riding pose') : loamT('still window') }));
@@ -50698,6 +50730,7 @@ function mpTrustHTML(D, M) {
   return `<section class="mp-section mp-trust" aria-label="${escapeHtml(loamT('What this was measured from'))}">
       ${mpSectionHead(escapeHtml(loamT('How much to trust this page')), escapeHtml(loamT('Every claim above rests on one of these. A caution lowers the confidence of the reads it touches; nothing is hidden.')))}
       <div class="mp-facts-row">${chips.join('')}</div>
+      <div id="mpSlotCalibration" class="mp-slot"></div>
       <div id="mpSlotQuality" class="mp-slot"></div>
       <p class="mp-local-line analysis-explanation">${MP_ICON.lock}${escapeHtml(loamT('Every number on this page was computed on this device. Nothing was uploaded; sharing a card or an export is always your choice.'))}</p>
     </section>`;
@@ -50788,7 +50821,7 @@ function mpSelectRun(host, D, M, i) {
   const reset = panel.querySelector('#mpSelReset');
   if (reset) reset.onclick = () => { try { resetSegmentFocus(D.ride); } catch (e) {} mpSelectRun(host, D, M, null); };
   const open = panel.querySelector('#mpSelOpen');
-  if (open) open.onclick = () => openSegmentPage(r, D);
+  if (open) open.onclick = () => openSegmentPage(r, D, null, 'corners');
 }
 function mpDrawMotorChart(host, D, M) {
   const el = host.querySelector('#mpMotorChart');
@@ -50874,7 +50907,7 @@ function wireMtbPage(host, D, M) {
         mpSelectRun(host, D, M, r.i);
         const map = document.getElementById('map');
         if (map && map.scrollIntoView) map.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      } else if (act === 'open') openSegmentPage(r, D);
+      } else if (act === 'open') openSegmentPage(r, D, null, 'corners');
       else if (act === 'compare' && r.src) compareWithPastLaps(r.src, { sport: displaySport(D), rowNoun: M.mode === 'laps' ? 'lap' : 'descent' });
       else if (act === 'tag' && r.src) promptTagDescent(r.src, D.libraryRideId);
     };
@@ -57605,7 +57638,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '5c48ac2ff · 2026-10-21';
+const LOAM_BUILD = '7598842d7 · 2026-10-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
