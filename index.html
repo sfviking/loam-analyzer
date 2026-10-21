@@ -39646,6 +39646,15 @@ const LOAM_NB = {
   'to Anthropic on the developer\'s shared account (up to {n} questions a day per device; add your own key in the settings above to lift that).':
     'til Anthropic på utviklerens delte konto (opptil {n} spørsmål per døgn per enhet; legg inn din egen nøkkel i innstillingene over for å øke grensen).',
 
+  /* ---- Claude through App Attest (no key in the app). */
+  'The shared coach account is busy on this iPhone. Try again in a minute.':
+    'Den delte trenerkontoen er opptatt på denne iPhonen. Prøv igjen om et minutt.',
+  'This iPhone cannot prove the app is genuine, which the shared coach account needs. Add your own Anthropic API key in the coach settings to keep going.':
+    'Denne iPhonen kan ikke bevise at appen er ekte, og det krever den delte trenerkontoen. Legg inn din egen API-nøkkel for Anthropic i trenerinnstillingene for å fortsette.',
+  'The shared coach account could not be reached ({code}). Try again later, or add your own Anthropic API key in the coach settings.':
+    'Fikk ikke kontakt med den delte trenerkontoen ({code}). Prøv igjen senere, eller legg inn din egen API-nøkkel for Anthropic i trenerinnstillingene.',
+  'shared coach account':
+    'delt trenerkonto',
   /* ---- The coach on this iPhone (Apple Intelligence), the consent card before a third-party AI,
      and the testers' Claude-vs-Apple A/B. */
   'A/B test: Claude vs Apple Intelligence':
@@ -45640,11 +45649,47 @@ function coachOnDevice() {
   const pref = coachGet('provider', '');
   if (pref === 'apple') return true;
   if (pref === 'claude') return false;
-  return !coachEndpoint() && !coachKey();
+  /* An attested install reaches Claude with no key, and Claude coached far better than Apple's model
+     in the first A/B (owner, 2026-10-21), so Apple is the default only when Claude is out of reach. */
+  return !coachEndpoint() && !coachKey() && !coachAttestAvailable();
 }
-/* Whether a question can be sent at all. A custom server needs no key (a local one has none), and
-   the on-device model needs nothing. */
-function coachCanSend() { return coachOnDevice() || !!coachEndpoint() || !!coachKey(); }
+/* Whether a question can be sent at all. A custom server needs no key (a local one has none), the
+   on-device model needs nothing, and an attested install gets a token from the app. */
+function coachCanSend() { return coachOnDevice() || !!coachEndpoint() || !!coachKey() || coachAttestAvailable(); }
+
+/* ---- Claude with no key in the app: App Attest (ios/Sources/UI/ClaudeAppAttest.swift).
+   The app proves to Anthropic that this install is a genuine copy of Loam and hands the page a
+   one-hour bearer token that can only call the Messages API, billed to the developer's workspace.
+   `window.LOAM_CLAUDE_ATTEST` says whether this install can (a client ID is configured and the phone
+   has a Secure Enclave); the token itself is asked for per request, since the app caches and
+   refreshes it. Preferred over the bundled key wherever it works; the bundled key, which only
+   TestFlight builds carry, is the fallback when it does not. */
+function coachAttestAvailable() {
+  const v = typeof window !== 'undefined' ? window.LOAM_CLAUDE_ATTEST : null;
+  return !!(v && typeof v === 'object' && v.available && localCoachBridge());
+}
+async function coachAttestToken() {
+  const bridge = localCoachBridge();
+  if (!bridge) return { ok: false, code: 'unavailable' };
+  try {
+    const r = await bridge.postMessage({ op: 'token' });
+    return r && r.ok && typeof r.token === 'string' && r.token ? { ok: true, token: r.token }
+      : { ok: false, code: (r && r.code) || 'failed', detail: (r && r.detail) || '' };
+  } catch (e) {
+    return { ok: false, code: 'bridge', detail: String((e && e.message) || e) };
+  }
+}
+async function coachAttestInvalidate(token) {
+  const bridge = localCoachBridge();
+  try { if (bridge) await bridge.postMessage({ op: 'invalidateToken', token }); } catch (e) { /* best-effort */ }
+}
+/* Why the app could not get a token, in what the athlete can do about it. */
+function coachAttestErrorText(code) {
+  if (code === 'rateLimited') return loamT('The shared coach account is busy on this iPhone. Try again in a minute.');
+  if (code === 'unsupported') return loamT('This iPhone cannot prove the app is genuine, which the shared coach account needs. Add your own Anthropic API key in the coach settings to keep going.');
+  if (code === 'network') return coachErrorText('Load failed');
+  return loamT('The shared coach account could not be reached ({code}). Try again later, or add your own Anthropic API key in the coach settings.', { code: code || 'failed' });
+}
 /* The model a cached first turn is filed under. ONE definition for the read and the write: they used
    to differ (the restore path keyed on the Claude model even with a custom server set), which would
    replay one provider's cached answer as another's. */
@@ -45665,7 +45710,9 @@ function coachEndpointUnreachableText(ep) {
 }
 /* Whether this request is billed to the developer's shared account, which is what the daily cap and
    the "developer's account" copy are about. Never true on a custom server. */
-function coachOnBundled() { return !coachOnDevice() && !coachEndpoint() && !coachHasOwnKey() && !!coachBundledKey(); }
+function coachOnBundled() {
+  return !coachOnDevice() && !coachEndpoint() && !coachHasOwnKey() && (!!coachBundledKey() || coachAttestAvailable());
+}
 
 /* Guarded like every other storage read in this file: `localStorage` itself throws (not just the
    write) when a browser is set to block all storage, and this one sits on the path that builds the
@@ -47178,9 +47225,20 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
      `anthropicOnly` is the Claude half of the Claude-vs-Apple comparison: that test is about Claude,
      so a custom server the tester set for everyday use is bypassed for it. */
   const ep = anthropicOnly ? null : coachEndpoint();
-  const key = ep ? (ep.key || '') : coachKey();
+  let key = ep ? (ep.key || '') : coachKey();
   const model = coachModel();
-  if (!ep && !key) { onError('No API key set.'); return; }
+  /* No key of the athlete's own and no custom server: the request is on the developer's shared
+     account, through an attested token where this install has one (App Attest) and the bundled key
+     otherwise. A token the app cannot mint falls back to the bundled key when the build carries one
+     (TestFlight); without one, the reason the token failed is the error. */
+  const onShared = !ep && !coachHasOwnKey();
+  let bearer = null, authRetried = false;
+  if (onShared && coachAttestAvailable()) {
+    const t = await coachAttestToken();
+    if (t.ok) { bearer = t.token; key = ''; }
+    else if (!coachBundledKey()) { onError(coachAttestErrorText(t.code)); return; }
+  }
+  if (!ep && !key && !bearer) { onError('No API key set.'); return; }
   const epReq = ep ? coachEndpointRequest(ep, { system, messages, key, maxTokens: 8192 }) : null;
   /* max_tokens bounds thinking AND the visible answer together, so adaptive thinking spends from
      the same budget the coaching text needs. 4096 was tight enough on the newer models (which
@@ -47210,7 +47268,7 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
         method: 'POST', signal,
         headers: epReq ? epReq.headers : {
           'content-type': 'application/json',
-          'x-api-key': key,
+          ...(bearer ? { authorization: 'Bearer ' + bearer } : { 'x-api-key': key }),
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true'
         },
@@ -47233,6 +47291,15 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
       let msg = 'HTTP ' + resp.status, apiErr = null;
       try { const j = await resp.json(); apiErr = j.error; if (j.error && j.error.message) msg = j.error.message; else if (typeof j.error === 'string') msg = j.error; } catch (e) {}
       const spent = coachSpendLimitReached(resp.status, apiErr);
+      /* An attested token can expire or be revoked between minting and use. Drop it and ask once for
+         a fresh one, as the package does; a second 401 is a real rejection. Not a network retry, so
+         it spends none of the backoff budget. */
+      if (bearer && resp.status === 401 && !authRetried && !full) {
+        authRetried = true;
+        await coachAttestInvalidate(bearer);
+        const t = await coachAttestToken();
+        if (t.ok) { bearer = t.token; attempt -= 1; continue; }
+      }
       if (!spent && COACH_RETRY_STATUS.indexOf(resp.status) !== -1 && mayRetry()) {
         if (onNotice) onNotice(loamT('Claude is busy — retrying…'));
         if (!await pause()) { onDone(''); return; }
@@ -47243,7 +47310,7 @@ async function callClaude({ system, messages, onText, onDone, onError, onNotice,
          spent allowance gets its own sentence because "try again later" is wrong for it by weeks.
          The comparison's Claude half is on the bundled key whenever the tester has no key of their
          own, whatever the everyday provider is set to. */
-      if (anthropicOnly ? (!coachHasOwnKey() && !!coachBundledKey()) : coachOnBundled()) {
+      if (onShared) {
         if (spent) {
           msg = loamT('The shared coach account has used its monthly allowance and comes back next month. To keep going now, add your own Anthropic API key in the coach settings.');
         } else {
@@ -47521,6 +47588,9 @@ function renderCoachKeyStatusRemote(el, ep) {
       ? `<span class="coach-key-scope">${loamT('remembered on this device')}</span>`
       : `<span class="coach-key-scope">${loamT('this session only')}</span>`;
     el.innerHTML = `<span class="coach-key-ok">✓ ${loamT('your API key')}</span> · ${scope} · <a href="#" id="coachKeyChange">${loamT('change')}</a>`;
+  } else if (coachAttestAvailable()) {
+    /* No key anywhere in this build's coach path: the app proves itself to Anthropic instead. */
+    el.innerHTML = `<span class="coach-key-ok">✓ ${loamT('shared coach account')}</span> · <a href="#" id="coachKeyChange">${loamT('use your own')}</a>`;
   } else if (coachBundledKey()) {
     el.innerHTML = `<span class="coach-key-ok">✓ ${loamT('bundled key')}</span> · <a href="#" id="coachKeyChange">${loamT('use your own')}</a>`;
   } else {
@@ -48229,7 +48299,7 @@ function renderCoachAbEntry() {
   if (!coachAbOffered() || !coachState) { host.classList.add('hidden'); host.innerHTML = ''; return; }
   host.classList.remove('hidden');
   const why = !localCoachAvailable() ? localCoachErrorText('unavailable', (localCoachInfo() || {}).reason)
-    : !coachKey() ? loamT('Claude needs the shared key or your own Anthropic key for this.') : '';
+    : !(coachKey() || coachAttestAvailable()) ? loamT('Claude needs the shared key or your own Anthropic key for this.') : '';
   const tally = coachAbTallyText();
   host.innerHTML = `<button type="button" class="coach-chip coach-ab-btn" id="coachAbStart"${why ? ' disabled' : ''}>${escapeHtml(loamT('A/B test: Claude vs Apple Intelligence'))}</button>`
     + `<span class="coach-note">${escapeHtml(why || loamT('Test builds only. Asks both coaches the same question (or the session analysis) and hides which is which until you vote.'))}`
@@ -48240,12 +48310,12 @@ function renderCoachAbEntry() {
 
 async function runCoachAb() {
   if (!coachState || coachState.streaming) return;
-  if (!localCoachAvailable() || !coachKey()) { renderCoachAbEntry(); return; }
+  if (!localCoachAvailable() || !(coachKey() || coachAttestAvailable())) { renderCoachAbEntry(); return; }
   const state = coachState;
   const inp = document.getElementById('coachInput');
   const typed = inp && !inp.disabled && !document.getElementById('coachCompose').classList.contains('hidden') ? inp.value.trim() : '';
   const question = typed || loamT(coachAnalyzePrompt(state.sport));
-  const onBundledKey = !coachHasOwnKey() && !!coachBundledKey();
+  const onBundledKey = !coachHasOwnKey() && (!!coachBundledKey() || coachAttestAvailable());
   if (onBundledKey && coachDailyUsed() >= COACH_MAX_DAILY_BUNDLED) {
     appendCoachBubble('assistant', loamT('The shared account has reached today\'s question limit, so the comparison cannot ask Claude until tomorrow.'));
     return;
@@ -57676,7 +57746,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '4fc1dcb2f · 2026-10-20';
+const LOAM_BUILD = '552276cdb · 2026-10-21';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
