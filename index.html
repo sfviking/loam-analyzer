@@ -2173,6 +2173,11 @@
   .section-title .activity-icon { width:34px; height:34px; flex-basis:34px; border-radius:10px; }
   .section-title .activity-icon svg { width:22px; height:22px; }
   .session-heading p { color:var(--text-dim); font-size:14px; margin:0; }
+  .session-heading .session-conditions { margin-top:2px; }
+  .mp-conditions { margin:0; font-size:13px; color:var(--text-dim); }
+  /* The Apple Weather mark is U+F8FF, a private-use glyph only Apple's system fonts draw, so the link
+     names the system font first rather than inheriting a web font that has no such glyph. */
+  .wx-mark { font-family:-apple-system, system-ui, sans-serif; color:inherit; text-decoration:underline; text-underline-offset:2px; white-space:nowrap; }
   /* The route-and-hills strip (sessionShapeHtml) takes its own row under the title, with the share
      button staying beside the title. On a phone the title takes the whole first row instead, and the
      strip fills the row the button used to sit alone on. Route in the activity's accent, as the
@@ -4316,7 +4321,7 @@ function loamSeasonResolve(now, forced, automated, offId) {
     <div class="coach-thread" id="coachThread"></div>
     <div class="coach-cta" id="coachCta">
       <button class="coach-start-btn" id="coachStart">Get AI coaching</button>
-      <span class="coach-note" id="coachCtaNote">Sends this session's metrics (not raw sensor data), plus a summary of your Apple Health vitals when connected, to Anthropic and streams back a coaching insight. Roughly $0.02-0.10 per insight, billed to your key.</span>
+      <span class="coach-note" id="coachCtaNote">Sends this session's metrics and weather (not raw sensor data), plus a summary of your Apple Health vitals when connected, to Anthropic and streams back a coaching insight. Roughly $0.02-0.10 per insight, billed to your key.</span>
     </div>
     <div class="coach-chips hidden" id="coachChips"></div>
     <!-- The Claude-vs-Apple A/B, test builds only (renderCoachAbEntry). -->
@@ -40782,8 +40787,8 @@ const LOAM_NB = {
     'tallene dine, gjort om til coaching — sendes til Anthropic med din egen API-nøkkel, kun når du ber om det',
   'your metrics, turned into coaching — sent to Anthropic on the developer\'s account, only when you ask':
     'tallene dine, gjort om til coaching — sendes til Anthropic på utviklerens konto, kun når du ber om det',
-  'Sends this session\'s metrics (not raw sensor data), plus a summary of your Apple Health vitals when connected,':
-    'Sender tallene fra denne økten (ikke rå sensordata), pluss et sammendrag av helsetallene dine fra Apple Health når de er koblet til,',
+  'Sends this session\'s metrics and weather (not raw sensor data), plus a summary of your Apple Health vitals when connected,':
+    'Sender tallene og været fra denne økten (ikke rå sensordata), pluss et sammendrag av helsetallene dine fra Apple Health når de er koblet til,',
   'Sends weekly totals of your recorded and manually entered training, your goal, availability, saved session schedule and completion status, plus a summary of your Apple Health vitals when connected,':
     'Sender ukestall for registrert og manuelt lagt til trening, målet ditt, tilgjengelig tid, lagret øktplan og fullføringsstatus, samt et sammendrag av helsedata fra Apple Helse når tilkoblet,',
   'to Anthropic and streams back a coaching insight. Roughly $0.02-0.10 per insight, billed to your key.':
@@ -40870,8 +40875,8 @@ const LOAM_NB = {
     'Du syntes begge var dårlige.',
   'Your votes so far: Claude {c} · Apple {a} · same {s} · both poor {n}.':
     'Stemmene dine så langt: Claude {c} · Apple {a} · like {s} · begge dårlige {n}.',
-  'a summary of this session\'s metrics (not the raw sensor data)':
-    'et sammendrag av tallene fra denne økten (ikke rå sensordata)',
+  'a summary of this session\'s metrics and its weather (not the raw sensor data)':
+    'et sammendrag av tallene og været fra denne økten (ikke rå sensordata)',
   'it needs iOS 26 or later':
     'den krever iOS 26 eller nyere',
   'on this iPhone':
@@ -42190,6 +42195,10 @@ const LOAM_NB = {
   'Times run gate to gate on the saved segment, the clock Compare laps uses, so this lap can differ from the Time above.':
     'Tidene måles fra port til port på det lagrede segmentet, samme klokke som Sammenlign runder bruker, så denne runden kan avvike fra Varighet ovenfor.',
   'Back to {name}': 'Tilbake til {name}',
+  'wind {speed}': 'vind {speed}',
+  'wet ground': 'vått underlag',
+  'calm': 'vindstille',
+  'Weather data by Apple Weather': 'Værdata fra Apple Vær',
 };
 
 /* ---------- Static chrome ----------
@@ -48969,7 +48978,7 @@ function coachEnsureConsent({ ep, anthropicOnly } = {}) {
   const training = coachState && coachState.sport === 'training';
   const what = training
     ? loamT('weekly totals of your recorded and manually entered training, your goal, availability and planned sessions')
-    : loamT('a summary of this session\'s metrics (not the raw sensor data)');
+    : loamT('a summary of this session\'s metrics and its weather (not the raw sensor data)');
   const body = server
     ? loamT('To answer, Loam sends {who} {what}, a short summary of your Apple Health vitals if you connected Health, and your questions. Loam does not know who runs that server or what it keeps.', { who, what })
     : loamT('To answer, Loam sends Anthropic, a third-party AI company in the United States, {what}, a short summary of your Apple Health vitals if you connected Health, and your questions. Anthropic processes it under its own terms and privacy policy. Your Strava data is never sent.', { what });
@@ -49193,7 +49202,7 @@ function coachInputPlaceholder(sport, opts) {
 function refreshCoachFacts(D, sport) {
   if (!coachState || !coachState.digest || coachState.sport !== sport) return;
   try {
-    coachState.digest = sessionDigest(D, sport);
+    coachState.digest = attachConditions(sessionDigest(D, sport), D);
   } catch (e) { return; }
   coachState.digestReady = Promise.allSettled([
     attachCoachHistory(D, sport),
@@ -49209,7 +49218,7 @@ function renderCoachPanel(D, sport, opts = {}) {
      `opts.digest` is a digest built elsewhere -- the training plan's, which is not a session and has
      no D to build one from -- and it arrives complete, so nothing is attached to it below. */
   const prebuilt = opts && opts.digest;
-  coachState = { sport, digest: prebuilt || sessionDigest(D, sport), messages: [], streaming: false };
+  coachState = { sport, digest: prebuilt || attachConditions(sessionDigest(D, sport), D), messages: [], streaming: false };
   show('coachSection');
   /* Fold recent same-sport sessions from the library into the digest so coaching can speak to a
      trend ("your weak-side radius improved since last week"), not just this one ride. Async and
@@ -49273,7 +49282,7 @@ function refreshCoachDestinationCopy() {
        statement about what is leaving the device. */
     const what = sport === 'training'
       ? loamT('Sends weekly totals of your recorded and manually entered training, your goal, availability, saved session schedule and completion status, plus a summary of your Apple Health vitals when connected,')
-      : loamT('Sends this session\'s metrics (not raw sensor data), plus a summary of your Apple Health vitals when connected,');
+      : loamT('Sends this session\'s metrics and weather (not raw sensor data), plus a summary of your Apple Health vitals when connected,');
     note.textContent = ep
       ? what + ' ' + loamT('to your AI server at {host}, not to Anthropic.', { host: coachEndpointHost(ep) })
       : onBundled
@@ -49539,7 +49548,7 @@ function attachHealthContext(state) {
 function coachKeyDigest(digest) {
   if (!digest || typeof digest !== 'object') return JSON.stringify(digest);
   if (digest.kind === 'training_plan') return JSON.stringify(digest);
-  const { health_context, health_context_note, ...rest } = digest;
+  const { health_context, health_context_note, conditions, conditions_note, ...rest } = digest;
   return JSON.stringify(rest);
 }
 
@@ -52037,6 +52046,7 @@ function mpHeaderHTML(D, M) {
         <div class="mp-chips">
           <span class="mp-sport">${escapeHtml(sessionSportLabel(M.sport))}</span>
         </div>
+        ${conditionsHTML(appSessionWeather(D), 'mp-conditions')}
         <dl class="mp-sensors analysis-detailed-only">${sensors.join('')}</dl>
       </div>
       <div class="mp-header-footer">
@@ -53277,6 +53287,82 @@ function appSessionContext(D) {
   const ctx = { title: str(window.LOAM_SESSION_TITLE), place: str(window.LOAM_SESSION_PLACE), workout: str(window.LOAM_SESSION_WORKOUT) };
   return ctx.title || ctx.place || ctx.workout ? ctx : null;
 }
+/* The conditions the app looked up for this recording (WeatherKit, held in the app's memory for the
+   launch and never stored, per Apple's terms), handed over as LOAM_SESSION_WEATHER beside the title,
+   or later through loamSessionWeatherArrived when the lookup finishes after the page has rendered.
+   Same rule as appSessionContext: read only while the recording the app opened is the one on screen,
+   so a library ride opened inside the same page never wears another session's weather. A summary with
+   no temperature is treated as none. Read by the heading line and by the coach's digest
+   (attachConditions); the WeatherKit terms questions behind both are in the WeatherKit entry of
+   decisions/analyzer-and-app.md. */
+function appSessionWeather(D) {
+  if (typeof LOAM_EMBEDDED === 'undefined' || !LOAM_EMBEDDED || !D || !window.LOAM_SESSION_NAME) return null;
+  if (D.title !== loamCsvName(window.LOAM_SESSION_NAME)) return null;
+  const w = window.LOAM_SESSION_WEATHER;
+  return w && typeof w === 'object' && Number.isFinite(w.temperatureC) ? w : null;
+}
+/* "19°C · Mostly Clear · wind 7 km/h · wet ground ·  Weather" in the reader's units. One hourly value
+   near the session's midpoint for the area, so it describes the day rather than the trail: no
+   gusts, no direction, nothing a reader would take as the wind on a given descent. WeatherKit's
+   condition text arrives in the phone's language already. The Apple Weather mark and its legal link
+   are required wherever the values are shown; the link opens outside the app (AnalyzerNavigationPolicy). */
+function conditionsHTML(w, cls) {
+  if (!w) return '';
+  const temp = U.metric() ? `${Math.round(w.temperatureC)}°C` : `${Math.round(w.temperatureC * 9 / 5 + 32)}°F`;
+  const parts = [temp];
+  if (typeof w.conditionText === 'string' && w.conditionText.trim()) parts.push(w.conditionText.trim());
+  if (Number.isFinite(w.windKmh) && w.windKmh >= 0) {
+    const wind = Math.round(U.speedNum(w.windKmh / 3.6));
+    parts.push(wind > 0 ? loamT('wind {speed}', { speed: `${wind} ${U.speedUnit()}` }) : loamT('calm'));
+  }
+  if (w.wet === true) parts.push(loamT('wet ground'));
+  return `<p class="${cls}" data-conditions>${parts.map(escapeHtml).join(' · ')} · <a class="wx-mark" href="https://weatherkit.apple.com/legal-attribution.html" aria-label="${escapeHtml(loamT('Weather data by Apple Weather'))}">&#xF8FF; Weather</a></p>`;
+}
+/* The app looks the conditions up when a session opens (nothing is stored), so the answer can land
+   after the heading and the coach panel were built. Fill the line in where each header puts it and
+   hand the coach the same, without re-running the render. Returns whether there was anything to show,
+   which is what the E2E reads. */
+window.loamSessionWeatherArrived = function () {
+  const D = _lastRender && _lastRender.D;
+  const w = appSessionWeather(D);
+  if (!w) return false;
+  const heading = document.querySelector('#sessionOverview .session-heading > div');
+  if (heading) {
+    heading.querySelector('[data-conditions]')?.remove();
+    heading.insertAdjacentHTML('beforeend', conditionsHTML(w, 'session-conditions'));
+  }
+  const chips = document.querySelector('.mp-header .mp-chips');
+  if (chips) {
+    chips.parentElement.querySelector(':scope > [data-conditions]')?.remove();
+    chips.insertAdjacentHTML('afterend', conditionsHTML(w, 'mp-conditions'));
+  }
+  if (coachState && coachState.digest && coachState.digest.kind !== 'training_plan') attachConditions(coachState.digest, D);
+  return true;
+};
+/* The same conditions, for the coach: context it may use to read a session (heat or cold against
+   heart rate and pace, wet ground against grip and descent speed), in the athlete's units. Attached
+   to the digest beside the ride's own facts and kept out of the first-turn cache key with the other
+   context the app injects (coachKeyDigest), so a session whose weather arrives later still replays its
+   cached insight. Owner's call 2026-10-24 to send it, see the WeatherKit entry in
+   decisions/analyzer-and-app.md. */
+function attachConditions(digest, D) {
+  const w = appSessionWeather(D);
+  if (!digest || typeof digest !== 'object' || !w) return digest;
+  const metric = U.metric();
+  const r = (x, n = 0) => Number.isFinite(x) ? +x.toFixed(n) : null;
+  const temp = (c) => Number.isFinite(c) ? r(metric ? c : c * 9 / 5 + 32) : null;
+  const wind = Number.isFinite(w.windKmh) ? r(metric ? w.windKmh : w.windKmh / 1.609344) : null;
+  digest.conditions = {
+    [metric ? 'temperature_c' : 'temperature_f']: temp(w.temperatureC),
+    [metric ? 'feels_like_c' : 'feels_like_f']: temp(w.apparentC),
+    sky: typeof w.conditionText === 'string' && w.conditionText.trim() ? w.conditionText.trim() : null,
+    [metric ? 'wind_kmh' : 'wind_mph']: wind,
+    humidity_pct: Number.isFinite(w.humidity) ? r(w.humidity * 100) : null,
+    wet_ground: w.wet === true,
+  };
+  digest.conditions_note = 'Apple Weather\'s hourly conditions for the area at about the middle of the session, looked up after it. One value for the area and the hour: not the wind on any particular stretch, not gusts, and not the surface of any trail. wet_ground means measurable rain in that hour or the four before it. Use it as context (heat or cold for heart rate and pace, wet ground for grip and slower descents), never as the measured cause of a number, and do not invent conditions that are not listed.';
+  return digest;
+}
 
 /* The reps of an interval session: two or more Segment Start / Segment End pairs on a run or a walk.
    A guided workout stamps one pair per rep as the voice calls it, and a runner may tap them; the runs
@@ -53491,7 +53577,7 @@ function renderSessionOverview(D, sport) {
   const sensors = D.sensors || {};
   const shape = sessionShapeHtml(sessionShapeGeometry(sensors.location, climbAltSeries(sensors.baro || [], sensors.location || [], ride), ride));
   host.innerHTML = `<div class="session-heading${shape ? ' has-shape' : ''}"><div><h1 class="activity-title" tabindex="-1">${activityIcon(sport)}<span>${escapeHtml(title)}</span></h1>
-      <p>${escapeHtml([sessionSportLabel(sport), when].filter(Boolean).join(' · '))}</p></div>
+      <p>${escapeHtml([sessionSportLabel(sport), when].filter(Boolean).join(' · '))}</p>${conditionsHTML(appSessionWeather(D), 'session-conditions')}</div>
       ${shape}<button type="button" class="session-share card-share" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
     <div class="session-facts">${Number.isFinite(distance) ? tile(U.dist(distance), 'Distance') : ''}
       ${run && run.speed > 0 ? tile(U.pace(run.speed), 'Moving pace') : ''}
@@ -59408,7 +59494,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'd190e5f14 · 2026-10-24';
+const LOAM_BUILD = '6ca099795 · 2026-10-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
