@@ -2173,6 +2173,20 @@
   .section-title .activity-icon { width:34px; height:34px; flex-basis:34px; border-radius:10px; }
   .section-title .activity-icon svg { width:22px; height:22px; }
   .session-heading p { color:var(--text-dim); font-size:14px; margin:0; }
+  /* The route-and-hills strip (sessionShapeHtml) takes its own row under the title, with the share
+     button staying beside the title. On a phone the title takes the whole first row instead, and the
+     strip fills the row the button used to sit alone on. Route in the activity's accent, as the
+     icon is; the profile in --accent-2, the colour the splits' topo column already gives altitude. */
+  .session-heading.has-shape { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:16px; }
+  .session-heading.has-shape > .session-share { grid-column:2; grid-row:1; }
+  .session-shape { grid-column:1 / -1; grid-row:2; display:flex; align-items:flex-end; gap:14px; min-width:0; margin-top:16px; }
+  .session-shape svg { display:block; flex:none; overflow:visible; }
+  .session-shape .shape-route path { fill:none; stroke:var(--accent); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+  .session-shape .shape-route circle { fill:var(--accent); stroke:var(--surface); stroke-width:1.5; }
+  /* Capped so a desktop-wide card does not stretch the hills flat; on a phone the row is narrower. */
+  .session-shape .shape-profile { flex:1 1 auto; min-width:0; max-width:360px; height:64px; }
+  .session-shape .shape-profile polyline { fill:none; stroke:var(--accent-2); stroke-width:1.75; vector-effect:non-scaling-stroke; stroke-linejoin:round; stroke-linecap:round; }
+  .session-shape .shape-profile polygon { fill:color-mix(in srgb, var(--accent-2) 18%, transparent); stroke:none; }
   body:is(.running-analysis,.road-analysis) .session-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 24px; }
   .run-supporting-facts { display:flex; flex-wrap:wrap; gap:8px 20px; margin-top:16px; color:var(--text-dim); font-size:14px; }
   .run-scope-note, .run-takeaway-context { color:var(--text-dim); font-size:14px; line-height:1.5; }
@@ -2294,6 +2308,9 @@
     .session-facts { gap:16px; }
     .session-facts strong { font-size:23px; }
     .session-heading { flex-wrap:wrap; }
+    .session-heading.has-shape > div:first-child { grid-column:1 / -1; }
+    .session-heading.has-shape > .session-share { grid-row:2; }
+    .session-heading.has-shape > .session-shape { grid-column:1; }
     .lib-session { display:block; }
     .lib-actions { margin-top:12px; }
     .recent-row { flex-wrap:wrap; }
@@ -42111,6 +42128,9 @@ const LOAM_NB = {
   'estimated head bob · AirPods': 'anslått hodebevegelse · AirPods',
   'estimated phone motion': 'anslått telefonbevegelse',
   'Distance includes {out} outside the run. Pace and splits use the {run} run window.': 'Distansen inkluderer {out} utenfor løpeturen. Tempo og splitter bruker løpevinduet på {run}.',
+  /* The overview's route-and-hills strip, read aloud in place of the two drawings. */
+  'Route shape and elevation profile, {range} from the lowest point to the highest.': 'Rutens form og høydeprofil, {range} fra laveste til høyeste punkt.',
+  'Route shape.': 'Rutens form.',
   'Pace alone does not establish why it changed.': 'Tempo alene fastslår ikke hvorfor det endret seg.',
   /* The same verdict once the run's heart rate has a say (`pacingDeference`). */
   'Slowed {v}/{unit}.': 'Saktere med {v}/{unit}.',
@@ -53314,6 +53334,123 @@ function openSessionDataSources() {
   const summary = detail && detail.querySelector('summary');
   if (summary) summary.focus({ preventScroll: true });
 }
+/* ===== The overview's route-and-hills strip ===
+   Two small drawings under the session title (owner request, 2026-10-24: "a quick graphic, perhaps
+   depicting the route (but without the map) or maybe the topography of how hilly it is"): the GPS
+   track as a bare line, north up, and the altitude along it. No tiles, axes or numbers -- the tiles
+   under it carry the figures, and the share card already puts the route on a map.
+
+   Both read the session WINDOW (`D.ride`), the stretch the share card's track, the Climb figure and
+   the splits are read over. The ground outside it is what the scope note under the tiles names.
+
+   The profile is altitude against DISTANCE, not time, so a stop at the top of a climb is not drawn
+   as a plateau the ground does not have. Its altitude is `climbAltSeries` (barometer, else GPS): the
+   series the Climb figure, the Climbs panel and the splits' topo column read, so the drawing and the
+   number under it describe one hill. */
+const SHAPE_MIN_FIXES = 8;        /* the share card's floor for drawing a track at all */
+const SHAPE_MIN_EXTENT_M = 50;    /* under this the "route" is one spot's GPS wander (a gym, a range) */
+const SHAPE_PROFILE_BINS = 96;
+/* The least altitude span the profile is drawn over. Without it a flat run's few metres of
+   barometric wander fill the box edge to edge and draw as hills; 30 m on the 64 px strip is about
+   half a metre per pixel, so a flat route draws as a low, nearly level band. Display only. */
+const SHAPE_MIN_SPAN_M = 30;
+const SHAPE_ROUTE_PX = 64, SHAPE_ROUTE_PAD = 5, SHAPE_PROFILE_H = 64;
+
+/* The strip's geometry, in metres. Null when there is no route to draw. `profile` is null (and the
+   strip draws the route alone) when the window carries no altitude. */
+function sessionShapeGeometry(locRows, alts, ride) {
+  if (!ride || ride.start == null || ride.end == null) return null;
+  const fixes = (locRows || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.latitude != null && r.longitude != null);
+  if (fixes.length < SHAPE_MIN_FIXES) return null;
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const r of fixes) {
+    if (r.latitude < minLat) minLat = r.latitude; if (r.latitude > maxLat) maxLat = r.latitude;
+    if (r.longitude < minLon) minLon = r.longitude; if (r.longitude > maxLon) maxLon = r.longitude;
+  }
+  const M_PER_DEG = 111320, lonScale = Math.cos((minLat + maxLat) / 2 * Math.PI / 180) || 1;
+  const width = (maxLon - minLon) * lonScale * M_PER_DEG, height = (maxLat - minLat) * M_PER_DEG;
+  if (Math.max(width, height) < SHAPE_MIN_EXTENT_M) return null;
+  /* A leg across a Pause is not drawn, as on every map here (pausedLegBreaks). */
+  const brk = pausedLegBreaks(fixes.map(r => r.t), ride.pausedSpans || []);
+  const route = fixes.map((r, i) => ({ x: (r.longitude - minLon) * lonScale * M_PER_DEG, y: (r.latitude - minLat) * M_PER_DEG, lift: brk.has(i) }));
+  /* Distance along the track under computeRunSummary's hop rule: a paused leg, a standing fix's
+     wander and a teleport are not ground; a dropout's bridged ground is. One difference, because
+     this is a drawing rather than a figure: a fix with NO speed counts as moving, since a source that
+     never reports speed would otherwise collapse the whole profile onto its first column. */
+  const cum = [0];
+  for (let i = 1; i < fixes.length; i++) {
+    const a = route[i - 1], b = route[i], dt = fixes[i].t - fixes[i - 1].t;
+    const d = Math.hypot(b.x - a.x, b.y - a.y), v = fixes[i].speed;
+    const ground = dt > 0 && !b.lift
+      && (dt > 5 || (d / dt <= 12 && (v == null || v >= 0.5)));
+    cum.push(cum[i - 1] + (ground ? d : 0));
+  }
+  const distance = cum[cum.length - 1];
+  let profile = null, altMin = null, altMax = null;
+  const inAlts = (alts || []).filter(a => a && a.alt != null && a.t >= ride.start && a.t <= ride.end);
+  if (inAlts.length >= 2 && distance > 0) {
+    /* Binned by distance and averaged, which also smooths a noisy GPS altitude; an empty bin (a
+       dropout's long hop) takes the line between its neighbours. */
+    const sums = new Array(SHAPE_PROFILE_BINS).fill(0), counts = new Array(SHAPE_PROFILE_BINS).fill(0);
+    for (let i = 0; i < fixes.length; i++) {
+      const alt = pacingAltAt(inAlts, fixes[i].t);
+      if (alt == null) continue;
+      const k = Math.min(SHAPE_PROFILE_BINS - 1, Math.floor(cum[i] / distance * SHAPE_PROFILE_BINS));
+      sums[k] += alt; counts[k]++;
+    }
+    const known = [];
+    for (let k = 0; k < SHAPE_PROFILE_BINS; k++) if (counts[k]) known.push(k);
+    if (known.length >= 2) {
+      profile = new Array(SHAPE_PROFILE_BINS);
+      for (let k = 0, j = 0; k < SHAPE_PROFILE_BINS; k++) {
+        while (j < known.length - 1 && known[j + 1] <= k) j++;
+        const k0 = known[j], k1 = known[Math.min(j + 1, known.length - 1)];
+        const v0 = sums[k0] / counts[k0], v1 = sums[k1] / counts[k1];
+        profile[k] = k <= k0 || k1 === k0 ? v0 : k >= k1 ? v1 : v0 + (v1 - v0) * (k - k0) / (k1 - k0);
+      }
+      altMin = Infinity; altMax = -Infinity;
+      for (const a of inAlts) { if (a.alt < altMin) altMin = a.alt; if (a.alt > altMax) altMax = a.alt; }
+    }
+  }
+  return { route, width, height, distance, profile, altMin, altMax };
+}
+
+/* The strip's markup: the route fitted into a square, north up, with a dot where it started; and the
+   profile stretched to whatever width the row leaves it. Colours come from the theme in CSS. */
+function sessionShapeHtml(geo) {
+  if (!geo) return '';
+  const S = SHAPE_ROUTE_PX, P = SHAPE_ROUTE_PAD;
+  const scale = Math.min((S - 2 * P) / (geo.width || 1e-9), (S - 2 * P) / (geo.height || 1e-9));
+  const ox = (S - geo.width * scale) / 2, oy = (S - geo.height * scale) / 2;
+  const px = (p) => [ox + p.x * scale, S - oy - p.y * scale];
+  /* Thinned to a point every ~0.8 px, which keeps a long recording's markup small; a lifted leg is
+     always kept so a pause still breaks the line. */
+  let d = '', last = null;
+  geo.route.forEach((p, i) => {
+    const [x, y] = px(p);
+    if (i > 0 && !p.lift && i < geo.route.length - 1 && Math.hypot(x - last[0], y - last[1]) < 0.8) return;
+    d += (i === 0 || p.lift ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+    last = [x, y];
+  });
+  const [sx, sy] = px(geo.route[0]);
+  const route = `<svg class="shape-route" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" aria-hidden="true">`
+    + `<path d="${d}"/><circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="3.5"/></svg>`;
+  let profile = '';
+  if (geo.profile) {
+    const vals = geo.profile, H = SHAPE_PROFILE_H, padT = 4, padB = 2;
+    const lo0 = Math.min(...vals), hi0 = Math.max(...vals);
+    /* A short span is widened mostly UPWARD, so a flat route sits low in the box rather than floating. */
+    const extra = Math.max(0, SHAPE_MIN_SPAN_M - (hi0 - lo0));
+    const lo = lo0 - extra * 0.25, hi = hi0 + extra * 0.75;
+    const pts = vals.map((v, k) => `${(100 * k / (vals.length - 1)).toFixed(2)},${(H - padB - (v - lo) / (hi - lo) * (H - padT - padB)).toFixed(1)}`).join(' ');
+    profile = `<svg class="shape-profile" viewBox="0 0 100 ${H}" preserveAspectRatio="none" aria-hidden="true">`
+      + `<polygon points="0,${H} ${pts} 100,${H}"/><polyline points="${pts}"/></svg>`;
+  }
+  const label = geo.profile
+    ? loamT('Route shape and elevation profile, {range} from the lowest point to the highest.', { range: U.elev(geo.altMax - geo.altMin) })
+    : loamT('Route shape.');
+  return `<div class="session-shape" role="img" aria-label="${escapeHtml(label)}">${route}${profile}</div>`;
+}
 function renderSessionOverview(D, sport) {
   const previousNotice = document.getElementById('mtbCalibNotice');
   if (previousNotice && previousNotice.closest('#sessionOverview')) document.getElementById('results').prepend(previousNotice);
@@ -53351,9 +53488,11 @@ function renderSessionOverview(D, sport) {
   const unreliable = sidesUnreliableFor(D);
   const shifted = !!(D.calibWin && D.calibWin.mountShift);
   const tile = (value, label) => `<div><strong>${escapeHtml(value)}</strong><span>${escapeHtml(loamT(label))}</span>${road && label === 'Top speed' ? roadTopSpeedActions(D) : ''}</div>`;
-  host.innerHTML = `<div class="session-heading"><div><h1 class="activity-title" tabindex="-1">${activityIcon(sport)}<span>${escapeHtml(title)}</span></h1>
+  const sensors = D.sensors || {};
+  const shape = sessionShapeHtml(sessionShapeGeometry(sensors.location, climbAltSeries(sensors.baro || [], sensors.location || [], ride), ride));
+  host.innerHTML = `<div class="session-heading${shape ? ' has-shape' : ''}"><div><h1 class="activity-title" tabindex="-1">${activityIcon(sport)}<span>${escapeHtml(title)}</span></h1>
       <p>${escapeHtml([sessionSportLabel(sport), when].filter(Boolean).join(' · '))}</p></div>
-      <button type="button" class="session-share card-share" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
+      ${shape}<button type="button" class="session-share card-share" title="${escapeHtml(loamT('Share card'))}" aria-label="${escapeHtml(loamT('Share card'))}">${CARD_SHARE_SVG}</button></div>
     <div class="session-facts">${Number.isFinite(distance) ? tile(U.dist(distance), 'Distance') : ''}
       ${run && run.speed > 0 ? tile(U.pace(run.speed), 'Moving pace') : ''}
       ${Number.isFinite(duration) ? tile(duration < 60 ? `${Math.round(duration)}s` : fmtDuration(duration), 'Moving time') : ''}
@@ -59269,7 +59408,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '7587bb027 · 2026-10-24';
+const LOAM_BUILD = 'd190e5f14 · 2026-10-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
