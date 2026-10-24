@@ -910,7 +910,8 @@
      written by drawRuns/drawRunsEmpty. Only the table Auto OPENED on is dropped: the mode picker
      lives inside this section, so dropping a Descents the athlete picked took the picker with it
      and left no way back (owner report, 2026-10-11: "it disappeared altogether"). Any pick marks
-     the section `data-runs-picked`, reset by renderRunsPanel on the next session. */
+     the section `data-runs-picked`, and so does the ride page's "All actions" (mpShowRunsTable);
+     renderRunsPanel resets it on the next session. */
   :root[data-analysis-view="visual"] :is(#runSegmentsSection, #roadDescentsSection, #roadDescentHistorySection, #recordingQualitySection, #runsSection[data-runs-mode="descents"]:not([data-runs-picked])) { display:none !important; }
   :root[data-analysis-view="visual"] .analysis-compact-note { color:var(--text-dim); font-size:12px; margin:8px 0; }
   :root[data-analysis-view="visual"] :is(.session-lead, .lift-form-row) { grid-template-columns:minmax(0, 1fr); }
@@ -2385,11 +2386,23 @@
 })();
 /* SEASONAL EDITION (owner, 2026-10-23: "Create a Halloween version, special edition"). The calendar
    decides, so the edition turns itself on and, more to the point, OFF again without a release.
-   Local dates, both ends inclusive. The icon side of the same window is ci_post_clone.sh's
-   `halloween_window`, and season.test.js holds the two to the same dates. */
+   25 October through 1 November, both ends inclusive, on PACIFIC dates (owner, 2026-10-24: "kick in on
+   10/25 PST"), so every tester turns over at the same instant whatever their own zone. The icon side
+   (ci_post_clone.sh's `halloween_window`) and the watch (`HalloweenSeason`) read the same window on
+   the same calendar, and season.test.js holds all three to it. */
+function loamPacificDate(d) {
+  try {
+    var parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles',
+      year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(d);
+    var get = function (t) { for (var i = 0; i < parts.length; i++) if (parts[i].type === t) return +parts[i].value; return NaN; };
+    var y = get('year'), m = get('month'), day = get('day');
+    if (y && m && day) return { y: y, m: m - 1, day: day };
+  } catch (e) {}
+  return { y: d.getFullYear(), m: d.getMonth(), day: d.getDate() };   /* no Intl zone data: local */
+}
 function loamSeasonFor(d) {
-  var m = d.getMonth(), day = d.getDate();
-  if ((m === 9 && day >= 20) || (m === 10 && day <= 1)) return 'halloween';
+  var p = loamPacificDate(d);
+  if ((p.m === 9 && p.day >= 25) || (p.m === 10 && p.day <= 1)) return 'halloween';
   return null;
 }
 /* `forced` is ?season= ('halloween' previews it in any month, 'off' suppresses it).
@@ -2400,11 +2413,12 @@ function loamSeasonFor(d) {
 function loamSeasonResolve(now, forced, automated, offId) {
   var none = { season: null, id: null, on: false };
   if (forced === 'off') return none;
-  if (forced === 'halloween') return { season: forced, id: forced + '-' + now.getFullYear(), on: true };
+  var year = loamPacificDate(now).y;
+  if (forced === 'halloween') return { season: forced, id: forced + '-' + year, on: true };
   if (automated) return none;
   var season = loamSeasonFor(now);
   if (!season) return none;
-  var id = season + '-' + now.getFullYear();
+  var id = season + '-' + year;
   return { season: season, id: id, on: offId !== id };
 }
 (function () {
@@ -5320,9 +5334,18 @@ function calibrationRotation(gravityRows, calibStart, calibEnd) {
  * stop was excluded, so "somewhere across this stop" is the whole of what the recording knows, and
  * the surface says so instead of naming a second.
  *
+ * A MOVE STAYS; POSTURE COMES BACK. A step only counts if it holds: no stretch of the later side
+ * looks more like the earlier pose than the later one, and no stretch of the earlier side looks more
+ * like the later pose. A phone that moved in its mount stays moved until a hand puts it back; a phone
+ * worn on the body tilts with the torso and returns when the rider sits up. See the note at the hold
+ * test for the strap-pocket ride that measured the difference.
+ *
  * What it does NOT do, deliberately: it finds ONE step. A phone that moved twice is reported at
  * one of its moves, and a slow continuous creep will report as a step somewhere in the
- * middle of the creep rather than as a creep. It also says nothing about WHY the phone moved, and
+ * middle of the creep rather than as a creep. The hold test gives up two cases in exchange for every
+ * strap-pocket ride: a phone moved and later put back the way it was reads as never having moved,
+ * and a posture held from some point to the end of the ride (a final tuck down to the car) reads as
+ * a move. It also says nothing about WHY the phone moved, and
  * nothing about which side is the "right" pose -- the calibration window decides that, and this only
  * says that one of the two sides disagrees with it.
  */
@@ -5355,9 +5378,10 @@ const MOUNT_SHIFT_NEAR_FIX_S = 5.0;
  * recording can show the athlete was actually moving -- see the note above on why this is required
  * rather than optional. rideStart / rideEnd bound the ride window.
  *
- * Returns null when there is nothing to say (no ride window, too little moving riding, or no split
- * clears the threshold), else { t, deg, beforeS, afterS, samples } where `t` is the instant the pose
- * steps and `deg` the size of the step.
+ * Returns null when there is nothing to say (no ride window, too little moving riding, no split
+ * clears the threshold, or the pose comes back across the split, which is posture), else
+ * { t, deg, beforeS, afterS, samples } where `t` is the instant the pose steps and `deg` the size of
+ * the step.
  */
 function detectMountShift(gravityRows, rideStart, rideEnd, isMoving, opts) {
   const o = opts || {};
@@ -5415,9 +5439,9 @@ function detectMountShift(gravityRows, rideStart, rideEnd, isMoving, opts) {
      (2026-10-10, phone re-seated across a stop at 11:08-13:44) it named 3:31. The step is LOCATED
      by the split whose two sides are each most self-consistent -- the largest summed resultant
      length, the change-point estimate for a mean direction -- which names 13:53 there. The GATE
-     stays the largest angle, so which rides are flagged is unchanged. */
+     stays the largest angle, so locating the step changed no verdict; the hold test below can. */
   const len = (lo, hi) => Math.hypot(px[hi] - px[lo], py[hi] - py[lo], pz[hi] - pz[lo]);
-  const split = (i, deg) => ({ t: rows[i].t, deg, beforeS: i * dt, afterS: (rows.length - i) * dt });
+  const split = (i, deg) => ({ i, t: rows[i].t, deg, beforeS: i * dt, afterS: (rows.length - i) * dt });
   let best = null, widest = null, bestLen = -1;
   const strideN = Math.max(1, Math.round(stepS / dt));
   for (let i = minSideN; i <= rows.length - minSideN; i += strideN) {
@@ -5438,7 +5462,33 @@ function detectMountShift(gravityRows, rideStart, rideEnd, isMoving, opts) {
      and its own angle is then below the threshold, which would have the notice say "moved about
      10 deg" for a finding that needs 12. The only step the recording vouches for is then the
      largest-angle split, so report that one, its instant and its size together. */
-  return { ...(best.deg >= thresholdDeg ? best : widest), samples: rows.length };
+  const reported = best.deg >= thresholdDeg ? best : widest;
+
+  /* A MOVE STAYS; POSTURE COMES BACK (2026-10-24, owner report: "I never see turn replay anymore",
+     phone in a pocket on a backpack shoulder strap, `2026-10-24_16-21-37`). Tucking into a 15 m/s
+     road descent swung the phone's pose 55-68 deg in under ten seconds; it held there for 150 s,
+     came back each time the rider sat up (to within 3-7 deg of where it started, the second time),
+     and the AirPods' head pitch dropped ~30 deg at the same instants. The pocket held; the torso moved and the strap
+     went with it. The largest angle cannot tell the two apart -- any long excursion near one end of
+     a ride is a big angle between two means -- and that ride read "moved 29.5 deg at 23:46", which
+     withheld the lean of all 102 turns for a stretch that held none. A phone that moved in its
+     mount stays moved until a hand puts it back, so a step is a move only if no minimum-length
+     stretch on either side looks more like the OTHER side's pose than its own. Tested at the
+     split that is reported, since that is the step the notice would name. */
+  const N = rows.length;
+  const nearer = (lo, hi, toward, away) => {
+    for (let j = lo; j + minSideN <= hi; j += strideN) {
+      const m = unit(j, j + minSideN);
+      if (m && m[0] * (toward[0] - away[0]) + m[1] * (toward[1] - away[1]) + m[2] * (toward[2] - away[2]) > 0) return true;
+    }
+    return false;
+  };
+  const holds = (s) => {
+    const a = unit(0, s.i), b = unit(s.i, N);
+    return !!a && !!b && !nearer(s.i, N, a, b) && !nearer(0, s.i, b, a);
+  };
+  if (!holds(reported)) return null;
+  return { t: reported.t, deg: reported.deg, beforeS: reported.beforeS, afterS: reported.afterS, samples: N };
 }
 
 /* "Was the athlete actually moving at time t", answered from the GPS fixes alone, for detectMountShift
@@ -14628,7 +14678,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 25;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally)
+const ANALYSIS_CACHE_VERSION = 26;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -52379,7 +52429,7 @@ function mtbPageHTML(D, M) {
       <div id="mpSlotSignature" class="mp-slot"></div>
     </section>
     <section id="mpRuns" class="mp-section" aria-label="${escapeHtml(runsNoun)}">
-      ${mpSectionHead(escapeHtml(runsNoun), escapeHtml(loamT('The downhill is the ride. Every run is timed and graded on its own; name a trail once and Loam compares it with your past laps.')), `<button type="button" class="mp-btn mp-btn-ghost" id="mpToTable">${escapeHtml(loamT('All actions'))} ↓</button>`)}
+      ${mpSectionHead(escapeHtml(runsNoun), escapeHtml(loamT('The downhill is the ride. Every run is timed and graded on its own; name a trail once and Loam compares it with your past laps.')), cards ? `<button type="button" class="mp-btn mp-btn-ghost" id="mpToTable">${escapeHtml(loamT('All actions'))} ↓</button>` : '')}
       ${cards ? `<div class="mp-cards">${cards}</div>` : `<p class="mp-muted">${escapeHtml(loamT('No descent found in this recording.'))}</p>`}
       <div id="mpSlotRuns" class="mp-slot"></div>
     </section>
@@ -52539,10 +52589,22 @@ function wireMtbPage(host, D, M) {
   const classic = host.querySelector('#mpClassicBtn');
   if (classic) classic.onclick = () => setMtbPage(false);
   const toTable = host.querySelector('#mpToTable');
-  if (toTable) toTable.onclick = () => { const t = document.getElementById('runsSection'); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  if (toTable) toTable.onclick = mpShowRunsTable;
   const review = host.querySelector('#mpReviewCalib');
   if (review) review.onclick = () => { try { openCalibrationDetails(); } catch (e) {} };
   mpSelectRun(host, D, M, null);
+}
+/* Visual drops the runs table while Auto has it listing descents (the compact-view CSS), and a scroll
+   to a display:none section goes nowhere: in Visual this button did nothing at all (owner report,
+   2026-10-24). Asking for the table is a pick like the mode picker's, so it is marked the same way
+   and stays for this session; the nav is rebuilt so Jump to lists it too. */
+function mpShowRunsTable() {
+  const t = document.getElementById('runsSection');
+  if (!t || t.classList.contains('hidden')) return;
+  if (getComputedStyle(t).display === 'none') { t.dataset.runsPicked = '1'; buildSectionNav(); }
+  const fold = document.getElementById('runsFold');
+  if (fold && !fold.open) fold.open = true;
+  t.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 const MP_SLOTS = [
   ['mpSlotSignature', 'rideSignatureSection'], ['mpSlotMap', 'overviewSection'], ['mpSlotTimeline', 'timelineSection'],
@@ -59494,7 +59556,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '6ca099795 · 2026-10-24';
+const LOAM_BUILD = 'ead200aeb · 2026-10-24';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
