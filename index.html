@@ -810,6 +810,8 @@
      TURN; on a jump they were turn chips sitting over a bike in the air (owner report, 2026-10-10).
      `data-replay` is set by each formSelect* function. */
   #formReplaySection[data-replay="jump"] .form-turn-only { display: none !important; }
+  /* The replay's share records a turn (shareTurnReplay); a segment or a jump has no clip to give. */
+  #formReplaySection:not([data-replay="turn"]) > .section-title > .card-share { display: none; }
   .form-limits { display:grid; gap:4px; font-size:12px; color:var(--text-muted); margin-bottom:12px; }
   .form-limits:empty { margin-bottom:0; }
   .form-calibration-warning { color:var(--accent); padding:10px; border:1px solid var(--accent); border-radius:8px; }
@@ -3339,10 +3341,11 @@ function loamSeasonResolve(now, forced, automated, offId) {
     min-width: 0; max-width: 100%; }
   .lf-head-r { display: inline-flex; align-items: center; gap: 8px; min-width: 0; margin-left: auto; }
   .lf-head-r .card-share { margin-left: 0; }
-  .lf-share.recording { color: var(--accent); border-color: var(--accent); cursor: progress; animation: lfRec 1s ease-in-out infinite alternate; }
-  .lf-share.ready { color: #fff; background: var(--accent); border-color: var(--accent); }
+  /* A share that records a clip (Spotter Cam, a turn replay) shows that it is recording, then ready. */
+  .card-share.recording { color: var(--accent); border-color: var(--accent); cursor: progress; animation: lfRec 1s ease-in-out infinite alternate; }
+  .card-share.ready { color: #fff; background: var(--accent); border-color: var(--accent); }
   @keyframes lfRec { from { opacity: 1; } to { opacity: 0.45; } }
-  @media (prefers-reduced-motion: reduce) { .lf-share.recording { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .card-share.recording { animation: none; } }
   .lf-stage { width: 100%; border-radius: 12px; overflow: hidden; line-height: 0; }
   .lf-stage svg { display: block; width: 100%; height: auto; }
   .lf-stage.orbit { touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
@@ -11526,7 +11529,7 @@ function formOpenJump(id) {
 }
 function formSelectJump(D, J) {
   const replacing = !!_form;
-  formStopAnim(); _formZoomMult = 1; formMarkReplayKind('jump');
+  formStopAnim(); formClipInvalidate(); _formZoomMult = 1; formMarkReplayKind('jump');
   const w0 = J.tStart - 1, dur = J.tEnd + 1 - w0;
   const n = Math.max(20, Math.round(dur * 50)), g = Array.from({ length: n }, (_, k) => w0 + k * dur / (n - 1));
   const loc = (D.sensors.location || []).filter(r => r.t >= w0 - 2 && r.t <= w0 + dur + 2);
@@ -12929,7 +12932,7 @@ function formAskCoach() {
 function formSelectTurn(D, turn) {
   if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
   const replacing = !!_form;
-  formStopAnim(); formMarkReplayKind('turn');
+  formStopAnim(); formClipInvalidate(); formMarkReplayKind('turn');
   _formZoomMult = 1;   /* each new turn starts framed to fit */
   const S = formTurnSeries(D, turn);
   const note = document.getElementById('formNote');
@@ -13073,7 +13076,7 @@ function formGhostContext(D, run) {
 function formSelectSegment(D, run) {
   if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
   const replacing = !!_form;
-  formStopAnim(); formMarkReplayKind('segment');
+  formStopAnim(); formClipInvalidate(); formMarkReplayKind('segment');
   _formZoomMult = 1;   /* each new segment starts framed to fit */
   /* The button switches to the SEGMENT question here rather than going away: a run has no apex, but
      it has its own corners, radii, lean medians and lap times, and those are what a rider lapping one
@@ -13270,12 +13273,12 @@ function avatarPalette() {
         vent: '#160f08', dial: '#1b130b',  dialStroke: '#9c4818', dialHub: '#c79b76', seamCol: '#9c4818', crown: null };
 }
 
-/* Build the rear-view SVG + metric strip for the current tau. One innerHTML write per frame. */
-function formFrame() {
-  const F = _form; if (!F) return;
-  if (F.jump) { formJumpFrame(); return; }
+/* The turn scene at playhead `tau`: the rear-view SVG and what the metric strip reads at that
+   instant. It writes nothing, so the clip recorder (shareTurnReplay) can draw any instant of a
+   replay without moving the one on screen. */
+function formTurnScene(F, tau) {
   const S = F.S;
-  const tNow = S.w0 + F.tau;
+  const tNow = S.w0 + tau;
   const k = Math.max(0, Math.min(S.n - 1, lowerBound(S.g, tNow)));
   const lean = formSampleAt(S, S.lean, tNow) || 0;   /* deg, + = leaning right */
   const headRel = formSampleAt(S, S.headRel, tNow);
@@ -13543,6 +13546,15 @@ function formFrame() {
     + `<line x1="24" y1="${ground}" x2="${W-24}" y2="${ground}" stroke="${SC.ground}" stroke-width="2"/>`
     + shadow + protractor + ghostBody + rider + hero + strip
     + (F.comparison && F.comparison.leanOK ? `<text x="340" y="77" text-anchor="end" fill="#9fc0d8" font-size="12">${escapeHtml(loamT('B · phone Δ {deg}°', { deg: formInterp(F.comparison.S.g, F.comparison.S.lean, formTimeAtPhase(F.comparison.ref, formPhaseAt(F.turn, tNow))).toFixed(0) }))}</text>` : '');
+  return { svg, tNow, lean, headRel, wristRoll, seg, phase, sideLetter, SC };
+}
+
+/* Build the rear-view SVG + metric strip for the current tau. One innerHTML write per frame. */
+function formFrame() {
+  const F = _form; if (!F) return;
+  if (F.jump) { formJumpFrame(); return; }
+  const S = F.S;
+  const { svg, tNow, lean, headRel, wristRoll, seg, phase, sideLetter } = formTurnScene(F, F.tau);
   const svgEl = document.getElementById('formReplaySvg');
   if (svgEl) svgEl.innerHTML = svg;
 
@@ -13654,6 +13666,153 @@ function formFrame() {
   const sc = document.getElementById('formScrub');
   if (sc && document.activeElement !== sc && F.dur > 0) sc.value = Math.round((F.tau / F.dur) * 1000);
   formExtraFrame();
+}
+
+/* ---- Sharing a turn replay as a clip: the Spotter Cam's recorder (liftClipMime, liftClipRaster,
+   loamShareVideo) pointed at a corner. Each frame is formTurnScene at an instant of the clip's own,
+   so the replay on screen keeps doing whatever the rider is doing with it. The clip plays at the
+   replay's speed setting, because a corner is three or four seconds of riding and at 1x it is over
+   before it has been read, and in real time like the lift's: a slow rasterize drops frames, it never
+   stretches the corner. The map is left out (its tiles are another site's images and would taint the
+   canvas), and the replay's legend and calibration warning are burned into the footer, since the clip
+   travels without them. Turn replays only: a segment runs for minutes, and the jump scene is a live
+   DOM tree rather than a string. */
+const FORM_CLIP_MAX_S = 30;
+const FORM_CLIP_HOLD_S = 0.8;   /* the exit frame is held, so the clip ends on the corner instead of cutting off */
+const FORM_CLIP_W = 720, FORM_CLIP_H = 900, FORM_CLIP_STAGE_H = 600;   /* the 360x300 scene at 2x over a footer, 4:5 */
+let _formClip = { busy: false, ready: null };
+function formClipButton(state) {
+  const b = document.querySelector('#formReplaySection > .section-title > .card-share');
+  if (!b) return;
+  b.disabled = state === 'recording';
+  b.classList.toggle('recording', state === 'recording');
+  b.classList.toggle('ready', state === 'ready');
+  const label = state === 'recording' ? loamT('Recording the replay…')
+    : state === 'ready' ? loamT('Clip ready: tap to share') : loamT('Share replay');
+  b.title = label; b.setAttribute('aria-label', label);
+}
+/* Called when the replay on screen changes, so a clip recorded for one corner is never handed out
+   from under another. */
+function formClipInvalidate() { _formClip.ready = null; if (!_formClip.busy) formClipButton('idle'); }
+/* What else decides the picture: the kit, the season, the ghost toggle and the speed. */
+function formClipLook(F) {
+  return [avatarPref(), inHalloween() ? 'halloween' : '', document.getElementById('formGhostToggle')?.checked ? 'ghost' : '', F.mult].join(':');
+}
+function formClipWrap(ctx, text, maxW) {
+  const lines = [];
+  let line = '';
+  for (const w of String(text).split(' ')) {
+    const next = line ? line + ' ' + w : w;
+    if (line && ctx.measureText(next).width > maxW) { lines.push(line); line = w; } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+function formClipPaint(ctx, img, F, scene, title, notes) {
+  const W = FORM_CLIP_W, H = FORM_CLIP_H, SH = FORM_CLIP_STAGE_H, pad = 36, SC = scene.SC;
+  const mono = '"JetBrains Mono", ui-monospace, monospace';
+  ctx.fillStyle = SC.bg[2]; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, 0, 0, W, SH);
+  ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+  /* The phase is already in the scene's hero line, so the footer does not repeat it. */
+  ctx.fillStyle = SC.ink; ctx.font = '700 40px "Bricolage Grotesque", sans-serif';
+  ctx.fillText(title, pad, SH + 64, W - pad * 2);
+  /* What the metric strip reads at this instant, measured values only. */
+  const speed = formRecordedSpeed(F.S, scene.tNow);
+  const reads = [];
+  if (speed != null) reads.push(`${loamT('Speed')} ${U.speedNum(speed).toFixed(1)} ${U.speedUnit()}`);
+  if (scene.headRel != null) reads.push(`${loamT('Relative head turn')} ${scene.headRel >= 0 ? '+' : ''}${scene.headRel.toFixed(0)}°`);
+  ctx.fillStyle = SC.clock; ctx.font = `500 22px ${mono}`;
+  if (reads.length) ctx.fillText(reads.join(' · '), pad, SH + 110, W - pad * 2);
+  ctx.font = `500 18px ${mono}`;
+  /* At most four lines (a calibration warning and the Norwegian head-turn line, two each), which
+     end above the name. */
+  formClipWrap(ctx, notes.join(' · '), W - pad * 2).forEach((ln, i) => ctx.fillText(ln, pad, SH + 156 + i * 26));
+  ctx.fillStyle = '#e0a458'; ctx.font = '600 20px "IBM Plex Sans", sans-serif';
+  ctx.fillText(loamT('Form replay') + ' · Loam', pad, H - 22);
+}
+async function shareTurnReplay() {
+  if (_formClip.busy) return;
+  const F = _form;
+  /* The control is only shown on a turn replay; a turn with too little data to draw has no scene,
+     and a button that does nothing there would read as a share that quietly worked. */
+  if (!F || F.jump || !F.turn || !F.S || F.S.segment) { loamClipShareFailed(); return; }
+  const look = formClipLook(F);
+  /* The second tap of the web path, as for the lift: the recording outlived the tap's user activation,
+     and this tap is the fresh gesture that delivers it. */
+  const r = _formClip.ready;
+  if (r && r.F === F && r.look === look && r.cmp === (F.comparison || null)) {
+    const out = await loamShareVideo(r.blob, r.filename, r.caption, r.poster);
+    if (out !== 'needs-gesture') formClipInvalidate();
+    return;
+  }
+  _formClip.busy = true; _formClip.ready = null;
+  formClipButton('recording');
+  try {
+    const D = F.D, S = F.S, T = F.turn;
+    const when = parseUTCFromFilename((D && D.title) || '');
+    const caption = loamT('My corner, replayed with Loam.');
+    const slug = 'turn-' + T.n;   /* two corners of one ride must not share a file name */
+    const title = loamT('Turn {n}', { n: T.n }) + ' · ' + loamT(T.direction === 'L' ? 'left' : 'right')
+      + (T.radius != null && !isNaN(T.radius) ? ' · r ' + U.small(T.radius) : '');
+    const notes = [];
+    if (F.warning) notes.push(loamT(F.warning));
+    notes.push(loamT(S.headRel ? 'Phone tilt and head turn measured · rider drawn from them' : 'Phone tilt measured · rider drawn from it'));
+    const canvas = document.createElement('canvas');
+    canvas.width = FORM_CLIP_W; canvas.height = FORM_CLIP_H;
+    const ctx = canvas.getContext('2d');
+    const paintAt = async (tau) => {
+      const scene = formTurnScene(F, tau);
+      const ghost = !!(F.formGhost && document.getElementById('formGhostToggle')?.checked);
+      /* The page's fonts do not reach an SVG drawn as an image, and a <text> with no family of its
+         own (the comparison read-out) would fall back to a serif. */
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 300" width="${FORM_CLIP_W}" height="${FORM_CLIP_STAGE_H}" font-family="'IBM Plex Sans', -apple-system, 'Helvetica Neue', Arial, sans-serif">${scene.svg}</svg>`;
+      formClipPaint(ctx, await liftClipRaster(svg), F, scene, title, ghost ? notes.concat(loamT('Ghost form · faster lap')) : notes);
+    };
+    /* The poster, and the whole share where video is not available: the corner at its peak lean. */
+    await paintAt(Math.max(0, Math.min(F.dur, S.g[formPeakIdx(S) || 0] - S.w0)));
+    const poster = canvas.toDataURL('image/png');
+    const mime = liftClipMime();
+    if (!mime || typeof canvas.captureStream !== 'function') {
+      await loamShareImage(poster, loamCardFilename(slug, when), caption);
+      return;
+    }
+    /* A long corner at a slow setting plays faster rather than being cut off before its exit. */
+    const mult = Math.max(F.mult || 0.5, F.dur / FORM_CLIP_MAX_S);
+    const clipS = F.dur / mult + FORM_CLIP_HOLD_S;
+    await paintAt(0);   // the first frame the recorder sees is the replay, not a blank canvas
+    const stream = canvas.captureStream(30);
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4000000 });
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { recorder.onstop = res; });
+    recorder.start(250);
+    const t0 = performance.now();
+    for (;;) {
+      const el = (performance.now() - t0) / 1000;
+      if (el >= clipS) break;
+      await paintAt(Math.min(F.dur, el * mult));   /* repainted through the hold: a canvas left alone sends no frames */
+      await new Promise((res) => requestAnimationFrame(res));
+    }
+    recorder.stop();
+    await stopped;
+    stream.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(chunks, { type: mime.split(';')[0] });
+    if (!blob.size) { loamClipShareFailed(); return; }
+    const ext = /mp4/.test(mime) ? 'mp4' : 'webm';
+    const filename = loamCardFilename(slug, when).replace(/\.png$/, '.' + ext);
+    const out = await loamShareVideo(blob, filename, caption, poster);
+    if (out === 'needs-gesture' && _form === F) {
+      _formClip.ready = { F, look, cmp: F.comparison || null, blob, filename, caption, poster };
+      setStatus(loamT('Clip ready: tap to share'));
+    }
+  } catch (e) {
+    console.warn('turn clip failed', e);
+    loamClipShareFailed();
+  } finally {
+    _formClip.busy = false;
+    formClipButton(_formClip.ready ? 'ready' : 'idle');
+  }
 }
 
 /* DTW time-lag: align each run to the fastest run (Sakoe-Chiba band on z-normalized
@@ -38582,6 +38741,9 @@ const LOAM_NB = {
   'Recording the replay…': 'Tar opp avspillingen …',
   'Clip ready: tap to share': 'Klippet er klart: trykk for å dele',
   'My lift, replayed rep by rep with Loam.': 'Løftet mitt, spilt av repetisjon for repetisjon med Loam.',
+  'My corner, replayed with Loam.': 'Svingen min, spilt av med Loam.',
+  'Phone tilt measured · rider drawn from it': 'Telefonhelningen er målt · rytteren er tegnet ut fra den',
+  'Phone tilt and head turn measured · rider drawn from them': 'Telefonhelningen og hodedreiningen er målt · rytteren er tegnet ut fra dem',
   'Rep timing measured · side-view pose modeled': 'Rytmen er målt · stillingen sett fra siden er modellert',
   'Median tempo · side-view pose modeled': 'Mediantempo · stillingen sett fra siden er modellert',
   'Replay could not be shared': 'Avspillingen kunne ikke deles',
@@ -42609,7 +42771,10 @@ const CARD_SHARE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 /* Cards that build their own poster rather than a snapshot of their charts. */
 const CARD_SHARE_CUSTOM = {
   jumpsSection: () => shareJumpStats(_lastRender && _lastRender.D),
+  formReplaySection: () => shareTurnReplay(),
 };
+/* A card whose share is a clip rather than a picture says so. */
+const CARD_SHARE_LABEL = { formReplaySection: 'Share replay' };
 function cardShareCharts(sec, visibleOnly) {
   return [...sec.querySelectorAll('.js-plotly-plot')]
     .filter(gd => gd._fullLayout && gd.data && gd.data.length && (!visibleOnly || gd.getClientRects().length));
@@ -42648,7 +42813,7 @@ function decorateCardShares() {
     if (host.classList.contains('hidden') || !host.getClientRects().length) continue;
     const hasChart = [...host.querySelectorAll('.chart')].some(c => c.getClientRects().length && c.childElementCount);
     if (!custom && !hasChart) continue;
-    const label = loamT('Share card');
+    const label = loamT(CARD_SHARE_LABEL[id] || 'Share card');
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'card-share';
@@ -59594,7 +59759,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'abb4b3add · 2026-10-25';
+const LOAM_BUILD = '37a1c7dbe · 2026-10-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
