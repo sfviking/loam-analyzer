@@ -472,6 +472,11 @@
     border: 1px solid currentColor; border-radius: 4px; padding: 4px 12px; cursor: pointer;
   }
   @media (pointer: coarse) { #loamToast .toast-action { min-height: 36px; } }
+  /* A clip being recorded (loamClipProgress): the words, and a bar that fills to the end of the clip. */
+  #loamToast.clip-progress { min-width: 220px; }
+  #loamToast .toast-progress { display: block; height: 3px; margin-top: 8px; border-radius: 2px; overflow: hidden;
+    background: color-mix(in srgb, currentColor 25%, transparent); }
+  #loamToast .toast-progress > span { display: block; height: 100%; width: 0; background: currentColor; }
   /* Interaction polish (additive, no layout change): smooth state transitions, a tactile press, and a
      keyboard focus ring on every control for consistency and accessibility. */
   button, select, input, .recent-open, .scrub-chip { transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, filter 0.15s ease, transform 0.06s ease, box-shadow 0.15s ease; }
@@ -3826,7 +3831,7 @@ function loamSeasonResolve(now, forced, automated, offId) {
           </div>
         </div>
         <div id="formMapWrap"><div id="formMapTiles"></div><div id="formMap"></div>
-          <div id="formZoomCtrl"><button type="button" id="formZoomIn" title="Zoom in" aria-label="Zoom in">+</button><button type="button" id="formZoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button></div>
+          <div id="formZoomCtrl"><button type="button" id="formFollow" class="hidden" title="Follow the replay" aria-label="Follow the replay"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="1.8" fill="currentColor"/><path d="M8 0.5v3M8 12.5v3M0.5 8h3M12.5 8h3" stroke="currentColor" stroke-width="1.6"/></svg></button><button type="button" id="formZoomIn" title="Zoom in" aria-label="Zoom in">+</button><button type="button" id="formZoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button></div>
         </div>
       </div>
       <details id="formVideoPanel" style="margin-top:12px;">
@@ -11569,7 +11574,7 @@ function formOpenJump(id) {
 }
 function formSelectJump(D, J) {
   const replacing = !!_form;
-  formStopAnim(); formClipInvalidate(); _formZoomMult = 1; formMarkReplayKind('jump');
+  formStopAnim(); formClipInvalidate(); _formZoomMult = 1; formResetView(); formMarkReplayKind('jump');
   const w0 = J.tStart - 1, dur = J.tEnd + 1 - w0;
   const n = Math.max(20, Math.round(dur * 50)), g = Array.from({ length: n }, (_, k) => w0 + k * dur / (n - 1));
   const loc = (D.sensors.location || []).filter(r => r.t >= w0 - 2 && r.t <= w0 + dur + 2);
@@ -11960,13 +11965,53 @@ function formTurnSeries(D, turn) {
    render. A left turn bends left on both the schematic and the rider, fixing the old north-up confusion. */
 let _formSvg = null;
 let _formZoomMult = 1;   /* user zoom on the replay map: 1 = fit the turn; reset on each new turn/segment */
+/* Where a zoomed-in replay map looks. Zoomed past fit, the track no longer fits, so the map follows the
+   rider; a drag takes over (follow off, centre held in the map's rotated metres so it survives a re-zoom)
+   until #formFollow hands it back. `rider` is the last drawn position, so a re-zoom opens on it rather
+   than loading the track centre's tiles and jumping away. Reset with _formZoomMult. */
+let _formView = { follow: true, x: 0, y: 0, rider: null };
+function formResetView() { _formView = { follow: true, x: 0, y: 0, rider: null }; }
 const FORM_MERC = 156543.03392804097;   /* web-mercator metres/pixel at zoom 0, equator */
-/* Zoom the replay map in/out about the turn and redraw tiles + overlay together (they share `scale`). */
+/* Zoom the replay map in/out and redraw tiles + overlay together (they share `scale`). */
 function formZoomBy(f) {
   if (!_form || !_form.S) return;
   _formZoomMult = Math.max(0.5, Math.min(8, _formZoomMult * f));
+  if (!(_formZoomMult > 1)) _formView.follow = true;   /* the whole track fits again; nothing to pan */
   formInitMap(_form.S);
   if (typeof formFrame === 'function') formFrame();   /* restore the moving marker / covered trail at the current time */
+}
+/* Point the replay map at (x, y) in its rotated metres: the SVG overlay by a translate on #formPan, the
+   tiles by re-centring Leaflet on the same spot, so the two stay registered. */
+function formMapSetView(x, y) {
+  const V = _formSvg; if (!V || !V.box) return;
+  ({ x, y } = formClampView(V.box, V.W, V.H, V.scale, x, y));
+  if (V.vx === x && V.vy === y) return;
+  V.vx = x; V.vy = y;
+  const g = V.el.querySelector('#formPan');
+  if (g) g.setAttribute('transform', `translate(${(-(x - V.cxm) * V.scale).toFixed(1)} ${((y - V.cym) * V.scale).toFixed(1)})`);
+  if (_formTilesMap && V.zoom != null) { try { _formTilesMap.setView(V.toLatLon(x, y), V.zoom, { animate: false }); } catch (e) {} }
+}
+/* The centre may leave the track's box by half the view: a drag can bring the track to the edge but
+   never lose it, and a dead-straight track (a box with no width) can still be panned sideways. */
+function formClampView(box, W, H, scale, x, y) {
+  const mx = W / 2 / scale, my = H / 2 / scale;
+  return { x: Math.max(box.minX - mx, Math.min(box.maxX + mx, x)), y: Math.max(box.minY - my, Math.min(box.maxY + my, y)) };
+}
+/* The centre the map should have now: the rider while following a zoomed-in map, the dragged-to spot
+   once the user has panned, the track centre whenever the whole track fits. */
+function formMapWantedCentre(V) {
+  if (!(_formZoomMult > 1)) return { x: V.cxm, y: V.cym };
+  if (!_formView.follow) return { x: _formView.x, y: _formView.y };
+  return _formView.rider ? V.toXY(_formView.rider[0], _formView.rider[1]) : { x: V.cxm, y: V.cym };
+}
+function formSyncFollowBtn() {
+  const b = document.getElementById('formFollow');
+  if (b) b.classList.toggle('hidden', !(_formZoomMult > 1 && !_formView.follow));
+}
+function formFollowRider() {
+  _formView.follow = true;
+  formSyncFollowBtn();
+  if (_form && _form.S && typeof formFrame === 'function') formFrame();
 }
 function formBasemapDef() {
   /* "Recognize where I am" wants imagery, not the blank label-free Minimal that is grey in the woods.
@@ -12008,6 +12053,13 @@ function formInitMap(S) {
     /* Desired px-per-metre to frame the track, scaled by the user's zoom, then snapped to a real
        mercator zoom so the tiles can match it. */
     let scale = Math.min((W - 2 * pad) / Math.max(1, maxX - minX), (H - 2 * pad) / Math.max(1, maxY - minY)) * _formZoomMult;
+    /* Rotated metres back to lat/lon (the inverse of toXY), for centring the tiles on any spot. */
+    const toLatLon = (x, y) => { const e = x * ca + y * sa, n = -x * sa + y * ca; return [lat0 + (n / R) * (180 / Math.PI), lon0 + (e / (R * coslat)) * (180 / Math.PI)]; };
+    const box = { minX, maxX, minY, maxY };
+    /* Open on the spot the map should be showing (the rider, when a zoomed-in map is following), so
+       a re-zoom does not load the track centre's tiles only to pan straight off them. */
+    const V0 = formMapWantedCentre({ cxm, cym, toXY });
+    let vx = V0.x, vy = V0.y, tileZoom = null;
 
     /* Rotated-tile backdrop: an oversized square Leaflet map centred on the track, CSS-rotated by -upB
        so its north-up imagery becomes heading-up. Oversized to a full diagonal so no empty corners show
@@ -12025,10 +12077,9 @@ function formInitMap(S) {
         let zoom = Math.log2(Math.max(1e-9, scale * FORM_MERC * coslat));
         zoom = Math.max(3, Math.min(maxZ, zoom));
         scale = Math.pow(2, zoom) / (FORM_MERC * coslat);
-        /* Track centre (rotated frame) back to lat/lon for the map centre. */
-        const eC = cxm * ca + cym * sa, nC = -cxm * sa + cym * ca;
-        const centerLat = lat0 + (nC / R) * (180 / Math.PI);
-        const centerLon = lon0 + (eC / (R * coslat)) * (180 / Math.PI);
+        tileZoom = zoom;
+        ({ x: vx, y: vy } = formClampView(box, W, H, scale, V0.x, V0.y));
+        const [centerLat, centerLon] = toLatLon(vx, vy);
         const D = Math.ceil(Math.hypot(W, H)) + 4;
         tilesEl.style.width = D + 'px'; tilesEl.style.height = D + 'px';
         tilesEl.style.left = ((W - D) / 2) + 'px'; tilesEl.style.top = ((H - D) / 2) + 'px';
@@ -12040,13 +12091,21 @@ function formInitMap(S) {
         L.tileLayer(basemapTileUrl(bm), Object.assign({}, bm.opts, { maxNativeZoom: maxNative, maxZoom: maxZ })).addTo(_formTilesMap);
         try { _formTilesMap.attributionControl.setPrefix(false); } catch (e) {}
         _formTilesMap.setView([centerLat, centerLon], zoom, { animate: false });
-        setTimeout(() => { try { if (_formTilesMap) { _formTilesMap.invalidateSize(false); _formTilesMap.setView([centerLat, centerLon], zoom, { animate: false }); } } catch (e) {} }, 0);
+        /* Re-centre on wherever the view is by then: a frame may already have followed the rider or a
+           drag moved it, and the init-time centre would put the tiles back under a panned overlay. */
+        const tm = _formTilesMap;
+        setTimeout(() => { try { if (_formTilesMap === tm) { const V = _formSvg; tm.invalidateSize(false); tm.setView(V && V.box ? V.toLatLon(V.vx, V.vy) : [centerLat, centerLon], zoom, { animate: false }); } } catch (e) {} }, 0);
       } catch (e) { console.warn('formInitMap tiles failed', e); if (tilesEl) { tilesEl.style.transform = ''; } }
     }
 
     /* SVG projection: same centre (cxm,cym) at the viewport centre, same px-per-metre as the tiles. */
+    ({ x: vx, y: vy } = formClampView(box, W, H, scale, V0.x, V0.y));
     const toSvg = (la, lo) => { const p = toXY(la, lo); return [W / 2 + (p.x - cxm) * scale, H / 2 - (p.y - cym) * scale]; };  /* flip y: up */
-    _formSvg = { el, W, H, upB, toSvg, M };
+    /* toSvg is the UNPANNED projection; everything that moves with the ground sits in #formPan, whose
+       translate puts (vx, vy) at the viewport centre (formMapSetView). */
+    _formSvg = { el, W, H, upB, toSvg, M, toXY, toLatLon, box, cxm, cym, scale, zoom: tileZoom, vx, vy };
+    const panX = () => -(_formSvg.vx - cxm) * scale, panY = () => (_formSvg.vy - cym) * scale;
+    formSyncFollowBtn();
 
     /* Each phase: a dark casing under a bright line, so the track reads over imagery or the dark backdrop. */
     const seg = (lo, hi, col) => {
@@ -12081,6 +12140,7 @@ function formInitMap(S) {
       }
     }
     el.innerHTML = `<svg viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" width="100%" height="100%" style="display:block;background:transparent;">`
+      + `<g id="formPan" transform="translate(${panX().toFixed(1)} ${panY().toFixed(1)})">`
       + seg(M.t[0], S.tStart, '#9fc0d8') + seg(S.tStart, S.tEnd, '#86c06b') + seg(S.tEnd, M.t[M.t.length - 1], '#e8b25e')
       + `<g id="formCovered"></g>` + ghostDots
       + (G ? `<g id="formGhostDot"><circle r="5.5" fill="#f1f5f9" fill-opacity="0.3" stroke="#f1f5f9" stroke-width="1.6" stroke-dasharray="2.5 2.5"/></g>` : '')
@@ -12092,15 +12152,48 @@ function formInitMap(S) {
       + `<circle cx="${sp[0].toFixed(1)}" cy="${sp[1].toFixed(1)}" r="3.5" fill="#8caa6d" stroke="#0a0d07" stroke-width="1.5"/>`
       + `<circle cx="${ep[0].toFixed(1)}" cy="${ep[1].toFixed(1)}" r="3.5" fill="#e8b25e" stroke="#0a0d07" stroke-width="1.5"/>`
       + `<g id="formNav"><circle r="6" fill="#f1f5f9" stroke="#0a0d07" stroke-width="2"/><path d="M0,-11 L4.5,-4.5 L-4.5,-4.5 Z" fill="#f1f5f9" stroke="#0a0d07" stroke-width="1"/></g>`
+      + `</g>`
       + `<text x="9" y="17" font-family="'JetBrains Mono',monospace" font-size="10" fill="#f1f5f9" ${txt}>${escapeHtml(loamT('travel'))} &#8593;</text>`
       + `<g transform="translate(${(W - 18).toFixed(0)} 20) rotate(${northDeg.toFixed(1)})"><line x1="0" y1="7" x2="0" y2="-5" stroke="#f1f5f9" stroke-width="1.8"/><path d="M0,-8 L2.6,-4 L-2.6,-4 Z" fill="#f1f5f9" stroke="#0a0d07" stroke-width="0.6"/></g>`
       + `<text x="${(W - 18).toFixed(0)}" y="36" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="9" fill="#f1f5f9" ${txt}>N</text>`
       + `</svg>`;
-    /* Click to scrub to the nearest point in time (in SVG/px coordinates). */
+    /* Drag pans a zoomed-in map and stops it following the rider. At fit there is nothing to pan, so
+       touches there still scroll the page. */
+    el.style.touchAction = _formZoomMult > 1 ? 'none' : '';
+    el.style.cursor = _formZoomMult > 1 ? 'grab' : '';
+    el.onpointerdown = (ev) => {
+      const V = _formSvg;
+      if (!V) return;
+      V.suppressClick = false;
+      if (!(_formZoomMult > 1) || (ev.pointerType === 'mouse' && ev.button !== 0)) return;
+      const rect = el.getBoundingClientRect();
+      V.drag = { id: ev.pointerId, x0: ev.clientX, y0: ev.clientY, vx: V.vx, vy: V.vy, k: W / Math.max(1, rect.width), moved: false };
+      try { el.setPointerCapture(ev.pointerId); } catch (e) {}
+    };
+    el.onpointermove = (ev) => {
+      const V = _formSvg, d = V && V.drag;
+      if (!d || d.id !== ev.pointerId) return;
+      const ddx = (ev.clientX - d.x0) * d.k, ddy = (ev.clientY - d.y0) * d.k;
+      if (!d.moved && Math.hypot(ddx, ddy) < 5) return;   /* a tap still scrubs */
+      d.moved = true;
+      _formView.follow = false;
+      formMapSetView(d.vx - ddx / V.scale, d.vy + ddy / V.scale);   /* screen y runs down, map y up */
+      _formView.x = V.vx; _formView.y = V.vy;
+      formSyncFollowBtn();
+    };
+    const dragEnd = (ev) => {
+      const V = _formSvg, d = V && V.drag;
+      if (!d || d.id !== ev.pointerId) return;
+      V.drag = null;
+      if (d.moved) V.suppressClick = true;   /* mouse fires a click after the drag; it is not a scrub */
+    };
+    el.onpointerup = dragEnd; el.onpointercancel = dragEnd;
+    /* Click to scrub to the nearest point in time (in SVG/px coordinates, less the pan). */
     el.onclick = (ev) => {
       if (!_form || !_formSvg || !M.t.length) return;
+      if (_formSvg.suppressClick) { _formSvg.suppressClick = false; return; }
       const rect = el.getBoundingClientRect();
-      const px = (ev.clientX - rect.left) / rect.width * W, py = (ev.clientY - rect.top) / rect.height * H;
+      const px = (ev.clientX - rect.left) / rect.width * W - panX(), py = (ev.clientY - rect.top) / rect.height * H - panY();
       let best = -1, bd = Infinity;
       for (let i = 0; i < M.t.length; i++) { const c = toSvg(M.lat[i], M.lon[i]); const d = (c[0] - px) ** 2 + (c[1] - py) ** 2; if (d < bd) { bd = d; best = i; } }
       if (best >= 0) { formSetPlaying(false); formSeek(M.t[best] - S.w0, true); }
@@ -12113,6 +12206,8 @@ function formUpdateMap(S, tNow) {
   const lat = formInterp(M.t, M.lat, tNow), lon = formInterp(M.t, M.lon, tNow);
   if (lat == null || lon == null) return;
   const here = toSvg(lat, lon);
+  _formView.rider = [lat, lon];
+  { const c = formMapWantedCentre(_formSvg); formMapSetView(c.x, c.y); }
 
   /* Speed-coloured "covered" trail: the ridden-so-far segments, each tinted by GPS speed. */
   const cov = el.querySelector('#formCovered');
@@ -12790,9 +12885,11 @@ function setupFormReplay(D) {
   document.getElementById('formPlay').onclick = formPlayClicked;
   document.getElementById('formSpeedSel').onchange = (e) => { if (_form) _form.mult = +e.target.value; };
   { const av = document.getElementById('formAvatarSel'); if (av) { av.value = avatarPref(); av.onchange = (e) => setAvatar(e.target.value); } }
-  /* Replay map zoom: +/- buttons and the mouse wheel, re-framing the turn about its centre. */
+  /* Replay map zoom: +/- buttons and the mouse wheel. Zoomed in, the map follows the rider until dragged;
+     #formFollow hands it back. */
   { const zi = document.getElementById('formZoomIn'); if (zi) zi.onclick = (e) => { e.stopPropagation(); formZoomBy(1.5); }; }
   { const zo = document.getElementById('formZoomOut'); if (zo) zo.onclick = (e) => { e.stopPropagation(); formZoomBy(1 / 1.5); }; }
+  { const fo = document.getElementById('formFollow'); if (fo) fo.onclick = (e) => { e.stopPropagation(); formFollowRider(); }; }
   { const wrap = document.getElementById('formMapWrap');
     if (wrap) wrap.onwheel = (e) => { if (!_form) return; e.preventDefault(); formZoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2); }; }
   const scrub = document.getElementById('formScrub');
@@ -12990,7 +13087,7 @@ function formSelectTurn(D, turn) {
   if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
   const replacing = !!_form;
   formStopAnim(); formClipInvalidate(); formMarkReplayKind('turn');
-  _formZoomMult = 1;   /* each new turn starts framed to fit */
+  _formZoomMult = 1; formResetView();   /* each new turn starts framed to fit */
   const S = formTurnSeries(D, turn);
   const note = document.getElementById('formNote');
   if (!S) {
@@ -13134,7 +13231,7 @@ function formSelectSegment(D, run) {
   if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
   const replacing = !!_form;
   formStopAnim(); formClipInvalidate(); formMarkReplayKind('segment');
-  _formZoomMult = 1;   /* each new segment starts framed to fit */
+  _formZoomMult = 1; formResetView();   /* each new segment starts framed to fit */
   /* The button switches to the SEGMENT question here rather than going away: a run has no apex, but
      it has its own corners, radii, lean medians and lap times, and those are what a rider lapping one
      trail wants read. Synced before formSegmentSeries so a series that fails to build leaves the
@@ -13805,6 +13902,7 @@ async function shareTurnReplay() {
   }
   _formClip.busy = true; _formClip.ready = null;
   formClipButton('recording');
+  loamClipProgress(0);
   try {
     const D = F.D, S = F.S, T = F.turn;
     const when = parseUTCFromFilename((D && D.title) || '');
@@ -13831,6 +13929,7 @@ async function shareTurnReplay() {
     const poster = canvas.toDataURL('image/png');
     const mime = liftClipMime();
     if (!mime || typeof canvas.captureStream !== 'function') {
+      loamClipProgress(null);
       await loamShareImage(poster, loamCardFilename(slug, when), caption);
       return;
     }
@@ -13848,9 +13947,11 @@ async function shareTurnReplay() {
     for (;;) {
       const el = (performance.now() - t0) / 1000;
       if (el >= clipS) break;
+      loamClipProgress(el / clipS);
       await paintAt(Math.min(F.dur, el * mult));   /* repainted through the hold: a canvas left alone sends no frames */
       await new Promise((res) => requestAnimationFrame(res));
     }
+    loamClipProgress(1);
     recorder.stop();
     await stopped;
     stream.getTracks().forEach((t) => t.stop());
@@ -13858,6 +13959,7 @@ async function shareTurnReplay() {
     if (!blob.size) { loamClipShareFailed(); return; }
     const ext = /mp4/.test(mime) ? 'mp4' : 'webm';
     const filename = loamCardFilename(slug, when).replace(/\.png$/, '.' + ext);
+    loamClipProgress(null);
     const out = await loamShareVideo(blob, filename, caption, poster);
     if (out === 'needs-gesture' && _form === F) {
       _formClip.ready = { F, look, cmp: F.comparison || null, blob, filename, caption, poster };
@@ -13867,6 +13969,7 @@ async function shareTurnReplay() {
     console.warn('turn clip failed', e);
     loamClipShareFailed();
   } finally {
+    loamClipProgress(null);
     _formClip.busy = false;
     formClipButton(_formClip.ready ? 'ready' : 'idle');
   }
@@ -14914,7 +15017,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 26;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off)
+const ANALYSIS_CACHE_VERSION = 27;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -16991,6 +17094,22 @@ function unit(x, y, z) {
   return { x: x / m, y: y / m, z: z / m };
 }
 
+/*
+ * Upward acceleration of one CoreMotion device-motion sample, m/s^2, from user acceleration and
+ * gravity both in g. CoreMotion reports userAcceleration with the accelerometer's sign, and that
+ * accelerometer reads z = -1 g lying face up at rest: MINUS the proper acceleration. So a device
+ * accelerating UP reports a userAcceleration pointing DOWN, along the gravity vector, and up is
+ * +(a . g_hat). Every strength counter read -(a . g_hat) until 2026-10-25 and so ran each lift upside
+ * down: the press read as the lowering, every rep was decided by the NEXT rep's descent (which is why
+ * the last rep of a set waited for the End-set tap), and "bar speed" was the lowering. Three sensors
+ * on one ATG squat showed it independently -- phone, watch and AirPods all integrate to a body 33-83 cm
+ * HIGHER at the bottom of the squat under the old sign (decisions/analyzer-and-app.md, 2026-10-25).
+ */
+function upAccelMps2(ax, ay, az, gx, gy, gz) {
+  const g = unit(gx, gy, gz);
+  return (ax * g.x + ay * g.y + az * g.z) * 9.80665;
+}
+
 /* Angle (deg) between two unit vectors. */
 function angDeg(a, b) {
   const d = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
@@ -17105,6 +17224,68 @@ function countReps(slice, segT) {
 }
 
 /*
+ * Each rep's depth as the phone saw it, degrees: how far the phone had rotated from the set's
+ * standing pose at the rep's deepest point. In a front pocket that is the thigh's angle from vertical
+ * at the bottom -- the angle a squat's depth IS -- read off one fused orientation with no integration,
+ * and the same however the phone sits in the pocket, since an angle between two vectors in one frame
+ * does not care how the frame is turned.
+ * Each rep's window runs halfway to its neighbours (half a cadence past the ends, never more than 2 s
+ * either side), which holds its bottom whether the stamp is the wrist's (the fastest point of the
+ * lowering) or the phone's (the bottom). The widest pair of directions in a window is that rep's top
+ * and bottom, unordered; the pairs are lined up against rep 1's, and the end the phone DWELLS near
+ * over the whole set -- lockout, the setup, the rack -- is the standing pose. Measured from that one
+ * pose rather than from each rep's own top, so a lockout cut short does not read as a shallower rep:
+ * on the 2026-10-25 ATG squat the per-rep swing read 110 / 100 / 110 / 111 / 111 because the lifter
+ * stopped about 9 degrees short of standing between reps 1 and 2, and this reads 109 / 105 / 109 /
+ * 110 / 110 on five reps the lifter calls one depth, where the wrist's doubly integrated bar travel
+ * read 0.67-0.85 m. What it cannot know is WHERE the phone is: on a bench or the floor it reads a few
+ * degrees, and the Spotter Cam takes it only for a squat whose reps swung the phone like a thigh
+ * (liftThighDepths in the HTML).
+ */
+function thighSwingDeg(t, gu, repTimes) {
+  const n = repTimes.length;
+  if (!n || !t.length) return [];
+  const gaps = [];
+  for (let k = 1; k < n; k++) gaps.push(repTimes[k] - repTimes[k - 1]);
+  const half = Math.min(2, (gaps.length ? median(gaps) : 3) / 2);
+  let i0 = 0;
+  const wins = repTimes.map((tr, k) => {
+    const lo = Math.max(tr - 2, k > 0 ? (repTimes[k - 1] + tr) / 2 : tr - half);
+    const hi = Math.min(tr + 2, k + 1 < n ? (tr + repTimes[k + 1]) / 2 : tr + half);
+    while (i0 < t.length && t[i0] < lo) i0++;
+    let i1 = i0;
+    while (i1 < t.length && t[i1] <= hi) i1++;
+    const stride = Math.max(1, Math.ceil((i1 - i0) / 60));
+    const pts = [];
+    for (let i = i0; i < i1; i += stride) pts.push(gu[i]);
+    let ends = null, widest = -1;
+    for (let a = 0; a < pts.length; a++) for (let b = a + 1; b < pts.length; b++) {
+      const d = angDeg(pts[a], pts[b]);
+      if (d > widest) { widest = d; ends = [pts[a], pts[b]]; }
+    }
+    return { pts, ends };
+  });
+  const ref0 = (wins.find(w => w.ends) || {}).ends;
+  if (!ref0) return repTimes.map(() => 0);
+  const sumP = { x: 0, y: 0, z: 0 }, sumQ = { x: 0, y: 0, z: 0 };
+  for (const w of wins) {
+    if (!w.ends) continue;
+    let [p, q] = w.ends;
+    if (angDeg(p, ref0[0]) + angDeg(q, ref0[1]) > angDeg(p, ref0[1]) + angDeg(q, ref0[0])) [p, q] = [q, p];
+    sumP.x += p.x; sumP.y += p.y; sumP.z += p.z; sumQ.x += q.x; sumQ.y += q.y; sumQ.z += q.z;
+  }
+  const P = unit(sumP.x, sumP.y, sumP.z), Q = unit(sumQ.x, sumQ.y, sumQ.z);
+  let nearP = 0, nearQ = 0;
+  for (const g of gu) { if (angDeg(g, P) < 30) nearP++; else if (angDeg(g, Q) < 30) nearQ++; }
+  const stand = nearP >= nearQ ? P : Q;
+  return wins.map(w => {
+    let deepest = 0;
+    for (const g of w.pts) { const d = angDeg(g, stand); if (d > deepest) deepest = d; }
+    return +deepest.toFixed(1);
+  });
+}
+
+/*
  * Mean concentric (upward) bar velocity per rep, from wrist motion. The bar is
  * momentarily still at the bottom, so we reset velocity to zero there and
  * integrate wrist vertical user-acceleration up to the top of the rep. Reported
@@ -17126,9 +17307,7 @@ function estimateConcentricVelocity(wrist, reps) {
     let v = 0, vSum = 0, wSum = 0;
     for (let i = 1; i < seg.length; i++) {
       const p = seg[i - 1], c = seg[i];
-      const gu = unit(c.gx, c.gy, c.gz);
-      // user acceleration projected onto up (up = -gravity), g -> m/s^2
-      const upAccel = -(c.ax * gu.x + c.ay * gu.y + c.az * gu.z) * G;
+      const upAccel = upAccelMps2(c.ax, c.ay, c.az, c.gx, c.gy, c.gz);
       const dt = c.t - p.t;
       v += upAccel * dt;
       vSum += Math.max(0, v) * dt;
@@ -17198,8 +17377,12 @@ const WRIST_MIN_REP_SEP_BENCH_S = 0.8;
  * on the drive gate give the same counts), not on edges. ONE session, one lifter: the next bench
  * recording grades these again before any of them is called validated.
  */
-const WRIST_DOWN_THR_BENCH = 0.15;        // m/s: a controlled bench lowering never reaches the squat's 0.30
-const WRIST_UP_THR_BENCH = 0.25;          // m/s: the first press off the un-rack runs 0.26-0.28; a failed one 0.12-0.18
+/* EVERY SPEED IN THE BLOCK ABOVE WAS READ UPSIDE DOWN (see upAccelMps2): its "lowering" speeds are
+   PRESS speeds and its "press" speeds are lowerings. The two values swapped places when the sign was
+   fixed (2026-10-25), so each physical phase is held to the threshold it was graded at: the press,
+   which ran 0.15-0.30 m/s on the heavy sets, against 0.15, and the lowering against 0.25. */
+const WRIST_DOWN_THR_BENCH = 0.25;        // m/s: the lowering
+const WRIST_UP_THR_BENCH = 0.15;          // m/s: the press; 0.15-0.30 on the reference session's heavy sets
 const WRIST_BENCH_FOREARM_MAX_DEG = 60;   // a cycle pressed with the forearm this far off the set's line is not a rep
 /* How still the bar must be (band-passed vertical velocity, m/s) to be dwelling at the bottom: the pause
    read is the time around each rep's reversal spent under this. ~0.1 s on a touch-and-go rep (the
@@ -17235,6 +17418,9 @@ const WRIST_PAUSE_V_MPS = 0.10;
  * those trims cannot see. On 2026-07-15 all four walk-outs (12.14-14.82 s) are now caught here as
  * well as by the trim, and every working rep survives.
  */
+/* EVERY HOLD ABOVE WAS MEASURED UPSIDE DOWN (see upAccelMps2): the 8.16 / 9.44 s "holds at the bottom"
+   were most likely holds at lockout before the next rep, and the walk-out's hold a reach up to the bar.
+   Unchanged with the sign fix (2026-10-25) and not re-graded under it. */
 const WRIST_MAX_HOLD_S = 11.0;
 
 /*
@@ -17271,9 +17457,8 @@ function countRepsWrist(wrist, tStart, tEnd, opts = {}) {
   const minRepSepS = bench ? WRIST_MIN_REP_SEP_BENCH_S : WRIST_MIN_REP_SEP_S;
   const downThr = bench ? WRIST_DOWN_THR_BENCH : WRIST_VEL_THR;
   const upThr = bench ? WRIST_UP_THR_BENCH : WRIST_VEL_THR;
-  const G = 9.80665;
   const tw = seg.map(r => r.t);
-  const up = seg.map(r => { const g = unit(r.gx, r.gy, r.gz); return -(r.ax * g.x + r.ay * g.y + r.az * g.z) * G; });
+  const up = seg.map(r => upAccelMps2(r.ax, r.ay, r.az, r.gx, r.gy, r.gz));
   /* Gravity along the watch's x axis, which runs along the FOREARM (the crown points along the arm,
      and the band only lets the watch turn about that axis), so |gx| is the cosine of the forearm's
      angle from vertical and its sign says whether the hand is above or below the elbow. Read at the
@@ -17541,6 +17726,10 @@ function analyzeStrength(sensors, ride, opts = {}) {
          press with the hands above the elbows (a bench), which is the only lift the view shows it for. */
       forearmDeg: useWrist ? wristRes.forearmDeg : null,
       repForearmDeg: useWrist ? (wristRes.perRep || []).map(r => r.forearmDeg) : [],
+      /* Per-rep depth as the phone saw it, degrees from the set's standing pose: the thigh's angle at
+         the bottom when the phone rode in a front pocket. See thighSwingDeg; what the Spotter Cam
+         draws a squat's per-rep depth from when it qualifies. */
+      repThighDeg: thighSwingDeg(segT, gu.slice(a, b + 1), repTimes),
       flexionProxyDeg: +phone.ampDeg.toFixed(1),          // pocket-tilt depth proxy (secondary)
       headPitchDeg,
       barSpeed,
@@ -30154,6 +30343,24 @@ function liftLeanDeg(set) { if (set.lift === 'bench') return set.forearmDeg != n
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
 function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : set.lift === 'curl' ? 'curl' : set.lift === 'bench' ? 'bench' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
 
+/* The phone's per-rep depth (`repThighDeg`, degrees from the set's standing pose; see thighSwingDeg)
+   when it can stand for a squat's depth, else null. Only for a squat-posed set (tapped squat, or
+   untapped), only while the counts are the detector's own, and only when the reps swung the phone like
+   a thigh: a median under 45 degrees is a phone on a bench or the floor, or a stride-sized wobble,
+   and the wrist's bar travel is used instead. Preferred over that travel because it is one fused angle
+   per rep where the travel is a double integral: on the 2026-10-25 ATG squat the thigh read 109 / 105
+   / 109 / 110 / 110 and the travel 0.67-0.85 m over five reps the lifter calls one depth. */
+function liftThighDepths(set) {
+  if (!set || set.repSource === 'manual') return null;
+  const lift = String(set.lift || '').toLowerCase();
+  if (lift && lift !== 'squat') return null;
+  const n = Math.round(+set.reps);
+  const v = Array.isArray(set.repThighDeg) ? set.repThighDeg.map(Number) : [];
+  if (!(n > 0) || v.length !== n || !v.every(x => Number.isFinite(x) && x > 0)) return null;
+  const sorted = v.slice().sort((a, b) => a - b);
+  return (sorted[(sorted.length - 1) >> 1] + sorted[sorted.length >> 1]) / 2 >= 45 ? v : null;
+}
+
 /* A compact replay clock built from the detector facts already carried by each set. `repTimes` are
    the detected per-rep anchors, so their gaps preserve a fast rep, a grind, and the real pauses
    between reps instead of flattening the whole set onto its median tempo. Wrist-counted reps also
@@ -30173,7 +30380,10 @@ function liftRepTimeline(set) {
   const phases = Array.isArray(set && set.repPhaseTimes) ? set.repPhaseTimes : [];
   const phasesMeasured = detectorAligned && phases.length === n && phases.every(p => p && Number.isFinite(+p.eccS)
     && Number.isFinite(+p.conS) && +p.eccS >= 0 && +p.conS > 0);
-  const depths = Array.isArray(set && set.repDepthsM) ? set.repDepthsM.map(Number) : [];
+  /* Depth per rep: the phone's thigh angle where it qualifies (liftThighDepths), else the wrist's bar
+     travel. Either way only the RATIO between reps is drawn, so the two units never meet. */
+  const thighs = liftThighDepths(set);
+  const depths = thighs || (Array.isArray(set && set.repDepthsM) ? set.repDepthsM.map(Number) : []);
   const validDepths = detectorAligned && depths.length === n && depths.every(v => Number.isFinite(v) && v > 0);
   /* A deadlift starts every rep on the floor, which is a stop the bar cannot pass, and a pull that
      measures shorter than the set's median cannot say which end it lost -- the floor or the lockout.
@@ -30201,7 +30411,8 @@ function liftRepTimeline(set) {
     const pauseS = rawPause >= 0.25 ? Math.min(rawPause, Math.max(0, conS - 0.12)) : 0;
     const depthScale = medDepth == null || floorPull ? 1 : Math.max(0.72, Math.min(1.18, depths[i] / medDepth));
     /* `depthScale` is CLAMPED so one mis-measured rep cannot draw a caricature; `depthM` is the raw
-       measurement, and every NUMBER shown to the lifter is derived from it rather than from the
+       measurement (metres of bar travel, or degrees of thigh when `depthSource` is 'thigh' -- the
+       name predates the thigh), and every NUMBER shown to the lifter is derived from it rather than from the
        clamp -- see liftGhostRead, where reading the clamp back would under-report the rep that faded
        most, which is exactly the rep worth reporting. */
     const depthM = validDepths ? depths[i] : null;
@@ -30227,6 +30438,7 @@ function liftRepTimeline(set) {
     cadenceMeasured,
     phasesMeasured,
     depthMeasured: validDepths,
+    depthSource: validDepths ? (thighs ? 'thigh' : 'wrist') : null,
     floorPull,
     pauseMeasured: reps.some(r => r.holdS > r.bottomS),
   };
@@ -30267,11 +30479,11 @@ function liftThighAt(dmax, phase, progress) {
    can.) Lean is NOT a difference the ghost can show: `liftLeanDeg` is a constant per set, read off
    the lifter's own bar-position tap, so the two bodies lean identically by construction.
 
-   Returns null wherever there is nothing honest to compare -- depth is wrist-only, and a single rep
+   Returns null wherever there is nothing honest to compare -- no per-rep depth was measured, or a single rep
    is its own reference -- so the toggle, the reference line, the ghost body and the read-out all
    appear and disappear together.
 
-   `deltaPct` comes from the RAW measured ROM (`depthM`), never from `depthScale`: that is clamped to
+   `deltaPct` comes from the RAW measurement (`depthM`), never from `depthScale`: that is clamped to
    [0.72, 1.18] for the drawing, so a rep half as deep as rep 1 would report as -28% instead of -50%. */
 function liftGhostRead(plan, frame) {
   /* A floor pull draws every rep to the floor, so a rep-1 body would stand exactly where the live one
@@ -30315,7 +30527,7 @@ function liftDepthTargetSVG(set, dmax, leanDeg, barPos, lift, tf, t) {
 /* Rep 1's own MEASURED depth as a reference line, so a set that gets shallower shows it instead of
    asking the reader to compare a column of metres. Mirrors liftDepthTargetSVG deliberately: same
    shape, different provenance, and the label says which -- that line is a target the lifter TAPPED
-   and this one is what the wrist MEASURED. `refScale` is the clamped DRAWING scale, so the line lands
+   and this one was MEASURED (the phone's thigh angle, else the wrist's bar travel). `refScale` is the clamped DRAWING scale, so the line lands
    exactly where the ghost body stands rather than a pixel or two off it. Right-anchored, with its
    box BELOW the line, because the two lines coincide whenever rep 1 happens to be the set's median
    and their labels must not land on top of each other when they do. */
@@ -30339,7 +30551,8 @@ function liftRefDepthSVG(refScale, targetDmax, leanDeg, barPos, lift, tf, t) {
    and the ghost toggle); the export has no DOM to refresh and ignores it. */
 function liftFormCompose(st, set, elapsedS) {
   const planKey = st.setIdx + ':' + set.reps + ':' + set.tempoS + ':'
-    + JSON.stringify(set.repTimes || []) + ':' + JSON.stringify(set.repPhaseTimes || []) + ':' + JSON.stringify(set.repDepthsM || []);
+    + JSON.stringify(set.repTimes || []) + ':' + JSON.stringify(set.repPhaseTimes || []) + ':' + JSON.stringify(set.repDepthsM || [])
+    + ':' + JSON.stringify(set.repThighDeg || []);
   if (!st.plan || st.planKey !== planKey) { st.plan = liftRepTimeline(set); st.planKey = planKey; st.repIdx = -1; }
   const frame = liftRepFrame(st.plan, elapsedS);
   const targetDmax = liftDepthMaxDeg(set), dmax = targetDmax * frame.depthScale, ln = liftLeanDeg(set);
@@ -30660,6 +30873,7 @@ async function shareLiftForm() {
   }
   _liftClip.busy = true; _liftClip.ready = null;
   liftClipButton('recording');
+  loamClipProgress(0);
   try {
     const when = parseUTCFromFilename((D && D.title) || '');
     const caption = loamT('My lift, replayed rep by rep with Loam.');
@@ -30686,6 +30900,7 @@ async function shareLiftForm() {
     const poster = canvas.toDataURL('image/png');
     const mime = liftClipMime();
     if (!mime || typeof canvas.captureStream !== 'function') {
+      loamClipProgress(null);
       await loamShareImage(poster, loamCardFilename('spotter', when), caption);
       return;
     }
@@ -30702,9 +30917,11 @@ async function shareLiftForm() {
     for (;;) {
       const el = (performance.now() - t0) / 1000;
       if (el >= durS) break;
+      loamClipProgress(el / durS);
       await paintAt(st, el);
       await new Promise((r) => requestAnimationFrame(r));
     }
+    loamClipProgress(1);
     recorder.stop();
     await stopped;
     stream.getTracks().forEach((t) => t.stop());
@@ -30712,6 +30929,7 @@ async function shareLiftForm() {
     if (!blob.size) { loamClipShareFailed(); return; }
     const ext = /mp4/.test(mime) ? 'mp4' : 'webm';
     const filename = loamCardFilename('spotter', when).replace(/\.png$/, '.' + ext);
+    loamClipProgress(null);
     const out = await loamShareVideo(blob, filename, caption, poster);
     if (out === 'needs-gesture' && _liftForm.D === D) {
       _liftClip.ready = { key, D, blob, filename, caption, poster };
@@ -30721,6 +30939,7 @@ async function shareLiftForm() {
     console.warn('spotter clip failed', e);
     loamClipShareFailed();
   } finally {
+    loamClipProgress(null);
     _liftClip.busy = false;
     liftClipButton(_liftClip.ready ? 'ready' : 'idle');
   }
@@ -30785,7 +31004,10 @@ function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEn
   if (liftFormNoPose(set)) return loamT('{Lift}: no dedicated form view yet, so this is a neutral standing hold, not the real {lift} motion. Your reps and tempo are the real numbers.',
     { Lift: liftNameCap(set.lift), lift: liftNameLower(set.lift) });
   const target = liftDepthCap(set.depthTarget) ? liftDepthCap(set.depthTarget).toLowerCase() : null;
-  const depth = plan.depthMeasured
+  const depth = plan.depthSource === 'thigh'
+    ? (target ? loamT('Relative depth is the thigh angle the phone in your pocket measured, normalized to your set\'s tapped {target} target.', { target })
+              : loamT('Relative depth is the thigh angle the phone in your pocket measured, normalized to your set.'))
+    : plan.depthMeasured
     ? (target ? loamT('Relative wrist depth is normalized to your set\'s tapped {target} target.', { target })
               : loamT('Relative wrist depth is normalized to your set.'))
     : (target ? loamT('The {target} line is the target you tapped.', { target }) : loamT('No depth target was tapped.'));
@@ -32903,7 +33125,11 @@ function renderStrength(D) {
       const pz = ph && ph.pauseS != null ? `, ${f(ph.pauseS, 1)} s ${loamT('pause')}` : '';
       return `<rect x="${(k * bw + 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${col}"><title>${loamT('rep {n}: {v} m/s', { n: k + 1, v: f(v) })}${dcm}${pz}</title></rect>`;
     }).join('');
-    const depStr = dep.length ? dep.map(d => (d * 100).toFixed(0)).join(' · ') + ' cm' : '';
+    /* Where the phone measured the thigh (liftThighDepths), that is the depth list: the bar travel
+       beside it is a double integral that scattered 0.67-0.85 m over five reps of one depth. */
+    const thighDep = liftThighDepths(s);
+    const depStr = thighDep ? '' : dep.length ? dep.map(d => (d * 100).toFixed(0)).join(' · ') + ' cm' : '';
+    const thighStr = thighDep ? thighDep.map(d => Math.round(d) + '°').join(' · ') : '';
     /* The dwell at the reversal sits between the two halves it separates: "at the chest" on a bench,
        "at the bottom" everywhere else. ~0.1 s is a touch-and-go rep (the reversal is smeared by the
        smoothing); it grows with fatigue and reads the real second or two of a paused rep. */
@@ -32915,6 +33141,7 @@ function renderStrength(D) {
       <div class="rep-set-head">${loamT('Set {n}', { n: i + 1 })}${s.lift ? ' · ' + escapeHtml(liftNameLower(s.lift)) : ''} · ${loamT('{n} reps', { n: s.reps })}${vloss >= 8 ? ` · <span class="rep-fade">${loamT('{pct}% fade', { pct: vloss })}</span>` : ''}</div>
       <svg class="rep-bars" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bars}</svg>
       ${depStr ? `<div class="rep-depths">${loamT('depth {list}', { list: depStr })}</div>` : ''}
+      ${thighStr ? `<div class="rep-depths">${loamT('thigh angle {list}', { list: thighStr })}</div>` : ''}
       ${tempoStr}
     </div>`;
   }).filter(Boolean).join('');
@@ -38641,6 +38868,7 @@ const LOAM_NB = {
   'Set {n}': 'Sett {n}',
   '{pct}% fade': '{pct}% fall',
   'depth {list}': 'dybde {list}',
+  'thigh angle {list}': 'lårvinkel {list}',
 
   /* The card bar and the Coach's read heading. */
   'Your session, set by set. Column height shows logged weight; reps reflect your corrections.': 'Økten din, sett for sett. Søylehøyden viser registrert vekt; repetisjonene følger korrigeringene dine.',
@@ -38789,6 +39017,8 @@ const LOAM_NB = {
   'Curl elbow-flexion replay.': 'Avspilling av albuebøyen i curl.',
   'Relative wrist depth is normalized to your set\'s tapped {target} target.': 'Relativ dybde i håndleddet er normalisert mot {target}-målet du trykket inn for settet.',
   'Relative wrist depth is normalized to your set.': 'Relativ dybde i håndleddet er normalisert mot settet ditt.',
+  'Relative depth is the thigh angle the phone in your pocket measured, normalized to your set\'s tapped {target} target.': 'Relativ dybde er lårvinkelen telefonen i lomma målte, normalisert mot {target}-målet du trykket inn for settet.',
+  'Relative depth is the thigh angle the phone in your pocket measured, normalized to your set.': 'Relativ dybde er lårvinkelen telefonen i lomma målte, normalisert mot settet ditt.',
   'The {target} line is the target you tapped.': '{target}-linjen er målet du trykket inn.',
   'No depth target was tapped.': 'Ingen dybdemål ble trykket inn.',
   'The faint body behind you is rep 1 at the same point in the movement: only depth differs between reps, because torso lean is drawn from your taps rather than measured.':
@@ -38796,6 +39026,7 @@ const LOAM_NB = {
   'This lift': 'Denne øvelsen',
   'Share replay': 'Del avspillingen',
   'Recording the replay…': 'Tar opp avspillingen …',
+  'Making the video…': 'Lager videoen …',
   'Clip ready: tap to share': 'Klippet er klart: trykk for å dele',
   'My lift, replayed rep by rep with Loam.': 'Løftet mitt, spilt av repetisjon for repetisjon med Loam.',
   'My corner, replayed with Loam.': 'Svingen min, spilt av med Loam.',
@@ -39925,6 +40156,7 @@ const LOAM_NB = {
   'Progress sections': 'Seksjoner i fremgang',
   'Zoom in': 'Zoom inn',
   'Zoom out': 'Zoom ut',
+  'Follow the replay': 'Følg avspillingen',
   'More': 'Mer',
   'More actions for {name}': 'Flere handlinger for {name}',
   'Activity across the recording': 'Aktivitet gjennom opptaket',
@@ -58944,6 +59176,7 @@ function loamToast(msg, ms = 4500, action) {
     document.body.appendChild(t);
   }
   t.textContent = msg;
+  t.classList.remove('clip-progress');
   t.classList.toggle('has-action', !!action);
   if (action) {
     const b = document.createElement('button');
@@ -58956,6 +59189,32 @@ function loamToast(msg, ms = 4500, action) {
   t.classList.add('show');
   clearTimeout(t._hideTimer);
   t._hideTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+/* A shared clip records in real time, so the share sheet waits as long as the replay runs (owner,
+   2026-10-25: "Sharing takes a long time - maybe show a status that it's generating"). While it
+   records, the toast says so with a bar filled to `frac` of the clip; null puts it away. The words are
+   written once, so a screen reader hears them once rather than at every step of the bar. */
+function loamClipProgress(frac) {
+  let t = document.getElementById('loamToast');
+  const bar = t && t.classList.contains('clip-progress') ? t.querySelector('.toast-progress > span') : null;
+  if (frac == null) {
+    if (bar) { clearTimeout(t._hideTimer); t.classList.remove('show', 'clip-progress'); }
+    return;
+  }
+  let fill = bar;
+  if (!fill) {
+    loamToast(loamT('Making the video…'), 60000);
+    t = document.getElementById('loamToast');
+    t.classList.add('clip-progress');
+    const track = document.createElement('span');
+    track.className = 'toast-progress';
+    track.setAttribute('aria-hidden', 'true');
+    fill = track.appendChild(document.createElement('span'));
+    t.appendChild(track);
+  }
+  fill.style.width = Math.round(Math.max(0, Math.min(1, frac)) * 100) + '%';
+  clearTimeout(t._hideTimer);
+  t._hideTimer = setTimeout(() => t.classList.remove('show', 'clip-progress'), 60000);
 }
 
 /* Route a drop from anywhere on the page. On the landing view, files stack in the pending list as
@@ -59467,13 +59726,29 @@ function loamCsvName(raw) {
    reads a File in slices, so the recording is never wholly in the content process at all. This is
    also why the desktop analyzer coped: a dropped file is disk-backed from the start and takes this
    same path. */
+/* In the app a session opens with the View / Trim / Options row just above the screen, so the summary
+   card leads and the row is one short scroll up (owner, 2026-10-25). Measured from the row rather than
+   from #results so it holds for whichever sport's container is showing, and the row's bottom margin
+   is the gap above the card. Not when anything is showing above the row: the truncated-recording,
+   guessed-sport and sample-rate notices and the trim bar sit there, and opening past them would hide
+   the one thing on the page that says the numbers below are partial or inferred.
+   Called by every open path, including the cached reopen, which returned before the old
+   `#results.scrollIntoView()` and so opened every reopened session at the top. Never by a re-render
+   (trim, the View switch, a refresh), which leaves the reader where they are. */
+function loamOpenPastViewBar() {
+  if (!LOAM_EMBEDDED) return;
+  const bar = document.querySelector('.analysis-view-bar');
+  if (!bar || !bar.getClientRects().length) return;
+  for (let el = bar.previousElementSibling; el; el = el.previousElementSibling) {
+    if (el.getBoundingClientRect().height > 0) return;
+  }
+  window.scrollTo({ top: bar.getBoundingClientRect().bottom + window.scrollY, behavior: 'instant' });
+}
+
 function loamAnalyzeBlobFile(blob, filename) {
   const name = loamCsvName(filename);
   const p = analyze([new File([blob], name, { type: 'text/csv' })]);
-  if (p && p.then) p.then(() => {
-    const r = document.getElementById('results');
-    if (r && LOAM_EMBEDDED) r.scrollIntoView();
-  }).catch(() => {});
+  if (p && p.then) p.then(loamOpenPastViewBar).catch(() => {});
   return p;
 }
 
@@ -59500,7 +59775,7 @@ window.loamAnalyzeURL = async function (url) {
     /* Ask the cache BEFORE reading the recording. On a hit this is the whole open: no fetch (which
        in the app gunzips the entire recording through AnalyzerSchemeHandler) and no hash stream over
        every byte of it. Any miss falls straight through to the path below, unchanged. */
-    if (await tryFastReopen(url)) return;
+    if (await tryFastReopen(url)) { loamOpenPastViewBar(); return; }
     await loadingOpening();
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
@@ -59527,7 +59802,7 @@ window.loamAnalyzeURL = async function (url) {
 window.loamAnalyzeURLWithFit = async function (csvUrl, fitUrl) {
   try {
     perfStart('reopen with FIT');
-    if (await tryFastReopen(csvUrl, fitUrl)) return;
+    if (await tryFastReopen(csvUrl, fitUrl)) { loamOpenPastViewBar(); return; }
     await loadingOpening();
     const csvResp = await fetch(csvUrl);
     if (!csvResp.ok) throw new Error('csv fetch failed: ' + csvResp.status);
@@ -59547,10 +59822,7 @@ window.loamAnalyzeURLWithFit = async function (csvUrl, fitUrl) {
        is an unhandled rejection -- which in the app is a console error the E2E's uncaught-error
        assertion would report against a failure the analyzer has in fact handled. Same reason
        loamAnalyzeBlobFile carries one. */
-    if (p && p.then) p.then(() => {
-      const r = document.getElementById('results');
-      if (r && LOAM_EMBEDDED) r.scrollIntoView();
-    }).catch(() => {});
+    if (p && p.then) p.then(loamOpenPastViewBar).catch(() => {});
     return await p;
   } catch (e) {
     // See loamAnalyzeURL: surface fetch failures so embedded mode never shows a blank screen.
@@ -59572,7 +59844,7 @@ window.loamAnalyzeFitURL = async function (fitUrl) {
     const p = analyze(files);
     // .catch for the same reason as loamAnalyzeURLWithFit: this branch off `p` is separate from the
     // `await` below, so without it a handled failure still surfaces as an unhandled rejection.
-    if (p && p.then) p.then(() => { const r = document.getElementById('results'); if (r && LOAM_EMBEDDED) r.scrollIntoView(); }).catch(() => {});
+    if (p && p.then) p.then(loamOpenPastViewBar).catch(() => {});
     return await p;
   } catch (e) {
     hide('loading'); showError('Could not load this FIT.', (e && e.stack) || String(e));
@@ -59816,7 +60088,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '5fe81d037 · 2026-10-25';
+const LOAM_BUILD = 'daf465d43 · 2026-10-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
