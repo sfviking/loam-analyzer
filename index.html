@@ -11170,6 +11170,46 @@ function formBearingDeg(lat1, lon1, lat2, lon2) {
   const x = Math.cos(lat1 * toR) * Math.sin(lat2 * toR) - Math.sin(lat1 * toR) * Math.cos(lat2 * toR) * Math.cos(dLon);
   return Math.atan2(y, x) * 180 / Math.PI;
 }
+/* DISPLAY ONLY: a centripetal Catmull-Rom curve through every GPS fix, so the replay map draws and
+   moves through a corner as a curve instead of as 1 Hz chords that snap the marker's heading at each
+   fix. Every fix stays on the curve at its own time; points are added only where the track bends (one
+   per ~6 deg, at most 8 per interval) and never on a chord under 0.5 m, so a straight stretch costs
+   nothing. Centripetal knots, because the uniform kind loops and overshoots when fix spacing changes.
+   It adds no information, so nothing that measures (ghost pacing, distance, speed) may read it. */
+function formSmoothTrack(ts, lats, lons) {
+  const t = [], lat = [], lon = [];
+  for (let i = 0; i < ts.length; i++) {
+    if (Number.isFinite(ts[i]) && Number.isFinite(lats[i]) && Number.isFinite(lons[i])) { t.push(ts[i]); lat.push(lats[i]); lon.push(lons[i]); }
+  }
+  const n = t.length;
+  if (n < 3) return { t, lat, lon };
+  const toR = Math.PI / 180, R = 6378137, ky = toR * R, kx = Math.cos(lat[0] * toR) * ky;
+  const x = lon.map(v => (v - lon[0]) * kx), y = lat.map(v => (v - lat[0]) * ky);
+  const P = i => i < 0 ? [2 * x[0] - x[1], 2 * y[0] - y[1]]
+    : i >= n ? [2 * x[n - 1] - x[n - 2], 2 * y[n - 1] - y[n - 2]] : [x[i], y[i]];
+  const bendDeg = (a, b, c) => {
+    const ux = b[0] - a[0], uy = b[1] - a[1], vx = c[0] - b[0], vy = c[1] - b[1];
+    if (Math.hypot(ux, uy) < 1e-6 || Math.hypot(vx, vy) < 1e-6) return 0;
+    return Math.abs(Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)) * 180 / Math.PI;
+  };
+  const knot = (a, b) => Math.max(1e-4, Math.sqrt(Math.hypot(b[0] - a[0], b[1] - a[1])));
+  const mix = (a, b, ta, tb, s) => { const f = (s - ta) / (tb - ta); return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]; };
+  const out = { t: [t[0]], lat: [lat[0]], lon: [lon[0]] };
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+    const k = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 0.5 ? 1
+      : Math.min(8, Math.max(1, Math.ceil(Math.max(bendDeg(p0, p1, p2), bendDeg(p1, p2, p3)) / 6)));
+    const s0 = 0, s1 = s0 + knot(p0, p1), s2 = s1 + knot(p1, p2), s3 = s2 + knot(p2, p3);
+    for (let j = 1; j < k; j++) {
+      const u = j / k, s = s1 + (s2 - s1) * u;
+      const a1 = mix(p0, p1, s0, s1, s), a2 = mix(p1, p2, s1, s2, s), a3 = mix(p2, p3, s2, s3, s);
+      const c = mix(mix(a1, a2, s0, s2, s), mix(a2, a3, s1, s3, s), s1, s2, s);
+      out.t.push(t[i] + (t[i + 1] - t[i]) * u); out.lat.push(lat[0] + c[1] / ky); out.lon.push(lon[0] + c[0] / kx);
+    }
+    out.t.push(t[i + 1]); out.lat.push(lat[i + 1]); out.lon.push(lon[i + 1]);
+  }
+  return out;
+}
 
 /* Calibration is evaluated on selection, never in the animation loop. Cached rides use the
    surviving gravity channel, just like renderCalibNotice; dismissing that notice changes no facts. */
@@ -11943,13 +11983,15 @@ function formInitMap(S) {
   if (_formTilesMap) { try { _formTilesMap.remove(); } catch (e) {} }
   if (_formMap) { try { _formMap.remove(); } catch (e) {} }
   _formMap = null; _formTilesMap = null; _formMapMarker = null; _formMapCovered = null; _formMapHeading = null; _formSvg = null;
-  const haveTrack = !!(S && S.locT && S.locT.length >= 2 && el);
+  /* The map draws and moves along a curve through the fixes (formSmoothTrack); S keeps the raw fixes. */
+  const M = (S && S.locT) ? formSmoothTrack(S.locT, S.locLat, S.locLon) : null;
+  const haveTrack = !!(M && M.t.length >= 2 && el);
   if (wrap) wrap.style.display = haveTrack ? '' : 'none';
   if (!haveTrack) return;
   try {
     const toR = Math.PI / 180, R = 6378137;   /* WGS84 radius, matching web mercator so the SVG aligns with tiles */
-    const lat0 = S.locLat[0], lon0 = S.locLon[0], coslat = Math.cos(lat0 * toR);
-    const apexLat = formInterp(S.locT, S.locLat, S.tPeak), apexLon = formInterp(S.locT, S.locLon, S.tPeak);
+    const lat0 = M.lat[0], lon0 = M.lon[0], coslat = Math.cos(lat0 * toR);
+    const apexLat = formInterp(M.t, M.lat, S.tPeak), apexLon = formInterp(M.t, M.lon, S.tPeak);
     /* "Up" = the approach bearing (start -> apex), so the rider enters from the bottom heading up. */
     let upB = formBearingDeg(lat0, lon0, apexLat, apexLon) * toR;
     if (!isFinite(upB)) upB = 0;
@@ -11961,7 +12003,7 @@ function formInitMap(S) {
     /* lat/lon -> east/north metres -> rotate CCW by upB so travel points up (+y). */
     const toXY = (la, lo) => { const e = (lo - lon0) * toR * coslat * R, n = (la - lat0) * toR * R; return { x: e * ca - n * sa, y: e * sa + n * ca }; };
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (let i = 0; i < S.locLat.length; i++) { const p = toXY(S.locLat[i], S.locLon[i]); if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+    for (let i = 0; i < M.lat.length; i++) { const p = toXY(M.lat[i], M.lon[i]); if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
     const cxm = (minX + maxX) / 2, cym = (minY + maxY) / 2;
     /* Desired px-per-metre to frame the track, scaled by the user's zoom, then snapped to a real
        mercator zoom so the tiles can match it. */
@@ -12004,20 +12046,20 @@ function formInitMap(S) {
 
     /* SVG projection: same centre (cxm,cym) at the viewport centre, same px-per-metre as the tiles. */
     const toSvg = (la, lo) => { const p = toXY(la, lo); return [W / 2 + (p.x - cxm) * scale, H / 2 - (p.y - cym) * scale]; };  /* flip y: up */
-    _formSvg = { el, W, H, upB, toSvg };
+    _formSvg = { el, W, H, upB, toSvg, M };
 
     /* Each phase: a dark casing under a bright line, so the track reads over imagery or the dark backdrop. */
     const seg = (lo, hi, col) => {
       const out = [];
-      if (lo > S.locT[0]) out.push(toSvg(formInterp(S.locT, S.locLat, lo), formInterp(S.locT, S.locLon, lo)));
-      for (let i = 0; i < S.locT.length; i++) if (S.locT[i] >= lo && S.locT[i] <= hi) out.push(toSvg(S.locLat[i], S.locLon[i]));
-      if (hi < S.locT[S.locT.length - 1]) out.push(toSvg(formInterp(S.locT, S.locLat, hi), formInterp(S.locT, S.locLon, hi)));
+      if (lo > M.t[0]) out.push(toSvg(formInterp(M.t, M.lat, lo), formInterp(M.t, M.lon, lo)));
+      for (let i = 0; i < M.t.length; i++) if (M.t[i] >= lo && M.t[i] <= hi) out.push(toSvg(M.lat[i], M.lon[i]));
+      if (hi < M.t[M.t.length - 1]) out.push(toSvg(formInterp(M.t, M.lat, hi), formInterp(M.t, M.lon, hi)));
       if (out.length < 2) return '';
       const pts = out.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
       return `<polyline points="${pts}" fill="none" stroke="#0a0d07" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"/>`
            + `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`;
     };
-    const sp = toSvg(S.locLat[0], S.locLon[0]), ep = toSvg(S.locLat[S.locLat.length - 1], S.locLon[S.locLon.length - 1]), ap = toSvg(apexLat, apexLon);
+    const sp = toSvg(M.lat[0], M.lon[0]), ep = toSvg(M.lat[M.lat.length - 1], M.lon[M.lon.length - 1]), ap = toSvg(apexLat, apexLon);
     const northDeg = -upB * 180 / Math.PI;   /* where true north ended up, relative to screen-up */
     const txt = `paint-order="stroke" stroke="#0a0d07" stroke-width="2.6" stroke-linejoin="round"`;
     /* Ghost layers (whole-segment replays with a faster same-segment lap): a per-corner
@@ -12030,7 +12072,7 @@ function formInitMap(S) {
       for (const T of G.turnWins) {
         const d = G.deltasByN[T.n];
         if (d == null) continue;
-        const la = formInterp(S.locT, S.locLat, T.tPeak), lo = formInterp(S.locT, S.locLon, T.tPeak);
+        const la = formInterp(M.t, M.lat, T.tPeak), lo = formInterp(M.t, M.lon, T.tPeak);
         if (la == null || lo == null) continue;
         const p = toSvg(la, lo);
         /* Light halo outline so both colors read over the track line (which is the
@@ -12039,7 +12081,7 @@ function formInitMap(S) {
       }
     }
     el.innerHTML = `<svg viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" width="100%" height="100%" style="display:block;background:transparent;">`
-      + seg(S.locT[0], S.tStart, '#9fc0d8') + seg(S.tStart, S.tEnd, '#86c06b') + seg(S.tEnd, S.locT[S.locT.length - 1], '#e8b25e')
+      + seg(M.t[0], S.tStart, '#9fc0d8') + seg(S.tStart, S.tEnd, '#86c06b') + seg(S.tEnd, M.t[M.t.length - 1], '#e8b25e')
       + `<g id="formCovered"></g>` + ghostDots
       + (G ? `<g id="formGhostDot"><circle r="5.5" fill="#f1f5f9" fill-opacity="0.3" stroke="#f1f5f9" stroke-width="1.6" stroke-dasharray="2.5 2.5"/></g>` : '')
       /* The vision cone: where the head points, drawn from the rider over the map and turned each frame
@@ -12056,19 +12098,19 @@ function formInitMap(S) {
       + `</svg>`;
     /* Click to scrub to the nearest point in time (in SVG/px coordinates). */
     el.onclick = (ev) => {
-      if (!_form || !_formSvg || !S.locT.length) return;
+      if (!_form || !_formSvg || !M.t.length) return;
       const rect = el.getBoundingClientRect();
       const px = (ev.clientX - rect.left) / rect.width * W, py = (ev.clientY - rect.top) / rect.height * H;
       let best = -1, bd = Infinity;
-      for (let i = 0; i < S.locT.length; i++) { const c = toSvg(S.locLat[i], S.locLon[i]); const d = (c[0] - px) ** 2 + (c[1] - py) ** 2; if (d < bd) { bd = d; best = i; } }
-      if (best >= 0) { formSetPlaying(false); formSeek(S.locT[best] - S.w0, true); }
+      for (let i = 0; i < M.t.length; i++) { const c = toSvg(M.lat[i], M.lon[i]); const d = (c[0] - px) ** 2 + (c[1] - py) ** 2; if (d < bd) { bd = d; best = i; } }
+      if (best >= 0) { formSetPlaying(false); formSeek(M.t[best] - S.w0, true); }
     };
   } catch (e) { console.warn('formInitMap (svg) failed', e); if (wrap) wrap.style.display = 'none'; }
 }
 function formUpdateMap(S, tNow) {
-  if (!_formSvg || !S || !S.locT || !S.locT.length) return;
-  const { el, toSvg, upB } = _formSvg;
-  const lat = formInterp(S.locT, S.locLat, tNow), lon = formInterp(S.locT, S.locLon, tNow);
+  if (!_formSvg || !S || !_formSvg.M) return;
+  const { el, toSvg, upB, M } = _formSvg;
+  const lat = formInterp(M.t, M.lat, tNow), lon = formInterp(M.t, M.lon, tNow);
   if (lat == null || lon == null) return;
   const here = toSvg(lat, lon);
 
@@ -12077,24 +12119,35 @@ function formUpdateMap(S, tNow) {
   if (cov) {
     const maxS = S.spdMax > 0 ? S.spdMax : 1;
     const tt = [], pp = [];
-    for (let i = 0; i < S.locT.length; i++) { if (S.locT[i] <= tNow) { tt.push(S.locT[i]); pp.push(toSvg(S.locLat[i], S.locLon[i])); } else break; }
+    for (let i = 0; i < M.t.length; i++) { if (M.t[i] <= tNow) { tt.push(M.t[i]); pp.push(toSvg(M.lat[i], M.lon[i])); } else break; }
     tt.push(tNow); pp.push(here);
-    let segs = '';
+    /* One polyline per GPS interval, carrying the curve's added points: the element count and the
+       midpoint-speed tint stay what the 1 Hz chords had (one element per added point cost 4x the frame). */
+    let segs = '', from = 0;
     for (let i = 1; i < pp.length; i++) {
-      const tm = (tt[i - 1] + tt[i]) / 2;
+      if (i < pp.length - 1 && S.locT[lowerBound(S.locT, tt[i])] !== tt[i]) continue;
+      const tm = (tt[from] + tt[i]) / 2;
       const spd = (S.spdT && S.spdT.length) ? formInterp(S.spdT, S.spdV, tm) : 0;
-      segs += `<line x1="${pp[i - 1][0].toFixed(1)}" y1="${pp[i - 1][1].toFixed(1)}" x2="${pp[i][0].toFixed(1)}" y2="${pp[i][1].toFixed(1)}" stroke="${speedColor(spd || 0, maxS)}" stroke-width="4" stroke-linecap="round"/>`;
+      const pts = pp.slice(from, i + 1).map(q => q[0].toFixed(1) + ',' + q[1].toFixed(1)).join(' ');
+      segs += `<polyline points="${pts}" fill="none" stroke="${speedColor(spd || 0, maxS)}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>`;
+      from = i;
     }
     cov.innerHTML = segs;
   }
 
-  /* Move the heading chevron and point it in the travel direction relative to up (~0.5s ahead). */
+  /* Point the heading chevron along the curve at this instant: a chord CENTRED on now, not ahead of it.
+     The vision cone adds a head offset measured against the bike's CURRENT course, so a look-ahead
+     turns the cone into the corner by however far the bike turns meanwhile. The forward 0.5 s chord
+     this replaced led the curve by 11-14 deg mid-corner (39 at worst) and turned 0.20-0.25 s before the
+     gyro on a real ride; centred, it is 0.00 s. +/-0.25 s rather than +/-0.1: same zero lead on a
+     curve, and it keeps the old chord's smoothness (worst 7.4 deg per 50 ms frame against 10). */
   const nav = el.querySelector('#formNav');
   let rel = 0;
   {
-    const tA = Math.min(S.locT[S.locT.length - 1], tNow + 0.5);
-    const la2 = formInterp(S.locT, S.locLat, tA), lo2 = formInterp(S.locT, S.locLon, tA);
-    if (!(la2 === lat && lo2 === lon)) rel = formBearingDeg(lat, lon, la2, lo2) - upB * 180 / Math.PI;
+    const tA = Math.max(M.t[0], tNow - 0.25), tB = Math.min(M.t[M.t.length - 1], tNow + 0.25);
+    const la1 = formInterp(M.t, M.lat, tA), lo1 = formInterp(M.t, M.lon, tA);
+    const la2 = formInterp(M.t, M.lat, tB), lo2 = formInterp(M.t, M.lon, tB);
+    if (!(la1 === la2 && lo1 === lo2)) rel = formBearingDeg(la1, lo1, la2, lo2) - upB * 180 / Math.PI;
   }
   if (nav) nav.setAttribute('transform', `translate(${here[0].toFixed(1)} ${here[1].toFixed(1)}) rotate(${rel.toFixed(1)})`);
   /* The vision cone follows the rider and swings by the head's offset from travel: the same corner
@@ -12116,9 +12169,13 @@ function formUpdateMap(S, tNow) {
     const gh = el.querySelector('#formGhostDot');
     if (gh) {
       const tauRun = Math.max(0, tNow - _form.run.tStart);
-      const at = ghostAt(G.gTrack, tauRun);
-      const p = toSvg(at.lat, at.lon);
-      gh.setAttribute('transform', `translate(${p[0].toFixed(1)} ${p[1].toFixed(1)})`);
+      /* Smoothed like the rider's own track, so the two dots run the same kind of line through a corner. */
+      if (_formSvg.ghostSrc !== G.gTrack) { _formSvg.ghostSrc = G.gTrack; _formSvg.ghostM = formSmoothTrack(G.gTrack.t, G.gTrack.lat, G.gTrack.lon); }
+      const GM = _formSvg.ghostM;
+      if (GM.t.length) {
+        const p = toSvg(formInterp(GM.t, GM.lat, tauRun), formInterp(GM.t, GM.lon, tauRun));
+        gh.setAttribute('transform', `translate(${p[0].toFixed(1)} ${p[1].toFixed(1)})`);
+      }
     }
     for (const T of G.turnWins) {
       const dot = el.querySelector('#fgd-' + T.n);
@@ -59759,7 +59816,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '37a1c7dbe · 2026-10-25';
+const LOAM_BUILD = '5fe81d037 · 2026-10-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
