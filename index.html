@@ -55732,6 +55732,8 @@ function highlightJump(n) {
   if (m?._icon?.firstChild) m._icon.firstChild.classList.add('highlight');
 }
 
+/* What the radius chart was last drawn from, so a width change can redraw it (see below). */
+let _radiusChartState = null;
 function renderRadiusChart(turns) {
   const data = turns.filter(T => !isNaN(T.radius));
   /* Radius = apex speed / yaw rate, so its confidence rides entirely on the speed source. With a FIT
@@ -55742,6 +55744,29 @@ function renderRadiusChart(turns) {
   /* Bars, labels, hover, and the axis follow the Units toggle (previously hardcoded meters). */
   const rUnit = U.smallUnit();
   const rVal = U.smallNum;
+  /* The width it will be drawn at. The div is 0 wide while its "detailed measurements" fold is
+     closed, so fall back to the section, which stays laid out. */
+  const host = document.getElementById('radiusChart');
+  const section = document.getElementById('radiusSection');
+  const width = (host && host.clientWidth) || (section && section.clientWidth) || 700;
+  const margin = { l: 56, r: 24, t: 52, b: 44 };
+  const plotW = Math.max(120, width - margin.l - margin.r);
+  const ns = data.map(T => T.n);
+  const span = ns.length ? Math.max(...ns) - Math.min(...ns) + 1 : 0;
+  /* One tick per turn only while they fit. dtick:1 was unconditional, so a 120-turn ride asked for
+     120 labels in a ~280px phone plot and Plotly rotated them into a black smear. Otherwise the
+     smallest 1/2/5-style step that leaves room for each label. Plotly's own auto ticks were tried:
+     they space at 80px, which left a phone with only "50, 100", and go fractional on a short ride. */
+  const lo = ns.length ? Math.min(...ns) : 1, hi = ns.length ? Math.max(...ns) : 1;
+  const labelPx = String(hi).length * 7 + 22;
+  const maxTicks = Math.max(2, Math.floor(plotW / labelPx));
+  /* Ticks drawn inside the bars' range [lo - 0.5, hi + 0.5] at multiples of the step (tick0 = 0). */
+  const ticksAt = s => Math.floor((hi + 0.5) / s) - Math.ceil((lo - 0.5) / s) + 1;
+  const dtick = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000].find(s => ticksAt(s) <= maxTicks) || 1000;
+  _radiusChartState = { turns, width };
+  /* The grey outline marks an estimate, but on a bar a few px wide its two 1px edges ARE the bar,
+     and a 120-turn ride on a phone read as grey instead of left/right. Narrow bars keep the fade. */
+  const outline = !measured && plotW / Math.max(1, span) >= 8;
   const trace = {
     x: data.map(T => T.n), y: data.map(T => rVal(T.radius)), type: 'bar',
     marker: {
@@ -55749,31 +55774,64 @@ function renderRadiusChart(turns) {
          green/orange, which deutan riders cannot tell apart. */
       color: data.map(T => T.direction === 'R' ? '#c14e2e' : '#1f7ba6'),
       opacity: measured ? 1 : 0.55,
-      line: measured ? { width: 0 } : { color: '#94a3b8', width: 1 },
+      line: outline ? { color: '#94a3b8', width: 1 } : { width: 0 },
     },
     text: data.map(T => (measured ? '' : '~') + rVal(T.radius).toFixed(1) + ' ' + rUnit), textposition: 'outside',
     textfont: { family: 'JetBrains Mono', size: 10, color: '#475569' },
     hovertemplate: 'Turn %{x}<br>' + (measured ? 'Radius' : '~Radius (GPS est.)') + ' %{y:.1f} ' + rUnit + '<extra></extra>'
   };
+  const note = loamT(measured ? 'Measured from FIT wheel speed' : '~ estimated: apex speed interpolated from GPS. Attach a FIT for measured wheel speed.');
+  const left = loamT('left'), right = loamT('right');
+  const noteAnn = { xref: 'paper', yref: 'paper', x: 0, xanchor: 'left', showarrow: false,
+    font: { size: 11, color: measured ? '#557a2f' : '#94a3b8' } };
+  const keyAnn = {
+    /* Direction key, colored inline so the sky/clay bars are never color-alone. */
+    xref: 'paper', yref: 'paper', x: 1, xanchor: 'right', showarrow: false,
+    text: `<span style="color:${loamChartTheme()['#1f7ba6']}">■ ${escapeHtml(left)}</span>   <span style="color:${loamChartTheme()['#c14e2e']}">■ ${escapeHtml(right)}</span>`,
+    font: { size: 11, family: 'JetBrains Mono' },
+  };
+  /* SVG text does not wrap, and the note and the key shared one row: on a phone the note ran under
+     the key and off the chart. When they do not fit side by side, the key gets its own row above
+     the plot and the note wraps above it. Glyph widths are generous because the webfonts may not
+     load: wrapping a little early costs a line, wrapping late runs text off the chart. */
+  const NOTE_PX = 5.6, KEY_PX = 6.7, LINE_PX = 15;
+  const keyW = (left.length + right.length + 7) * KEY_PX;
+  if (note.length * NOTE_PX + 16 + keyW <= plotW) {
+    Object.assign(noteAnn, { y: 1.12, text: note });
+    Object.assign(keyAnn, { y: 1.12 });
+  } else {
+    const lines = [], max = Math.max(12, Math.floor(plotW / NOTE_PX));
+    for (const w of note.split(/\s+/).filter(Boolean)) {
+      const last = lines.length ? lines[lines.length - 1] : null;
+      if (last != null && (last + ' ' + w).length <= max) lines[lines.length - 1] = last + ' ' + w;
+      else lines.push(w);
+    }
+    Object.assign(keyAnn, { y: 1, yanchor: 'bottom', yshift: 4 });
+    Object.assign(noteAnn, { y: 1, yanchor: 'bottom', yshift: 4 + LINE_PX + 3, align: 'left', text: lines.join('<br>') });
+    margin.t = 4 + LINE_PX + 3 + lines.length * LINE_PX + 8;
+  }
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
-    margin: { l: 56, r: 24, t: 52, b: 44 },
-    xaxis: { title: { text: loamT('turn #'), font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'linear', dtick: 1 },
+    margin,
+    xaxis: { title: { text: loamT('turn #'), font: { size: 11 } }, gridcolor: '#e2e8f0', tickmode: 'linear', tick0: 0, dtick },
     yaxis: { title: { text: loamT('apex radius ({u})', { u: rUnit }), font: { size: 11 } }, gridcolor: '#e2e8f0', zerolinecolor: '#e2e8f0' },
-    annotations: [{
-      xref: 'paper', yref: 'paper', x: 0, y: 1.12, xanchor: 'left', showarrow: false,
-      text: loamT(measured ? 'Measured from FIT wheel speed' : '~ estimated: apex speed interpolated from GPS. Attach a FIT for measured wheel speed.'),
-      font: { size: 11, color: measured ? '#557a2f' : '#94a3b8' },
-    }, {
-      /* Direction key, colored inline so the sky/clay bars are never color-alone. */
-      xref: 'paper', yref: 'paper', x: 1, y: 1.12, xanchor: 'right', showarrow: false,
-      text: `<span style="color:${loamChartTheme()['#1f7ba6']}">■ ${escapeHtml(loamT('left'))}</span>   <span style="color:${loamChartTheme()['#c14e2e']}">■ ${escapeHtml(loamT('right'))}</span>`,
-      font: { size: 11, family: 'JetBrains Mono' },
-    }],
+    /* Bar labels shrink to their bar's width; on narrow bars that left a microscopic smudge on each
+       one. Hide a label rather than draw it under 7px; hover still carries the number. */
+    uniformtext: { mode: 'hide', minsize: 7 },
+    annotations: [noteAnn, keyAnn],
   };
   loamPlot('radiusChart', [trace], layout, PLOT_CFG);
 }
+/* The tick step, the note's wrap and the outline are all chosen from the width, so a chart drawn in
+   landscape and rotated to portrait would bring the overlap straight back. Redraw on a real width
+   change; the fold's synthetic resize (`resizeChartsSoon`) lands within a few px and is skipped. */
+window.addEventListener('resize', () => {
+  const host = document.getElementById('radiusChart');
+  if (!_radiusChartState || !host || !host.clientWidth) return;
+  if (Math.abs(host.clientWidth - _radiusChartState.width) < 24) return;
+  renderRadiusChart(_radiusChartState.turns);
+});
 
 /* Total pedal count for the ride: crank revolutions from integrating FIT cadence (rpm) over time.
    Trapezoidal between consecutive records, skipping gaps/pauses over 10s so a stopped stretch does
@@ -60088,7 +60146,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'daf465d43 · 2026-10-25';
+const LOAM_BUILD = 'a4ee68392 · 2026-10-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
