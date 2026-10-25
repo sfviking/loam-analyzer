@@ -28635,11 +28635,66 @@ function runWeeklyVolume(rides) {
   return out;
 }
 
-function renderRunningProgress(rides, dated) {
-  const weeks = runWeeklyVolume(rides), metric = U.metric();
+/* Date ticks that name the year once an axis spans months. A bare '%b %e' printed "Jan 1" four times
+   across a seven-year axis, since Plotly puts a multi-year axis's ticks on 1 January (owner screenshot,
+   2026-10-25). Plotly's stop ranges are inclusive at both ends and the first match wins, so the day
+   stop ends at 14 days, its widest daily step, not at 'M1', which printed monthly ticks as "Sep 1". */
+const PROGRESS_DATE_TICKS = [
+  { dtickrange: [null, 14 * 86400e3], value: '%b %e' },
+  { dtickrange: ['M1', 'M6'], value: "%b '%y" },
+  { dtickrange: ['M12', null], value: '%Y' },
+];
+
+/* A whole run's MOVING average faster than the men's mile world record (3:43.13) was not run on foot:
+   over a session it is a car, a bike or a train with the phone in a pocket, and one at 2:56/mi had
+   pushed the pace chart's top to 2:00 (owner screenshot, 2026-10-25). The crop's 12 m/s
+   vehicle floor (CROP_VEHICLE_MPS) is the wrong number here: it is sized so a descending RIDER does not
+   trip it, and town driving sits under it. No floor on the slow side: a declared run walked at
+   24:00/mi is slow, not impossible. */
+const RUN_SESSION_MAX_MPS = 1609.344 / 223.13;
+function runRowNotOnFoot(r) {
+  const s = (r && r.summary) || {};
+  const v = s.movingSpeed > 0 ? s.movingSpeed : s.avgSpeed;   // elapsed avg is a lower bound on moving
+  return v > RUN_SESSION_MAX_MPS;
+}
+
+/* Running Progress opens on the newest stretch with no year-long gap in it. Two 2019 runs in
+   front of a 2026 season made the axis seven years wide, under 1 px a week at phone width, with the
+   season squeezed into its last few percent (owner screenshot, 2026-10-25). A year without a run is a
+   break in the record, not a rest week, so zero weeks inside the window still show. Returns the
+   index of the window's first run in `dated` (sorted oldest first); 0 when there is no such gap. */
+const RUN_PROGRESS_GAP_DAYS = 365;
+let _progRunAllTime = false;
+function runProgressWindowStart(dated) {
+  for (let i = dated.length - 1; i > 0; i--)
+    if (dated[i].d - dated[i - 1].d > RUN_PROGRESS_GAP_DAYS * 86400e3) return i;
+  return 0;
+}
+function setProgRunAllTime(on) { _progRunAllTime = !!on; renderProgress(); }
+
+function renderRunningProgress(rides, dated, notOnFoot = []) {
+  /* Backfill reads the whole library, not the window: a run off the left edge is still worth
+     re-saving with its pace. */
+  const missingAll = dated.filter(o => !(o.r.summary && o.r.summary.movingSpeed > 0));
+  const start = runProgressWindowStart(dated), from = _progRunAllTime ? 0 : start;
+  const since = dated[start].d;
+  const earlier = dated.slice(0, from);
+  dated = dated.slice(from);
+  const weeks = runWeeklyVolume(dated.map(o => o.r)), metric = U.metric();
   const unitM = metric ? 1000 : 1609.344;
+  const day = (d) => d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
   const host = document.getElementById('progressCharts');
+  const scopeBtn = (all, label) => `<button type="button" class="${_progRunAllTime === all ? 'on' : ''}" aria-pressed="${_progRunAllTime === all}" onclick="setProgRunAllTime(${all})">${escapeHtml(label)}</button>`;
+  const scope = start > 0
+    ? `<div class="prog-chart-mode" id="progRunScope"><span class="chart-mode-toggle" role="group" aria-label="${escapeHtml(loamT('Date range'))}">${scopeBtn(false, loamT('Since {date}', { date: day(since) }))}${scopeBtn(true, loamT('All runs'))}</span></div>`
+      + (earlier.length ? `<p class="dim" id="progRunScopeNote" style="font-size:12px">${escapeHtml(loamT('Charts start after more than a year without a run. Earlier runs: {n}, the last on {date}.', { n: earlier.length, date: day(earlier[earlier.length - 1].d) }))}</p>` : '')
+    : '';
+  const shownOff = notOnFoot.slice(0, 4).map(r => `${day(new Date(sessionRecordedDate(r)))} (${U.pace(r.summary.movingSpeed > 0 ? r.summary.movingSpeed : r.summary.avgSpeed)})`);
+  const offFoot = notOnFoot.length
+    ? `<p class="dim" id="progRunOffFoot" style="font-size:12px">${escapeHtml(loamT('Left out as not on foot, faster than the mile world record ({pace}): {list}.', { pace: U.pace(RUN_SESSION_MAX_MPS), list: shownOff.join('; ') + (notOnFoot.length > 4 ? `; +${notOnFoot.length - 4}` : '') }))}</p>`
+    : '';
   host.innerHTML = `<p class="dim">${loamT('Runs saved on this device. Pace varies with route, conditions and workout intent; this is not a fitness score.')}</p>
+    ${scope}${offFoot}
     <div class="chart" id="progRunWeeks" style="height:280px"></div>
     <div class="chart" id="progRunPace" style="height:280px"></div>
     <p class="dim" id="progRunPaceNote" style="font-size:12px"></p>
@@ -28649,7 +28704,7 @@ function renderRunningProgress(rides, dated) {
   const layout = (title, ytitle) => ({ title: { text: title, font: { size: 14 } },
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans, sans-serif', color: '#475569', size: 12 },
     margin: { l: 58, r: 18, t: 48, b: 46 },
-    xaxis: { type: 'date', tickformat: '%b %e', nticks: 5, gridcolor: '#e2e8f0',
+    xaxis: { type: 'date', tickformatstops: PROGRESS_DATE_TICKS, nticks: 5, gridcolor: '#e2e8f0',
       ...(onlyDay != null ? { range: [pmcDayKey(new Date(onlyDay - 4 * 86400e3)), pmcDayKey(new Date(onlyDay + 4 * 86400e3))] } : {}) },
     yaxis: { title: { text: ytitle }, gridcolor: '#e2e8f0', zerolinecolor: '#cbd5e1' } });
   loamPlot('progRunWeeks', [{ x: weeks.map(w => w.date), y: weeks.map(w => +(w.distance / unitM).toFixed(2)),
@@ -28682,7 +28737,7 @@ function renderRunningProgress(rides, dated) {
     ? loamT('Moving pace for {n} of {total} runs. Runs saved before pace was stored appear once reopened.', { n: nPace, total: dated.length }) + app : '';
   document.getElementById('progRunHrNote').textContent = nHr < dated.length
     ? loamT('Heart rate for {n} of {total} runs: older runs appear once reopened, and runs recorded without heart rate never do.', { n: nHr, total: dated.length }) : '';
-  requestRunBackfill(missing.map(o => o.r));
+  requestRunBackfill(missingAll.map(o => o.r));
 }
 
 /* Ask the app to re-analyze runs whose library rows predate the stored pace and heart rate. The
@@ -28726,7 +28781,15 @@ async function renderProgress() {
   sportSelect.innerHTML = `<option value="all">${escapeHtml(loamT('All sports'))}</option>` + sports.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(sessionSportLabel(s))}</option>`).join('');
   sportSelect.value = sports.includes(selectedSport) ? selectedSport : 'all';
   const runningTrends = ['run', 'running'].includes(sportSelect.value);
-  const trendRides = rides.filter(r => sportSelect.value === 'all' || (runningTrends ? ['run', 'running'].includes(r.sport) : r.sport === sportSelect.value));
+  let trendRides = rides.filter(r => sportSelect.value === 'all' || (runningTrends ? ['run', 'running'].includes(r.sport) : r.sport === sportSelect.value));
+  /* Before the headline is counted, so the session count and total distance above the running charts
+     leave out the same sessions the charts do. Enriched first: an old row's pace lives in its cache. */
+  let notOnFoot = [];
+  if (runningTrends) {
+    await enrichRunProgress(trendRides);
+    notOnFoot = trendRides.filter(runRowNotOnFoot);
+    trendRides = trendRides.filter(r => !notOnFoot.includes(r));
+  }
   /* The same scope for the Trails table: a runner who picks Running should not be shown a bike
      descent's lap count and PR under it. Null means every sport. */
   const trailSports = sportSelect.value === 'all' ? null : (runningTrends ? ['run', 'running'] : [sportSelect.value]);
@@ -28774,9 +28837,8 @@ async function renderProgress() {
     ${sportSelect.value !== 'all' ? '<div class="chart" id="progSpeed" style="height:260px; margin-bottom:16px;"></div>' : ''}
     ${cornerTrends ? '<div class="chart" id="progRadius" style="height:260px; margin-bottom:16px;"></div><div class="chart" id="progLean" style="height:260px; margin-bottom:4px;"></div><div id="progLeanNote" class="dim" style="font-size:12px; margin-bottom:16px;"></div>' : ''}`;
   if (runningTrends) {
-    await enrichRunProgress(trendRides);
     await enrichRidesAvgHr(trendRides);
-    renderRunningProgress(trendRides, dated);
+    renderRunningProgress(trendRides, dated, notOnFoot);
     renderProgressReadiness(rides);
     renderProgressTrails(trailSports);
     return;
@@ -28812,7 +28874,7 @@ async function renderProgress() {
       title: { text: title, font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
       margin: { l: 54, r: 16, t: 36, b: 44 },
       ...(kind === 'bar' ? { barmode: 'stack' } : {}),
-      xaxis: { type: 'date', gridcolor: '#e2e8f0', tickformat: '%b %e', hoverformat: '%b %e, %Y', nticks: 6, range: xRange },
+      xaxis: { type: 'date', gridcolor: '#e2e8f0', tickformatstops: PROGRESS_DATE_TICKS, hoverformat: '%b %e, %Y', nticks: 6, range: xRange },
       yaxis: { title: { text: ytitle, font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
     }, PLOT_CFG);
     return true;
@@ -42690,6 +42752,11 @@ const LOAM_NB = {
   'Reopen an older run to include its moving pace here.': 'Åpne en eldre løpetur igjen for å ta med tempoet i bevegelse her.',
   'Average heart rate per run': 'Gjennomsnittspuls per løpetur',
   'Heart-rate trends appear for runs recorded with heart rate.': 'Pulstrender vises for løpeturer tatt opp med puls.',
+  'Date range': 'Tidsrom',
+  'Since {date}': 'Siden {date}',
+  'All runs': 'Alle løpeturer',
+  'Charts start after more than a year without a run. Earlier runs: {n}, the last on {date}.': 'Diagrammene starter etter mer enn et år uten løpeturer. Tidligere løpeturer: {n}, den siste {date}.',
+  'Left out as not on foot, faster than the mile world record ({pace}): {list}.': 'Utelatt fordi de ikke var til fots, raskere enn verdensrekorden på en engelsk mil ({pace}): {list}.',
   'Moving pace for {n} of {total} runs. Runs saved before pace was stored appear once reopened.': 'Tempo i bevegelse for {n} av {total} løpeturer. Løpeturer lagret før tempoet ble lagret, vises når du åpner dem igjen.',
   'Heart rate for {n} of {total} runs: older runs appear once reopened, and runs recorded without heart rate never do.': 'Puls for {n} av {total} løpeturer: eldre løpeturer vises når du åpner dem igjen, og løpeturer tatt opp uten puls vises aldri.',
   'The app fills in the ones still on this phone after you close this screen.': 'Appen fyller inn de som fortsatt ligger på denne telefonen etter at du lukker denne skjermen.',
@@ -60146,7 +60213,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'a4ee68392 · 2026-10-25';
+const LOAM_BUILD = '2335ac5ad · 2026-10-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
