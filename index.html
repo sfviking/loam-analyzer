@@ -966,7 +966,7 @@
   /* In the app this row would hold only the bike-computer FIT button, which the native session menu
      already carries, so it is a blank row unless Back to comparison is on it. */
   body.embedded .results-controls:not(:has(#backToCompareBtn:not(.hidden))) { display:none; }
-  body:has(:is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #miniSummary, #segmentPage, #crossResults):not(.hidden)) .analysis-view-bar { display:flex; }
+  body:has(:is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #treadmillResults, #miniSummary, #segmentPage, #crossResults):not(.hidden)) .analysis-view-bar { display:flex; }
   .analysis-view-bar > label { display:flex; align-items:center; gap:10px; color:var(--text-dim); font-size:13px; }
   .analysis-view-bar select { min-width:116px; }
   /* `:not(:has(...))` for the reason the Visual tablenote rule below carries it: a note that
@@ -978,7 +978,7 @@
      Hiding the borrowed panels leaves the ride page's Coach heading over an empty space. */
   :root[data-analysis-view="visual"] .analysis-detailed-only,
   :root[data-analysis-view="visual"] .analysis-explanation,
-  :root[data-analysis-view="visual"] :is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults) .caveat-more,
+  :root[data-analysis-view="visual"] :is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #treadmillResults, #segmentPage, #crossResults) .caveat-more,
   :root[data-analysis-view="visual"] body:not(.running-analysis):not(.road-analysis) :is(#coachHighlights, #coachSection):not(#progressPlanCoachHost *, #mtbPage *),
   :root[data-analysis-view="visual"] :is(#gpsUpsellSection, #roadUpsellSection, #geekStatsSection, #landscapeTip, #paramsBar),
   :root[data-analysis-view="visual"] :is(.lift-coach, .golf-tips, .view-highlights) { display:none !important; }
@@ -1008,7 +1008,7 @@
      already gone. The retired Focused view hid both charts in Detailed, which is why the
      compact-view control check never saw this. */
   :root[data-analysis-view="visual"] .section-title > .subtitle:not(:has(button, input, select, a)) { display:none !important; }
-  :root[data-analysis-view="visual"] :is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults)
+  :root[data-analysis-view="visual"] :is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #treadmillResults, #segmentPage, #crossResults)
     :is(.strength-tablenote, .golf-tablenote):not(:only-child):not(.hrz-caveat):not(.hrz-keep):not(:has(button, input, select, a)) { display:none !important; }
   :root[data-analysis-view="visual"] .stat .value { font-size:clamp(30px, 4vw, 44px); line-height:1.1; }
   :root[data-analysis-view="visual"] .stile-v { font-size:clamp(26px, 3vw, 36px); line-height:1.15; }
@@ -2936,6 +2936,7 @@ function loamSeasonRequested(search, host) {
 <div id="swimResults" class="hidden"></div>
 <div id="triResults" class="hidden"></div>
 <div id="skiResults" class="hidden"></div>
+<div id="treadmillResults" class="hidden"></div>
 <style>
   #strengthResults { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
   /* Swim (BETA). An imported Apple Watch swim: no map, no track, no charts of raw motion (there is
@@ -6834,6 +6835,168 @@ function applyWalkBandCadence(running, walkCadSeries) {
     seg.cadAvg = segCads.length ? segCads.reduce((s, c) => s + c.spm, 0) / segCads.length : null;
   }
   return running;
+}
+
+/* ===== Treadmill read =================================================================
+   Ported from analyzer/sports/running/treadmill.js and pinned to it by that module's drift guard.
+   A DECLARED walk or run with no GPS: the GPS gate every foot read sits behind is swapped for a
+   motion one, and everything that needs a position is left out. The reasoning and the one
+   recording it is graded on live in the module header. */
+const TREADMILL_WIN_S = 10;
+const TREADMILL_HOP_S = 5;
+const TREADMILL_MIN_IMPACT_MPS2 = 0.15;
+const TREADMILL_MIN_CONF = 0.15;
+/* Below a minute of stepping there is no session to describe, and the cadence halves would each be a
+   handful of windows. */
+const TREADMILL_MIN_STEPPING_S = 60;
+const TREADMILL_WALK_LO_HZ = 1.2, TREADMILL_WALK_HI_HZ = 2.6;
+const TREADMILL_RUN_LO_HZ = 2.0, TREADMILL_RUN_HI_HZ = 3.5;
+/* Each half of the session needs this many cadence readings before the two halves are compared. */
+const TREADMILL_MIN_HALF_READINGS = 6;
+/* A walk does not stop because its step peak dipped under the confidence bar for a window or two. On
+   the first treadmill walk 20 of 212 windows did, every one of them reading 122-127 spm at 0.87 m/s2
+   of impact or more, and never more than two in a row once the walk was under way. Dropping them cost
+   9% of the walking time and the steps. Lowering the bar instead is not safe: at 25 Hz a 10 s window
+   is 250 samples, where white noise alone peaks at about 0.10-0.13. So a run of up to this many
+   windows that MOVED (impact over the floor) between two stepping windows is stepping too. It adds
+   time, never a cadence reading. */
+const TREADMILL_BRIDGE_WINDOWS = 3;
+
+/**
+ * Stepping windows over `span`, in classifyGait's output shape so briskMinutes and the AirPods
+ * oscillation read take them unchanged. Each window carries its own cadence reading in the declared
+ * band; `cadSeries` is the stepping windows' readings, the phone's cadence series.
+ */
+function treadmillGait(accelRows, span, sport) {
+  const walking = sport === 'walking';
+  const empty = { activity: null, windows: [], breaks: [], walkFrac: null, runFrac: null, walkCadSeries: [], cadSeries: [] };
+  if (!span || !Number.isFinite(span.start) || !Number.isFinite(span.end)) return empty;
+  const acc = (accelRows || []).filter(r => r && r.t >= span.start && r.t <= span.end
+    && Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.z));
+  if (acc.length < 200) return empty;
+  const lo = walking ? TREADMILL_WALK_LO_HZ : TREADMILL_RUN_LO_HZ;
+  const hi = walking ? TREADMILL_WALK_HI_HZ : TREADMILL_RUN_HI_HZ;
+  const tArr = acc.map(r => r.t);
+  const mag = acc.map(r => Math.hypot(r.x, r.y, r.z));
+  const lower = (arr, x) => { let a = 0, b = arr.length; while (a < b) { const m = (a + b) >> 1; if (arr[m] < x) a = m + 1; else b = m; } return a; };
+  const windows = [], cadSeries = [];
+  for (let w0 = span.start; w0 + TREADMILL_WIN_S <= span.end; w0 += TREADMILL_HOP_S) {
+    const w1 = w0 + TREADMILL_WIN_S;
+    const i0 = lower(tArr, w0), i1 = lower(tArr, w1);
+    if (i1 - i0 < 200) continue;
+    const sig = mag.slice(i0, i1);
+    const m = sig.reduce((a, b) => a + b, 0) / sig.length;
+    const detr = sig.map(v => v - m);
+    const impact = Math.sqrt(detr.reduce((s, v) => s + v * v, 0) / detr.length);
+    const ts = tArr.slice(i0, i1).map(t => t - w0);
+    const f = dftPeakFreq(detr, ts, lo, hi, 0.02);
+    const conf = impact > 0 ? Math.min(dftMagAt(detr, ts, f) / impact, 1) : 0;
+    const stepping = impact >= TREADMILL_MIN_IMPACT_MPS2 && conf > TREADMILL_MIN_CONF;
+    const gait = stepping ? (walking ? 'walk' : 'run') : 'idle';
+    windows.push({ t0: w0, t1: w1, gait, speed: null, impact, spm: f * 60, conf });
+    if (stepping) cadSeries.push({ t: (w0 + w1) / 2, freq: f, spm: f * 60, conf });
+  }
+  /* Bridge short dips between two stepping windows (TREADMILL_BRIDGE_WINDOWS). Contiguity is checked
+     in TIME as well as by index, because a window with too few samples is skipped, not pushed. */
+  for (let i = 1; i < windows.length; i++) {
+    if (windows[i].gait !== 'idle' || windows[i - 1].gait === 'idle') continue;
+    let j = i;
+    while (j < windows.length && windows[j].gait === 'idle' && windows[j].impact >= TREADMILL_MIN_IMPACT_MPS2) j++;
+    const len = j - i;
+    if (len >= 1 && len <= TREADMILL_BRIDGE_WINDOWS && j < windows.length && windows[j].gait !== 'idle'
+        && windows[j].t0 - windows[i - 1].t0 <= (len + 1) * TREADMILL_HOP_S + 1e-6) {
+      for (let k = i; k < j; k++) { windows[k].gait = walking ? 'walk' : 'run'; windows[k].bridged = true; }
+    }
+    i = Math.max(i, j - 1);
+  }
+  const n = cadSeries.length;
+  return {
+    activity: n >= 6 ? (walking ? 'walking' : 'running') : null,
+    windows, breaks: [],
+    walkFrac: n ? (walking ? 1 : 0) : null, runFrac: n ? (walking ? 0 : 1) : null,
+    walkCadSeries: walking ? cadSeries : [], cadSeries,
+  };
+}
+
+/** The hop between windows, read off the windows rather than assumed (briskWindowHopS' rule). */
+function treadmillHopS(windows) {
+  let hop = null;
+  for (let i = 1; i < (windows || []).length; i++) {
+    const d = windows[i].t0 - windows[i - 1].t0;
+    if (d > 0 && (hop == null || d < hop)) hop = d;
+  }
+  return hop || TREADMILL_HOP_S;
+}
+
+/** First stepping window's start to the last one's end, or null when nothing stepped. */
+function treadmillWindow(gait) {
+  const st = ((gait && gait.windows) || []).filter(w => w.gait !== 'idle');
+  if (!st.length) return null;
+  return { start: st[0].t0, end: st[st.length - 1].t1 };
+}
+
+/** Seconds of stepping: one hop per stepping window, since the windows overlap. */
+function treadmillSteppingS(windows) {
+  const ws = windows || [];
+  const hop = treadmillHopS(ws);
+  return ws.filter(w => w.gait !== 'idle').length * hop;
+}
+
+/**
+ * Steps, from cadence: each stepping window contributes one hop at the PREFERRED cadence nearest it
+ * (the watch's or the AirPods' when the caller swapped one in; for a bridged window, its neighbours'),
+ * falling back to the window's own phone reading only when there is no series at all. An estimate by
+ * construction, and labelled as one where it is shown.
+ */
+function treadmillSteps(windows, cadSeries) {
+  const ws = windows || [];
+  const hop = treadmillHopS(ws);
+  const series = (cadSeries || []).filter(c => c && Number.isFinite(c.t) && Number.isFinite(c.spm) && c.conf > TREADMILL_MIN_CONF);
+  let steps = 0;
+  for (const w of ws) {
+    if (w.gait === 'idle') continue;
+    const mid = (w.t0 + w.t1) / 2;
+    let best = null, bestGap = Infinity;
+    for (const c of series) {
+      const gap = Math.abs(c.t - mid);
+      if (gap < bestGap) { bestGap = gap; best = c; }
+    }
+    const spm = best ? best.spm : w.spm;
+    if (Number.isFinite(spm)) steps += spm * hop / 60;
+  }
+  return Math.round(steps);
+}
+
+/**
+ * The numbers the treadmill view shows. `R` is the running-shaped object the caller built and swapped
+ * cadence (and AirPods oscillation) into: { cadSeries, cadMedian, cadSource, oscMedian, oscSource }.
+ */
+function treadmillSummary(gait, R, hrRows, ride) {
+  const rr = R || {};
+  const cads = (rr.cadSeries || []).filter(c => c && Number.isFinite(c.spm) && c.conf > TREADMILL_MIN_CONF);
+  const sorted = cads.map(c => c.spm).sort((a, b) => a - b);
+  const at = (p) => sorted.length ? sorted[Math.floor(p * (sorted.length - 1))] : null;
+  const med = (xs) => { const s = xs.slice().sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+  const half = Math.floor(cads.length / 2);
+  const firstHalf = cads.slice(0, half).map(c => c.spm), secondHalf = cads.slice(half).map(c => c.spm);
+  const halves = firstHalf.length >= TREADMILL_MIN_HALF_READINGS && secondHalf.length >= TREADMILL_MIN_HALF_READINGS;
+  const hr = (hrRows || []).filter(r => r && ride && r.t >= ride.start && r.t <= ride.end && r.bpm > 0);
+  return {
+    steppingS: treadmillSteppingS(gait && gait.windows),
+    windowS: ride ? ride.end - ride.start : null,
+    cadN: cads.length,
+    cadMedian: rr.cadMedian != null ? rr.cadMedian : med(sorted),
+    cadP10: at(0.1), cadP90: at(0.9),
+    cadFirstHalf: halves ? med(firstHalf) : null,
+    cadSecondHalf: halves ? med(secondHalf) : null,
+    cadSource: rr.cadSource || 'phone',
+    steps: treadmillSteps(gait && gait.windows, rr.cadSeries),
+    hrN: hr.length,
+    hrAvg: hr.length ? Math.round(hr.reduce((a, r) => a + r.bpm, 0) / hr.length) : null,
+    hrMax: hr.length ? Math.max(...hr.map(r => r.bpm)) : null,
+    oscMedian: rr.oscSource === 'head' && rr.oscMedian != null ? rr.oscMedian : null,
+    oscSource: rr.oscSource === 'head' ? 'head' : null,
+  };
 }
 
 /* ===== Brisk minutes =================================================================
@@ -26402,6 +26565,69 @@ async function analyze(files) {
             descents: loamT(dome.descents.length === 1 ? '{n} descent' : '{n} descents', { n: dome.descents.length }) }), true);
           return;
         }
+        /* AN INDOOR WALK OR RUN: declared, and not one GPS fix. Until 2026-10-27 this fell to the
+           refusal below, which told a walker who had already picked Walking that there was nothing to
+           read -- true of distance and pace, false of cadence, which never needed a position and was
+           lost only because every foot read sits behind a GPS-speed gate. treadmill.js swaps that gate
+           for a motion one and leaves out everything a position would have given. Declared only: on
+           Auto a recording with no GPS goes to the stationary detectors first, and a treadmill walk
+           there reads as a lift, which is issue #592 and is not changed here. */
+        else if (!sensors.location.length && (userSport === 'running' || userSport === 'walking')) {
+          onProgress('reading an indoor session');
+          const walking = userSport === 'walking';
+          const gait = treadmillGait(sensors.accel, spanRide, userSport);
+          const win = treadmillWindow(gait);
+          if (!win || treadmillSteppingS(gait.windows) < TREADMILL_MIN_STEPPING_S) {
+            throw new Error(walking
+              ? 'No GPS in this recording, so it was read as an indoor walk, and the phone found less than a minute of steady stepping in it. Cadence needs the phone in a pocket, in your hand or on the treadmill while you walk.'
+              : 'No GPS in this recording, so it was read as an indoor run, and the phone found less than a minute of steady stepping in it. Cadence needs the phone in a pocket, in your hand or on the treadmill while you run.');
+          }
+          ride = win;
+          /* The running-shaped object the cadence and oscillation helpers mutate. The phone's series
+             goes in first and the watch's or the AirPods' replaces it under the running path's own
+             rules, so an indoor session prefers the same sensor an outdoor one would. */
+          const running = { cadSeries: [], cadMedian: null, cadMean: null, cadSource: 'phone', segments: [], oscSeries: [], oscMedian: null };
+          applyWalkBandCadence(running, gait.cadSeries);
+          /* Off the phone's own series, before any swap, as the outdoor path counts them. */
+          const brisk = walking ? briskMinutes(gait.windows, gait.walkCadSeries, []) : null;
+          const wristCad = wristCadenceSeries(sensors.wrist || [], win);
+          if (preferWristCadence(wristCad, running.cadSeries)) applyWristCadence(running, wristCad);
+          else if (!walking) {
+            const headCad = headCadenceSeries(sensors.headphone || [], win);
+            if (preferHeadCadence(headCad, running.cadSeries)) applyHeadCadence(running, headCad);
+          }
+          /* The AirPods' oscillation only. The phone's is withheld, not computed: outdoors it reads
+             about twice the head, and indoors it may be lying on the console. */
+          if (!walking) {
+            const headOsc = headOscillationSeries(sensors.headphone || [], running.cadSeries, win, gait.windows);
+            if (headOsc.length >= OSC_MIN_HEAD_WINDOWS) applyOscillation(running, headOsc, 'head');
+          }
+          const summary = treadmillSummary(gait, running, sensors.heartRate || [], win);
+          const ped = pedTotals(sensors.pedometer || [], win);
+          let lastHrT = -Infinity;
+          const series = {
+            cad: running.cadSeries.filter(c => c.conf > TREADMILL_MIN_CONF).map(c => ({ t: +c.t.toFixed(1), spm: +c.spm.toFixed(1) })),
+            hr: (sensors.heartRate || []).filter(r => r && r.t >= win.start && r.t <= win.end && r.bpm > 0
+              && (r.t - lastHrT >= 2 ? (lastHrT = r.t, true) : false)).map(r => ({ t: +r.t.toFixed(1), bpm: r.bpm })),
+            osc: summary.oscSource === 'head' ? running.oscSeries.map(o => ({ t: +o.t.toFixed(1), cm: +o.oscCm.toFixed(2) })) : [],
+          };
+          const channels = {
+            wristRows: (sensors.wrist || []).length, headphoneRows: (sensors.headphone || []).length,
+            heartRateN: summary.hrN, pedometerN: (sensors.pedometer || []).length,
+          };
+          const indoorRender = { treadmill: summary, series, brisk, pedSteps: ped ? ped.steps : null, channels,
+            sport: userSport, spanS: spanRide.end - spanRide.start, imuRateHz,
+            title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)) };
+          if (superseded()) return;
+          await loadingDraw(onProgress); if (superseded()) return;
+          hideAllSections(); hide('loading'); hide('results'); show('treadmillResults');
+          if (cacheKey) { putCachedAnalysis(cacheKey, userSport, indoorRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+          renderTreadmill(indoorRender);
+          const cadFrom = summary.cadSource === 'wrist' ? ' ' + loamT('from watch') : summary.cadSource === 'head' ? ' ' + loamT('from AirPods') : '';
+          setStatus(loamT(walking ? 'Indoor walk loaded ({cadence})' : 'Indoor run loaded ({cadence})', {
+            cadence: summary.cadMedian != null ? Math.round(summary.cadMedian) + ' SPM' + cadFrom : loamT('no cadence') }), true);
+          return;
+        }
         else if (!sensors.location.length) {
           /* Two different situations reach this line and they want opposite advice, which the single
              old message could not give: it told everybody to "pick Weightlifting or Golf", so a
@@ -26412,8 +26638,9 @@ async function analyze(files) {
 
              A DECLARED sport gets past the stationary detectors untouched (autoSport is false, so
              `stationary` is null above), and the only sports that can be declared and still land
-             here are the moving ones -- lift, golf and swim all take the span window forty lines
-             earlier. So a declared sport here means "you told us this was read from a GPS track and
+             here are the RIDES -- lift, golf and swim take the span window forty lines earlier, a ski
+             session has its own branch, and since 2026-10-27 a walk or run takes the indoor read just
+             above. So a declared sport here means "you told us this was read from a GPS track and
              there is no GPS track", which is a limit to state rather than a setting to change. */
           /* And it names the control the READER can actually see. The app hides the dropzone and its
              Sport picker entirely, so "pick it in the Sport selector" is an instruction to use a
@@ -26423,8 +26650,8 @@ async function analyze(files) {
             ? 'the session\u2019s Change activity menu on the Sessions tab'
             : 'the Sport selector above';
           throw new Error(autoSport
-            ? `No GPS in this recording. If it was a lift, golf or a pool swim, pick Weightlifting, Golf or Swimming in ${picker} so it analyzes as a stationary session.`
-            : `No GPS in this recording, and a ${sportNoun(userSport)} is read from the GPS track: distance, pace and the active window all come from it, so there is nothing here to analyze. A treadmill or indoor session records no fixes. Weightlifting, Golf and Swimming are the activities Loam can read without GPS \u2014 you can switch this session to one of those in ${picker}.`);
+            ? `No GPS in this recording. If it was a lift, golf or a pool swim, pick Weightlifting, Golf or Swimming in ${picker} so it analyzes as a stationary session. If it was a treadmill or indoor walk or run, pick Walking or Running there and it is read as an indoor session.`
+            : `No GPS in this recording, and a ${sportNoun(userSport)} is read from the GPS track: distance, pace and the active window all come from it, so there is nothing here to analyze. A trainer or indoor ride records no fixes, and Loam cannot read one yet. Walks and runs (read as indoor sessions), weightlifting, golf and swimming are what Loam can read without GPS \u2014 you can switch this session to one of those in ${picker}.`);
         } else {
           // Too short / too slow for a moving window, but we still have a GPS track. Show a minimal
           // summary (duration, distance, avg speed, map) instead of a hard error, so a quick walk
@@ -29007,7 +29234,7 @@ function durTileHTML(sec) {
    Progress page (and of the dropzone after "Analyze another"). */
 function hideOutOfResultsSurfaces() {
   for (const id of ['coachSection', 'cropSection', 'sampleRateNotice', 'truncNotice', 'miniSummary',
-                    'strengthResults', 'golfResults', 'swimResults', 'skiResults', 'triResults', 'triBackBar']) {
+                    'strengthResults', 'golfResults', 'swimResults', 'skiResults', 'treadmillResults', 'triResults', 'triBackBar']) {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   }
 }
@@ -29015,7 +29242,7 @@ let _progressReturn = null;
 async function openProgress() {
   if (!document.getElementById('progressResults').classList.contains('hidden')) return;
   const ids = ['results','crossResults','coachSection','cropSection','sampleRateNotice','truncNotice',
-    'miniSummary','strengthResults','golfResults','swimResults','skiResults','triResults','triBackBar'];
+    'miniSummary','strengthResults','golfResults','swimResults','skiResults','treadmillResults','triResults','triBackBar'];
   _progressReturn = ids.some(id => !document.getElementById(id)?.classList.contains('hidden')) && document.getElementById('dropzone').classList.contains('hidden')
     ? { view: _lastRender, y: window.scrollY, status: document.getElementById('statusText').textContent,
         coach: coachState, visible: ids.filter(id => document.getElementById(id) && !document.getElementById(id).classList.contains('hidden')) } : null;
@@ -30127,7 +30354,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','roadMountControl','golfResults','swimResults','triResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -34821,6 +35048,83 @@ function drawSkiHr(sig, legs) {
     shapes: skiLegShapes(legs), showlegend: false, hovermode: 'x',
   }, { displayModeBar: false, responsive: true });
 }
+/* The INDOOR walk or run: declared, with no GPS (treadmill.js). It renders into a host of its own
+   because the outdoor run view is built round a track -- map, splits, pace, best efforts, climbs --
+   and would show a page of blanks. Every number here is a body read; the lead says what is absent. */
+function renderTreadmill(D) {
+  _lastRender = { fn: renderTreadmill, D };
+  { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  const el = document.getElementById('treadmillResults');
+  if (!el) return;
+  const s = (D && D.treadmill) || {};
+  const walking = !!D && D.sport === 'walking';
+  const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
+  const from = s.cadSource === 'wrist' ? loamT('from your watch') : s.cadSource === 'head' ? loamT('from your AirPods') : loamT('from the phone');
+  const brisk = D && D.brisk;
+  const tiles = [
+    tile(s.steppingS != null ? fmtDuration(s.steppingS) : '—', walking ? loamT('time walking') : loamT('time running')),
+    s.cadMedian != null ? tile(Math.round(s.cadMedian) + ' spm', loamT('Cadence'), from) : '',
+    s.cadP10 != null && s.cadP90 != null ? tile(`${Math.round(s.cadP10)}&ndash;${Math.round(s.cadP90)}`, loamT('cadence range, p10 to p90')) : '',
+    s.cadFirstHalf != null ? tile(`${Math.round(s.cadFirstHalf)} &rarr; ${Math.round(s.cadSecondHalf)}`, loamT('cadence, first half to second half')) : '',
+    s.steps ? tile('&asymp; ' + s.steps, loamT('steps, from cadence')) : '',
+    D && D.pedSteps ? tile(String(D.pedSteps), loamT('steps, counted by the phone')) : '',
+    walking && brisk ? tile(Math.round(brisk.moderateMin) + ' min', loamT('Brisk minutes'),
+      loamT('{v} min at {vig}+ spm · {mod}+ spm counts', { v: Math.round(brisk.vigorousMin), vig: brisk.thresholds.vigorousSpm, mod: brisk.thresholds.moderateSpm })) : '',
+    s.hrAvg != null ? tile(`${s.hrAvg} / ${s.hrMax}`, loamT('heart rate avg / max')) : '',
+    s.oscMedian != null ? tile(s.oscMedian.toFixed(1) + ' cm', loamT('Oscillation'), loamT('from your AirPods')) : '',
+  ].filter(Boolean).join('');
+  const lead = walking
+    ? loamT('<strong>No GPS in this recording, so it is read as an indoor walk</strong> &mdash; a treadmill, an indoor track, or a walk with Location off. What is here is how you moved: cadence, steps and, when a watch was worn, heart rate. <strong>Distance, pace, stride length, splits and the map need a GPS track</strong>, so they are left out rather than shown as zero.')
+    : loamT('<strong>No GPS in this recording, so it is read as an indoor run</strong> &mdash; a treadmill, an indoor track, or a run with Location off. What is here is how you moved: cadence, steps and, when a watch or AirPods were worn, heart rate and vertical oscillation. <strong>Distance, pace, stride length, splits and the map need a GPS track</strong>, so they are left out rather than shown as zero.');
+  const rest = loamT('A ten-second stretch counts as moving when the phone felt both a jolt (at least {imp} m/s&sup2; of movement) and a steady step rhythm; a phone lying still has neither. Walk or run is the label you chose, not one read from the motion: without speed, a hard walk and an easy run jolt the phone alike. Vertical oscillation comes only from AirPods, because indoors the phone is often on the console, where it measures the machine rather than you. Read so far on one real treadmill walk; a treadmill run has not been checked yet.',
+    { imp: TREADMILL_MIN_IMPACT_MPS2 });
+  const hasHr = (D && D.series && D.series.hr || []).length >= 2;
+  el.innerHTML = `
+    <div class="section-title"><span class="activity-title">${activityIcon(walking ? 'walking' : 'running')}<span>${walking ? loamT('Indoor walk') : loamT('Indoor run')}</span></span> <span class="beta-badge">${loamT('NO GPS')}</span></div>
+    ${leadNote(lead, rest, 'strength-tablenote', loamT('How this is read'))}
+    <div class="stiles ski-stiles">${tiles}</div>
+    <div class="section-title" style="margin-top:22px">${loamT('Cadence')}<span class="subtitle">${hasHr ? loamT('steps per minute, with heart rate') : loamT('steps per minute')}</span></div>
+    <div class="panel">
+      <div id="treadmillCadChart" class="chart" style="height:${hasHr ? 300 : 240}px"></div>
+      <div class="strength-tablenote analysis-explanation">${loamT('One reading per stretch the phone counted as moving. A gap is time it did not: standing on the belt, a pause, or stepping off.')}</div>
+    </div>`;
+  drawTreadmillCadence(D);
+  /* Not reached through buildSectionNav, which is where the results flow gets its share buttons. */
+  setTimeout(decorateCardShares, 0);
+}
+
+function drawTreadmillCadence(D) {
+  const el = document.getElementById('treadmillCadChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const cad = (D && D.series && D.series.cad) || [];
+  const hr = (D && D.series && D.series.hr) || [];
+  if (cad.length < 2) { el.innerHTML = `<div class="strength-tablenote">${loamT('No cadence reading in this recording.')}</div>`; return; }
+  /* A gap longer than a bridged dip breaks the line, so a stop is drawn as a stop rather than a
+     straight line across it. */
+  const xs = [], ys = [];
+  for (let i = 0; i < cad.length; i++) {
+    if (i && cad[i].t - cad[i - 1].t > (TREADMILL_BRIDGE_WINDOWS + 1) * TREADMILL_HOP_S) { xs.push(null); ys.push(null); }
+    xs.push(cad[i].t / 60); ys.push(cad[i].spm);
+  }
+  const traces = [{
+    x: xs, y: ys, type: 'scatter', mode: 'lines', name: loamT('Cadence'),
+    line: { color: '#3d7a5a', width: 1.8 }, connectgaps: false,
+    hovertemplate: '%{x:.1f} min<br>%{y:.0f} spm<extra></extra>',
+  }];
+  if (hr.length >= 2) traces.push({
+    x: hr.map(p => p.t / 60), y: hr.map(p => p.bpm), type: 'scatter', mode: 'lines', name: loamT('Heart rate'),
+    yaxis: 'y2', line: { color: '#c14e2e', width: 1.2 }, connectgaps: false,
+    hovertemplate: '%{x:.1f} min<br>%{y} bpm<extra></extra>',
+  });
+  loamPlot(el, traces, {
+    margin: { l: 44, r: hr.length >= 2 ? 44 : 12, t: 8, b: 42 },
+    xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
+    yaxis: { title: 'spm', fixedrange: true },
+    ...(hr.length >= 2 ? { yaxis2: { title: 'bpm', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false } } : {}),
+    showlegend: hr.length >= 2, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  }, { displayModeBar: false, responsive: true });
+}
+
 function renderSwim(D) {
   _lastRender = { fn: renderSwim, D };
   /* A swim is read off the wrist with the phone flat on a pool deck, so there is no body frame to
@@ -42492,6 +42796,39 @@ const LOAM_NB = {
   'DTW: {n} descents': 'DTW: {n} nedkjøringer',
   '{n} walk break': '{n} gåpause',
   '{n} walk breaks': '{n} gåpauser',
+  'Indoor walk loaded ({cadence})': 'Innendørs gåtur lastet ({cadence})',
+  'Indoor run loaded ({cadence})': 'Innendørs løpetur lastet ({cadence})',
+  'reading an indoor session': 'leser en innendørsøkt',
+  'No GPS in this recording, so it was read as an indoor walk, and the phone found less than a minute of steady stepping in it. Cadence needs the phone in a pocket, in your hand or on the treadmill while you walk.':
+    'Ingen GPS i dette opptaket, så det ble lest som en innendørs gåtur, og telefonen fant under ett minutt med jevne skritt i det. Kadens krever at telefonen er i en lomme, i hånden eller på tredemøllen mens du går.',
+  'No GPS in this recording, so it was read as an indoor run, and the phone found less than a minute of steady stepping in it. Cadence needs the phone in a pocket, in your hand or on the treadmill while you run.':
+    'Ingen GPS i dette opptaket, så det ble lest som en innendørs løpetur, og telefonen fant under ett minutt med jevne skritt i det. Kadens krever at telefonen er i en lomme, i hånden eller på tredemøllen mens du løper.',
+  /* The indoor walk/run view (renderTreadmill). */
+  'Indoor walk': 'Innendørs gåtur',
+  'Indoor run': 'Innendørs løpetur',
+  'NO GPS': 'INGEN GPS',
+  'How this is read': 'Slik leses dette',
+  'from your watch': 'fra klokken din',
+  'from your AirPods': 'fra AirPods',
+  'from the phone': 'fra telefonen',
+  'time walking': 'tid du gikk',
+  'time running': 'tid du løp',
+  'cadence range, p10 to p90': 'kadensområde, p10 til p90',
+  'cadence, first half to second half': 'kadens, første til andre halvdel',
+  'steps, from cadence': 'skritt, fra kadens',
+  'steps, counted by the phone': 'skritt, talt av telefonen',
+  'heart rate avg / max': 'puls snitt / maks',
+  'steps per minute, with heart rate': 'skritt per minutt, med puls',
+  'steps per minute': 'skritt per minutt',
+  'One reading per stretch the phone counted as moving. A gap is time it did not: standing on the belt, a pause, or stepping off.':
+    'Én avlesning per strekk telefonen regnet som bevegelse. Et hull er tid den ikke gjorde det: stående på båndet, en pause eller et steg av.',
+  'No cadence reading in this recording.': 'Ingen kadensavlesning i dette opptaket.',
+  '<strong>No GPS in this recording, so it is read as an indoor walk</strong> &mdash; a treadmill, an indoor track, or a walk with Location off. What is here is how you moved: cadence, steps and, when a watch was worn, heart rate. <strong>Distance, pace, stride length, splits and the map need a GPS track</strong>, so they are left out rather than shown as zero.':
+    '<strong>Ingen GPS i dette opptaket, så det leses som en innendørs gåtur</strong> &mdash; en tredemølle, en innendørsbane eller en gåtur med Posisjon slått av. Det som er her, er hvordan du beveget deg: kadens, skritt og, når en klokke ble brukt, puls. <strong>Distanse, tempo, skrittlengde, splitter og kartet krever et GPS-spor</strong>, så de er utelatt i stedet for å vises som null.',
+  '<strong>No GPS in this recording, so it is read as an indoor run</strong> &mdash; a treadmill, an indoor track, or a run with Location off. What is here is how you moved: cadence, steps and, when a watch or AirPods were worn, heart rate and vertical oscillation. <strong>Distance, pace, stride length, splits and the map need a GPS track</strong>, so they are left out rather than shown as zero.':
+    '<strong>Ingen GPS i dette opptaket, så det leses som en innendørs løpetur</strong> &mdash; en tredemølle, en innendørsbane eller en løpetur med Posisjon slått av. Det som er her, er hvordan du beveget deg: kadens, skritt og, når en klokke eller AirPods ble brukt, puls og vertikal svingning. <strong>Distanse, tempo, skrittlengde, splitter og kartet krever et GPS-spor</strong>, så de er utelatt i stedet for å vises som null.',
+  'A ten-second stretch counts as moving when the phone felt both a jolt (at least {imp} m/s&sup2; of movement) and a steady step rhythm; a phone lying still has neither. Walk or run is the label you chose, not one read from the motion: without speed, a hard walk and an easy run jolt the phone alike. Vertical oscillation comes only from AirPods, because indoors the phone is often on the console, where it measures the machine rather than you. Read so far on one real treadmill walk; a treadmill run has not been checked yet.':
+    'Et strekk på ti sekunder teller som bevegelse når telefonen kjente både et støt (minst {imp} m/s&sup2; bevegelse) og en jevn skrittrytme; en telefon som ligger stille, har ingen av delene. Gåtur eller løpetur er merkelappen du valgte, ikke en som er lest fra bevegelsen: uten fart rister en hard gåtur og en rolig løpetur telefonen likt. Vertikal svingning kommer bare fra AirPods, fordi telefonen innendørs ofte ligger på konsollen, der den måler maskinen i stedet for deg. Så langt lest på én ekte gåtur på tredemølle; en løpetur på tredemølle er ikke sjekket ennå.',
   'Indoor ski session loaded ({laps} · {descents} · experimental, graded once)':
     'Innendørs skiøkt lastet ({laps} · {descents} · eksperimentell, vurdert én gang)',
   '{n} lap': '{n} runde',
@@ -43948,7 +44285,7 @@ function decorateCardShares() {
      views that write a heading and then its panel as siblings (the ski view), a heading whose next
      sibling holds the charts. Both get the same button, and both share the same way. */
   const units = [];
-  for (const rootId of ['results', 'crossResults', 'segmentPage', 'skiResults', 'strengthResults', 'golfResults', 'swimResults']) {
+  for (const rootId of ['results', 'crossResults', 'segmentPage', 'skiResults', 'treadmillResults', 'strengthResults', 'golfResults', 'swimResults']) {
     const root = document.getElementById(rootId);
     if (!root || root.classList.contains('hidden')) continue;
     root.querySelectorAll('.section-title > .card-share').forEach(b => b.remove());
@@ -52650,7 +52987,7 @@ function setAnalysisView(value) {
    turn, and opened by default it is a scroll wall (owner, 2026-09-27: "hide the all turns section even
    in details"). The jump and airtime tables are the same wall (owner, 2026-10-07: "give the ability to
    hide the jump list"). It stays one tap away, and the paths that deep-link into a row still open it. */
-const DETAILED_FOLD_SCOPE = ':is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults, #miniSummary, #coachSection, [id$="Notice"])';
+const DETAILED_FOLD_SCOPE = ':is(#results, #strengthResults, #golfResults, #swimResults, #skiResults, #treadmillResults, #segmentPage, #crossResults, #miniSummary, #coachSection, [id$="Notice"])';
 function syncDetailedFolds(scope) {
   const detailed = analysisView() === 'detailed';
   const found = scope.querySelectorAll ? [...scope.querySelectorAll('details')] : [];
@@ -52681,7 +53018,7 @@ new MutationObserver((records) => {
    points at different content after text/cards reflow. Cache the visible block before resize;
    scroll events caused by that resize must not replace it with the newly displaced content. */
 (function preserveReadingPosition() {
-  const views = '#results, #strengthResults, #golfResults, #swimResults, #skiResults, #segmentPage, #crossResults, #progressResults';
+  const views = '#results, #strengthResults, #golfResults, #swimResults, #skiResults, #treadmillResults, #segmentPage, #crossResults, #progressResults';
   const blocks = '.hrz-row, .rq-row, tr, p, li, .section-title, .strength-tablenote, .strength-caveat, .chart, .panel, section';
   let width = document.documentElement.clientWidth;
   let anchor = null, frame = 0, until = 0;
@@ -59448,7 +59785,9 @@ function errorGuidance(msg, sport) {
      both already name their own cause and remedy. The old "nothing is wrong with this recording"
      line would now be actively false on the first of them: something IS wrong, the barometer was
      off. */
-  if (/read entirely from the wrist|too little phone orientation|indoor ski session/i.test(m)) return '';
+  /* The indoor walk/run refusal names its cause (no stepping) and its remedy (where to carry the
+     phone); the catch-all would add "Location and Motion", and Location is not what it needs. */
+  if (/read entirely from the wrist|too little phone orientation|indoor ski session|read as an indoor (walk|run), and/i.test(m)) return '';
   if (/moving window/i.test(m)) return loamT('No moving window was found in the GPS. The recording may be too short, or Location was off during capture.');
   if (/run window|accel samples/i.test(m)) return loamT('The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or {pick}.', { pick });
   if (/accel or GPS|Missing accel/i.test(m)) return loamT('No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.');
@@ -59673,6 +60012,14 @@ function renderCachedAnalysis(cached) {
   if (d && d.dome) {
     hideAllSections(); hide('results'); show('skiResults');
     renderSkiIndoor(d);
+    return;
+  }
+  /* An INDOOR walk or run (no GPS), the fifth host of its own (#treadmillResults). Keyed on the DATA
+     for the ski branch's reason: `running` and `walking` also name the outdoor render, which reads a
+     summary and a GPS track this object does not carry. */
+  if (d && d.treadmill) {
+    hideAllSections(); hide('results'); show('treadmillResults');
+    renderTreadmill(d);
     return;
   }
   if (d && d.gpsOnly) { renderAllGps(d); return; }
@@ -61122,7 +61469,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '97984a520 · 2026-10-27';
+const LOAM_BUILD = '05f55f95f · 2026-10-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
