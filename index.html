@@ -1824,6 +1824,27 @@
   /* A note the athlete hid for this recording (decorateNoteHides). An attribute rather than .hidden,
      which the render paths own and set back on every render. */
   [data-note-hidden] { display: none !important; }
+  /* A ski day from a GPS track: where the day went, as one bar, then the laps. */
+  .ski-budget { margin: 4px 0 12px; }
+  .ski-budget-bar {
+    display: flex; height: 14px; border-radius: var(--radius-sm); overflow: hidden;
+    border: 1px solid var(--border); background: var(--surface-2);
+  }
+  .ski-budget-bar > span { display: block; height: 100%; min-width: 2px; }
+  .ski-budget-key {
+    display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px;
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; color: var(--text-dim);
+  }
+  .ski-budget-key i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .ski-b-skiing { background: var(--sky); }
+  .ski-b-lifts { background: var(--text-muted); }
+  .ski-b-lines { background: var(--amber); }
+  .ski-b-breaks { background: var(--violet); }
+  .ski-b-other { background: var(--border); }
+  #skiGpsTable tr.ski-lift-row td, #skiGpsTable tr.ski-break-row td {
+    color: var(--text-muted); font-size: 12px; padding-top: 2px; padding-bottom: 2px; text-align: left;
+  }
+  #skiGpsTable tr.ski-best td:first-child::after { content: ' \2605'; color: var(--amber); }
   /* GPS-only gateway panel: locked-feature cards. Deliberately quieter than live sections
      (dashed border, muted lock chip) so it reads as "not yet", not as data. */
   .upsell-grid {
@@ -4283,6 +4304,22 @@ function loamSeasonRequested(search, host) {
     <div class="dim" id="roadCornersCaveat" style="font-size:12px; margin-top:8px;">Corner radius and apex speed come from 1 Hz GPS geometry, solid for road sweepers, approximate for tight hairpins. Repeat the same descent and compare apex speeds to track cornering confidence.</div>
   </section>
 
+  <section id="skiGpsSection" class="hidden">
+    <div class="section-title">
+      <span id="skiGpsTitle">Runs &amp; lifts</span>
+      <span class="subtitle" id="skiGpsSubtitle"></span>
+    </div>
+    <div id="skiGpsBudget" class="ski-budget"></div>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="skiGpsTable">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="skiGpsRepeats" class="rp-note analysis-explanation"></div>
+    <div class="dim analysis-explanation" id="skiGpsCaveat" style="font-size:12px; margin-top:8px;"></div>
+  </section>
+
   <section id="roadDescentHistorySection" class="hidden">
     <div class="section-title">
       Descent ghost
@@ -6357,6 +6394,11 @@ function pageLex() { return sportLex(displaySport(_lastRender && _lastRender.D))
    measured and rejected (CLAUDE.md) -- so a surface that says "corner by corner" to them is offering
    a read it cannot produce. */
 function hasBodyFrameTurns(sport) { return isMtbFamily(sport) || isSkiSport(sport); }
+/* Whether THIS session carries body-frame turns: the sport says it could, and the recording has the
+   motion to find them. A ski day imported from a GPS track is a ski sport with no IMU, and its runs
+   table would otherwise grow Turns / L/R / Radius columns of dashes and promise a corner play-by-play
+   that cannot exist. */
+function sessionHasBodyTurns(D) { return !!D && hasBodyFrameTurns(D.sport) && !(D.gpsOnly && isSkiSport(D.sport)); }
 /* The runs panel's ROW noun: the segmentation mode, not the sport (descents -> descent, laps -> lap,
    marks -> run). One function so the panel title, the subtitle, the rows, the ghost-race note and the
    play-by-play cannot pluralise or capitalise three different words for one table. */
@@ -8778,7 +8820,7 @@ function drawRuns() {
   { const t = document.getElementById('runsTitle'); if (t) t.textContent = loamT(nounTitle); }
   /* Every word below that names the SPORT comes from here. The row noun above names the MODE. */
   const lex = sportLex(displaySport(D));
-  const showTurns = hasBodyFrameTurns(D.sport);
+  const showTurns = sessionHasBodyTurns(D);
   const displaySportNorm = normalizeSport(displaySport(D));
   const footSport = !showTurns && (displaySportNorm === 'run' || displaySportNorm === 'walk');
   const topLabel = footSport ? loamT('Best 5s pace') : loamT('Top');
@@ -9080,7 +9122,7 @@ function drawRuns() {
          replaces the coach's facts without rebuilding the panel, so a conversation in progress
          survives -- see its header for why that distinction is the whole reason it exists. */
       try {
-        if (_runsD && hasBodyFrameTurns(_runsD.sport)) {
+        if (sessionHasBodyTurns(_runsD)) {
           const rSport = renderPathSport(_runsD.sport);
           renderCoachHighlights(_runsD, rSport);
           renderGeekStats(_runsD, rSport);
@@ -9923,7 +9965,7 @@ function showTurnsForRun(r, D) {
      with it, which is the half that should not have been. */
   const mapSec = document.getElementById('overviewSection');
   if (mapSec) mapSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (!hasBodyFrameTurns(D.sport)) return;
+  if (!sessionHasBodyTurns(D)) return;
   filterTurnTableToRun(r, D);
 }
 /* Filter the per-turn table to one run's window, with the filter tag naming the run and offering
@@ -10432,7 +10474,7 @@ async function setupPlayByPlay(allRuns, D, rowNoun) {
      laps up turn by turn; on foot, on the road and on a GPS-only import there are no body-frame
      turns, so it compares the clock and says so -- a subtitle promising "tap a corner to open it"
      over a run's panel was offering a control that never appears (owner screenshot, 2026-09-12). */
-  const corners = hasBodyFrameTurns(D.sport);
+  const corners = sessionHasBodyTurns(D);
   { const st = document.getElementById('pbpSubtitle');
     if (st) st.textContent = corners
       ? loamT('vs your best comparable lap of the same segment \u00b7 biggest give-ups first \u00b7 tap a corner to open it')
@@ -16022,7 +16064,7 @@ function librarySessionAvgHr(sensors, ride) {
   const hr = ((sensors && sensors.heartRate) || []).filter(r => r && r.bpm > 0 && r.t >= ride.start && r.t <= ride.end);
   return hr.length >= LIBRARY_AVG_HR_MIN_ROWS ? Math.round(hr.reduce((a, r) => a + r.bpm, 0) / hr.length) : null;
 }
-async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey, turnSidesUnreliable, bestEfforts, brisk }) {
+async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turnCount, jumpCount, contentKey, turns, recordedAt, analysisKey, turnSidesUnreliable, bestEfforts, brisk, transportSpans }) {
   /* Build descent list with polylines + speed for every recording, not just
      runs — the MTB pipeline doesn't compute these natively. Bike descents get the
      net-drop floor; running keeps every graded segment (hill repeats are short).
@@ -16033,7 +16075,10 @@ async function saveRideToLibrary({ filename, sport, sensors, ride, summary, turn
      false for it -- the silent kind of wrong, because a ski day genuinely does have many real
      descents and a few extra would not look obviously wrong. */
   const rawDescents = extractRideDescents(sensors, ride, filename,
-    (isMtbFamily(sport) || isSkiSport(sport) || sport === 'ride' || sport === 'road') ? MIN_DESCENT_DROP_M : 0);
+    (isMtbFamily(sport) || isSkiSport(sport) || sport === 'ride' || sport === 'road') ? MIN_DESCENT_DROP_M : 0)
+    /* Lift rides down (a ski download): a descent mostly inside one is the gondola, not a run. */
+    .filter(d => !(transportSpans || []).some(sp =>
+      Math.min(d.tEnd, sp.t1) - Math.max(d.tStart, sp.t0) > 0.5 * (d.tEnd - d.tStart)));
   const descents = [];
   for (const d of rawDescents) {
     const poly = descentPolyline(sensors, d);
@@ -16329,10 +16374,13 @@ function detectTurns(t, yawSeg, yawMetric, rollSmooth, rideStart, rideEnd, param
 /* The activity type declared inside the FIT file itself (Strava / Garmin / Specialized all write
    it): the 'sport' message (global msg 12, field 0), falling back to the session summary (global
    msg 18, field 5). FIT sport enum: 1 running, 11 walking, 16 mountaineering, 17 hiking are on
-   foot; everything else (cycling, e-biking = 21, skiing, or absent, e.g. the Avinox export which
-   declares none) is treated as a ride. This is what keeps a Strava run/hike exported as .fit from
-   rendering as a mountain-bike ride. We trust the declared sport rather than guessing from cadence:
-   crank RPM and running step rate overlap, and an e-bike carries cadence too. */
+   foot; 13 alpine skiing is a ski day (a watch's own ski recording, or a GPX the app imported as
+   skiing); everything else (cycling, e-biking = 21, or absent, e.g. the Avinox export which declares
+   none) is treated as a ride. This is what keeps a Strava run/hike exported as .fit from rendering
+   as a mountain-bike ride. We trust the declared sport rather than guessing from cadence: crank RPM
+   and running step rate overlap, and an e-bike carries cadence too. Snowboarding (14) and cross-
+   country skiing (12) still read as a ride: the first would be labelled a ski day, the second has
+   no lifts for the ski reads to stand on. */
 function fitDeclaredSport(messages) {
   let sport = null;
   const sportMsg = messages.find(m => m.gm === 12);
@@ -16340,6 +16388,7 @@ function fitDeclaredSport(messages) {
   if (sport == null) { const sess = messages.find(m => m.gm === 18); if (sess && sess.fields[5] != null) sport = sess.fields[5]; }
   if (sport === 1) return 'run';
   if (sport === 11 || sport === 16 || sport === 17) return 'walk';
+  if (sport === 13) return 'skiing';
   return 'ride';
 }
 
@@ -16753,7 +16802,9 @@ function computeGpsSummary(sensors, ride, segments) {
     const w = inB.filter(r => r.t >= seg.tStart && r.t <= seg.tEnd);
     return w.length > 1 ? Math.max(0, w[0].relativeAltitude - w[w.length - 1].relativeAltitude) : 0;
   };
-  const downs = segments.filter(s => s.dir === 'down' && dropOf(s) >= MIN_DESCENT_DROP_M);
+  /* A lift ridden DOWN (a ski download, `markSkiDownloads`) is transport, not a descent. Nothing on a
+     bike path marks a down segment as a lift, so this changes no bike total. */
+  const downs = segments.filter(s => s.dir === 'down' && s.kind !== 'lift' && dropOf(s) >= MIN_DESCENT_DROP_M);
   const maxDescentDrop = downs.length ? Math.max(...downs.map(dropOf)) : 0;
   const duration = ride.end - ride.start;
   const ridingTime = Math.max(1, movingTime - liftTime);
@@ -16768,7 +16819,7 @@ function computeGpsSummary(sensors, ride, segments) {
     vamPedaled: pedaledTime > 60 && pedaledAscent > 20 ? pedaledAscent / (pedaledTime / 3600) : null,
     maxDescentDrop,
     nDownhills: downs.length,
-    nUphills: segments.filter(s => s.dir === 'up').length - lifts.length,
+    nUphills: segments.filter(s => s.dir === 'up' && s.kind !== 'lift').length,
   };
 }
 
@@ -16882,6 +16933,10 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg 
   onProgress(foot ? 'detecting climbs and descents' : 'detecting climbs, descents, and lifts');
   const graded = detectGradeSegments(sensors.baro, sensors.location, ride);
   const segments = foot ? graded : markLiftSegments(graded, sensors.location);
+  /* A ski day: lifts ridden DOWN are transport too (a spring download), and the day is read as laps
+     between lifts rather than as a bike's descents and corners. */
+  const ski = isSkiSport(gpsSport);
+  if (ski) LoamSki.markSkiDownloads(segments, sensors.location);
   onProgress('computing summary');
   const summary = computeGpsSummary(sensors, ride, segments);
   const fitInRide = foot ? [] : records.map(r => ({ ...r, t_phone: r.ts - startFitSec }))
@@ -16895,10 +16950,14 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg 
   /* Sweeping-corner analysis on the real descents (same detector as the road view; park berms at
      speed span enough GPS samples to register). Junk down-segments with no meaningful drop are
      dropped to match the runs panel's MIN_DESCENT_DROP_M bar, then renumbered. */
-  const descents = analyzeRoadDescents(segments, sensors.location)
+  /* Not for a ski day: GPS corners at 1 Hz are a bike's sweepers, and turn detection from GPS alone
+     is measured not viable -- a skier's turns are the phone recording's job. */
+  const descents = ski ? [] : analyzeRoadDescents(segments, sensors.location)
     .filter(d => d.drop != null && d.drop >= MIN_DESCENT_DROP_M);
   descents.forEach((d, i) => { d.index = i + 1; });
   const descentGroups = groupRepeatedDescents(descents);
+  const skiDay = ski ? LoamSki.skiGpsDay({ segments, location: sensors.location, baro: sensors.baro,
+    heartRate: sensors.heartRate, ride }) : null;
   /* A foot FIT carries the athlete's own step rate (record field 4) and this page threw it away
      while telling them "GPS cannot see steps". Clipped to the ride window rather than cropped in
      `fitOnlySensors`: the crop does not rebase the clock (see cropSensors), so one filter against
@@ -16950,6 +17009,9 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg 
   const saved = triLeg ? null : await saveRideToLibrary({
     filename: fitFile.name, sport: gpsSport, sensors, ride, summary, jumpCount: ridingJumps.length, contentKey: contentHash,
     recordedAt: fitRecordedAt,
+    /* The library finds its descents afresh from the track, so a gondola ridden down would come back
+       as a run. Its span is handed over to leave it out. */
+    transportSpans: ski ? segments.filter(sg => sg.kind === 'lift' && sg.dir === 'down').map(sg => ({ t0: sg.tStart, t1: sg.tEnd })) : null,
   });
   /* Keep the FIT bytes so the ride re-opens from the library forever (Open re-analyzes). */
   if (!triLeg) await putRideSource(contentHash, fitFile.name, buf);
@@ -16977,9 +17039,10 @@ async function analyzeFitOnly(fitFile, onProgress, superseded, activity, triLeg 
     fitLaps, fitLapsDropped,
     libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
     title: fitFile.name, recordedAt: fitRecordedAt,
+    skiDay,
   };
   renderAllGps(D);
-  const noun = nounT(gpsSport === 'run' ? 'run' : gpsSport === 'walk' ? 'walk' : (gpsSport === 'emtb' ? 'e-MTB ride' : 'ride'));
+  const noun = nounT(gpsSport === 'run' ? 'run' : gpsSport === 'walk' ? 'walk' : ski ? 'ski day' : (gpsSport === 'emtb' ? 'e-MTB ride' : 'ride'));
   const liftNote = summary.liftCount ? ' · ' + loamT('{n} lifts', { n: summary.liftCount }) : '';
   const jumpNote = ridingJumps.length ? ' · ' + loamT('{n} jumps from the head unit', { n: ridingJumps.length }) : '';
   setStatus(loamT('FIT {noun} loaded (GPS-only · {fixes} fixes{lifts}{jumps})',
@@ -21859,6 +21922,27 @@ function raceTimeline(A) {
   for (const e of out) e.sharePct = A.totalS > 0 && !e.none ? (e.durationS / A.totalS) * 100 : 0;
   return out;
 }
+
+/* The whole-race chart's line. `speed` is sized to find a transition, and drawn as it is a bike leg
+   can read as a saw from fix to fix: on a track whose position moves less often than its timestamps
+   do, a 30 s window holds one move or two, so the next point can read twice the last. A sport listed
+   here is drawn over its own longer window, read inside the leg so T1 and T2 are not smeared into it.
+   Display only: every figure on the page still comes from `speed`. */
+const TRI_CHART_WINDOW_S = { bike: 120 };
+function raceChartSpeed(route, A) {
+  const out = A.speed.slice();
+  for (const l of A.legs) {
+    const windowS = TRI_CHART_WINDOW_S[l.sport];
+    if (!windowS) continue;
+    let i0 = 0;
+    while (i0 < route.length && route[i0].t < l.t0) i0++;
+    let i1 = i0;
+    while (i1 < route.length && route[i1].t <= l.t1) i1++;
+    if (i1 - i0 < 2) continue;
+    raceSpeedSeries(route.slice(i0, i1), windowS).forEach((v, k) => { out[i0 + k] = v; });
+  }
+  return out;
+}
   /* ---- end race.js ---- */
 
   /* ---- ported from analyzer/sports/triathlon/seam.js ---- */
@@ -22268,7 +22352,7 @@ function routeLegFit(points, sport) {
   return bytes;
 }
   /* ---- end fit.js ---- */
-  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, swimDistanceSource, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages, raceLegRoute, routeSwimPayload, routeLegFit };
+  return { TRI_SPORTS, TRI_SPEED_WINDOW_S, TRI_SUSTAIN_S, TRI_REGIME_LO, TRI_REGIME_HI, TRI_ENTRY_BEFORE_S, TRI_ENTRY_AFTER_S, TRI_EXIT_LOOKBACK_S, TRI_MAX_GAP_S, TRI_MIN_TRANSITION_S, normalizeRace, raceSpeedSeries, regimeSpeed, sustainedRuns, raceSpanStats, analyzeRace, raceTimeline, TRI_CHART_WINDOW_S, raceChartSpeed, TRI_STANDING_MPS, TRI_BREAKDOWN_WINDOW_S, TRI_BIKE_FADE_PCT, TRI_RUN_FADE_PCT, TRI_RUN_OPEN_S, TRI_COMPARABLE_DIST_FRAC, TRI_HISTORY_MAX, transitionBreakdown, legPieces, seamRead, seamSentence, swimDistanceSource, raceHistoryRecord, raceHistoryUpsert, comparableRaces, raceDigest, raceCoachPrompt, raceAnalyzePrompt, raceChips, raceInputPlaceholder, TRI_FIT_SPORTS, TRI_FIT_TRANSITION, fitMultisportRace, fitLegMessages, raceLegRoute, routeSwimPayload, routeLegFit };
 })();
 
 /* ===== Ski SK1: the indoor (dome) read ====================================== *
@@ -23559,6 +23643,404 @@ const LoamSki = (function () {
     return { skiHeadingBudget, skiStepsBetween, skiActivityMix, skiHeartRateIn, skiLapAnatomy, skiYawTrace, skiDecimate, skiLoadPerSecond, skiMedian, SKI_RATE_MIN_LEG_S, SKI_TRACE_HZ, SKI_TRACE_SMOOTH_S };
   })();
 
+  /* ---- ported from analyzer/sports/ski/gps-day.js ---- */
+  const SkiGpsDay = (function () {
+    /* A download is held to the up-lift gates (duration, grade, the 15 s end trim) and three stricter
+       ones. Stricter because the cost is asymmetric: an up lift missed is a climb left in the day, a run
+       wrongly called a download deletes skiing the athlete did. */
+    const SKI_DOWNLOAD_MIN_S = 90;
+    const SKI_DOWNLOAD_MIN_GRADE_PCT = 12;
+    const SKI_DOWNLOAD_MIN_STRAIGHT = 0.97;
+    const SKI_DOWNLOAD_MAX_CV = 0.15;
+    /* A chairlift or gondola runs at 2-6 m/s; anyone skiing a 12% pitch for 90 s goes faster than 7. An
+       aerial tram (up to ~12 m/s) is the known case this misses. */
+    const SKI_DOWNLOAD_MAX_MPS = 7;
+
+    /* At or above this a skier is moving; below, standing, queueing or shuffling. Not the 0.5 m/s floor
+       the derived speed already applies: a lift line creeps at ~0.5-1 m/s and is not skiing. */
+    const SKI_GPS_MOVING_MPS = 1.0;
+    /* The last fix at or above this before a lift loads is where the skier ARRIVED at the bottom; from
+       there to loading is the wait (the line, plus skating in). Skiing into the maze is faster than this,
+       shuffling through it slower. */
+    const SKI_GPS_ARRIVE_MPS = 3.0;
+    /* How far back from the climb segment's start the lift's own motion is looked for. */
+    const SKI_GPS_LOAD_LOOKBACK_S = 45;
+    /* A break is this long spent within SKI_GPS_DWELL_M of one spot: lunch, a lodge, a lift on wind hold.
+       A speed rule was tried first and fails: a lodge break is walked about at 1-1.5 m/s, so a 50-minute
+       one at Sierra-at-Tahoe read as thirteen stops of 1-11 minutes with "moving" in between. The dwell
+       finds it (51 min), Dodge Ridge's lunch (66 min) and nothing on the three days that had no long
+       stop. The longest wait that reads as a lift line on the five days is 7.6 min. */
+    const SKI_GPS_BREAK_S = 1200;
+    const SKI_GPS_DWELL_M = 150;
+    /* A lap counts as a run when it falls this far. The same 30 m `MIN_DESCENT_DROP_M` the dashboard's
+       descents use, so a ski run and a bike descent clear one bar. */
+    const SKI_GPS_RUN_MIN_DROP_M = 30;
+    /* Top speed is the fastest speed HELD this long, so one bad fix cannot set it. */
+    const SKI_GPS_PEAK_HOLD_S = 3;
+    /* The steepest pitch is the biggest fall over this much ground. The descents' own 20 s grade samples
+       were tried first and read 77-138% on ordinary pistes: at a standstill 20 s covers a few metres and
+       GPS altitude noise dominates. Over 100 m the five days read 15-46%, over 50 m 16-57%. */
+    const SKI_GPS_PITCH_M = 100;
+    /* The longest hop integrated, the same 5 s every other distance loop in the dashboard uses. */
+    const SKI_GPS_MAX_GAP_S = 5;
+    /* Two rides are the same lift when both stations lie within this. A lift's stations do not move, so
+       this can be tight; the run test (start and end within 200 m, length within 20%) is looser because
+       a skier never starts or stops in exactly the same place. */
+    const SKI_LIFT_SAME_M = 100;
+    const SKI_RUN_SAME_M = 200;
+    const SKI_RUN_SAME_LEN_FRAC = 0.2;
+
+    function skiGpsHaversine(lat1, lon1, lat2, lon2) {
+      const toR = Math.PI / 180, R = 6371000;
+      const dLat = (lat2 - lat1) * toR, dLon = (lon2 - lon1) * toR;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+    }
+
+    function skiGpsFixes(location, t0, t1) {
+      return (location || []).filter(r => r && r.t >= t0 && r.t <= t1
+        && Number.isFinite(r.latitude) && Number.isFinite(r.longitude));
+    }
+
+    /* Straightness, speed CV and mean moving speed over a segment with its ends trimmed, exactly as
+       `markLiftSegments` measures an up lift, so the two kinds of lift are read the same way. */
+    function skiGpsTransportShape(seg, location) {
+      const rows = skiGpsFixes(location, seg.tStart + 15, seg.tEnd - 15);
+      if (rows.length < 20) return null;
+      let path = 0;
+      for (let i = 1; i < rows.length; i++) {
+        path += skiGpsHaversine(rows[i - 1].latitude, rows[i - 1].longitude, rows[i].latitude, rows[i].longitude);
+      }
+      const net = skiGpsHaversine(rows[0].latitude, rows[0].longitude, rows[rows.length - 1].latitude, rows[rows.length - 1].longitude);
+      const spd = rows.map(r => r.speed).filter(v => v != null && v > 0.3);
+      const mean = spd.reduce((a, b) => a + b, 0) / Math.max(1, spd.length);
+      const cv = Math.sqrt(spd.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, spd.length)) / Math.max(0.01, mean);
+      return { straightness: path > 0 ? net / path : 0, cv, meanSpeed: mean };
+    }
+
+    /**
+     * Mark the descents that were lift rides down. Mutates `kind` to 'lift' on each qualifying down
+     * segment, the same marker an up lift carries, so everything that already leaves lifts out of riding
+     * (distance, timeline shading, the runs list) leaves these out too. Returns the segments.
+     */
+    function markSkiDownloads(segments, location) {
+      for (const seg of segments || []) {
+        if (seg.dir !== 'down' || seg.kind === 'lift') continue;
+        if (!(seg.duration >= SKI_DOWNLOAD_MIN_S) || !(seg.gradeAvg <= -SKI_DOWNLOAD_MIN_GRADE_PCT)) continue;
+        const shape = skiGpsTransportShape(seg, location);
+        if (!shape) continue;
+        if (shape.straightness >= SKI_DOWNLOAD_MIN_STRAIGHT && shape.cv <= SKI_DOWNLOAD_MAX_CV
+            && shape.meanSpeed <= SKI_DOWNLOAD_MAX_MPS) seg.kind = 'lift';
+      }
+      return segments;
+    }
+
+    /**
+     * Stretches of SKI_GPS_BREAK_S or more spent within SKI_GPS_DWELL_M of their own running centre.
+     * Greedy and in time order: a dwell is extended fix by fix until one lands outside the radius, and
+     * the search resumes after it. Its edges blur by the time it takes to cross the radius -- skiing in
+     * at 10 m/s, about 15 s. Returns `[{ t0, t1 }]`.
+     */
+    function skiGpsDwells(location, t0 = -Infinity, t1 = Infinity) {
+      const fx = skiGpsFixes(location, t0, t1);
+      const out = [];
+      let i = 0;
+      while (i < fx.length) {
+        let latS = 0, lonS = 0, n = 0, k = i;
+        for (; k < fx.length; k++) {
+          latS += fx[k].latitude; lonS += fx[k].longitude; n++;
+          if (skiGpsHaversine(latS / n, lonS / n, fx[k].latitude, fx[k].longitude) > SKI_GPS_DWELL_M) break;
+        }
+        const last = fx[k - 1];
+        if (last.t - fx[i].t >= SKI_GPS_BREAK_S) { out.push({ t0: fx[i].t, t1: last.t }); i = k; }
+        else i++;
+      }
+      return out;
+    }
+
+    function skiGpsOverlap(spans, a, b) {
+      let s = 0;
+      for (const d of spans) s += Math.max(0, Math.min(b, d.t1) - Math.max(a, d.t0));
+      return s;
+    }
+
+    function skiGpsInSpan(spans, t) {
+      for (const d of spans) if (t > d.t0 && t <= d.t1) return true;
+      return false;
+    }
+
+    /* Altitude series in time order, from the baro rows (relativeAltitude) or `{ t, alt }`. */
+    function skiGpsAltitudes(baro, t0, t1) {
+      return (baro || [])
+        .filter(r => r && r.t >= t0 && r.t <= t1)
+        .map(r => ({ t: r.t, alt: r.relativeAltitude != null ? r.relativeAltitude : r.alt }))
+        .filter(r => Number.isFinite(r.alt));
+    }
+
+    /* The biggest fall taken IN ORDER: the highest point reached before the lowest point after it. A lap
+       that opens with a skate uphill to the top of the piste still measures from that top. */
+    function skiGpsOrderedDrop(alts) {
+      let runMax = -Infinity, runMaxT = null, best = 0, tTop = null, tBottom = null;
+      for (const a of alts) {
+        if (a.alt > runMax) { runMax = a.alt; runMaxT = a.t; }
+        if (runMax - a.alt > best) { best = runMax - a.alt; tTop = runMaxT; tBottom = a.t; }
+      }
+      return { drop: best, tTop, tBottom };
+    }
+
+    function skiGpsHeartRate(heartRate, t0, t1) {
+      const b = (heartRate || [])
+        .filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.bpm) && r.bpm > 0 && r.t >= t0 && r.t <= t1)
+        .map(r => r.bpm);
+      if (!b.length) return { avg: null, max: null };
+      return { avg: Math.round(b.reduce((a, v) => a + v, 0) / b.length), max: Math.max(...b) };
+    }
+
+    /* Moving time and moving distance over a window, leaving out any hop inside a break (a lodge walked
+       about at 1.2 m/s is not skiing), and the fastest speed held SKI_GPS_PEAK_HOLD_S. A hop longer than
+       SKI_GPS_MAX_GAP_S is a dropout and counts toward neither. */
+    function skiGpsMotion(rows, breaks) {
+      let movingS = 0, distance = 0, peak = 0;
+      for (let i = 1; i < rows.length; i++) {
+        const dt = rows[i].t - rows[i - 1].t;
+        if (!(dt > 0) || dt > SKI_GPS_MAX_GAP_S) continue;
+        const v = rows[i].speed, u = rows[i - 1].speed;
+        if (v == null || u == null || skiGpsInSpan(breaks, rows[i].t)) continue;
+        if (v >= SKI_GPS_MOVING_MPS) { movingS += dt; distance += ((u + v) / 2) * dt; }
+      }
+      /* The slowest speed inside each window at least PEAK_HOLD_S long is a speed that was HELD; the best
+         of those is the top speed. Windows across a dropout are skipped. */
+      let j = 0;
+      for (let i = 0; i < rows.length; i++) {
+        while (j < i && rows[i].t - rows[j + 1].t >= SKI_GPS_PEAK_HOLD_S) j++;
+        if (rows[i].t - rows[j].t < SKI_GPS_PEAK_HOLD_S) continue;
+        let held = Infinity, ok = true;
+        for (let k = j; k <= i; k++) {
+          if (k > j && rows[k].t - rows[k - 1].t > SKI_GPS_MAX_GAP_S) { ok = false; break; }
+          if (rows[k].speed == null) { ok = false; break; }
+          held = Math.min(held, rows[k].speed);
+        }
+        if (ok && held > peak) peak = held;
+      }
+      return { movingS, distance, peakSpeed: peak };
+    }
+
+    /* The biggest fall over SKI_GPS_PITCH_M of ground covered, in percent. Ground is the integrated
+       speed, not the fix-to-fix path, so a skier standing still while the GPS wanders adds none. Null
+       when the lap never covers that much ground. */
+    function skiGpsSteepestPitch(rows, baro) {
+      const altAt = new Map();
+      for (const b of baro || []) {
+        const a = b && (b.relativeAltitude != null ? b.relativeAltitude : b.alt);
+        if (Number.isFinite(a)) altAt.set(b.t, a);
+      }
+      const pts = rows.filter(r => altAt.has(r.t) && r.speed != null);
+      const cum = [0];
+      for (let i = 1; i < pts.length; i++) {
+        const dt = pts[i].t - pts[i - 1].t;
+        cum.push(cum[i - 1] + (dt > 0 && dt <= SKI_GPS_MAX_GAP_S ? ((pts[i].speed + pts[i - 1].speed) / 2) * dt : 0));
+      }
+      let best = null, j = 0;
+      for (let i = 0; i < pts.length; i++) {
+        if (j < i) j = i;
+        while (j < pts.length && cum[j] - cum[i] < SKI_GPS_PITCH_M) j++;
+        if (j >= pts.length) break;
+        const g = (altAt.get(pts[i].t) - altAt.get(pts[j].t)) / (cum[j] - cum[i]) * 100;
+        if (best == null || g > best) best = g;
+      }
+      return best;
+    }
+
+    /* Group items that are the same place ridden again: start and end within `sameM` of the group's first
+       member (and, when `lenFrac` is given, length within that fraction). Letters in order of first ride;
+       items that never repeat get null. Mutates `group` and `lap` onto each item; returns the groups. */
+    function skiGpsGroupRepeats(items, sameM, lenFrac) {
+      const groups = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (it.startLat == null || it.endLat == null) continue;
+        let placed = false;
+        for (const g of groups) {
+          const ex = items[g[0]];
+          const lenOk = lenFrac == null
+            || Math.abs(it.distance - ex.distance) / Math.max(it.distance, ex.distance, 1) <= lenFrac;
+          if (lenOk && skiGpsHaversine(it.startLat, it.startLon, ex.startLat, ex.startLon) <= sameM
+              && skiGpsHaversine(it.endLat, it.endLon, ex.endLat, ex.endLon) <= sameM) {
+            g.push(i); placed = true; break;
+          }
+        }
+        if (!placed) groups.push([i]);
+      }
+      for (const it of items) { it.group = null; it.lap = null; }
+      const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      return groups.filter(g => g.length >= 2).map((g, gi) => {
+        const label = letters[gi % letters.length];
+        g.forEach((idx, li) => { items[idx].group = label; items[idx].lap = li + 1; });
+        return { group: label, members: g.map(idx => items[idx].index) };
+      });
+    }
+
+    /**
+     * The day's laps, each a stretch between getting off one lift and getting on the next.
+     *
+     * Every lap reports what it holds; `run` says whether it fell SKI_GPS_RUN_MIN_DROP_M (a lap that did
+     * not -- a lift-to-lift transfer, the walk from the car -- is kept so the clock adds up, and is not a
+     * run). A run's distance, moving and stopped time, speeds, pitch and heart rate cover its fall only,
+     * top to bottom. `wait` is the time from arriving at the next lift's bottom to loading it, less any of
+     * it spent in a break; `breakS` is the whole lap's time inside breaks (`skiGpsDwells`).
+     *
+     * Returns null when there is no ride window to read.
+     */
+    function skiGpsDay({ segments, location, baro, heartRate, ride } = {}) {
+      if (!ride || ride.start == null || ride.end == null) return null;
+      const lifts = (segments || []).filter(s => s.kind === 'lift')
+        .slice().sort((a, b) => a.tStart - b.tStart);
+      const breaks = skiGpsDwells(location, ride.start, ride.end);
+      const windows = [];
+      let cursor = ride.start;
+      for (const L of lifts) {
+        windows.push({ t0: cursor, t1: Math.max(cursor, L.tStart), lift: L });
+        cursor = Math.max(cursor, L.tEnd);
+      }
+      windows.push({ t0: cursor, t1: Math.max(cursor, ride.end), lift: null });
+
+      const laps = [];
+      const liftRides = [];
+      for (const w of windows) {
+        const rows = (location || []).filter(r => r && r.t >= w.t0 && r.t <= w.t1);
+        const fall = skiGpsOrderedDrop(skiGpsAltitudes(baro, w.t0, w.t1));
+        const isRun = fall.drop >= SKI_GPS_RUN_MIN_DROP_M;
+        /* A run is read from the top of its fall to the bottom, so the skate to the lift, the line and
+           anything before the top stay out of its time, distance and speed. Without that, two laps of
+           one piste stop matching the day one of them ends with a walk round the base lodge. */
+        const runRows = isRun ? rows.filter(r => r.t >= fall.tTop && r.t <= fall.tBottom) : rows;
+        const fixes = runRows.filter(r => Number.isFinite(r.latitude) && Number.isFinite(r.longitude));
+        const motion = skiGpsMotion(runRows, breaks);
+        const runSpanS = runRows.length > 1 ? runRows[runRows.length - 1].t - runRows[0].t : 0;
+        const spanS = w.t1 - w.t0;
+        const breakS = skiGpsOverlap(breaks, w.t0, w.t1);
+        let wait = null;
+        if (w.lift) {
+          /* Step back over the lift's own first seconds to where it loaded: the climb segment opens
+             10-20 s after the chair moves off, so the last fast fix before it is the lift, not the skier
+             arriving. Still moving after SKI_GPS_LOAD_LOOKBACK_S means skied straight on: no wait. */
+          let k = rows.length - 1;
+          const moving = (r) => r.speed != null && r.speed >= SKI_GPS_MOVING_MPS;
+          while (k >= 0 && moving(rows[k]) && w.t1 - rows[k].t <= SKI_GPS_LOAD_LOOKBACK_S) k--;
+          if (k >= 0 && moving(rows[k])) wait = 0;
+          else {
+            const tLoad = k + 1 < rows.length ? rows[k + 1].t : w.t1;
+            let arrive = w.t0;
+            for (let i = k; i >= 0; i--) {
+              if (rows[i].speed != null && rows[i].speed >= SKI_GPS_ARRIVE_MPS) { arrive = rows[i].t; break; }
+            }
+            wait = Math.max(0, (tLoad - arrive) - skiGpsOverlap(breaks, arrive, tLoad));
+          }
+        }
+        const lap = {
+          index: laps.length + 1,
+          t0: w.t0, t1: w.t1, spanS,
+          run: isRun,
+          drop: fall.drop, tTop: fall.tTop, tBottom: fall.tBottom,
+          distance: motion.distance, movingS: motion.movingS, breakS,
+          stoppedS: Math.max(0, runSpanS - motion.movingS - skiGpsOverlap(breaks, runRows.length ? runRows[0].t : 0, runRows.length ? runRows[runRows.length - 1].t : 0)),
+          avgMovingSpeed: motion.movingS > 0 ? motion.distance / motion.movingS : null,
+          peakSpeed: motion.peakSpeed,
+          steepestPct: skiGpsSteepestPitch(runRows, baro),
+          hr: isRun ? skiGpsHeartRate(heartRate, fall.tTop, fall.tBottom) : skiGpsHeartRate(heartRate, w.t0, w.t1),
+          wait,
+          startLat: fixes.length ? fixes[0].latitude : null, startLon: fixes.length ? fixes[0].longitude : null,
+          endLat: fixes.length ? fixes[fixes.length - 1].latitude : null, endLon: fixes.length ? fixes[fixes.length - 1].longitude : null,
+          liftIndex: null, runIndex: null, group: null, groupLap: null,
+        };
+        laps.push(lap);
+        if (w.lift) {
+          const L = w.lift;
+          const lr = skiGpsFixes(location, L.tStart, L.tEnd);
+          const la = skiGpsAltitudes(baro, L.tStart, L.tEnd);
+          const lift = {
+            index: liftRides.length + 1,
+            tStart: L.tStart, tEnd: L.tEnd, durationS: L.tEnd - L.tStart,
+            down: L.dir === 'down',
+            gain: la.length > 1 ? la[la.length - 1].alt - la[0].alt : null,
+            distance: L.distance != null ? L.distance : null,
+            avgSpeed: L.distance != null && L.tEnd > L.tStart ? L.distance / (L.tEnd - L.tStart) : null,
+            hr: skiGpsHeartRate(heartRate, L.tStart, L.tEnd),
+            startLat: lr.length ? lr[0].latitude : null, startLon: lr.length ? lr[0].longitude : null,
+            endLat: lr.length ? lr[lr.length - 1].latitude : null, endLon: lr.length ? lr[lr.length - 1].longitude : null,
+            group: null,
+          };
+          liftRides.push(lift);
+          lap.liftIndex = lift.index;
+        }
+      }
+
+      const runs = laps.filter(l => l.run);
+      runs.forEach((r, i) => { r.runIndex = i + 1; });
+      const runItems = runs.map(r => ({ index: r.runIndex, distance: r.distance,
+        startLat: r.startLat, startLon: r.startLon, endLat: r.endLat, endLon: r.endLon }));
+      const runGroups = skiGpsGroupRepeats(runItems, SKI_RUN_SAME_M, SKI_RUN_SAME_LEN_FRAC);
+      runItems.forEach((it, i) => { runs[i].group = it.group; runs[i].groupLap = it.lap; });
+      /* The fastest lap of a piste is the least MOVING time: total time on the run also counts every
+         stop, and a run with a ten-minute chat in the middle is not the slow one. */
+      for (const g of runGroups) {
+        const members = runs.filter(r => r.group === g.group);
+        const best = members.reduce((b, r) => (b == null || r.movingS < b.movingS ? r : b), null);
+        g.bestRun = best ? best.runIndex : null;
+        g.bestMovingS = best ? best.movingS : null;
+        g.drop = members.reduce((a, r) => a + r.drop, 0) / members.length;
+      }
+      const liftItems = liftRides.map(l => ({ index: l.index, distance: l.distance || 0,
+        startLat: l.startLat, startLon: l.startLon, endLat: l.endLat, endLon: l.endLon }));
+      const liftGroupsRaw = skiGpsGroupRepeats(liftItems, SKI_LIFT_SAME_M, null);
+      liftItems.forEach((it, i) => { liftRides[i].group = it.group; });
+      const liftGroups = liftGroupsRaw.map(g => {
+        const members = liftRides.filter(l => l.group === g.group);
+        const mean = (f) => { const v = members.map(f).filter(Number.isFinite); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+        return { group: g.group, rides: members.length, members: g.members,
+          meanDurationS: mean(l => l.durationS), meanGain: mean(l => l.gain), meanSpeed: mean(l => l.avgSpeed) };
+      });
+
+      const sum = (arr, f) => arr.reduce((a, x) => a + (Number.isFinite(f(x)) ? f(x) : 0), 0);
+      const totalS = ride.end - ride.start;
+      const liftS = sum(liftRides, l => l.durationS);
+      const skiingS = sum(runs, r => r.movingS);
+      const waitS = sum(laps, l => l.wait);
+      const breakS = sum(laps, l => l.breakS);
+      const pick = (arr, f) => arr.reduce((b, x) => (b == null || f(x) > f(b) ? x : b), null);
+      const longest = pick(runs, r => r.distance);
+      const biggest = pick(runs, r => r.drop);
+      const fastest = pick(runs.filter(r => r.avgMovingSpeed != null), r => r.avgMovingSpeed);
+      const quickest = pick(runs, r => r.peakSpeed);
+      const steepest = pick(runs.filter(r => r.steepestPct != null), r => r.steepestPct);
+      const hrRuns = runs.map(r => r.hr.avg).filter(Number.isFinite);
+      const hrLifts = liftRides.filter(l => !l.down).map(l => l.hr.avg).filter(Number.isFinite);
+      const avg = (v) => v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null;
+
+      return {
+        laps, lifts: liftRides, runGroups, liftGroups, breaks,
+        totals: {
+          runs: runs.length,
+          lifts: liftRides.length,
+          downloads: liftRides.filter(l => l.down).length,
+          vertical: sum(runs, r => r.drop),
+          distance: sum(runs, r => r.distance),
+          totalS, skiingS, liftS, waitS, breakS,
+          otherS: Math.max(0, totalS - skiingS - liftS - waitS - breakS),
+          topSpeed: quickest ? quickest.peakSpeed : null,
+          topSpeedRun: quickest ? quickest.runIndex : null,
+          longestRun: longest ? longest.runIndex : null,
+          biggestRun: biggest ? biggest.runIndex : null,
+          fastestRun: fastest ? fastest.runIndex : null,
+          steepestRun: steepest ? steepest.runIndex : null,
+          steepestPct: steepest ? steepest.steepestPct : null,
+          hrRunsAvg: avg(hrRuns), hrLiftsAvg: avg(hrLifts),
+        },
+      };
+    }
+    return { markSkiDownloads, skiGpsDwells, skiGpsDay, SKI_DOWNLOAD_MIN_S, SKI_DOWNLOAD_MIN_GRADE_PCT, SKI_DOWNLOAD_MIN_STRAIGHT, SKI_DOWNLOAD_MAX_CV, SKI_DOWNLOAD_MAX_MPS, SKI_GPS_MOVING_MPS, SKI_GPS_ARRIVE_MPS, SKI_GPS_LOAD_LOOKBACK_S, SKI_GPS_BREAK_S, SKI_GPS_DWELL_M, SKI_GPS_RUN_MIN_DROP_M, SKI_GPS_PEAK_HOLD_S, SKI_GPS_PITCH_M, SKI_GPS_MAX_GAP_S, SKI_LIFT_SAME_M, SKI_RUN_SAME_M, SKI_RUN_SAME_LEN_FRAC };
+  })();
+
   const { detectSkiLegs, skiLaps, skiBaseDrift } = SkiLapCycles;
   const { skiAgitationSeries, skiLegAgitation, skiMotionLabel, skiTiltSpreadDeg } = SkiAgitation;
   const { skiScopeTurns, skiUnscopedTurns } = SkiTurnRhythm;
@@ -23670,7 +24152,7 @@ const LoamSki = (function () {
     };
   }
 
-  return { analyzeSkiDome, ...SkiLapCycles, ...SkiAgitation, ...SkiTurnRhythm, ...SkiEdgeLoad, ...SkiSessionReads };
+  return { analyzeSkiDome, ...SkiLapCycles, ...SkiAgitation, ...SkiTurnRhythm, ...SkiEdgeLoad, ...SkiSessionReads, ...SkiGpsDay };
 })();
 
 /* ===== Training plan: history, scaffold and coach =========================== *
@@ -29645,7 +30127,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','roadMountControl','golfResults','swimResults','triResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','roadMountControl','golfResults','swimResults','triResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -35903,12 +36385,13 @@ function drawTriSpeed(D) {
   const el = document.getElementById('triSpeedChart');
   if (!el || typeof Plotly === 'undefined') return;
   const A = D.analysis, route = D.race.route;
+  const speed = LoamTri.raceChartSpeed(route, A);
   const stride = Math.max(1, Math.ceil(route.length / 3000));
   const x = [], y = [];
   for (let i = 0; i < route.length; i += stride) {
     if (route[i].t < A.raceStart || route[i].t > A.raceEnd) continue;
     x.push(+((route[i].t - A.raceStart) / 60).toFixed(2));
-    y.push(+U.speedNum(A.speed[i]).toFixed(2));
+    y.push(+U.speedNum(speed[i]).toFixed(2));
   }
   const shapes = LoamTri.raceTimeline(A).filter(e => !e.none).map(e => ({
     type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1,
@@ -36288,10 +36771,15 @@ function renderAllGps(D) {
   prepareRoadExperience(D);
   document.body.classList.toggle('running-analysis', isRunAnalysis(D));
   if (isRunAnalysis(D)) placeRunUpsellLast();
-  const sport = D.gpsSport || 'ride';   // 'ride' | 'run' | 'walk'
+  const sport = D.gpsSport || 'ride';   // 'ride' | 'run' | 'walk' | 'skiing'
   _sidesUnreliable = false;
   const foot = sport === 'run' || sport === 'walk';
-  if (!foot) renderEmtbNotice(D);
+  /* A ski day from a GPS track: its own key numbers and lap table, no bike reads. */
+  const ski = isSkiSport(sport) && !!D.skiDay;
+  /* hideAllSections cleared the palette; a ski day takes the snow page here as it does on the phone
+     path. Every other sport clears it again, which is what it already was. */
+  applyPalette(sport);
+  if (!foot && !ski) renderEmtbNotice(D);
   /* Same foot layout as renderAllRunning; a bike FIT keeps the runs table where it is. */
   if (foot) placeRunsBelowFootReads();
   { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
@@ -36299,7 +36787,8 @@ function renderAllGps(D) {
   /* The timeline's subtitle is written by renderRunTimeline: it knows which channels this file
      carried, where this line used to promise altitude to a FIT that recorded none. */
   renderRideSignature(D, sport);
-  renderGpsStats(D.summary, sport, D.segments, D);
+  if (ski) renderSkiGpsStats(D);
+  else renderGpsStats(D.summary, sport, D.segments, D);
   /* Coach highlights parity: GPS rides get the card too, from a GPS-safe producer (empty-guard hides
      it if the summary yields no bullets). */
   renderCoachHighlights(D, 'gps');
@@ -36313,7 +36802,8 @@ function renderAllGps(D) {
   const hasHr = !!((D.sensors && D.sensors.heartRate) || []).length;
   { const head = document.getElementById('gpsOnlyNoticeHead');
     /* "GPS-only ride." over a run's splits table is the false noun renderPathSport was written for. */
-    if (head) head.textContent = loamT(foot ? 'GPS-only {noun}.' : 'Bike-computer {noun}.', { noun: lexNounT(sportLex(sport === 'run' ? 'run' : sport === 'walk' ? 'walk' : 'ride')) }); }
+    if (head) head.textContent = ski ? loamT('GPS-only ski day.')
+      : loamT(foot ? 'GPS-only {noun}.' : 'Bike-computer {noun}.', { noun: lexNounT(sportLex(sport === 'run' ? 'run' : sport === 'walk' ? 'walk' : 'ride')) }); }
   { const body = document.getElementById('gpsOnlyNoticeBody');
     /* The notice names exactly what is missing for THIS activity: turns/jumps for a bike, form for a
        run/hike. Otherwise a runner reads a bike-flavored disclaimer.
@@ -36326,7 +36816,12 @@ function renderAllGps(D) {
           ? loamT('vertical oscillation and running-form analysis is unavailable')
           : loamT('cadence, vertical oscillation, and running-form analysis is unavailable'))
       : loamT('body lean, detailed turn mechanics, and landing impact need phone motion data');
-    if (body) body.textContent =
+    if (body && ski) body.textContent =
+      loamT('This track carries GPS positions and altitude but no motion sensors, so the runs, lifts, vertical and speeds below are read from it, and turns, lean and jumps are not.')
+      + (hasHr ? ' ' + loamT('The heart rate below is your watch\'s own recording.') : '')
+      + (D.speedDerived ? ' ' + loamT('Speed is derived from GPS positions, so treat top speed as approximate.') : '')
+      + ' ' + loamT('Record your next ski day with Loam to add turns, turn radius and lean.');
+    else if (body) body.textContent =
       loamT('This FIT file carries a GPS track but no phone motion data, so {missing}.', { missing })
       + (hasCad && hasHr ? ' ' + loamT('Cadence and heart rate below are your watch\'s own recordings, not estimates from this page.')
          : hasCad ? ' ' + loamT('The cadence below is your watch\'s own recording, not an estimate from this page.')
@@ -36358,7 +36853,7 @@ function renderAllGps(D) {
      pressed. */
   { const laps = D.fitLaps || [];
     const pressed = laps.filter(l => l.trigger === 'manual').length;
-    const device = loamT(foot ? 'watch' : 'head unit');
+    const device = loamT(foot || ski ? 'watch' : 'head unit');
     /* A trimmed recording says so, rather than quietly showing fewer laps than the watch has. */
     const dropped = D.fitLapsDropped || 0;
     renderRunLaps(laps, laps.length
@@ -36373,6 +36868,7 @@ function renderAllGps(D) {
   renderRunSegments(D.segments, foot ? ((D.running && D.running.climbs) || []) : [],
                     { motionColumns: false, foot });
   renderGpsParams(D);
+  if (ski) { renderSkiGpsDay(D); placeSkiDayUnderMap(); }
   currentRide = D.ride;
   renderRunsPanel(D);
   postReplayTrack(D);
@@ -36398,7 +36894,7 @@ function renderAllGps(D) {
   /* A GPS-only bike file can now resolve to mtb / emtb / road (fitActivity), but the coach prompt for
      those assumes a phone body frame or a power meter. The digest is the GPS one either way, so the
      GPS-only ride prompt is the one that describes what the model is actually reading. */
-  renderCoachPanel(D, isRoadAnalysis(D) ? 'road' : foot ? sport : 'ride');
+  renderCoachPanel(D, isRoadAnalysis(D) ? 'road' : foot ? sport : ski ? 'skiing' : 'ride');
   updateAttachFitVisibility(sport, true);
   renderRoadExperience(D);
   buildSectionNav();
@@ -36433,9 +36929,19 @@ function renderGpsUpsell(D) {
      and the phone last; oscillation prefers the AirPods; walk breaks read the phone's accelerometer
      alone (classifyGait). A tag saying "phone" over all of them sold a watch wearer the wrong device. */
   const walk = sport === 'walk';
+  const ski = isSkiSport(sport);
   const PHONE = 'needs phone recording';
   const CAD_FROM = walk ? 'watch or phone' : 'watch, AirPods or phone';
-  const cards = foot
+  /* A skier is pitched what a phone recording reads on snow today, and nothing the ski pipeline does
+     not ship: no Form Replay (not built for skiing), no braking, no landing impact, no bike. */
+  const cards = ski
+    ? [
+        ['Turns & radius', loamT('Every turn of every run: how many, how quickly you link them, the radius of each arc and your left/right balance, from the phone\'s motion sensors. One GPS point per second cannot see a ski turn.')],
+        ['Torso lean', loamT('How far your upper body tips into each turn. It is the torso, not the ski\'s edge angle, and the page says so.')],
+        ['Jumps & airtime', loamT('An estimate of hang time and landing impact from the phone\'s freefall, with the phone in a jacket pocket. A GPS track, one point a second, cannot see a jump.')],
+        ['Deeper AI coaching', loamT('The coach below reads the day\'s runs, lifts, speeds and heart rate. With motion data it can also talk about your turns.')],
+      ]
+    : foot
     ? [
         ...(hasCad ? [] : [
           ['Cadence', loamT(walk
@@ -36468,7 +36974,9 @@ function renderGpsUpsell(D) {
   if (cta) {
     /* "Next run:" / "Next walk:" -- the foot branch opened with the literal "Next ride:" until
        2026-09-12, over the cards it had just been taught not to pitch turns and jumps to a runner. */
-    cta.innerHTML = foot
+    cta.innerHTML = ski
+      ? loamT('Next ski day: pick Ski in <strong>Loam Capture</strong> before you start, keep the phone in the same jacket pocket all day and hold still for about 20 s before the first run. Wear your Apple Watch for heart rate. Everything above lights up on the same day.')
+      : foot
       ? loamT(walk
         ? 'Next {noun}: start <strong>Loam Capture</strong> on your phone (an armband or pocket is fine), head out as usual, then attach this FIT to the session. Wear your Apple Watch for cadence and heart rate. Everything above lights up on the same outing.'
         : 'Next {noun}: start <strong>Loam Capture</strong> on your phone (an armband or pocket is fine), head out as usual, then attach this FIT to the session. Wear your Apple Watch for cadence and heart rate, and AirPods for head bob. Everything above lights up on the same outing.',
@@ -36575,13 +37083,114 @@ function renderGpsStats(s, sport, segments, D) {
 function renderGpsParams(D) {
   const sport = D.gpsSport || 'ride';
   const foot = sport === 'run' || sport === 'walk';
-  const label = sport === 'run' ? 'RUN' : sport === 'walk' ? 'WALK' : (displaySport(D) === 'emtb' ? 'E-MTB' : 'RIDE');
+  const ski = isSkiSport(sport);
+  const label = sport === 'run' ? 'RUN' : sport === 'walk' ? 'WALK' : ski ? 'SKI' : (displaySport(D) === 'emtb' ? 'E-MTB' : 'RIDE');
   document.getElementById('paramsBar').innerHTML = `
     <span>sport <strong>${label} (GPS-only FIT)</strong></span>
     <span>gps fixes <strong>${D.sensors.location.length.toLocaleString()}</strong></span>
     <span>speed <strong>${D.speedDerived ? 'derived from positions' : 'from FIT records'}</strong></span>
-    <span style="margin-left:auto">no motion data · ${loamT(foot ? 'running form unavailable' : 'body lean and landing impact unavailable')}</span>
+    <span style="margin-left:auto">no motion data · ${loamT(foot ? 'running form unavailable' : ski ? 'turns and lean unavailable' : 'body lean and landing impact unavailable')}</span>
   `;
+}
+
+/* ---------- A ski day from a GPS track ----------
+   The key numbers and the lap-by-lap table for `D.skiDay` (LoamSki.skiGpsDay). Everything here is
+   read from position, altitude and the watch's heart rate; the notice and the upsell say what is not. */
+function skiClockT(sec) {
+  if (sec == null || !isFinite(sec)) return '\u2014';
+  const m = Math.floor(sec / 60), s = Math.round(sec - m * 60);
+  return s === 60 ? (m + 1) + ':00' : m + ':' + String(s).padStart(2, '0');
+}
+function renderSkiGpsStats(D) {
+  const day = D.skiDay, T = day.totals, s = D.summary || {};
+  const pct = T.totalS > 0 ? Math.round(100 * T.skiingS / T.totalS) : 0;
+  const longest = T.longestRun ? day.laps.find(l => l.runIndex === T.longestRun) : null;
+  const tile = (cls, label, value, sub) =>
+    `<div class="stat${cls ? ' ' + cls : ''}"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+  document.getElementById('statsPanel').innerHTML = [
+    tile('accent', loamT('Runs'), String(T.runs),
+      loamT('{n} lifts', { n: T.lifts }) + (T.downloads ? ' · ' + loamT('{n} back down', { n: T.downloads }) : '')),
+    tile('accent2', loamT('Vertical skied'), U.elev(T.vertical),
+      s.liftAscent ? loamT('lifts carried {v}', { v: U.elev(s.liftAscent) }) : loamT('top to bottom of each run')),
+    tile('accent3', loamT('Top speed'), T.topSpeed ? U.speed(T.topSpeed) : '&mdash;',
+      T.topSpeedRun ? loamT('held 3 s · run {n}', { n: T.topSpeedRun }) : loamT('held 3 s')),
+    tile('', loamT('Distance skied'), U.dist(T.distance),
+      longest ? loamT('longest run {d}', { d: U.dist(longest.distance) }) : loamT('runs only, lifts left out')),
+    tile('', loamT('Time skiing'), durTileHTML(T.skiingS),
+      loamT('{p}% of the day · {m}m on lifts', { p: pct, m: Math.round(T.liftS / 60) })),
+    tile('', loamT('Lift lines'), durTileHTML(T.waitS),
+      T.breakS ? loamT('{m}m in breaks', { m: Math.round(T.breakS / 60) }) : loamT('no long breaks')),
+    T.steepestPct != null ? tile('', loamT('Steepest pitch'), `${Math.round(T.steepestPct)}<span class="unit">%</span>`,
+      loamT('over 100 m · run {n}', { n: T.steepestRun })) : '',
+    T.hrRunsAvg != null ? tile('', loamT('Heart rate'), `${T.hrRunsAvg}<span class="unit">bpm</span>`,
+      T.hrLiftsAvg != null ? loamT('skiing · {b} on the lifts', { b: T.hrLiftsAvg }) : loamT('skiing · watch recording')) : '',
+  ].join('');
+}
+function renderSkiGpsDay(D) {
+  const day = D.skiDay;
+  if (!day) return;
+  const T = day.totals;
+  { const st = document.getElementById('skiGpsTitle'); if (st) st.textContent = loamT('Runs & lifts'); }
+  { const st = document.getElementById('skiGpsSubtitle');
+    if (st) st.textContent = loamT('the day lap by lap, from the GPS track · the same piste skied again is grouped (A·1, A·2) · ★ fastest lap'); }
+  /* Where the day went, as one bar. The five parts add up to the day by construction (otherS is the
+     remainder), so the bar never claims more time than there was. */
+  const parts = [
+    ['skiing', loamT('Skiing'), T.skiingS], ['lifts', loamT('Lifts'), T.liftS],
+    ['lines', loamT('Lift lines'), T.waitS], ['breaks', loamT('Breaks'), T.breakS],
+    ['other', loamT('Standing and getting about'), T.otherS],
+  ].filter(p => p[2] > 0);
+  const total = Math.max(1, T.totalS);
+  const budget = document.getElementById('skiGpsBudget');
+  if (budget) budget.innerHTML =
+    `<div class="ski-budget-bar" role="img" aria-label="${escapeHtml(loamT('Where the day went'))}">`
+    + parts.map(([k, , v]) => `<span class="ski-b-${k}" style="width:${(100 * v / total).toFixed(2)}%"></span>`).join('')
+    + `</div><div class="ski-budget-key">`
+    + parts.map(([k, label, v]) => `<span><i class="ski-b-${k}"></i>${escapeHtml(label)} ${Math.round(v / 60)}m</span>`).join('')
+    + `</div>`;
+  const best = new Set(day.runGroups.map(g => g.bestRun));
+  const thead = document.querySelector('#skiGpsTable thead');
+  if (thead) thead.innerHTML = `<tr><th>#</th><th>${loamT('Piste')}</th><th>${loamT('Drop')}</th><th>${loamT('Dist')}</th>`
+    + `<th>${loamT('Moving')}</th><th>${loamT('Avg')}</th><th>${loamT('Top')}</th><th>${loamT('Steepest')}</th><th>${loamT('HR')}</th></tr>`;
+  const rows = [];
+  for (const lap of day.laps) {
+    if (lap.run) {
+      rows.push(`<tr class="${best.has(lap.runIndex) ? 'ski-best' : ''}"><td>${lap.runIndex}</td>`
+        + `<td>${lap.group ? `${lap.group}&middot;${lap.groupLap}` : '&mdash;'}</td>`
+        + `<td>${U.elev(lap.drop)}</td><td>${U.dist(lap.distance)}</td><td>${skiClockT(lap.movingS)}</td>`
+        + `<td>${lap.avgMovingSpeed != null ? U.speed(lap.avgMovingSpeed) : '&mdash;'}</td>`
+        + `<td>${lap.peakSpeed ? U.speed(lap.peakSpeed) : '&mdash;'}</td>`
+        + `<td>${lap.steepestPct != null ? Math.round(lap.steepestPct) + '%' : '&mdash;'}</td>`
+        + `<td>${lap.hr.avg != null ? lap.hr.avg : '&mdash;'}</td></tr>`);
+    }
+    if (lap.breakS >= LoamSki.SKI_GPS_BREAK_S) {
+      rows.push(`<tr class="ski-break-row"><td></td><td colspan="8">${escapeHtml(loamT('Break · {m} min in one place', { m: Math.round(lap.breakS / 60) }))}</td></tr>`);
+    }
+    if (lap.liftIndex) {
+      const L = day.lifts[lap.liftIndex - 1];
+      const bits = [
+        (L.down ? loamT('Lift back down') : loamT('Lift')) + (L.group ? ' ' + L.group : ''),
+        skiClockT(L.durationS),
+        L.gain != null ? (L.gain >= 0 ? '+' : '\u2212') + U.elev(Math.abs(L.gain)) : null,
+        L.avgSpeed != null ? U.speed(L.avgSpeed) : null,
+        lap.wait != null && lap.wait >= 5 ? loamT('line {t}', { t: skiClockT(lap.wait) }) : null,
+      ].filter(Boolean);
+      rows.push(`<tr class="ski-lift-row"><td>${L.down ? '\u21e3' : '\u21e1'}</td><td colspan="8">${escapeHtml(bits.join(' · '))}</td></tr>`);
+    }
+  }
+  const tb = document.querySelector('#skiGpsTable tbody');
+  if (tb) tb.innerHTML = rows.join('') || `<tr><td colspan="9" class="dim">${loamT('No runs found between lifts.')}</td></tr>`;
+  const rep = document.getElementById('skiGpsRepeats');
+  if (rep) {
+    const lines = day.runGroups.map(g => loamT('Piste {g}: runs {runs}, fastest run {best} in {t} moving.',
+      { g: g.group, runs: g.members.join(', '), best: g.bestRun, t: skiClockT(g.bestMovingS) }))
+      .concat(day.liftGroups.map(g => loamT('Lift {g}: {n} trips, {t} each, {v} up at {speed}.',
+        { g: g.group, n: g.rides, t: skiClockT(g.meanDurationS), v: U.elev(g.meanGain || 0), speed: U.speed(g.meanSpeed || 0) })));
+    rep.innerHTML = lines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
+  }
+  const cav = document.getElementById('skiGpsCaveat');
+  if (cav) cav.textContent = loamT('Read from the GPS track alone. A run is the lap between two lifts, measured from the top of its fall to the bottom. Top speed is the fastest speed held for 3 s, and speed comes from GPS positions, so treat it as approximate. A line is timed from reaching the lift to loading; a break is 20 minutes or more in one place. Turns, lean and jumps need a Loam recording.');
+  show('skiGpsSection');
 }
 
 /* Per-descent tag/compare actions now live on the Runs table (drawRuns); the standalone Descents
@@ -41424,6 +42033,7 @@ const LOAM_NB = {
   /* The segments table's direction cell, keyed WITH its arrow: the share card's own CLIMB tile is
      total ascent rather than a direction, and one key cannot be both. */
   '⇡ LIFT': '⇡ HEIS',
+  '⇣ LIFT': '⇣ HEIS',
   '↓ DESC': '↓ NED',
   '↑ CLIMB': '↑ OPP',
   'CLIMB': 'STIGNING',
@@ -41904,6 +42514,71 @@ const LOAM_NB = {
     '{n} FIT-hopp ignorert (ingen telefonopptak å synkronisere mot)',
   'FIT {noun} loaded (GPS-only · {fixes} fixes{lifts}{jumps})':
     'FIT-{noun} lastet (kun GPS · {fixes} posisjoner{lifts}{jumps})',
+  /* A ski day imported from a GPS track (renderSkiGpsStats, renderSkiGpsDay, the notice, the upsell
+     and the signature). Run is "nedkjøring", lift "heis", line "heiskø", piste "løype", as the indoor
+     ski view already writes them. */
+  'Runs & lifts': 'Nedkjøringer og heiser',
+  'the day lap by lap, from the GPS track · the same piste skied again is grouped (A·1, A·2) · ★ fastest lap':
+    'dagen runde for runde, fra GPS-sporet · samme løype kjørt igjen er gruppert (A·1, A·2) · ★ raskeste runde',
+  'Vertical skied': 'Fallhøyde kjørt',
+  'Distance skied': 'Distanse kjørt',
+  'Time skiing': 'Tid på ski',
+  'Lift lines': 'Heiskø',
+  'Steepest pitch': 'Brattest',
+  'Lifts': 'Heiser',
+  'Breaks': 'Pauser',
+  'Standing and getting about': 'Stående og på vei',
+  'Where the day went': 'Hvor dagen ble av',
+  'Piste': 'Løype',
+  'Moving': 'I bevegelse',
+  'Steepest': 'Brattest',
+  'RUNS': 'NEDKJØRINGER',
+  'VERTICAL': 'FALLHØYDE',
+  '{n} back down': '{n} ned igjen',
+  'top to bottom of each run': 'topp til bunn i hver nedkjøring',
+  'held 3 s': 'holdt i 3 s',
+  'held 3 s · run {n}': 'holdt i 3 s · nedkjøring {n}',
+  'longest run {d}': 'lengste nedkjøring {d}',
+  'runs only, lifts left out': 'bare nedkjøringer, heiser utelatt',
+  '{p}% of the day · {m}m on lifts': '{p} % av dagen · {m} min i heis',
+  '{m}m in breaks': '{m} min i pauser',
+  'no long breaks': 'ingen lange pauser',
+  'over 100 m · run {n}': 'over 100 m · nedkjøring {n}',
+  'skiing · {b} on the lifts': 'på ski · {b} i heisen',
+  'skiing · watch recording': 'på ski · klokkens opptak',
+  'Break · {m} min in one place': 'Pause · {m} min på samme sted',
+  'Lift back down': 'Heis ned igjen',
+  'line {t}': 'kø {t}',
+  'No runs found between lifts.': 'Fant ingen nedkjøringer mellom heisene.',
+  'Piste {g}: runs {runs}, fastest run {best} in {t} moving.':
+    'Løype {g}: nedkjøring {runs}, raskest nedkjøring {best} med {t} i bevegelse.',
+  'Lift {g}: {n} trips, {t} each, {v} up at {speed}.':
+    'Heis {g}: {n} turer, {t} hver, {v} opp i {speed}.',
+  'Read from the GPS track alone. A run is the lap between two lifts, measured from the top of its fall to the bottom. Top speed is the fastest speed held for 3 s, and speed comes from GPS positions, so treat it as approximate. A line is timed from reaching the lift to loading; a break is 20 minutes or more in one place. Turns, lean and jumps need a Loam recording.':
+    'Lest fra GPS-sporet alene. En nedkjøring er runden mellom to heiser, målt fra toppen av fallet til bunnen. Toppfart er den høyeste farten holdt i 3 s, og farten kommer fra GPS-posisjoner, så les den som omtrentlig. Heiskø måles fra du kommer til heisen til du sitter på; en pause er 20 minutter eller mer på samme sted. Svinger, helning og hopp krever et Loam-opptak.',
+  'GPS-only ski day.': 'Skidag med bare GPS.',
+  'This track carries GPS positions and altitude but no motion sensors, so the runs, lifts, vertical and speeds below are read from it, and turns, lean and jumps are not.':
+    'Dette sporet har GPS-posisjoner og høyde, men ingen bevegelsessensorer, så nedkjøringene, heisene, fallhøyden og farten under er lest fra det, og svinger, helning og hopp er det ikke.',
+  'Speed is derived from GPS positions, so treat top speed as approximate.':
+    'Farten er utledet fra GPS-posisjoner, så les toppfarten som omtrentlig.',
+  'Record your next ski day with Loam to add turns, turn radius and lean.':
+    'Ta opp neste skidag med Loam for å få med svinger, svingradius og helning.',
+  'turns and lean unavailable': 'svinger og helning utilgjengelig',
+  'Turns & radius': 'Svinger og radius',
+  'Torso lean': 'Overkroppens helning',
+  'Every turn of every run: how many, how quickly you link them, the radius of each arc and your left/right balance, from the phone\'s motion sensors. One GPS point per second cannot see a ski turn.':
+    'Hver sving i hver nedkjøring: hvor mange, hvor tett du setter dem, radien på hver bue og balansen mellom venstre og høyre, fra telefonens bevegelsessensorer. Ett GPS-punkt i sekundet kan ikke se en skisving.',
+  'How far your upper body tips into each turn. It is the torso, not the ski\'s edge angle, and the page says so.':
+    'Hvor langt overkroppen heller inn i hver sving. Det er overkroppen, ikke skiens kantvinkel, og siden sier det.',
+  'An estimate of hang time and landing impact from the phone\'s freefall, with the phone in a jacket pocket. A GPS track, one point a second, cannot see a jump.':
+    'Et anslag over svevetid og landingsstøt fra telefonens frie fall, med telefonen i en jakkelomme. Et GPS-spor, ett punkt i sekundet, kan ikke se et hopp.',
+  'estimated from the phone': 'anslått fra telefonen',
+  'The coach below reads the day\'s runs, lifts, speeds and heart rate. With motion data it can also talk about your turns.':
+    'Treneren under leser dagens nedkjøringer, heiser, fart og puls. Med bevegelsesdata kan den også snakke om svingene dine.',
+  'Next ski day: pick Ski in <strong>Loam Capture</strong> before you start, keep the phone in the same jacket pocket all day and hold still for about 20 s before the first run. Wear your Apple Watch for heart rate. Everything above lights up on the same day.':
+    'Neste skidag: velg Ski i <strong>Loam Capture</strong> før du starter, ha telefonen i samme jakkelomme hele dagen og hold deg i ro i rundt 20 s før første nedkjøring. Ha på Apple Watch for puls. Alt over blir tilgjengelig samme dag.',
+  'How consistent were my laps on the same piste?': 'Hvor jevne var rundene mine i samme løype?',
+  'How much of my day was actually skiing?': 'Hvor mye av dagen gikk egentlig til å stå på ski?',
   'Compare loaded · {n} {noun} · {matched}/{total} descents matched':
     'Sammenligning lastet · {n} {noun} · {matched}/{total} nedkjøringer matchet',
   'club': 'kølle',
@@ -46536,7 +47211,8 @@ function drawRunSegments() {
 /* One row of the census / descents views: what the detector measured over the segment. */
 function runSegGradeRow(s, i, view, motion, foot) {
   const dirCls = s.dir === 'down' ? 'dir-down' : 'dir-up';
-  const dirLabel = loamT(s.kind === 'lift' ? '⇡ LIFT' : s.dir === 'down' ? '↓ DESC' : '↑ CLIMB');
+  /* A lift ridden back down (a ski download) points down like the ride it was. */
+  const dirLabel = loamT(s.kind === 'lift' ? (s.dir === 'down' ? '⇣ LIFT' : '⇡ LIFT') : s.dir === 'down' ? '↓ DESC' : '↑ CLIMB');
   let html = `<td><strong>${i + 1}</strong></td>`;
   if (view !== 'descents') html += `<td class="${dirCls}">${dirLabel}</td>`;
   html += `
@@ -48654,6 +49330,40 @@ function buildDigest(D, sport, metric) {
   }
   /* GPS-only FIT ride: everything the coach may cite must be GPS-derivable. Per-descent detail is
      computed here (not stored on segments) so the digest stays the single source for the coach. */
+  /* A ski day from a GPS track: the day's laps, lifts, lines and pistes from `skiGpsDay`, and none of
+     the bike blocks below (head unit, motor, corners), which would describe a different sport. */
+  if (D.gpsOnly && D.skiDay) {
+    const day = D.skiDay, T = day.totals;
+    const min = (v) => (v == null ? null : r1(v / 60));
+    return {
+      sport: 'alpine skiing (GPS track import, no motion sensors)',
+      source: 'gps',
+      duration_min: min(T.totalS),
+      runs: T.runs,
+      lifts: T.lifts,
+      lifts_ridden_down: T.downloads,
+      ...u.elev('vertical_skied', T.vertical),
+      ...u.dist('distance_skied', T.distance),
+      time_min: { skiing: min(T.skiingS), on_lifts: min(T.liftS), lift_lines: min(T.waitS), breaks: min(T.breakS), other: min(T.otherS) },
+      ...u.speed('top_speed_held_3s', T.topSpeed),
+      steepest_pitch_pct_over_100m: T.steepestPct != null ? r1(T.steepestPct, 0) : null,
+      heart_rate_bpm: T.hrRunsAvg != null || T.hrLiftsAvg != null ? { runs_avg: T.hrRunsAvg, lifts_avg: T.hrLiftsAvg } : null,
+      per_run: day.laps.filter(l => l.run).map(r => ({
+        n: r.runIndex, piste: r.group ? r.group + '-' + r.groupLap : null,
+        ...u.elev('drop', r.drop), ...u.len('distance', r.distance, 0),
+        moving_s: r1(r.movingS, 0), stopped_s: r1(r.stoppedS, 0),
+        ...u.speed('avg_moving_speed', r.avgMovingSpeed), ...u.speed('top_speed', r.peakSpeed),
+        steepest_pct: r.steepestPct != null ? r1(r.steepestPct, 0) : null,
+        hr_avg: r.hr.avg, hr_max: r.hr.max,
+        lift_line_s: r.wait != null ? r1(r.wait, 0) : null, break_min: r.breakS ? min(r.breakS) : null,
+      })),
+      repeated_pistes: day.runGroups.map(g => ({ piste: g.group, runs: g.members, fastest_run: g.bestRun,
+        fastest_moving_s: r1(g.bestMovingS, 0), note: 'the same piste skied again, in day order' })),
+      lifts_by_lift: day.liftGroups.map(g => ({ lift: g.group, rides: g.rides, ride_min: min(g.meanDurationS),
+        ...u.elev('vertical', g.meanGain), ...u.speed('speed', g.meanSpeed) })),
+      data_caveats: 'Alpine ski day imported from a GPS track (a GPX or a watch FIT) with NO motion sensors: there are no turns, no turn radius, no lean, no edge angle and no jumps. Runs are the laps between detected lifts, each read from the top of its fall to the bottom. Vertical, distance, speed and pitch come from GPS position and altitude, so speed is approximate. Lift lines are estimated from speed; breaks are 20+ minutes in one place. Do not claim anything about technique.',
+    };
+  }
   if (D.gpsOnly || sport === 'ride' || sport === 'run' || sport === 'walk') {
     const foot = sport === 'run' || sport === 'walk';
     const loc = (D.sensors && D.sensors.location) || [];
@@ -49163,6 +49873,37 @@ function coachSystemPrompt(sport, level, metric, source) {
      observes them, and a coach that names them would be inventing the sport's core reads. Same
      rule as the jump entry and the crash card: describe what changed, name no cause, set no
      target. */
+  /* A ski day from a GPS TRACK (a GPX exported from Strava, a watch's ski FIT): no motion sensors at
+     all, so even the turn counts the phone prompt below vouches for do not exist. Forked on the
+     digest's `source` the way swim forks, because the two prompts forbid different things. */
+  if (isSkiSport(sport) && source === 'gps') {
+    return `You are Loam, an expert ski coach reading a single alpine ski day from a GPS track (imported from another app or a watch), with heart rate when the file carried it. There are NO motion sensors in this data. Turn the numbers into specific, honest, actionable coaching.
+
+Method - for every point, follow "metric -> mechanism -> action":
+1. Metric: cite the actual number from the data.
+2. Mechanism: explain what it implies about the day.
+3. Action: give one concrete thing to do on the next ski day.
+
+What the numbers here are:
+- A RUN is a lap between lift rides, read from the top of its fall to the bottom. Lifts are detected from the track (long, steep, dead straight, steady speed), including any lift ridden back down, which is transport and not skiing.
+- Vertical, distance, moving time and speeds per run come from GPS position and altitude. Top speed is the fastest speed HELD for 3 seconds. Speed is derived from positions, so it is approximate.
+- Steepest pitch is the biggest fall over 100 m of ground on that run.
+- The same piste skied again is grouped (A-1, A-2), and its fastest lap is the least MOVING time, because time on a run also counts every stop.
+- Lift lines are estimated from speed: arriving at the lift base to loading. Breaks are 20 minutes or more in one place: lunch, a lodge, a lift on hold.
+- Heart rate, when present, is the watch's own recording. On the lifts it shows how far the skier recovered between runs.
+
+A good answer here is about the SHAPE of the day: pacing across runs, consistency on a repeated piste, how much of the day was skiing against lifts, lines and breaks, how speed held on the steepest pitch, fatigue (slower laps late, heart rate drifting up), and how to get more good skiing out of the next day.
+
+${units}
+
+WHAT THIS DATA CANNOT SEE, and you must never claim:
+- TURNS of any kind: their number, rhythm, radius, symmetry or shape. One GPS point per second cannot resolve a ski turn, and there is no motion sensor to find them.
+- LEAN, EDGE ANGLE, ski pressure, fore/aft balance, carving vs skidding, jumps or airtime.
+- Terrain type, snow condition, a run's difficulty rating, or whether the skiing was technically good.
+Do not substitute a proxy for any of these. If the skier asks about technique, say plainly that a GPS track cannot see it, and that recording the next ski day with Loam (phone zipped into a jacket pocket, watch on) adds turn count, turn radius and torso lean.
+
+Tone: direct, specific, encouraging. Cite numbers. One or two priorities, not a list. Never invent a metric that is not in the data.`;
+  }
   if (isSkiSport(sport)) {
     return `You are Loam, an expert ski coach reading sensor-derived metrics from a single alpine ski day recorded with a phone worn on the body (plus, when present, an Apple Watch and AirPods). Turn them into specific, honest, actionable coaching.
 
@@ -49878,6 +50619,10 @@ function coachChips(sport, opts) {
   }
   /* Skiing has turns, lean and descents, so the neutral fallback under-sold it -- and the ski
      system prompt forbids edge angle and carve-vs-skid, so these must not drift toward either. */
+  if (isSkiSport(sport) && opts && opts.gpsOnly) {
+    /* A ski day from a GPS track has no turns at all, so no chip may ask about them. */
+    return ['How consistent were my laps on the same piste?', 'How much of my day was actually skiing?', 'What should I focus on next ski day?'];
+  }
   if (isSkiSport(sport)) {
     return [opts && opts.sidesUnreliable ? 'Which run should I work on?' : 'How balanced were my left and right turns?',
             'How consistent were my runs through the day?', 'What should I focus on next ski day?'];
@@ -50052,7 +50797,7 @@ function renderCoachPanelChips(D, sport, chips) {
     try { sidesUnreliable = !!sidesUnreliableFor(D); } catch (e) { sidesUnreliable = false; }
   }
   const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false), sidesUnreliable,
-    fastWalk: sport === 'walking' && isFastWalk(D && D.summary) };
+    fastWalk: sport === 'walking' && isFastWalk(D && D.summary), gpsOnly: !!(D && D.gpsOnly) };
   /* Translated HERE rather than inside `coachChips`, which is a pure per-sport picker with some
      twenty return sites. The chip's text is also the QUESTION sent to the coach, and the coach
      already answers in the reader's language (`coachLanguage`), so asking in it is the consistent
@@ -51455,6 +52200,7 @@ const SECTION_CATALOG = [
   { id: 'roadSection', label: 'Climbs' },
   { id: 'roadDataSection', label: 'Ride data' },
   { id: 'roadDescentsSection', label: 'Descents' },
+  { id: 'skiGpsSection', label: 'Runs & lifts' },
   { id: 'roadDescentHistorySection', label: 'Descent history' },
   { id: 'roadLapsSection', label: 'Laps' },
   { id: 'gpsUpsellSection', label: 'Unlock more' },
@@ -54309,7 +55055,10 @@ function renderSessionOverview(D, sport) {
   const duration = s.movingTime ?? s.duration ?? (ride.end - ride.start);
   const run = isRunAnalysis(D) ? runHeadline(D) : null;
   const road = isRoadAnalysis(D);
-  const distance = run ? run.distance : road ? s.distance : s.riddenDistance ?? s.distance;
+  /* A ski day from a GPS track reads its distance and drop off the runs alone: the summary's would
+     count the walk in, and its descent the gondola ridden back down. */
+  const skiT = D.gpsOnly && D.skiDay ? D.skiDay.totals : null;
+  const distance = run ? run.distance : road ? s.distance : skiT ? skiT.distance : s.riddenDistance ?? s.distance;
   const label = rsLabel(D.title);
   const app = appSessionContext(D);
   /* The app's title when it has one ("Edgewood Park · 4x4"), which is what the Sessions row calls
@@ -54336,6 +55085,7 @@ function renderSessionOverview(D, sport) {
       ${road ? tile(Number.isFinite(s.maxSpeed) ? U.speed(s.maxSpeed) : '—', 'Top speed')
         + tile(Number.isFinite(s.altGain) ? U.elev(s.altGain) : '—', 'Elevation gain')
         : run ? (run.hr > 0 ? tile(Math.round(run.hr) + ' bpm', 'Avg heart rate') : '')
+        : skiT ? tile(U.elev(skiT.vertical), 'Vertical skied')
         : Number.isFinite(s.altLoss ?? s.altDrop) ? tile(U.elev(s.altLoss ?? s.altDrop), 'Descent') : ''}</div>
     ${run ? `<div class="run-supporting-facts">${run.cadence > 0 ? `<span>${loamT('Cadence')}: ${Math.round(run.cadence)} spm</span>` : ''}
       ${Number.isFinite(s.altGain) ? `<span>${loamT('Climb')}: ${U.elev(s.altGain)}</span>` : ''}</div>
@@ -54505,6 +55255,15 @@ function renderRideSignature(D, sport) {
         { ...rsSplit(U.pace ? U.pace(s.avgSpeed) : null), label: 'AVG PACE' },
         { ...rsSplit(U.elev(s.altGain)), label: 'CLIMB' },
         { ...rsSplit(U.elev(s.altLoss)), label: 'DESCENT' },
+      ];
+    } else if (D.gpsOnly && D.skiDay) {
+      /* A ski day from a GPS track: runs, vertical, held top speed and distance skied. */
+      const T = D.skiDay.totals;
+      stats = [
+        { num: String(T.runs), unit: '', label: 'RUNS' },
+        { ...rsSplit(U.elev(T.vertical)), label: 'VERTICAL' },
+        { ...rsSplit(U.speed(T.topSpeed || 0)), label: 'TOP SPEED' },
+        { ...rsSplit(U.dist(T.distance)), label: 'DISTANCE' },
       ];
     } else if (sport === 'ride' || D.gpsOnly) {
       /* GPS-only ride (park/lift day): ridden distance excludes lifts, and the descent is the story. */
@@ -55395,8 +56154,12 @@ function renderAirtime(D) {
   const A = D.airtime;
   const el = document.getElementById('airtimeSummary');
   const hasAir = !!(A && A.jumps && A.jumps.length);
+  /* A ski day reaches this view too: the freefall detector runs on the descents-and-turns path
+     whatever the sport. Nobody skis with a Specialized head unit, so a skier is offered none, and
+     an airtime is placed by the day's clock rather than as "ride+". */
+  const ski = isSkiSport(D && D.sport);
   const sub = document.getElementById('airtimeSubtitle');
-  if (sub) sub.textContent = loamT(D && D.hasFit
+  if (sub) sub.textContent = loamT(D && D.hasFit || ski
     ? 'estimated from phone freefall + landing'
     : 'estimated from phone freefall + landing · attach a Specialized FIT for exact hang');
   const fitNote = fitJumpNote(D);
@@ -55421,7 +56184,7 @@ function renderAirtime(D) {
         <div class="lbl">${loamT('Biggest air')}</div>
         <div class="big">${Math.round(maxHang * 1000)}<span class="unit">${loamT('ms freefall')}</span></div>
       </div>
-      <div class="meta">${loamT(js.length > 1 ? '{n} airtimes' : '{n} airtime', { n: js.length })} · ${loamT('{n} high-confidence', { n: nHigh })}<br>${loamT(A.hasWatch ? 'phone freefall + Apple Watch landing' : 'estimated, no bike computer')}</div>
+      <div class="meta">${loamT(js.length > 1 ? '{n} airtimes' : '{n} airtime', { n: js.length })} · ${loamT('{n} high-confidence', { n: nHigh })}<br>${loamT(A.hasWatch ? 'phone freefall + Apple Watch landing' : ski ? 'estimated from the phone' : 'estimated, no bike computer')}</div>
     </div>
     <div class="stat accent4">
       <div class="label">${loamT('Airtimes')}</div>
@@ -55451,7 +56214,7 @@ function renderAirtime(D) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td><strong>${k + 1}</strong> ${formReplayJumps(D).some(j => j.id === 'air:' + (k+1)) ? `<button type="button" class="ghost-btn" data-replay="air:${k+1}">${loamT('Replay')}</button>` : ''}</td>
-      <td class="dim">${loamT('ride+{t}s', { t: j.t_phone.toFixed(1) })}</td>
+      <td class="dim">${ski ? skiClockT(Math.max(0, j.t_phone - ((D.ride && D.ride.start) || 0))) : loamT('ride+{t}s', { t: j.t_phone.toFixed(1) })}</td>
       <td><strong>${Math.round(j.hang * 1000)}</strong> ms</td>
       <td>${j.landingG.toFixed(1)} g${j.landingFromWatch ? ' <span class="dim">⌚</span>' : ''}</td>
       <td>${j.conf === 'high' ? '● ' + loamT('high') : '○ ' + loamT('med')}</td>
@@ -57414,6 +58177,12 @@ let _roadCornerMarkers = new Map();
    directly under the map, so the chip list and the map it drives read together instead of being
    separated by the timeline and runs table. Only the GPS-ride and road views call this; the section
    is hidden in every other view, so its relocated DOM position is harmless there. */
+/* The lap table is a ski day's main read, so it sits straight under the map and key numbers. */
+function placeSkiDayUnderMap() {
+  const ov = document.getElementById('overviewSection');
+  const sk = document.getElementById('skiGpsSection');
+  if (ov && sk && ov.parentNode) ov.after(sk);
+}
 function placeCornersUnderMap() {
   const ov = document.getElementById('overviewSection');
   const rd = document.getElementById('roadDescentsSection');
@@ -60353,7 +61122,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '4ce20c3b8 · 2026-10-26';
+const LOAM_BUILD = '97984a520 · 2026-10-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
