@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!--
+  Loam analyzer. Copyright (c) 2026 Eirik Oeyo. All rights reserved.
+  This page is published so that it can run in a browser. That is not a licence to copy, modify or
+  redistribute it; see LICENSE. The libraries it loads keep their own licences (Leaflet: BSD-2-Clause;
+  plotly.js, JSZip under its MIT option, Papa Parse, Motion: MIT), and each map shows its providers'
+  required credits.
+-->
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -2156,6 +2163,10 @@
      the terrain stays legible as grey relief and the track is the only saturated thing on the map.
      This is the paper convention: a printed topo under a highlighted route is read the same way. */
   :root[data-basemap="topo"] .leaflet-tile-pane { filter: grayscale(0.7) brightness(0.72) contrast(0.95); }
+  /* Winter is styled terrain, not a claim about current snow cover. Keep piste colours intact. */
+  :root[data-basemap="winter"] .leaflet-tile-pane { filter: none; }
+  .loam-winter-terrain { filter: grayscale(1) brightness(1.15) contrast(0.7); }
+  :root[data-basemap="winter"] .leaflet-container { background: #e7eff3; }
 
   .params {
     display: flex; gap: 24px; padding: 14px 20px;
@@ -2881,6 +2892,7 @@ function loamSeasonRequested(search, host) {
             <option value="minimal">Minimal</option>
             <option value="streets">Streets</option>
             <option value="satellite">Satellite</option>
+            <option value="winter">Winter</option>
             <option value="topo">Topo</option>
           </select>
         </label>
@@ -4275,7 +4287,7 @@ function loamSeasonRequested(search, host) {
       <summary>Climb power details</summary>
       <div class="panel" style="overflow-x:auto;">
         <table id="roadClimbsTable">
-          <thead><tr><th>#</th><th>Time</th><th>Grade</th><th>VAM</th><th>Avg W</th><th>NP</th><th>Cad</th><th>HR drift</th><th>Fade</th></tr></thead>
+          <thead><tr><th>#</th><th>Time</th><th>Grade</th><th>VAM</th><th>Avg W</th><th>Wtd W</th><th>Cad</th><th>HR drift</th><th>Fade</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -4336,7 +4348,7 @@ function loamSeasonRequested(search, host) {
     </div>
     <div class="panel" style="overflow-x:auto;">
       <table id="roadLapsTable">
-        <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Avg W</th><th>NP</th><th>HR</th><th>Cad</th><th>Ascent</th><th>Balance</th></tr></thead>
+        <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Avg W</th><th>Wtd W</th><th>HR</th><th>Cad</th><th>Ascent</th><th>Balance</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -12372,7 +12384,7 @@ function formInitMap(S) {
           doubleClickZoom: false, scrollWheelZoom: false, touchZoom: false, keyboard: false, tap: false, zoomSnap: 0,
           fadeAnimation: false, inertia: false, zoomAnimation: false });
         try { _formTilesMap.attributionControl.setPrefix(false); } catch (e) {}
-        L.tileLayer(basemapTileUrl(bm), Object.assign({}, bm.opts, { maxNativeZoom: maxNative, maxZoom: maxZ })).addTo(_formTilesMap);
+        basemapLayer(bm, { maxZoom: maxZ, maxNativeZoom: bm.opts.maxNativeZoom || maxNative }).addTo(_formTilesMap);
         try { _formTilesMap.attributionControl.setPrefix(false); } catch (e) {}
         _formTilesMap.setView([centerLat, centerLon], zoom, { animate: false });
         /* Re-centre on wherever the view is by then: a frame may already have followed the rider or a
@@ -29101,7 +29113,7 @@ function paintDeltaMap(el, refLat, refLon, lat, lon, col, soft, cap, mTag, refTa
     const map = L.map(mapDiv, { zoomControl: true, attributionControl: true, zoomAnimation: false });
     _crossDeltaMaps.push(map);
     const bm = (typeof formBasemapDef === 'function') ? formBasemapDef() : BASEMAPS[basemapPref()];
-    if (bm) { L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
+    if (bm) { basemapLayer(bm).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
     const track = [];
     for (let i = 0; i < refLat.length; i++) if (refLat[i] != null && refLon[i] != null) track.push([refLat[i], refLon[i]]);
     if (track.length > 1) {
@@ -29399,26 +29411,26 @@ function renderFitnessDashboard(pmc) {
     const nRides = pmc.filter(p => p.tss > 0).length;
     head.innerHTML =
       `<div style="display:flex; flex-wrap:wrap; gap:24px; align-items:baseline;">
-        <div><div style="font-size:12px; color:var(--text-muted);">FITNESS (CTL)</div><div style="font-size:26px; font-weight:600;">${Math.round(last.ctl)}</div></div>
-        <div><div style="font-size:12px; color:var(--text-muted);">FATIGUE (ATL)</div><div style="font-size:26px; font-weight:600;">${Math.round(last.atl)}</div></div>
-        <div><div style="font-size:12px; color:var(--text-muted);">FORM (TSB)</div><div style="font-size:26px; font-weight:600; color:${tsbColor};">${last.tsb > 0 ? '+' : ''}${Math.round(last.tsb)}</div></div>
+        <div><div style="font-size:12px; color:var(--text-muted);">FITNESS</div><div style="font-size:26px; font-weight:600;">${Math.round(last.ctl)}</div></div>
+        <div><div style="font-size:12px; color:var(--text-muted);">FATIGUE</div><div style="font-size:26px; font-weight:600;">${Math.round(last.atl)}</div></div>
+        <div><div style="font-size:12px; color:var(--text-muted);">FORM</div><div style="font-size:26px; font-weight:600; color:${tsbColor};">${last.tsb > 0 ? '+' : ''}${Math.round(last.tsb)}</div></div>
         <div style="align-self:center; color:var(--text-dim); font-size:13px;">${interp ? '<strong>' + interp.label + '</strong> · ' + interp.note : ''}</div>
       </div>
-      <div style="margin-top:8px; font-size:12px; color:var(--text-muted);">Fitness is a 42-day TSS average, fatigue a 7-day one, form the gap you carry into a ride. From ${nRides} training day${nRides === 1 ? '' : 's'} with power; the more history you save, the truer it gets.</div>`;
+      <div style="margin-top:8px; font-size:12px; color:var(--text-muted);">Fitness is a 42-day training-load average, fatigue a 7-day one, form the gap you carry into a ride. From ${nRides} training day${nRides === 1 ? '' : 's'} with power; the more history you save, the truer it gets.</div>`;
   }
   const x = pmc.map(p => p.date);
   const traces = [
-    { x, y: pmc.map(p => p.ctl), name: 'Fitness (CTL)', type: 'scatter', mode: 'lines', line: { color: '#3d6fb0', width: 2 }, yaxis: 'y' },
-    { x, y: pmc.map(p => p.atl), name: 'Fatigue (ATL)', type: 'scatter', mode: 'lines', line: { color: '#a06cc0', width: 1.5 }, yaxis: 'y' },
-    { x, y: pmc.map(p => p.tsb), name: 'Form (TSB)', type: 'scatter', mode: 'lines', line: { color: '#c98a2b', width: 1.5 }, fill: 'tozeroy', fillcolor: 'rgba(201,138,43,0.10)', yaxis: 'y2' },
+    { x, y: pmc.map(p => p.ctl), name: 'Fitness', type: 'scatter', mode: 'lines', line: { color: '#3d6fb0', width: 2 }, yaxis: 'y' },
+    { x, y: pmc.map(p => p.atl), name: 'Fatigue', type: 'scatter', mode: 'lines', line: { color: '#a06cc0', width: 1.5 }, yaxis: 'y' },
+    { x, y: pmc.map(p => p.tsb), name: 'Form', type: 'scatter', mode: 'lines', line: { color: '#c98a2b', width: 1.5 }, fill: 'tozeroy', fillcolor: 'rgba(201,138,43,0.10)', yaxis: 'y2' },
   ];
   const layout = {
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin: { l: 52, r: 52, t: 30, b: 44 },
     title: { text: 'Fitness, fatigue and form', font: { size: 13, color: '#334155' }, x: 0, xanchor: 'left' },
     xaxis: { type: 'date', gridcolor: '#e2e8f0' },
-    yaxis: { title: { text: 'CTL / ATL', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
-    yaxis2: { title: { text: 'TSB', font: { size: 11, color: '#c98a2b' } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#c98a2b' }, zeroline: true, zerolinecolor: '#cbd5e1' },
+    yaxis: { title: { text: 'Fitness / fatigue', font: { size: 11 } }, gridcolor: '#e2e8f0', rangemode: 'tozero' },
+    yaxis2: { title: { text: 'Form', font: { size: 11, color: '#c98a2b' } }, overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', tickfont: { color: '#c98a2b' }, zeroline: true, zerolinecolor: '#cbd5e1' },
     showlegend: true, legend: { x: 0, y: 1.14, orientation: 'h', font: { size: 10 } }, hovermode: 'x unified',
   };
   loamPlot('fitnessChart', traces, layout, PLOT_CFG);
@@ -35820,9 +35832,11 @@ function drawSwimRouteMap(R) {
   const route = ow.points || [];
   if (route.length < 2) return;
   try {
-    const map = L.map(el, { zoomControl: true, attributionControl: false });
+    /* The credit stays on: every basemap's provider requires it (ip-review-2026-10.md). */
+    const map = L.map(el, { zoomControl: true, attributionControl: true });
     const bm = BASEMAPS[basemapPref()] || BASEMAPS.satellite;
-    L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map);
+    basemapLayer(bm).addTo(map);
+    try { map.attributionControl.setPrefix(false); } catch (e) {}
     const pts = route.map(p => [p.lat, p.lon]);
     /* One polyline per window so each stretch carries its own colour. Windows overlap at their
        endpoints, which is what keeps the line continuous. */
@@ -36717,9 +36731,11 @@ function drawTriMap(D) {
   if (!el || typeof L === 'undefined') return;
   const A = D.analysis, route = D.race.route;
   try {
-    const map = L.map(el, { zoomControl: true, attributionControl: false });
+    /* The credit stays on: every basemap's provider requires it (ip-review-2026-10.md). */
+    const map = L.map(el, { zoomControl: true, attributionControl: true });
     const bm = BASEMAPS[basemapPref()] || BASEMAPS.satellite;
-    L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map);
+    basemapLayer(bm).addTo(map);
+    try { map.attributionControl.setPrefix(false); } catch (e) {}
     const all = [];
     for (const e of LoamTri.raceTimeline(A)) {
       if (e.none) continue;
@@ -37072,6 +37088,7 @@ async function refreshBriskWeek() {
 function renderAllGps(D) {
   _lastRender = { fn: renderAllGps, D };
   hideAllSections();
+  applyPalette(displaySport(D));
   prepareRoadExperience(D);
   document.body.classList.toggle('running-analysis', isRunAnalysis(D));
   if (isRunAnalysis(D)) placeRunUpsellLast();
@@ -37557,7 +37574,7 @@ function openSegmentTrim({ title, name, polyline, clipStart, clipEnd, coreStartI
       map = L.map(mapHost, { zoomControl: true, attributionControl: true });
       _segTrimMap = map;
       const bm = (typeof formBasemapDef === 'function') ? formBasemapDef() : BASEMAPS[basemapPref()];
-      if (bm) { L.tileLayer(basemapTileUrl(bm), bm.opts).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
+      if (bm) { basemapLayer(bm).addTo(map); try { map.attributionControl.setPrefix(false); } catch (e) {} }
       L.polyline(polyline, { color: '#0a0d07', weight: 5, opacity: 0.3 }).addTo(map);
       L.polyline(polyline, { color: '#ffffff', weight: 2, opacity: 0.55 }).addTo(map);
       seg = L.polyline(polyline.slice(i0, i1 + 1), { color: '#e0573a', weight: 4, opacity: 0.95 }).addTo(map);
@@ -38965,6 +38982,7 @@ const LOAM_NB = {
      exactly as written in LOAM_WHATS_NEW, so editing a note there misses its key and fails
      native-notes.contract.test.js until the Norwegian is updated to match. ---- */
   'New': 'Nytt',
+  '© 2026 Eirik Oeyo. All rights reserved.': '© 2026 Eirik Oeyo. Med enerett.',
   'Full history in CHANGELOG.md': 'Hele historikken står i CHANGELOG.md',
   'Power without a power meter': 'Effekt uten wattmåler',
   'a road or mountain bike ride recorded without a power meter now shows estimated power — average and normalized, W/kg, power on climbs, work and time coasting — worked out from your speed, the grade and your weight, with every number marked as an estimate. e-bikes and rides with a real power meter are left alone.': 'en tur på landeveissykkel eller terrengsykkel tatt opp uten wattmåler viser nå beregnet effekt — snitt og normalisert, W/kg, effekt i stigninger, arbeid og tid i frihjul — regnet ut fra farten, stigningen og vekten din, og hvert tall er merket som et estimat. Elsykler og turer med ekte wattmåler blir ikke rørt.',
@@ -39006,7 +39024,7 @@ const LOAM_NB = {
   'Strava athlete dashboard': 'Strava-dashbord for utøveren',
   'totals, trend charts back to 2 years, KOMs, records, a training heatmap, and your Eddington number (iOS Stats tab).': 'totaler, trenddiagrammer to år tilbake, KOM-er, rekorder, et treningsvarmekart og Eddington-tallet ditt (Statistikk-fanen i iOS).',
   'Fitness / fatigue / form': 'Kondisjon / tretthet / form',
-  'the Progress page draws CTL, ATL, and TSB from your saved rides, the classic Performance Management Chart.': 'Utvikling-siden tegner CTL, ATL og TSB fra de lagrede sykkelturene dine, det klassiske Performance Management Chart.',
+  'the Progress page draws fitness, fatigue and form from your saved rides.': 'Utvikling-siden tegner kondisjon, tretthet og form fra de lagrede sykkelturene dine.',
   'Climbs panel for runs and hikes': 'Stigningspanel for løpeturer og fotturer',
   'per-climb gain, grade, VAM, pace and grade-adjusted pace, with cadence and heart-rate fade.': 'høydemeter, stigningsgrad, VAM, tempo og stigningsjustert tempo per stigning, med hvordan kadens og puls faller av.',
   'Lap comparison reads as an assignment': 'Rundesammenligningen leses som en oppgave',
@@ -39647,7 +39665,7 @@ const LOAM_NB = {
   'assumed, set yours below': 'antatt, sett din egen nedenfor',
   'Average power': 'Snitteffekt',
   'while moving': 'i bevegelse',
-  'Normalized power': 'Normalisert effekt',
+  'Weighted power': 'Vektet effekt',
   'weights the hard efforts': 'vekter de harde dragene',
   'at {kg} kg, {who}': 'ved {kg} kg, {who}',
   'On climbs': 'I bakkene',
@@ -40559,6 +40577,7 @@ const LOAM_NB = {
   'not in this session': 'ikke i denne økten',
   'Warnings and the map always stay.': 'Advarsler og kartet vises alltid.',
   'Done': 'Ferdig',
+  'Winter': 'Vinter',
   'Map size, basemap, units and calibration': 'Kartstørrelse, bakgrunnskart, enheter og kalibrering',
   'Back to comparison': 'Tilbake til sammenligningen',
   'Return to the cross-session comparison': 'Gå tilbake til sammenligningen på tvers av økter',
@@ -40779,10 +40798,10 @@ const LOAM_NB = {
     'Største stigning: <strong>{mins} min på {grade} %</strong>, {watts} W (VAM {vam})',
   'Climb {index} started too hot: power faded <strong>{pct}%</strong> from first to last third':
     'Stigning {index} startet for hardt: effekten falt <strong>{pct} %</strong> fra første til siste tredjedel',
-  ' at {if} IF': ' på {if} IF',
+  ' at intensity {if}': ' på intensitet {if}',
   '(surgy: matches burned)': '(rykkete: fyrstikker brent)',
   '(steady pacing)': '(jevn fordeling)',
-  'Ride effort: <strong>NP {np} W</strong>{if} · VI {vi} {read}': 'Innsats på turen: <strong>NP {np} W</strong>{if} · VI {vi} {read}',
+  'Ride effort: <strong>weighted power {np} W</strong>{if} · VI {vi} {read}': 'Innsats på turen: <strong>vektet effekt {np} W</strong>{if} · VI {vi} {read}',
   ', drifting {pts} pts late in the ride (one-sided fatigue?)': ', med {pts} poeng drift sent i turen (ensidig tretthet?)',
   ', held steady all ride': ', stabil hele turen',
   'L/R balance <strong>{left}/{right}</strong>{drift}': 'V/H-balanse <strong>{left}/{right}</strong>{drift}',
@@ -41737,6 +41756,7 @@ const LOAM_NB = {
     'effekt · kadens · puls gjennom det registrerte vinduet',
   'Climbs & balance': 'Stigninger og balanse',
   'Avg W': 'Snitt W',
+  'Wtd W': 'Vektet W',
   'Cad': 'Kad',
   /* The splits table's topo column, reached by the heading's own `data-i18n-key` rather than by its
      text, because the text is "Topo" and that word is already the basemap picker's ("Topografisk").
@@ -41866,10 +41886,8 @@ const LOAM_NB = {
   '{v} avg (moving)': '{v} i snitt (i bevegelse)',
   '{t} elapsed': '{t} totalt',
   '{d} descents · {c} corners': '{d} nedkjøringer · {c} svinger',
-  'Norm. power': 'Norm. effekt',
   '{w} W avg · VI {vi}': '{w} W i snitt · VI {vi}',
   'Intensity': 'Intensitet',
-  '{tss} TSS · FTP {ftp} W': '{tss} TSS · FTP {ftp} W',
   'no FTP in FIT': 'ingen FTP i FIT-filen',
   'Elevation': 'Høyde',
   '{n} climbs': '{n} stigninger',
@@ -43517,7 +43535,7 @@ const LOAM_NB = {
   'from your head unit': 'fra sykkelcomputeren din',
   'estimated from this ride': 'anslått fra denne turen',
   'your setting': 'din innstilling',
-  'set one to unlock zones, IF and TSS': 'sett en for å låse opp soner, IF og TSS',
+  'set one to unlock zones, intensity and training load': 'sett en for å låse opp soner, intensitet og treningsbelastning',
   'this ride estimates {w} W': 'denne turen anslår {w} W',
   'Your numbers:': 'Tallene dine:',
   'set weight for W/kg': 'sett vekt for W/kg',
@@ -44108,6 +44126,7 @@ function localizeStaticChrome() {
   opt('#basemapSel', 'streets', 'Streets');
   opt('#basemapSel', 'satellite', 'Satellite');
   opt('#basemapSel', 'topo', 'Topo');
+  opt('#basemapSel', 'winter', 'Winter');
   selectLabel('#unitsToggle', 'Units');
   opt('#unitsToggle', 'imperial', 'Imperial (mi · mph · ft)');
   opt('#unitsToggle', 'metric', 'Metric (km · km/h · m)');
@@ -48314,13 +48333,9 @@ const COACH_LS_CONSENT = 'loam_coach_consent';
 const COACH_LS_AB = 'loam_coach_ab';
 const COACH_MODELS = [['claude-opus-5', 'Opus 5 — best'], ['claude-sonnet-5', 'Sonnet 5 — faster/cheaper']];
 const COACH_MODEL_DEFAULT = COACH_MODELS[0][0];
-/* Default when the request is billed to the BUNDLED key (the owner's account, injected by the iOS
-   app for testers): Sonnet 5, several times cheaper per token than Opus 5 for a coaching reply the
-   athlete reads once. A tester can still pick Opus in the dropdown, and an athlete on their OWN key
-   keeps the Opus default -- they are paying, and the choice was never the problem. Cost per active
-   tester per month at the previous default was measured in dollars, not cents (pre-release review,
-   2026-08-17), and this is the one lever that changes it without changing the product. */
-const COACH_MODEL_BUNDLED_DEFAULT = 'claude-sonnet-5';
+/* The shared account uses the same Opus default as personal keys: the owner prioritises coaching
+   quality (2026-10-27). coachModel still honours an explicit selection; daily caps are separate. */
+const COACH_MODEL_BUNDLED_DEFAULT = COACH_MODEL_DEFAULT;
 /* Questions per device per DAY on the bundled key. COACH_MAX_TURNS caps one conversation, but it
    resets on every reopen or re-render, so it never bounded what one device could cost the owner in
    a day. Persisted in localStorage per date; an athlete on their own key is not subject to it. */
@@ -49187,9 +49202,9 @@ function roadHighlights(D) {
     }
   }
   if (m.np != null && m.vi != null) {
-    const iff = m.if ? loamT(' at {if} IF', { if: m.if.toFixed(2) }) : '';
+    const iff = m.if ? loamT(' at intensity {if}', { if: m.if.toFixed(2) }) : '';
     const read = loamT(m.vi > 1.15 ? '(surgy: matches burned)' : '(steady pacing)');
-    out.push(loamT('Ride effort: <strong>NP {np} W</strong>{if} · VI {vi} {read}', { np: Math.round(m.np), if: iff, vi: m.vi.toFixed(2), read }));
+    out.push(loamT('Ride effort: <strong>weighted power {np} W</strong>{if} · VI {vi} {read}', { np: Math.round(m.np), if: iff, vi: m.vi.toFixed(2), read }));
   }
   if (D.balance) {
     const drift = D.balanceDrift;
@@ -50342,6 +50357,7 @@ For follow-up questions, answer briefly and conversationally. Always respond dir
   }
   if (sport === 'road') {
     return `You are Loam, a road-cycling coach. This ride may come from a phone, a companion FIT or a head unit. Use the digest's source and available channels; never assume a power meter, heart-rate sensor or cadence sensor.
+Say weighted power, intensity and training load for the digest's normalized_w, intensity_factor and tss. Never write NP, IF, TSS, CTL, ATL, TSB, Normalized Power, Intensity Factor or Training Stress Score: those are another company's trademarks.
 Cite the measured number first, then distinguish an observation from a possible explanation. Focus on climbing, ride volume and measured effort. A climb's average gradient does not describe its steepest pitch. Short rises may contribute to total gain without meeting the climb detector's threshold.
 Power fade, heart-rate drift, variability and left/right balance are descriptive. They do not establish starting too hard, fatigue, injury, bike fit or inefficient cadence. Never infer braking, grip, gaze or confidence from speed or corner geometry. Do not prescribe speed targets or ideal cadence numbers from this ride. Missing data is unknown, not zero. Device totals and derived altitude profiles can differ.
 ${units}
@@ -54191,6 +54207,11 @@ function mtbPageHTML(D, M) {
     </section>` : `<section id="mpBody" class="mp-section" data-optional="1" aria-label="${escapeHtml(loamT('Heart and head'))}"><div id="mpSlotHr" class="mp-slot"></div><div id="mpSlotEstPower" class="mp-slot"></div></section>`;
   return `${mpHeaderHTML(D, M)}
     ${mpHeadlineHTML(D, M)}
+    <section id="mpCoach" class="mp-section" aria-label="${escapeHtml(loamT('Coach'))}">
+      ${mpSectionHead(escapeHtml(loamT('Coach')), escapeHtml(loamT('The number, the mechanism behind it, and what to try next lap. The coach only talks about what the sensors measured.')))}
+      <div id="mpSlotHighlights" class="mp-slot"></div>
+      <div id="mpSlotCoach" class="mp-slot"></div>
+    </section>
     <section id="mpLocation" class="mp-section" aria-label="${escapeHtml(loamT('Map and timeline'))}">
       ${mpSectionHead(escapeHtml(loamT('Where it happened')), escapeHtml(loamT('Tap a descent to focus the map and the timeline on it.')))}
       <div class="mp-map-row">
@@ -54211,11 +54232,6 @@ function mtbPageHTML(D, M) {
     <section id="mpCompare" class="mp-section" data-optional="1" aria-label="${escapeHtml(loamT('Compare'))}">
       ${mpSectionHead(escapeHtml(loamT('Compare')), escapeHtml(loamT('Two runs of the same trail, aligned by position, so the gap shows where it was made. Name a trail to compare it across rides; ride it twice in one session for the play-by-play.')))}
       <div id="mpSlotCompare" class="mp-slot"></div>
-    </section>
-    <section id="mpCoach" class="mp-section" aria-label="${escapeHtml(loamT('Coach'))}">
-      ${mpSectionHead(escapeHtml(loamT('Coach')), escapeHtml(loamT('The number, the mechanism behind it, and what to try next lap. The coach only talks about what the sensors measured.')))}
-      <div id="mpSlotHighlights" class="mp-slot"></div>
-      <div id="mpSlotCoach" class="mp-slot"></div>
     </section>
     ${mpTrustHTML(D, M)}
     <div id="mpSlotGeek" class="mp-slot"></div>`;
@@ -55680,6 +55696,13 @@ function renderRideSignature(D, sport) {
     const terrainLayer = sigTiles.length
       ? `<g clip-path="url(#rsClip)">${terrainImgs}</g><rect x="${boxX}" y="${boxTop}" width="${boxW}" height="${boxH}" fill="#0a0d07" fill-opacity="0.42"/>`
       : '';
+    /* Esri's required credit for World_Topo_Map (its service `copyrightText`), printed on the card
+       whenever its tiles are, because the PNG leaves the app. Two lines at the foot of the panel. */
+    const terrainCredit = sigTiles.length
+      ? `<text x="${boxX + boxW - 6}" text-anchor="end" font-size="8" fill="#d6dccd" fill-opacity="0.8" font-family="'IBM Plex Sans',sans-serif">`
+        + `<tspan y="${boxTop + boxH - 15}">Sources: Esri, HERE, Garmin, Intermap, increment P Corp., GEBCO, USGS, FAO, NPS, NRCAN, GeoBase, IGN,</tspan>`
+        + `<tspan x="${boxX + boxW - 6}" y="${boxTop + boxH - 5}">Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), © OpenStreetMap contributors, and the GIS User Community</tspan></text>`
+      : '';
 
     /* "chrome" is everything above the background: the green halo, glow track, accents, end markers,
        legibility scrims, wordmark, and stats. Shared verbatim by the live preview (over an rsBg rect +
@@ -55693,6 +55716,7 @@ function renderRideSignature(D, sport) {
   <circle cx="${g(X(s1))}" cy="${g(Y(s1))}" r="6.5" fill="#e0573a" stroke="#0a0d07" stroke-width="2"/>
   <rect width="${W}" height="90" fill="url(#rsScrim)"/>
   <rect y="${H-116}" width="${W}" height="116" fill="url(#rsScrimB)"/>
+  ${terrainCredit}
   <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="#e0a458">A</tspan>M</text>
   <text x="38" y="78" font-size="15" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${subtitle}</text>
   <text x="${W-38}" y="50" text-anchor="end" font-size="14" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${loamT('{word} SIGNATURE', { word: rideWord })}</text>
@@ -58249,8 +58273,8 @@ function renderRoadStats(D, sel) {
       ...(s.avgHr > 0 ? [tile('Avg heart rate', Math.round(s.avgHr) + ' bpm')] : []),
       ...(s.avgCadence > 0 ? [tile('Pedaling cadence', Math.round(s.avgCadence) + ' rpm')] : []),
       ...((m.avg ?? s.avgPower) != null ? [tile('Average power', Math.round(m.avg ?? s.avgPower) + ' W')] : []),
-      ...(m.np != null ? [tile('Norm. power', Math.round(m.np) + ' W')] : []),
-      ...(m.if != null ? [tile('Intensity', m.if.toFixed(2) + ' IF'), tile('Training load', Math.round(m.tss) + ' TSS', `FTP ${m.ftp} W`)] : []),
+      ...(m.np != null ? [tile('Weighted power', Math.round(m.np) + ' W')] : []),
+      ...(m.if != null ? [tile('Intensity', m.if.toFixed(2)), tile('Training load', String(Math.round(m.tss)), `FTP ${m.ftp} W`)] : []),
     ];
   }
   const scope = sel ? escapeHtml(sel.label || loamT('Selection')) : escapeHtml(loamT('Whole ride'));
@@ -59137,7 +59161,7 @@ function renderEstimatedPower(D, opts = {}) {
   body.innerHTML = `
     <div class="panel stats-panel est-power-tiles">
       <div class="stat accent"><div class="label">${loamT('Average power')}</div><div class="value">~${w(mid.avgW)}<span class="unit">W</span></div><div class="sub">${range(low.avgW, high.avgW)} · ${loamT('while moving')}</div></div>
-      <div class="stat"><div class="label">${loamT('Normalized power')}</div><div class="value">~${w(mid.npW)}<span class="unit">W</span></div><div class="sub">${loamT('weights the hard efforts')}</div></div>
+      <div class="stat"><div class="label">${loamT('Weighted power')}</div><div class="value">~${w(mid.npW)}<span class="unit">W</span></div><div class="sub">${loamT('weights the hard efforts')}</div></div>
       <div class="stat"><div class="label">W/kg</div><div class="value">~${mid.wPerKg != null ? mid.wPerKg.toFixed(1) : '—'}</div><div class="sub">${loamT('at {kg} kg, {who}', { kg: +setup.riderKg.toFixed(1), who })}</div></div>
       ${mid.climbW != null ? `<div class="stat accent2"><div class="label">${loamT('On climbs')}</div><div class="value">~${w(mid.climbW)}<span class="unit">W</span></div><div class="sub">${loamT('{time} on 4%+ grades · {range}', { time: mins(mid.climbS), range: range(low.climbW, high.climbW) })}</div></div>` : ''}
       <div class="stat"><div class="label">${loamT('Work')}</div><div class="value">~${Math.round(mid.kJ)}<span class="unit">kJ</span></div><div class="sub">${loamT('at the pedals')}</div></div>
@@ -59216,7 +59240,7 @@ function renderRoadRiderControls(D) {
   const a = loamAthlete();
   const m = D.metrics || {};
   const src = m.ftpSource === 'device' ? loamT('from your head unit') : m.ftpSource === 'estimate' ? loamT('estimated from this ride')
-    : m.ftpSource === 'manual' ? loamT('your setting') : loamT('set one to unlock zones, IF and TSS');
+    : m.ftpSource === 'manual' ? loamT('your setting') : loamT('set one to unlock zones, intensity and training load');
   const eftpHint = (m.eftp && m.ftpSource !== 'estimate') ? ' · ' + loamT('this ride estimates {w} W', { w: m.eftp }) : '';
   el.innerHTML =
     `<div style="display:flex; flex-wrap:wrap; gap:14px 18px; align-items:center; font-size:13px; color:var(--text-dim);">
@@ -61469,7 +61493,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '05f55f95f · 2026-10-27';
+const LOAM_BUILD = '629f9bdfc · 2026-10-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
@@ -61514,7 +61538,7 @@ const LOAM_WHATS_NEW = [
     ['Loam on your watch face', 'a complication that opens the watch app with one tap (circular, corner, inline, or rectangular slot).'],
     ['Health vitals + daily readiness', 'HRV, resting HR, and VO2max trends against your own normal band, plus a transparent 0-100 readiness score (iOS Stats tab).'],
     ['Strava athlete dashboard', 'totals, trend charts back to 2 years, KOMs, records, a training heatmap, and your Eddington number (iOS Stats tab).'],
-    ['Fitness / fatigue / form', 'the Progress page draws CTL, ATL, and TSB from your saved rides, the classic Performance Management Chart.'],
+    ['Fitness / fatigue / form', 'the Progress page draws fitness, fatigue and form from your saved rides.'],
     ['Climbs panel for runs and hikes', 'per-climb gain, grade, VAM, pace and grade-adjusted pace, with cadence and heart-rate fade.'],
     ['Lap comparison reads as an assignment', 'the three corners that cost you the most, worst first, with the full turn-by-turn list one tap away; tapping a corner opens it on its segment page, framed on the corner.'],
     ['Mark a run "not a trail"', 'a road transit or the ride home can look like a descent to grade detection; label it once and its corners drop out of the lap comparison and the most-scrubbed picks.'],
@@ -61600,7 +61624,7 @@ function showWhatsNew() {
   const body = document.getElementById('whatsNewBody');
   if (body) body.innerHTML = whatsNewVisibleSections(LOAM_WHATS_NEW, loamHiddenSports()).map(s =>
     `<h4>${escapeHtml(loamT(s.h))}</h4><ul>${s.items.map(([t, d]) => `<li><strong>${escapeHtml(loamT(t))}</strong> — ${escapeHtml(loamT(d))}</li>`).join('')}</ul>`
-  ).join('') + `<div class="wn-foot">${escapeHtml(loamT('Full history in CHANGELOG.md'))}</div>`;
+  ).join('') + `<div class="wn-foot">${escapeHtml(loamT('Full history in CHANGELOG.md'))}<br>${escapeHtml(loamT('© 2026 Eirik Oeyo. All rights reserved.'))}</div>`;
   document.getElementById('whatsNewModal').classList.remove('hidden');
   markWhatsNewSeen();   /* opening it counts as seeing it: clears the dot and records the version */
 }
@@ -61751,7 +61775,8 @@ applyMapHeight();
 localizeStaticChrome();
 
 /* ---------- Configurable basemap (background map detail) ----------
-   Satellite (real Esri World Imagery) is the default: on a trail the terrain context (actual trails,
+   Winter uses pale terrain with OpenSnowMap pistes and a separate preference for snow sports.
+   Satellite (real Esri World Imagery) is the default for other sports: on a trail the terrain context (actual trails,
    trees, features) is worth more than a clean background, and the track's dark casing (drawColoredTrack)
    keeps it readable over imagery (the Form Replay map already defaults to satellite). Minimal
    (clean, label-free) / Streets / Topo remain in the selector. Persisted in localStorage; swapped
@@ -61761,18 +61786,32 @@ localizeStaticChrome();
    Whichever is picked is also published to CSS by markBasemap, because the tile-pane filter that
    makes imagery sit in a dark page does the wrong thing to Topo's coloured linework. */
 let baseTileLayer = null;
+/* Each provider's REQUIRED credit, not a shortening of it (ip-review-2026-10.md). Esri's wording is
+   the service's own `copyrightText` (World_Imagery/MapServer?f=json), so re-read it there if Esri
+   changes its sources. OSM's licence must be reachable from the credit, hence the link; links are
+   safe in the app because AnalyzerWebView opens a tapped http(s) link in Safari. */
+const MAP_LINK = (href, text) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+const OSM_CREDIT = '© ' + MAP_LINK('https://www.openstreetmap.org/copyright', 'OpenStreetMap') + ' contributors';
 const BASEMAPS = {
-  minimal:   { name: 'Minimal',   carto: true, url: 'https://{s}.basemaps.cartocdn.com/rastertiles/light_nolabels/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
-  streets:   { name: 'Streets',   carto: true, url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' } },
-  satellite: { name: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', opts: { maxZoom: 19, attribution: 'Imagery © Esri' } },
-  topo:      { name: 'Topo',      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', opts: { maxZoom: 17, subdomains: 'abc', attribution: '© OpenStreetMap · © OpenTopoMap (CC-BY-SA)' } },
+  winter:    { name: 'Winter', url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', opts: { maxZoom: 20, maxNativeZoom: 17, subdomains: 'abc', className: 'loam-winter-terrain', attribution: 'Map data: ' + OSM_CREDIT + ', SRTM · Map style: © ' + MAP_LINK('https://opentopomap.org', 'OpenTopoMap') + ' (' + MAP_LINK('https://creativecommons.org/licenses/by-sa/3.0/', 'CC-BY-SA') + ')' },
+    pistes: { url: 'https://tiles.opensnowmap.org/pistes/{z}/{x}/{y}.png', opts: { maxZoom: 20, maxNativeZoom: 18, zIndex: 2, attribution: 'Data ' + OSM_CREDIT + ' (ODbL) · © ' + MAP_LINK('https://www.opensnowmap.org', 'www.opensnowmap.org') + ' (' + MAP_LINK('https://creativecommons.org/licenses/by-sa/3.0/', 'CC-BY-SA') + ')' } } },
+  minimal:   { name: 'Minimal',   carto: true, url: 'https://{s}.basemaps.cartocdn.com/rastertiles/light_nolabels/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: OSM_CREDIT + ' · © ' + MAP_LINK('https://carto.com/attributions', 'CARTO') } },
+  streets:   { name: 'Streets',   carto: true, url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', opts: { maxZoom: 20, subdomains: 'abcd', attribution: OSM_CREDIT + ' · © ' + MAP_LINK('https://carto.com/attributions', 'CARTO') } },
+  satellite: { name: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', opts: { maxZoom: 19, attribution: 'Powered by ' + MAP_LINK('https://www.esri.com', 'Esri') + ' · Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community' } },
+  topo:      { name: 'Topo',      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', opts: { maxZoom: 17, subdomains: 'abc', attribution: 'Map data: ' + OSM_CREDIT + ', SRTM · Map style: © ' + MAP_LINK('https://opentopomap.org', 'OpenTopoMap') + ' (' + MAP_LINK('https://creativecommons.org/licenses/by-sa/3.0/', 'CC-BY-SA') + ')' } },
 };
+function basemapStorageKey() {
+  return document.documentElement?.dataset.palette === 'winter' ? 'loam_basemap_winter' : 'loam_basemap';
+}
 function basemapPref() {
-  const v = (typeof localStorage !== 'undefined' && localStorage.getItem('loam_basemap'))
-    || (typeof window !== 'undefined' && window.LOAM_BASEMAP) || 'satellite';
-  if (!BASEMAPS[v]) return 'satellite';
+  const winter = basemapStorageKey() === 'loam_basemap_winter';
+  const fallback = winter ? 'winter' : 'satellite';
+  let saved;
+  try { saved = localStorage.getItem(basemapStorageKey()); } catch (e) {}
+  const v = saved || (winter ? 'winter' : (typeof window !== 'undefined' && window.LOAM_BASEMAP)) || fallback;
+  if (!BASEMAPS[v]) return fallback;
   /* Not rewritten in storage: a later build that carries the key restores the saved choice. */
-  return BASEMAPS[v].carto && !cartoBasemapKey() ? 'satellite' : v;
+  return BASEMAPS[v].carto && !cartoBasemapKey() ? fallback : v;
 }
 function cartoBasemapKey() {
   return (typeof window !== 'undefined' && window.LOAM_CARTO_BASEMAP_API_KEY)
@@ -61797,31 +61836,39 @@ function loamTileUrl(url) {
   if (typeof LOAM_EMBEDDED === 'undefined' || !LOAM_EMBEDDED || !url) return url;
   return 'loam://app/tileproxy/' + url.replace(/^https?:\/\//, '');
 }
+/* All map surfaces share the same terrain + piste composition, including Form Replay. */
+function basemapLayer(b, extra = {}) {
+  markBasemap();
+  const terrain = L.tileLayer(basemapTileUrl(b), { ...b.opts, ...extra });
+  if (!b.pistes) return terrain;
+  const pistes = L.tileLayer(basemapTileUrl(b.pistes), { ...b.pistes.opts, maxZoom: extra.maxZoom || b.pistes.opts.maxZoom });
+  return L.layerGroup([terrain, pistes]);
+}
 /* Which basemap is showing, published to CSS so the tile-pane filter can be per-basemap (see the
    `[data-basemap="topo"]` rule). On the document element rather than on a map container because the
    page holds SEVERAL Leaflet maps (overview, segment, Form Replay, the PR mini maps) that all read
    this one preference, and only the overview map gets its layer swapped live by setBasemap below. */
 function markBasemap() {
   try { document.documentElement.setAttribute('data-basemap', basemapPref()); } catch (e) {}
+  const sel = document.getElementById('basemapSel'); if (sel) sel.value = basemapPref();
 }
 /* Add the selected basemap to a freshly-created Leaflet map, keeping a handle so it can be swapped. */
 function addBasemap(map) {
   const b = BASEMAPS[basemapPref()];
   markBasemap();
-  baseTileLayer = L.tileLayer(basemapTileUrl(b), b.opts).addTo(map);
+  baseTileLayer = basemapLayer(b).addTo(map);
   try { map.attributionControl.setPrefix(false); } catch (e) {}
   return baseTileLayer;
 }
 function setBasemap(v) {
-  try { localStorage.setItem('loam_basemap', v); } catch (e) {}
+  try { localStorage.setItem(basemapStorageKey(), v); } catch (e) {}
   const effective = basemapPref();
   const sel = document.getElementById('basemapSel'); if (sel) sel.value = effective;
   markBasemap();
   if (mapInstance) {
     if (baseTileLayer) { try { mapInstance.removeLayer(baseTileLayer); } catch (e) {} }
     const b = BASEMAPS[effective];
-    baseTileLayer = L.tileLayer(basemapTileUrl(b), b.opts).addTo(mapInstance);
-    baseTileLayer.bringToBack();
+    baseTileLayer = basemapLayer(b).addTo(mapInstance);
   }
 }
 (function initBasemapSel() {
