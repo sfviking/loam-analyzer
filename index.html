@@ -2486,6 +2486,13 @@
   .session-quality { flex-wrap: wrap; }
 }
 
+  #skiNamesSection .panel { padding: 16px; }
+  #skiNamesSection p { font-size: 14px; line-height: 1.5; margin: 0 0 14px; }
+  #skiNamesSection table { width: 100%; }
+  #skiNamesSection button { min-height: 44px; padding: 8px 12px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+  #skiNamesSection a { color: var(--accent); }
+  #skiNamesSection td { white-space: normal; }
+  #skiNamesSection [role=status]:empty { display: none; }
 </style>
 <script>
 /* Theme boot: stamp the persisted choice before first paint. "auto" (absent)
@@ -4210,6 +4217,7 @@ function loamSeasonRequested(search, host) {
        being of little use on a run. Folded rather than deleted or focus-hidden: the heading stays on
        the page as one line, so the reader can see the count and open it, which is what "gjemmes og
        legges et annet sted for de som måtte være spesielt interesserte" asks for. -->
+  <section id="skiNamesSection" class="hidden"></section>
   <section id="runSegmentsSection" class="hidden">
     <details class="fold" data-fold="runsegments" id="runSegmentsFold">
       <summary class="section-title">
@@ -8573,8 +8581,247 @@ function renderRunsPanel(D) {
       drawRuns();
     };
   }
+  renderSkiMapNames(D);
   drawRuns();
   refreshDescentTags(D);
+}
+
+/* ==== Ski map names port ==== */
+const LoamSkiMap = (() => {
+// Map suggestions, not ground truth or segment identities. These tolerances are unvalidated on snow.
+const SKI_MAP_CORRIDOR_M = 35;
+const SKI_MAP_MARGIN_M = 12;
+const SKI_MAP_COVERAGE = 0.7;
+const SKI_MAP_MIN_MATCH_M = 60;
+const SKI_MAP_MIN_ALIGNMENT = 0.5;
+const SKI_MAP_LIFTS = 'cable_car|gondola|mixed_lift|chair_lift|drag_lift|t-bar|j-bar|platter|rope_tow|magic_carpet';
+
+function skiMapPoint(p) {
+  return Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1])
+    && Math.abs(p[0]) <= 85 && Math.abs(p[1]) <= 180;
+}
+
+function skiMapDistance(a, b) {
+  const y = (a[0] - b[0]) * 111320;
+  const x = (a[1] - b[1]) * 111320 * Math.cos((a[0] + b[0]) * Math.PI / 360);
+  return Math.hypot(x, y);
+}
+
+function skiMapRows(rows, start = -Infinity, end = Infinity) {
+  return (rows || []).filter(r => r && Number.isFinite(r.t) && r.t >= start && r.t <= end
+    && skiMapPoint([r.latitude, r.longitude])
+    && !(r.horizontalAccuracy != null && (r.horizontalAccuracy < 0 || r.horizontalAccuracy >= 50)))
+    .slice().sort((a, b) => a.t - b.t);
+}
+
+// Round outward to ~1 km cells: only this area, never the timed track, leaves the device.
+function skiMapBounds(rows) {
+  const pts = skiMapRows(rows);
+  if (pts.length < 2) return null;
+  let s = 90, w = 180, n = -90, e = -180;
+  for (const r of pts) { s = Math.min(s, r.latitude); n = Math.max(n, r.latitude); w = Math.min(w, r.longitude); e = Math.max(e, r.longitude); }
+  const b = [Math.floor(s * 100 - 1) / 100, Math.floor(w * 100 - 1) / 100,
+    Math.ceil(n * 100 + 1) / 100, Math.ceil(e * 100 + 1) / 100];
+  // A resort-sized query only. A drive home or a dateline crossing must not request half a continent.
+  return skiMapPoint(b.slice(0, 2)) && skiMapPoint(b.slice(2))
+    && skiMapDistance([b[0], b[1]], [b[2], b[3]]) <= 30000 ? b : null;
+}
+
+function skiMapQuery(bounds) {
+  if (!Array.isArray(bounds) || bounds.length !== 4 || !skiMapPoint(bounds.slice(0, 2))
+      || !skiMapPoint(bounds.slice(2)) || bounds[0] >= bounds[2] || bounds[1] >= bounds[3]
+      || skiMapDistance(bounds.slice(0, 2), bounds.slice(2)) > 30000) return null;
+  const box = bounds.join(',');
+  return `[out:json][timeout:20];(way["piste:type"="downhill"](${box});relation["route"="piste"]["piste:type"="downhill"](${box});way["aerialway"~"^(${SKI_MAP_LIFTS})$"](${box}););out geom;`;
+}
+
+function skiMapFeatures(data) {
+  const groups = new Map();
+  const liftTypes = new Set(SKI_MAP_LIFTS.split('|'));
+  for (const el of (data && Array.isArray(data.elements) ? data.elements : [])) {
+    if (!el || !['way', 'relation'].includes(el.type) || !Number.isSafeInteger(el.id) || el.id <= 0) continue;
+    const tags = el.tags || {};
+    const kind = liftTypes.has(tags.aerialway) ? 'lift' : tags['piste:type'] === 'downhill' ? 'piste' : null;
+    if (!kind || tags.area === 'yes' || (el.type === 'relation' && tags.route !== 'piste')) continue;
+    const name = (kind === 'piste' ? tags['piste:name'] : null) || tags.name;
+    const ref = (kind === 'piste' ? tags['piste:ref'] : null) || tags.ref;
+    const label = [name, ref && ref !== name ? ref : null].filter(v => typeof v === 'string' && v.trim())
+      .map(v => v.trim()).join(' · ').slice(0, 160);
+    if (!label) continue;
+    const geometries = el.type === 'way' ? [el.geometry] : (el.members || []).filter(m => m.type === 'way').map(m => m.geometry);
+    const paths = [];
+    for (const geometry of geometries) {
+      let path = [];
+      for (const p of Array.isArray(geometry) ? geometry : []) {
+        const point = p && [p.lat, p.lon];
+        if (skiMapPoint(point)) path.push(point);
+        else { if (path.length > 1) paths.push(path); path = []; }
+      }
+      if (path.length > 1) paths.push(path);
+    }
+    if (!paths.length) continue;
+    const key = kind + ':' + label;
+    const existing = groups.get(key);
+    if (existing) existing.paths.push(...paths);
+    else groups.set(key, { kind, label, paths, url: `https://www.openstreetmap.org/${el.type}/${el.id}` });
+  }
+  return [...groups.values()].map(feature => {
+    const bounds = [90, 180, -90, -180];
+    for (const path of feature.paths) for (const p of path) {
+      bounds[0] = Math.min(bounds[0], p[0]); bounds[1] = Math.min(bounds[1], p[1]);
+      bounds[2] = Math.max(bounds[2], p[0]); bounds[3] = Math.max(bounds[3], p[1]);
+    }
+    return { ...feature, bounds };
+  });
+}
+
+function skiMapPathDistance(point, paths, heading) {
+  let best = Infinity;
+  const scaleX = 111320 * Math.cos(point[0] * Math.PI / 180);
+  for (const path of paths) for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1], b = path[i];
+    const ax = (a[1] - point[1]) * scaleX, ay = (a[0] - point[0]) * 111320;
+    const dx = (b[1] - a[1]) * scaleX, dy = (b[0] - a[0]) * 111320;
+    // Crossing a named piste is not following it. OSM way direction itself is arbitrary.
+    if (heading && Math.abs(dx * heading[0] + dy * heading[1])
+        < SKI_MAP_MIN_ALIGNMENT * Math.hypot(dx, dy) * Math.hypot(...heading)) continue;
+    const f = Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy || 1)));
+    best = Math.min(best, Math.hypot(ax + f * dx, ay + f * dy));
+  }
+  return best;
+}
+
+function skiMapMatch(rows, window, features, kind) {
+  const points = skiMapRows(rows, window.tStart, window.tEnd);
+  const candidates = features.filter(f => f.kind === kind);
+  const hits = new Map();
+  let totalM = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1], b = points[i], dt = b.t - a.t;
+    const length = skiMapDistance([a.latitude, a.longitude], [b.latitude, b.longitude]);
+    if (dt <= 0 || length < 1) continue;
+    // Gaps count against coverage but cannot manufacture a match by drawing through a piste.
+    totalM += length;
+    if (dt > 10 || length > 100) continue;
+    const steps = Math.ceil(length / 20);
+    for (let j = 0; j < steps; j++) {
+      const f = (j + 0.5) / steps;
+      const point = [a.latitude + (b.latitude - a.latitude) * f, a.longitude + (b.longitude - a.longitude) * f];
+      const heading = [(b.longitude - a.longitude) * Math.cos(point[0] * Math.PI / 180), b.latitude - a.latitude];
+      const latPad = SKI_MAP_CORRIDOR_M / 111320, lonPad = latPad / Math.cos(point[0] * Math.PI / 180);
+      const ranked = candidates.filter(({ bounds: b }) => point[0] >= b[0] - latPad && point[0] <= b[2] + latPad
+          && point[1] >= b[1] - lonPad && point[1] <= b[3] + lonPad)
+        .map(feature => ({ feature, d: skiMapPathDistance(point, feature.paths, heading) }))
+        .filter(x => x.d <= SKI_MAP_CORRIDOR_M).sort((x, y) => x.d - y.d);
+      if (!ranked.length || (ranked[1] && ranked[1].d - ranked[0].d < SKI_MAP_MARGIN_M)) continue;
+      const feature = ranked[0].feature;
+      const hit = hits.get(feature) || { label: feature.label, url: feature.url, meters: 0, firstT: a.t + dt * f };
+      hit.meters += length / steps;
+      hits.set(feature, hit);
+    }
+  }
+  const names = [...hits.values()].filter(h => h.meters >= SKI_MAP_MIN_MATCH_M).sort((a, b) => a.firstT - b.firstT);
+  const coverage = totalM > 0 ? names.reduce((sum, h) => sum + h.meters, 0) / totalM : 0;
+  return { names: coverage >= SKI_MAP_COVERAGE ? names : [], coverage, distanceM: totalM };
+}
+
+return { SKI_MAP_CORRIDOR_M, SKI_MAP_MARGIN_M, SKI_MAP_COVERAGE, SKI_MAP_MIN_MATCH_M, SKI_MAP_MIN_ALIGNMENT, SKI_MAP_LIFTS, skiMapPoint, skiMapDistance, skiMapRows, skiMapBounds, skiMapQuery, skiMapFeatures, skiMapPathDistance, skiMapMatch };
+})();
+/* ==== End ski map names port ==== */
+
+const skiMapStates = new WeakMap();
+const SKI_MAP_CACHE_KEY = 'loam_ski_map_v1';
+
+function skiMapState(D) {
+  if (!skiMapStates.has(D)) {
+    const rows = LoamSkiMap.skiMapRows(D.sensors?.location, D.ride?.start, D.ride?.end);
+    const bounds = LoamSkiMap.skiMapBounds(rows);
+    const state = { rows, bounds, features: null, matches: new Map(), pending: false, error: false };
+    try {
+      const cached = JSON.parse(localStorage.getItem(SKI_MAP_CACHE_KEY) || 'null');
+      if (bounds && cached && Date.now() - cached.at < 7 * 86400000 && cached.at <= Date.now()
+          && LoamSkiMap.skiMapQuery(cached.bounds)
+          && bounds[0] >= cached.bounds[0] && bounds[1] >= cached.bounds[1]
+          && bounds[2] <= cached.bounds[2] && bounds[3] <= cached.bounds[3]) {
+        state.features = LoamSkiMap.skiMapFeatures(cached.data);
+      }
+    } catch (_) { /* A missing cache must not prevent a fresh lookup. */ }
+    skiMapStates.set(D, state);
+  }
+  return skiMapStates.get(D);
+}
+
+function skiMapNamesFor(D, win, kind = 'piste') {
+  if (!D || !isSkiSport(displaySport(D))) return [];
+  const state = skiMapState(D);
+  if (!state.features) return [];
+  const key = `${kind}:${win.tStart}:${win.tEnd}`;
+  if (!state.matches.has(key)) state.matches.set(key, LoamSkiMap.skiMapMatch(state.rows, win, state.features, kind).names);
+  return state.matches.get(key);
+}
+
+async function lookupSkiMapNames(D) {
+  const state = skiMapState(D);
+  const query = LoamSkiMap.skiMapQuery(state.bounds);
+  if (!query || state.pending) return;
+  state.pending = true; state.error = false;
+  renderSkiMapNames(D);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  try {
+    const response = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST', body: new URLSearchParams({ data: query }),
+      credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
+    });
+    if (!response.ok) throw new Error('Map lookup failed');
+    const raw = await response.text();
+    if (raw.length > 4000000) throw new Error('Map area too large');
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.elements) || data.remark) throw new Error('Incomplete map response');
+    state.features = LoamSkiMap.skiMapFeatures(data);
+    state.matches.clear();
+    // Cache source geometry, never a verdict: matching is re-derived for old recordings too.
+    try { if (raw.length < 2000000) localStorage.setItem(SKI_MAP_CACHE_KEY, JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
+  } catch (_) { state.error = true; }
+  finally { clearTimeout(timeout); state.pending = false; }
+  if (_lastRender?.D !== D || _runsD !== D) return;
+  renderSkiMapNames(D); drawRuns();
+}
+
+function renderSkiMapNames(D) {
+  const sec = document.getElementById('skiNamesSection');
+  if (!sec) return;
+  if (!isSkiSport(displaySport(D))) { sec.classList.add('hidden'); return; }
+  document.getElementById('runsSection')?.insertAdjacentElement('afterend', sec);
+  const state = skiMapState(D);
+  const T = loamT, E = escapeHtml;
+  const runs = segmentRuns(D, 'auto').runs;
+  const lifts = (D.gradeSegments || D.segments || []).filter(s => s.kind === 'lift');
+  const items = [...runs.map((win, i) => ({ win, kind: 'piste', title: T('Run {n}', { n: i + 1 }) })),
+    ...lifts.map((win, i) => ({ win, kind: 'lift', title: T('Lift {n}', { n: i + 1 }) }))]
+    .sort((a, b) => a.win.tStart - b.win.tStart);
+  sec.classList.remove('hidden');
+  sec.innerHTML = `<div class="section-title">${T('Piste & lift names')}</div><div class="panel">
+    <p class="visual-keep">${T('Map suggestions from OpenStreetMap. Nearby or overlapping routes may remain unnamed. Your own names stay unchanged.')}</p>
+    ${state.features ? `<div style="overflow-x:auto"><table><thead><tr><th>${T('Segment')}</th><th>${T('Map name')}</th></tr></thead><tbody>${items.map((item, i) => {
+      const names = skiMapNamesFor(D, item.win, item.kind);
+      return `<tr><td><button type="button" data-ski-map-row="${i}" style="min-height:44px">${E(item.title)}</button></td><td style="white-space:normal;overflow-wrap:anywhere">${names.length
+        ? names.map(n => `<a href="${E(n.url)}" target="_blank" rel="noopener noreferrer">${E(n.label)}</a>`).join(' → ')
+        : T('No clear map match')}</td></tr>`;
+    }).join('')}</tbody></table></div><p class="visual-keep">${T('Names follow the matched sections of your track; they do not prove you skied an entire piste.')}</p>` : ''}
+    ${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive before looking up a resort.')}</p>`
+      : !state.features ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : 'Find piste & lift names')}</button>
+        <p class="dim visual-keep">${T('Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
+    <p class="visual-keep" role="status">${state.error ? T('Names could not be downloaded. Check your connection and try again.') : ''}</p>
+    <small>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>
+  </div>`;
+  sec.querySelector('#skiNamesLookup')?.addEventListener('click', () => lookupSkiMapNames(D));
+  sec.querySelectorAll('[data-ski-map-row]').forEach(button => button.addEventListener('click', () => {
+    const item = items[Number(button.dataset.skiMapRow)];
+    const names = skiMapNamesFor(D, item.win, item.kind);
+    focusRunSegment(item.win, names.map(n => n.label).join(' → ') || item.title, false);
+    document.getElementById('map')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }));
 }
 
 /* The track fit for this recording, computed once: it walks every GPS fix, and drawRuns asks per
@@ -9170,6 +9417,8 @@ function drawRuns() {
   document.querySelector('#runsTable tbody').innerHTML = runs.map((r, index) => {
     const m = r.metrics;
     const label = runDisplayLabel(r);
+    const mapNames = skiMapNamesFor(D, r);
+    const mapNameBadge = mapNames.length ? ` <small class="ski-map-name" style="display:block;font-weight:400;color:var(--text-muted)">${escapeHtml(loamT('Map: {name}', { name: mapNames.map(n => n.label).join(' → ') }))}</small>` : '';
     /* Library actions per run, when it is backed by a descent: tag/retag and compare past laps,
        folded in from the retired Descents section. A matched run's label already comes from its
        autoTag, so only show the badge when it adds a name the label does not (e.g. a custom
@@ -9233,7 +9482,7 @@ function drawRuns() {
     /* The run-title wrapper keeps long names clear of the phone editing controls;
        data-l supplies the metric labels when the table reflows into cards. */
     return `<tr data-idx="${r.n - 1}" class="${opensSeg ? 'opens-detail' : ''}" style="cursor:pointer;">
-      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}><span class="run-title">${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}</span>${opensSeg ? `<span class="run-open" title="${footSport ? loamT('Open this row') : loamT('Open this run\'s corners')}" aria-hidden="true">›</span>` : ''}</td>
+      <td class="run-num">${r.n}</td><td class="run-name" data-n="${r.n}" style="text-align:left;"${skipped ? ' data-skipped="1"' : ''}><span class="run-title">${escapeHtml(label)}${badge}${impliedBadge}${skipBadge}${mapNameBadge}</span>${opensSeg ? `<span class="run-open" title="${footSport ? loamT('Open this row') : loamT('Open this run\'s corners')}" aria-hidden="true">›</span>` : ''}</td>
       <td data-l="Time" data-s="${timeShort}" ${mode !== 'intervals' && m.duration === bestTime ? hi : ''}>${fmtDuration(m.duration)}</td>
       <td data-l="Dist" data-s="${distShort}">${trackDists[index]
         ? `${trackDists[index].snapped ? trackDists[index].snapped + ' m' : U.dist(trackDists[index].meters)} <span style="color:var(--text-muted); font-size:10px;">${loamT('(track · GPS {dist})', { dist: U.dist(m.distance) })}</span>`
@@ -11873,11 +12122,14 @@ function formSelectJump(D, J) {
   _form = { D, S, jump: J, tau: 0, dur, mult: +document.getElementById('formSpeedSel').value || 0.5, playing: false, raf: null, lastTs: null };
   formSetupComparison(D, null);
   document.getElementById('formLimits').innerHTML = formLeanReplayable(D) ? ''
-    : `<div>${escapeHtml(loamT('Turn and segment replays are off for this ride: the phone moved in its mount, so lean cannot be read. Jumps still replay.'))}</div>`;
+    : `<div class="analysis-explanation">${escapeHtml(loamT('Turn and segment replays are off for this ride: the phone moved in its mount, so lean cannot be read. Jumps still replay.'))}</div>`;
   formCoachSync(D, null, null);
   /* `J.source` is written by the drift-pinned LoamReplay, so it is translated here where it is drawn. */
-  document.getElementById('formNote').textContent = loamT(J.source) + '. ' + loamT('Flight height, bike pitch, and body pose are schematic, not measured. Landing impact is measured at the sensor, not at the wheels.')
-    + (J.fitHang != null && J.timingMeasured ? ' ' + loamT('FIT hang: {hang} s; the replay clock uses the local phone freefall.', { hang: loamNum(J.fitHang, 2) }) : '');
+  /* Simple keeps the source label; the schematic disclaimer and the clock note are Detailed prose
+     (the trust section already carries the phone-moved withholding). */
+  document.getElementById('formNote').innerHTML = escapeHtml(loamT(J.source) + '.')
+    + ` <span class="analysis-explanation">${escapeHtml(loamT('Flight height, bike pitch, and body pose are schematic, not measured. Landing impact is measured at the sensor, not at the wheels.')
+    + (J.fitHang != null && J.timingMeasured ? ' ' + loamT('FIT hang: {hang} s; the replay clock uses the local phone freefall.', { hang: loamNum(J.fitHang, 2) }) : ''))}</span>`;
   formInitMap(S); formSetPlaying(false); formFrame();
   if (replacing) formCrossfade();
 }
@@ -18077,6 +18329,11 @@ function analyzeStrength(sensors, ride, opts = {}) {
       reps: repTimes.length,
       repTimes,
       repSource: useWrist ? 'wrist' : 'phone',
+      /* Whether the watch streamed through this set at all. 'phone' alone only says the wrist counter
+         found no reps, which is not the same as no watch: an overhead press tapped Other on the
+         2026-10-22 session had a 49.8 Hz wrist stream and was still described as "NO Apple Watch
+         wrist motion" (see liftRepSourceNote). */
+      wristRecorded: !!wristRes,
       tempoS: periods.length ? +median(periods).toFixed(2) : null,
       romMeters: useWrist ? wristRes.romMeters : null,   // bar ROM (depth) in m, wrist only
       repDepthsM: useWrist ? (wristRes.perRep || []).map(r => r.romMeters) : [],   // per-rep bar ROM, wrist only
@@ -29518,6 +29775,15 @@ function runProgressWindowStart(dated) {
 }
 function setProgRunAllTime(on) { _progRunAllTime = !!on; renderProgress(); }
 
+/* The rows Progress left out as not on foot. Shared with the empty state, so a library whose every
+   "run" was a drive still says why the charts are empty rather than that nothing is saved. */
+function runOffFootNoteHtml(notOnFoot) {
+  if (!notOnFoot.length) return '';
+  const day = (d) => d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  const shownOff = notOnFoot.slice(0, 4).map(r => `${day(new Date(sessionRecordedDate(r)))} (${U.pace(r.summary.movingSpeed > 0 ? r.summary.movingSpeed : r.summary.avgSpeed)})`);
+  return `<p class="dim" id="progRunOffFoot" style="font-size:12px">${escapeHtml(loamT('Left out as not on foot, faster than the mile world record ({pace}): {list}.', { pace: U.pace(RUN_SESSION_MAX_MPS), list: shownOff.join('; ') + (notOnFoot.length > 4 ? `; +${notOnFoot.length - 4}` : '') }))}</p>`;
+}
+
 function renderRunningProgress(rides, dated, notOnFoot = []) {
   /* Backfill reads the whole library, not the window: a run off the left edge is still worth
      re-saving with its pace. */
@@ -29535,10 +29801,7 @@ function renderRunningProgress(rides, dated, notOnFoot = []) {
     ? `<div class="prog-chart-mode" id="progRunScope"><span class="chart-mode-toggle" role="group" aria-label="${escapeHtml(loamT('Date range'))}">${scopeBtn(false, loamT('Since {date}', { date: day(since) }))}${scopeBtn(true, loamT('All runs'))}</span></div>`
       + (earlier.length ? `<p class="dim" id="progRunScopeNote" style="font-size:12px">${escapeHtml(loamT('Charts start after more than a year without a run. Earlier runs: {n}, the last on {date}.', { n: earlier.length, date: day(earlier[earlier.length - 1].d) }))}</p>` : '')
     : '';
-  const shownOff = notOnFoot.slice(0, 4).map(r => `${day(new Date(sessionRecordedDate(r)))} (${U.pace(r.summary.movingSpeed > 0 ? r.summary.movingSpeed : r.summary.avgSpeed)})`);
-  const offFoot = notOnFoot.length
-    ? `<p class="dim" id="progRunOffFoot" style="font-size:12px">${escapeHtml(loamT('Left out as not on foot, faster than the mile world record ({pace}): {list}.', { pace: U.pace(RUN_SESSION_MAX_MPS), list: shownOff.join('; ') + (notOnFoot.length > 4 ? `; +${notOnFoot.length - 4}` : '') }))}</p>`
-    : '';
+  const offFoot = runOffFootNoteHtml(notOnFoot);
   host.innerHTML = `<p class="dim">${loamT('Runs saved on this device. Pace varies with route, conditions and workout intent; this is not a fitness score.')}</p>
     ${scope}${offFoot}
     <div class="chart" id="progRunWeeks" style="height:280px"></div>
@@ -29648,8 +29911,8 @@ async function renderProgress() {
   await renderTrainingPlan(rides);
   if (!dated.length) {
     sub.textContent = '';
-    headline.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">${escapeHtml(loamT('No sessions saved yet. Analyze one and it starts building your progress here.'))}</p>`;
-    chartsHost.innerHTML = '';
+    headline.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">${escapeHtml(notOnFoot.length ? loamT('No runs on foot saved yet.') : loamT('No sessions saved yet. Analyze one and it starts building your progress here.'))}</p>`;
+    chartsHost.innerHTML = runOffFootNoteHtml(notOnFoot);
     renderProgressReadiness(rides);
     renderProgressTrails(trailSports);
     return;
@@ -30371,7 +30634,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','skiNamesSection','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -31119,14 +31382,23 @@ function liftRepSourceNote(sets, t) {
     if (vars) for (const k of Object.keys(vars)) out = out.split('{' + k + '}').join(String(vars[k]));
     return out;
   });
-  const nums = (src) => list.map((s, i) => (s.repSource || 'wrist') === src ? i + 1 : null).filter(n => n != null);
-  const phone = nums('phone'), manual = nums('manual');
-  if (!phone.length && !manual.length) return null;
+  /* A phone set is one of two different facts: the watch never streamed (its channels are absent), or
+     it streamed and the wrist counter found no reps (its channels are there but did not register the
+     lift). `wristRecorded` says which; a set cached before that field existed reads it off the bar
+     speed, which is only ever available when wrist samples were. */
+  const wristOn = (s) => s.wristRecorded != null ? !!s.wristRecorded : !!(s.barSpeed && s.barSpeed.available);
+  const nums = (src, keep) => list.map((s, i) => (s.repSource || 'wrist') === src && (!keep || keep(s)) ? i + 1 : null).filter(n => n != null);
+  const phone = nums('phone', s => !wristOn(s)), silent = nums('phone', wristOn), manual = nums('manual');
+  if (!phone.length && !silent.length && !manual.length) return null;
   const parts = [];
   if (phone.length) parts.push(say(phone.length === 1
     ? 'Set {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on that set it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.'
     : 'Sets {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on those sets it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.',
     { sets: phone.join(', ') }));
+  if (silent.length) parts.push(say(silent.length === 1
+    ? 'Set {sets} was counted from PHONE POCKET TILT, a coarser instrument: the Apple Watch was recording, but its rep counter found no reps in that set\'s wrist motion. So it carries no bar ROM (depth) and no eccentric/concentric split, and any bar speed shown is a rough estimate over the phone\'s rep times. Where those read null it is because the wrist counter did not register the lift, NOT because the lift was shallow or slow -- never read a null there as a fault.'
+    : 'Sets {sets} were counted from PHONE POCKET TILT, a coarser instrument: the Apple Watch was recording, but its rep counter found no reps in those sets\' wrist motion. So they carry no bar ROM (depth) and no eccentric/concentric split, and any bar speed shown is a rough estimate over the phone\'s rep times. Where those read null it is because the wrist counter did not register the lift, NOT because the lift was shallow or slow -- never read a null there as a fault.',
+    { sets: silent.join(', ') }));
   if (manual.length) parts.push(say(manual.length === 1
     ? 'Set {sets} carries a rep count the LIFTER typed in to correct the counter. Treat it as authoritative and never describe it as something the watch measured.'
     : 'Sets {sets} carry a rep count the LIFTER typed in to correct the counter. Treat those as authoritative and never describe them as something the watch measured.',
@@ -36710,11 +36982,16 @@ function drawTriSpeed(D) {
   const A = D.analysis, route = D.race.route;
   const speed = LoamTri.raceChartSpeed(route, A);
   const stride = Math.max(1, Math.ceil(route.length / 3000));
-  const x = [], y = [];
+  /* Heart rate rides on its own axis when the file carries it: the per-leg table gives one number a
+     leg, and what the athlete looks for is WHERE it moved -- the climb out of T1, the first minutes
+     of the run. Drawn as the watch recorded it, gaps left as gaps; nothing is derived from it here. */
+  const hasHr = A.hasHr;
+  const x = [], y = [], hr = [];
   for (let i = 0; i < route.length; i += stride) {
     if (route[i].t < A.raceStart || route[i].t > A.raceEnd) continue;
     x.push(+((route[i].t - A.raceStart) / 60).toFixed(2));
     y.push(+U.speedNum(speed[i]).toFixed(2));
+    if (hasHr) hr.push(route[i].hr != null ? Math.round(route[i].hr) : null);
   }
   const shapes = LoamTri.raceTimeline(A).filter(e => !e.none).map(e => ({
     type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1,
@@ -36722,11 +36999,17 @@ function drawTriSpeed(D) {
     fillcolor: e.kind === 'leg' ? TRI_COLORS[e.sport] : TRI_COLORS.transition,
     opacity: e.kind === 'leg' ? 0.12 : 0.35, line: { width: 0 }, layer: 'below',
   }));
-  loamPlot(el, [{ x, y, type: 'scatter', mode: 'lines', line: { color: '#5b6270', width: 1.5 },
-    hovertemplate: `%{x:.1f} min<br>%{y:.1f} ${U.speedUnit()}<extra></extra>` }], {
-    margin: { l: 54, r: 12, t: 8, b: 42 },
+  const traces = [{ x, y, type: 'scatter', mode: 'lines', line: { color: '#5b6270', width: 1.5 },
+    hovertemplate: `%{x:.1f} min<br>%{y:.1f} ${U.speedUnit()}<extra></extra>` }];
+  if (hasHr) traces.push({ x, y: hr, yaxis: 'y2', type: 'scatter', mode: 'lines', connectgaps: false,
+    line: { color: '#c14e2e', width: 1.2 }, opacity: 0.8,
+    hovertemplate: `%{x:.1f} min<br>%{y} bpm<extra></extra>` });
+  loamPlot(el, traces, {
+    margin: { l: 54, r: hasHr ? 48 : 12, t: 8, b: 42 },
     xaxis: { title: loamT('minutes'), fixedrange: true },
     yaxis: { title: U.speedUnit(), fixedrange: true, rangemode: 'tozero' },
+    ...(hasHr ? { yaxis2: { title: { text: 'bpm', font: { color: '#c14e2e' } }, overlaying: 'y', side: 'right',
+      fixedrange: true, showgrid: false, tickfont: { color: '#c14e2e' } } } : {}),
     shapes, showlegend: false,
   }, { displayModeBar: false, responsive: true });
 }
@@ -37401,7 +37684,7 @@ function renderGpsStats(s, sport, segments, D) {
       <div class="value">${s.nDownhills}</div>
       <div class="sub">${s.maxDescentDrop ? loamT('biggest {v} drop', { v: U.elev(s.maxDescentDrop) }) : loamT('sustained grade')}${s.vamPedaled ? ' · ' + loamT('VAM {v} m/h', { v: Math.round(s.vamPedaled) }) : ''}</div>
     </div>
-    ${steepestInclineTile(segments, foot)}
+    ${steepestInclineTile(segments, foot, foot ? null : STEEPEST_PITCH_FLOOR)}
     ${steepestDescentTile(segments, foot, foot ? null : STEEPEST_PITCH_FLOOR)}
   `;
 }
@@ -39483,6 +39766,18 @@ const LOAM_NB = {
   'On foot (all)': 'Til fots (alle)',
   'E-mountain biking': 'El-terrengsykling',
   'Gravel cycling': 'Grussykling',
+  'Piste & lift names': 'Navn på løyper og heiser',
+  'Map suggestions from OpenStreetMap. Nearby or overlapping routes may remain unnamed. Your own names stay unchanged.': 'Navneforslag fra OpenStreetMap. Nærliggende eller overlappende traséer kan forbli uten navn. Dine egne navn beholdes.',
+  'Lift {n}': 'Heis {n}',
+  'Map name': 'Kartnavn',
+  'No clear map match': 'Ingen entydig karttreff',
+  'Names follow the matched sections of your track; they do not prove you skied an entire piste.': 'Navnene gjelder delene av sporet som samsvarer med kartet; de viser ikke at du kjørte hele løypa.',
+  'A compact outdoor GPS track is needed to find names. Trim any drive before looking up a resort.': 'Et avgrenset utendørs GPS-spor trengs for å finne navn. Klipp bort eventuell bilkjøring før du søker etter et anlegg.',
+  'Finding names…': 'Finner navn…',
+  'Find piste & lift names': 'Finn navn på løyper og heiser',
+  'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.': 'Laster ned navn for et avrundet kartområde fra Overpass. GPS-sporet og tidspunktene forblir på denne enheten.',
+  'Names could not be downloaded. Check your connection and try again.': 'Kunne ikke laste ned navn. Sjekk forbindelsen og prøv igjen.',
+  'Map: {name}': 'Kart: {name}',
   'Alpine skiing': 'Alpint',
   'Monday': 'Mandag',
   'Tuesday': 'Tirsdag',
@@ -40022,6 +40317,10 @@ const LOAM_NB = {
     'Sett {sets} hadde INGEN håndleddsbevegelse fra Apple Watch: de repetisjonene og det tempoet ble talt fra HVORDAN TELEFONEN VIPPET I LOMMEN, et grovere instrument, og de bærer verken stangens bevegelsesutslag (dybde), noen fordeling mellom ned og opp eller stangfart i det hele tatt. Der de står tomme for det settet, er det fordi kanalen aldri ble registrert, IKKE fordi løftet var grunt eller tregt -- les aldri en tom verdi der som en feil.',
   'Sets {sets} had NO Apple Watch wrist motion: those reps and tempo were counted from PHONE POCKET TILT, a coarser instrument, and they carry no bar ROM (depth), no eccentric/concentric split and no bar speed at all. Where those read null on those sets it is because the channel was never recorded, NOT because the lift was shallow or slow -- never read a null there as a fault.':
     'Sett {sets} hadde INGEN håndleddsbevegelse fra Apple Watch: de repetisjonene og det tempoet ble talt fra HVORDAN TELEFONEN VIPPET I LOMMEN, et grovere instrument, og de bærer verken stangens bevegelsesutslag (dybde), noen fordeling mellom ned og opp eller stangfart i det hele tatt. Der de står tomme for de settene, er det fordi kanalen aldri ble registrert, IKKE fordi løftet var grunt eller tregt -- les aldri en tom verdi der som en feil.',
+  'Set {sets} was counted from PHONE POCKET TILT, a coarser instrument: the Apple Watch was recording, but its rep counter found no reps in that set\'s wrist motion. So it carries no bar ROM (depth) and no eccentric/concentric split, and any bar speed shown is a rough estimate over the phone\'s rep times. Where those read null it is because the wrist counter did not register the lift, NOT because the lift was shallow or slow -- never read a null there as a fault.':
+    'Sett {sets} ble talt fra HVORDAN TELEFONEN VIPPET I LOMMEN, et grovere instrument: Apple Watch tok opp, men repetisjonstelleren fant ingen repetisjoner i håndleddsbevegelsen i det settet. Derfor bærer det verken stangens bevegelsesutslag (dybde) eller noen fordeling mellom ned og opp, og stangfarten som eventuelt vises er et grovt anslag over telefonens repetisjonstider. Der de står tomme, er det fordi håndleddstelleren ikke fanget opp løftet, IKKE fordi løftet var grunt eller tregt -- les aldri en tom verdi der som en feil.',
+  'Sets {sets} were counted from PHONE POCKET TILT, a coarser instrument: the Apple Watch was recording, but its rep counter found no reps in those sets\' wrist motion. So they carry no bar ROM (depth) and no eccentric/concentric split, and any bar speed shown is a rough estimate over the phone\'s rep times. Where those read null it is because the wrist counter did not register the lift, NOT because the lift was shallow or slow -- never read a null there as a fault.':
+    'Sett {sets} ble talt fra HVORDAN TELEFONEN VIPPET I LOMMEN, et grovere instrument: Apple Watch tok opp, men repetisjonstelleren fant ingen repetisjoner i håndleddsbevegelsen i de settene. Derfor bærer de verken stangens bevegelsesutslag (dybde) eller noen fordeling mellom ned og opp, og stangfarten som eventuelt vises er et grovt anslag over telefonens repetisjonstider. Der de står tomme, er det fordi håndleddstelleren ikke fanget opp løftet, IKKE fordi løftet var grunt eller tregt -- les aldri en tom verdi der som en feil.',
   'Set {sets} carries a rep count the LIFTER typed in to correct the counter. Treat it as authoritative and never describe it as something the watch measured.':
     'Sett {sets} har et repetisjonstall som LØFTEREN skrev inn for å rette telleren. Behandle det som fasit, og beskriv det aldri som noe klokken målte.',
   'Sets {sets} carry a rep count the LIFTER typed in to correct the counter. Treat those as authoritative and never describe them as something the watch measured.':
@@ -41884,6 +42183,7 @@ const LOAM_NB = {
   'backstroke': 'ryggcrawl',
   'breaststroke': 'brystsvømming',
   'butterfly': 'butterfly',
+  'kickboard': 'flytebrett',
   /* ---- The Range (golf) view's masthead, sensor row and hero. */
   /* The generic GPS-only sport has no name of its own in the map above, so it falls through to the
      lexicon's activity word; `Ride` is what a bare head-unit file lands on. */
@@ -43575,6 +43875,10 @@ const LOAM_NB = {
   'corner {n}': 'sving {n}',
   'left {deg}°': 'venstre {deg}°',
   'right {deg}°': 'høyre {deg}°',
+  'radius {v}': 'radius {v}',
+  'entry {v}': 'inngang {v}',
+  'apex {v}': 'apex {v}',
+  'exit {v}': 'utgang {v}',
   'hairpin': 'hårnål',
   'medium': 'middels',
   'lap {g}&middot;{n}': 'runde {g}&middot;{n}',
@@ -43913,6 +44217,7 @@ const LOAM_NB = {
   'Since {date}': 'Siden {date}',
   'All runs': 'Alle løpeturer',
   'Charts start after more than a year without a run. Earlier runs: {n}, the last on {date}.': 'Diagrammene starter etter mer enn et år uten løpeturer. Tidligere løpeturer: {n}, den siste {date}.',
+  'No runs on foot saved yet.': 'Ingen løpeturer til fots er lagret ennå.',
   'Left out as not on foot, faster than the mile world record ({pace}): {list}.': 'Utelatt fordi de ikke var til fots, raskere enn verdensrekorden på en engelsk mil ({pace}): {list}.',
   'Moving pace for {n} of {total} runs. Runs saved before pace was stored appear once reopened.': 'Tempo i bevegelse for {n} av {total} løpeturer. Løpeturer lagret før tempoet ble lagret, vises når du åpner dem igjen.',
   'Heart rate for {n} of {total} runs: older runs appear once reopened, and runs recorded without heart rate never do.': 'Puls for {n} av {total} løpeturer: eldre løpeturer vises når du åpner dem igjen, og løpeturer tatt opp uten puls vises aldri.',
@@ -44915,7 +45220,7 @@ function renderGeekStats(D, sport) {
    two speed names (`speedAvg` and `avgSpeed`); normalize those here so the headline means the same
    thing for a phone run, a GPS-only ride, and a road FIT.
    `floor` ({ minDistance, minSpeed }, optional) drops segments too short or too slow to read a pitch
-   from -- see STEEPEST_PITCH_FLOOR for the one caller that passes it. */
+   from -- see STEEPEST_PITCH_FLOOR for the caller that passes it (the incline tile takes the same). */
 function steepestDescentStat(segments, floor) {
   let best = null;
   for (const s of (segments || [])) {
@@ -44947,7 +45252,10 @@ function steepestDescentStat(segments, floor) {
      pushed (FAST_WALK_MPS is 1.8). At it, a 20 s window spans 40 m, so the same 2 m is 5 points.
    - minDistance 100 m: the shortest section the climb profile offers, and two and a half windows of
      ground at the speed floor, so no single window is the whole segment.
-   Not applied to foot activities: a hiker's steepest descent IS at walking pace. */
+   Not applied to foot activities: a hiker's steepest descent IS at walking pace.
+   The incline tile on the same path takes the same floor, for the same arithmetic run uphill: over
+   23 real FIT rides in the owner's library (2026-10-20) it headlined a segment under 25 m at walking
+   pace or slower on 13 of them, the worst "+50.8%" over 8 m at 0.05 m/s -- a parked GPS. */
 const STEEPEST_PITCH_FLOOR = { minDistance: 100, minSpeed: 2.0 };
 function steepestDescentTile(segments, pace, floor) {
   const d = steepestDescentStat(segments, floor);
@@ -44963,7 +45271,7 @@ function steepestDescentTile(segments, pace, floor) {
 
 /* Uphill companion to steepestDescentStat. Positive grades win in the opposite direction; ties use
    the longer segment for the same stable and more-useful read. */
-function steepestInclineStat(segments) {
+function steepestInclineStat(segments, floor) {
   let best = null;
   for (const s of (segments || [])) {
     if (!s || (s.dir != null && s.dir !== 'up') || s.kind === 'lift') continue;
@@ -44975,6 +45283,7 @@ function steepestInclineStat(segments) {
     const avgSpeed = Number.isFinite(s.speedAvg) ? s.speedAvg
       : Number.isFinite(s.avgSpeed) ? s.avgSpeed
       : (distance != null && duration > 0 ? distance / duration : null);
+    if (floor && !(distance >= floor.minDistance && avgSpeed >= floor.minSpeed)) continue;
     const candidate = { gradePct, avgSpeed, distance, duration };
     if (!best || gradePct > best.gradePct
         || (gradePct === best.gradePct && (distance || 0) > (best.distance || 0))) best = candidate;
@@ -44982,8 +45291,8 @@ function steepestInclineStat(segments) {
   return best;
 }
 
-function steepestInclineTile(segments, pace) {
-  const d = steepestInclineStat(segments);
+function steepestInclineTile(segments, pace, floor) {
+  const d = steepestInclineStat(segments, floor);
   if (!d) return '';
   const movement = d.avgSpeed > 0 ? (pace ? U.pace(d.avgSpeed) : U.speed(d.avgSpeed)) : '—';
   const distance = d.distance > 0 ? ` · ${U.dist(d.distance)}` : '';
@@ -49333,7 +49642,8 @@ function swimHighlights(D) {
       { list: graded.map(st => loamT('Set {n}', { n: st.index }) + ' ' + escapeHtml(modCopyT(st.trend.read.label))).join(' · ') }));
     /* A capture has no stroke styles (every length is 'unknown'), and one stroke says nothing the
        tiles do not. */
-    const styles = (s.styles || []).filter(st => st && st !== 'unknown');
+    /* Kickboard is a drill, not a stroke (`isCountable` leaves it out of the fit too). */
+    const styles = (s.styles || []).filter(st => st && st !== 'unknown' && st !== 'kickboard');
     if (!captured && styles.length > 1) out.push(loamT('Strokes: {list}.',
       { list: styles.map(st => escapeHtml(loamT(st)) + ' ' + loamT(s.styleCounts[st] === 1 ? '{n} length' : '{n} lengths', { n: s.styleCounts[st] })).join(' · ') }));
   } else if (captured) {
@@ -51444,7 +51754,7 @@ async function sendCoach(text) {
   }
   if (coachDailyExhausted()) {
     appendCoachBubble('assistant',
-      `That is ${COACH_MAX_DAILY_BUNDLED} coach questions today on the shared TestFlight account, which is the daily limit. ` +
+      `That is ${COACH_MAX_DAILY_BUNDLED} coach questions today on Loam's shared account, which is the daily limit. ` +
       `It resets tomorrow; to keep going now, add your own Anthropic API key in the coach settings.`);
     lockCoachInput('Daily limit on the shared account reached');
     return;
@@ -52536,6 +52846,7 @@ const SECTION_CATALOG = [
     lock: 'the map and the key numbers are one section (#statsPanel sits inside it), and every E2E scenario asserts it visible' },
   { id: 'timelineSection', label: 'Timeline',
     lock: 'every E2E scenario asserts it visible' },
+  { id: 'skiNamesSection', label: 'Piste & lift names' },
   { id: 'runsSection', label: 'Runs' },
   { id: 'runCompareSection', label: 'Compare laps', navResolve: 'compare',
     lock: 'one chip, two possible targets: the nav resolves the element itself, so there is no single element to switch off' },
@@ -53855,7 +54166,7 @@ const MP_ICON = {
 };
 function mpTitle(D) {
   const app = appSessionContext(D);
-  const label = rsLabel(D.title);
+  const label = rsLabel(D.title, Infinity);
   return app && app.title ? app.title : label && label !== 'RECORDING' ? label
     : loamT('{activity} session', { activity: lexNounT(sportLex(displaySport(D)), { cap: true }) });
 }
@@ -55096,19 +55407,20 @@ function rsSplit(str) {
 /* A poster label from a recording filename: a trail-name prefix if present (e.g.
    "Boy_Scout_Trail-2026-..." -> "BOY SCOUT TRAIL"), otherwise the athlete's LOCAL recording date
    ("MAY 24, 2026"). Capture filenames are stamped in UTC for unambiguous FIT alignment, so reading
-   their yyyy-mm-dd text directly can put an evening session west of UTC on tomorrow's date. */
-function rsLabel(name) {
+   their yyyy-mm-dd text directly can put an evening session west of UTC on tomorrow's date.
+   Page headings pass Infinity: the poster's character budget must not discard their title. */
+function rsLabel(name, maxLength = 26) {
   if (!name) return '';
   const s = String(name).replace(/\.[a-z0-9]+$/i, '');
   const m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
   const pre = (m ? s.slice(0, m.index) : s).replace(/[_-]+/g, ' ').trim();
-  if (pre && /[a-z]/i.test(pre)) return pre.toUpperCase().slice(0, 26);
+  if (pre && /[a-z]/i.test(pre)) return pre.toUpperCase().slice(0, maxLength);
   if (m) {
     const instant = parseUTCFromFilename(s);
     if (instant) return rsDateLabel(instant);
     return rsDate(+m[2] - 1, +m[3], m[1]);
   }
-  return pre.toUpperCase().slice(0, 26);
+  return pre.toUpperCase().slice(0, maxLength);
 }
 /* An ISO instant in the same shape rsLabel prints a filename date, so a card dated from the file's
    CONTENT and one dated from its NAME read identically. Falls back to the raw name's label if the
@@ -55417,7 +55729,7 @@ function renderSessionOverview(D, sport) {
      count the walk in, and its descent the gondola ridden back down. */
   const skiT = D.gpsOnly && D.skiDay ? D.skiDay.totals : null;
   const distance = run ? run.distance : road ? s.distance : skiT ? skiT.distance : s.riddenDistance ?? s.distance;
-  const label = rsLabel(D.title);
+  const label = rsLabel(D.title, Infinity);
   const app = appSessionContext(D);
   /* The app's title when it has one ("Edgewood Park · 4x4"), which is what the Sessions row calls
      this session; the date it used to fall back to is on the line under it either way. */
@@ -58668,15 +58980,15 @@ function renderRoadCornerMarkers(D) {
       const icon = L.divIcon({ className: '', iconSize: [16, 16], iconAnchor: [8, 8],
         html: `<div style="width:16px; height:16px; border-radius:50%; background:${color}; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.4); color:#fff; font-size:10px; font-weight:700; line-height:12px; text-align:center;">${c.dir}</div>` });
       /* Entry first, then apex, then exit, with arrows showing where speed dropped and came back. */
-      const trace = `entry ${sp(c.entrySpeed)}${arrow(c.entrySpeed, c.apexSpeed)}apex ${sp(c.apexSpeed)}`
-        + (c.exitSpeed != null ? `${arrow(c.apexSpeed, c.exitSpeed)}exit ${sp(c.exitSpeed)}` : '')
+      const trace = `${loamT('entry {v}', { v: sp(c.entrySpeed) })}${arrow(c.entrySpeed, c.apexSpeed)}${loamT('apex {v}', { v: sp(c.apexSpeed) })}`
+        + (c.exitSpeed != null ? `${arrow(c.apexSpeed, c.exitSpeed)}${loamT('exit {v}', { v: sp(c.exitSpeed) })}` : '')
         + ` ${U.speedUnit()}`;
       /* Named the way its row in the descent's card is ("Descent 3 · corner 14"), so a tapped row
          and the popup it opens agree on which corner this is. */
       const name = `${loamT('Descent {n}', { n: d.index })} · ${loamT('corner {n}', { n: i + 1 })}`;
       const marker = L.marker([c.apexLat, c.apexLon], { icon, title: name })
-        .bindPopup(`<strong>${name}${d.group ? ' (lap ' + d.group + '&middot;' + d.lap + ')' : ''}</strong><br>` +
-          `${c.dir === 'L' ? 'Left' : 'Right'} ${Math.round(c.headingChange)}&deg; · radius ${cornerRadiusLabel(c.radius)}<br>` +
+        .bindPopup(`<strong>${name}${d.group ? ` (${loamT('lap {g}&middot;{n}', { g: d.group, n: d.lap })})` : ''}</strong><br>` +
+          `${loamT(c.dir === 'L' ? 'left {deg}°' : 'right {deg}°', { deg: Math.round(c.headingChange) })} · ${loamT('radius {v}', { v: cornerRadiusLabel(c.radius) })}<br>` +
           trace)
         .addTo(mapInstance);
       _roadCornerMarkers.set(`${d.index}:${i}`, marker);
@@ -61498,7 +61810,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'fda8f01c3 · 2026-10-28';
+const LOAM_BUILD = '72143f3d6 · 2026-10-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
@@ -61694,8 +62006,19 @@ function setSeasonEnabled(on) {
   const el = document.documentElement;
   if (st.on) { el.dataset.season = st.season; try { localStorage.removeItem('loamSeasonOff'); } catch (e) {} }
   else { delete el.dataset.season; try { localStorage.setItem('loamSeasonOff', st.id); } catch (e) {} }
+  seasonRepaint(st);
+}
+function seasonRepaint(st) {
+  const label = document.getElementById('seasonToggleLabel');
+  if (label) label.classList.toggle('hidden', !st.season);
+  /* A recheck can cross from no season into winter, and the label still names whatever boot wrote. */
+  if (label && st.season) {
+    const c = seasonCopy(st.season);
+    for (const n of label.childNodes) if (n.nodeType === 3 && n.textContent.trim()) n.textContent = ` ${c.mark} ${loamT(c.name)}`;
+    label.title = loamT(c.title);
+  }
   const box = document.getElementById('seasonToggle');
-  if (box) box.checked = st.on;
+  if (box) box.checked = !!st.on;
   loamPostTheme();
   loamRethemeCharts();
   /* The form replay is drawn per frame from its own literals, not from the tokens, so it is told. */
@@ -61718,6 +62041,28 @@ function seasonCopy(season) {
   label.title = c.title;
   label.classList.remove('hidden');
   box.checked = !!st.on;
+})();
+(function initSeasonRecheck() {
+  /* The boot script resolves the calendar once, so a page left open across a season edge (a tab, or
+     the app's WebView brought back from the background) kept the costume after 1 November, or never
+     put it on. Coming
+     back to the page re-reads the calendar; a forced ?season= or an automated run never changes. */
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    let forced = null, off = null;
+    /* The app's Settings pick (window.LOAM_SEASON) is as forced as a ?season= preview: re-reading the
+       calendar here would drop a pinned edition every time the app came back from the background. */
+    try { forced = loamSeasonRequested(location.search, window.LOAM_SEASON); } catch (e) {}
+    if (forced || navigator.webdriver) return;
+    try { off = localStorage.getItem('loamSeasonOff'); } catch (e) {}
+    const was = window.loamSeasonState || {};
+    const next = loamSeasonResolve(new Date(), null, false, off);
+    if (next.id === was.id && next.on === was.on) return;
+    window.loamSeasonState = next;
+    const el = document.documentElement;
+    if (next.on) el.dataset.season = next.season; else delete el.dataset.season;
+    seasonRepaint(next);
+  });
 })();
 (function initVersion() {
   const chip = document.getElementById('whatsNewBtn');
