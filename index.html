@@ -8788,8 +8788,95 @@ return { ROUTE_MAP_CORRIDOR_M, ROUTE_MAP_MARGIN_M, ROUTE_MAP_COVERAGE, ROUTE_MAP
 })();
 /* ==== End route map names port ==== */
 
+/* ==== Ski catalogue port ==== */
+const LoamSkiCatalog = (() => {
+const { routeMapPoint, routeMapQuery } = LoamRouteMap;
+
+const SKI_CATALOG_ROOT = 'https://sfviking.github.io/loam-analyzer/ski-data/v1/';
+
+function skiCatalogCells(bounds) {
+  if (!routeMapQuery(bounds, 'ski')) throw new Error('response');
+  const cells = [];
+  for (let lat = Math.floor(bounds[0]); lat <= Math.floor(bounds[2]); lat++) {
+    for (let lon = Math.floor(bounds[1]); lon <= Math.floor(bounds[3]); lon++) cells.push(`${lat}_${lon}`);
+  }
+  if (cells.length > 32) throw new Error('response');
+  return cells;
+}
+
+function skiCatalogFeatures(data) {
+  if (data?.schema !== 1 || !Number.isFinite(Date.parse(data.sourceUpdatedAt))
+      || !Array.isArray(data.features) || data.features.length > 100000) throw new Error('response');
+  const groups = new Map(), seen = new Set();
+  for (const f of data.features) {
+    if (!f || !['piste', 'lift'].includes(f.kind) || typeof f.id !== 'string' || !f.id
+        || typeof f.label !== 'string' || !f.label.trim() || f.label.length > 160
+        || !/^https:\/\/www\.openstreetmap\.org\/(way|relation)\/\d+$/.test(f.url)
+        || !Array.isArray(f.paths) || !f.paths.length
+        || f.paths.some(p => !Array.isArray(p) || p.length < 2 || p.some(v => !routeMapPoint(v)))) throw new Error('response');
+    if (seen.has(f.id)) continue;
+    seen.add(f.id);
+    // Same-labelled pieces must not compete with one another in the ambiguity gate.
+    const key = `${f.kind}:${f.label}`;
+    if (groups.has(key)) groups.get(key).paths.push(...f.paths);
+    else groups.set(key, { kind: f.kind, label: f.label, url: f.url, paths: [...f.paths] });
+  }
+  return [...groups.values()].map(f => {
+    const bounds = [90, 180, -90, -180];
+    for (const path of f.paths) for (const [lat, lon] of path) {
+      bounds[0] = Math.min(bounds[0], lat); bounds[1] = Math.min(bounds[1], lon);
+      bounds[2] = Math.max(bounds[2], lat); bounds[3] = Math.max(bounds[3], lon);
+    }
+    return { ...f, bounds };
+  });
+}
+
+async function downloadSkiCatalog(bounds, { native = false, signal, fetcher = fetch } = {}) {
+  const cells = skiCatalogCells(bounds);
+  const root = native ? 'loam://app/ski-data/' : SKI_CATALOG_ROOT;
+  let bytes = 0;
+  const get = async (path, limit) => {
+    const response = await fetcher(root + path, { signal, credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
+    if (!response.ok) throw new Error('service:' + response.status);
+    const raw = await response.text();
+    bytes += raw.length;
+    if (raw.length > limit || bytes > 20000000) throw new Error('response');
+    try { return JSON.parse(raw); } catch (_) { throw new Error('response'); }
+  };
+  const manifest = await get('manifest.json', 1000000);
+  if (manifest?.schema !== 1 || !Number.isFinite(Date.parse(manifest.sourceUpdatedAt))
+      || !manifest.tiles || typeof manifest.tiles !== 'object' || Array.isArray(manifest.tiles)) throw new Error('response');
+  const features = [], hashes = new Set();
+  for (const cell of cells) {
+    if (!Object.hasOwn(manifest.tiles, cell)) continue; // An absent cell is a valid unmapped area.
+    const hash = manifest.tiles[cell];
+    if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('response');
+    if (hashes.has(hash)) continue;
+    hashes.add(hash);
+    const tile = await get(`tiles/${hash}.json`, 8000000);
+    if (tile?.schema !== 1 || !Array.isArray(tile.features)) throw new Error('response');
+    features.push(...tile.features);
+  }
+  const data = { schema: 1, sourceUpdatedAt: manifest.sourceUpdatedAt, features };
+  skiCatalogFeatures(data); // A partial/malformed download never enters the cache.
+  // A regional file can contain many resorts. Cache and match only intersecting features.
+  data.features = features.filter(f => {
+    let south = 90, west = 180, north = -90, east = -180;
+    for (const path of f.paths) for (const [lat, lon] of path) {
+      south = Math.min(south, lat); west = Math.min(west, lon);
+      north = Math.max(north, lat); east = Math.max(east, lon);
+    }
+    return south <= bounds[2] && north >= bounds[0] && west <= bounds[3] && east >= bounds[1];
+  });
+  return data;
+}
+
+return { SKI_CATALOG_ROOT, skiCatalogCells, skiCatalogFeatures, downloadSkiCatalog };
+})();
+/* ==== End ski catalogue port ==== */
+
 const routeMapStates = new WeakMap();
-const ROUTE_MAP_CACHE_KEY = 'loam_ski_map_v1';
+const ROUTE_MAP_CACHE_KEY = 'loam_ski_catalog_v1';
 function routeMapCacheKey(profile) { return profile === 'ski' ? ROUTE_MAP_CACHE_KEY : `loam_trail_map_${profile}_v1`; }
 
 let mapNamesRetryAfter = 0;
@@ -8814,11 +8901,12 @@ function routeMapState(D) {
     const state = { profile, rows, bounds, features: null, matches: new Map(), pending: false, error: false };
     try {
       const cached = JSON.parse(localStorage.getItem(routeMapCacheKey(profile)) || 'null');
-      if (bounds && cached && Date.now() - cached.at < 7 * 86400000 && cached.at <= Date.now()
+      if (bounds && cached && Date.now() - cached.at < (profile === 'ski' ? 1 : 7) * 86400000 && cached.at <= Date.now()
           && LoamRouteMap.routeMapQuery(cached.bounds, profile)
           && bounds[0] >= cached.bounds[0] && bounds[1] >= cached.bounds[1]
           && bounds[2] <= cached.bounds[2] && bounds[3] <= cached.bounds[3]) {
-        state.features = LoamRouteMap.routeMapFeatures(cached.data, profile);
+        state.features = profile === 'ski' ? LoamSkiCatalog.skiCatalogFeatures(cached.data) : LoamRouteMap.routeMapFeatures(cached.data, profile);
+        state.sourceUpdatedAt = cached.data.sourceUpdatedAt;
       }
     } catch (_) { /* A missing cache must not prevent a fresh lookup. */ }
     routeMapStates.set(D, state);
@@ -8845,22 +8933,27 @@ async function lookupMapNames(D) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
-    const [url, options] = mapNamesRequest(state.bounds, state.profile);
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    if (!response.ok) {
-      if ([406, 429, 502, 503, 504].includes(response.status)) mapNamesRetryAfter = Date.now() + 30000;
-      throw new Error('service:' + response.status);
+    let data, raw;
+    if (state.profile === 'ski') {
+      data = await LoamSkiCatalog.downloadSkiCatalog(state.bounds, { native: location.protocol === 'loam:', signal: controller.signal });
+      raw = JSON.stringify(data);
+      state.features = LoamSkiCatalog.skiCatalogFeatures(data);
+      state.sourceUpdatedAt = data.sourceUpdatedAt;
+    } else {
+      const [url, options] = mapNamesRequest(state.bounds, state.profile);
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      if (!response.ok) throw new Error('service:' + response.status);
+      raw = await response.text();
+      if (raw.length > 4000000) throw new Error('response');
+      try { data = JSON.parse(raw); } catch (_) { throw new Error('response'); }
+      if (!Array.isArray(data?.elements) || data.remark) throw new Error('response');
+      state.features = LoamRouteMap.routeMapFeatures(data, state.profile);
     }
-    const raw = await response.text();
-    if (raw.length > 4000000) throw new Error('response');
-    let data;
-    try { data = JSON.parse(raw); } catch (_) { throw new Error('response'); }
-    if (!Array.isArray(data?.elements) || data.remark) throw new Error('response');
-    state.features = LoamRouteMap.routeMapFeatures(data, state.profile);
     state.matches.clear();
     // Cache source geometry, never a verdict: matching is re-derived for old recordings too.
     try { if (raw.length < 2000000) localStorage.setItem(routeMapCacheKey(state.profile), JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
   } catch (error) {
+    if (/^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
     state.error = error.message?.startsWith('service:') ? error.message
       : error.name === 'AbortError' ? 'timeout' : error.message === 'response' ? 'response' : 'download';
   }
@@ -8898,13 +8991,15 @@ function renderMapNames(D) {
         : T('No clear map match')}</td></tr>`;
     }).join('')}</tbody></table></div><p class="visual-keep">${T(ski ? 'Names follow the matched sections of your track; they do not prove you skied an entire piste.' : 'Names describe matched parts of your recorded track, not completion of an entire trail or route.')}</p>` : ''}
     ${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.')}</p>`
-      : !state.features ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending || Date.now() < mapNamesRetryAfter ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : ski ? 'Find piste & lift names' : 'Find trail names')}</button>
-        <p class="dim visual-keep">${T('Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
+      : (!state.features || ski) ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending || Date.now() < mapNamesRetryAfter ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : ski && state.features ? 'Refresh names' : ski ? 'Find piste & lift names' : 'Find trail names')}</button>
+        <p class="dim visual-keep">${T(ski ? 'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.' : 'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
     <p class="visual-keep" role="status">${state.error ? state.error.startsWith('service:')
       ? T('The map-name service could not answer (HTTP {status}). Please try again later.', { status: state.error.split(':')[1] })
       : state.error === 'timeout' ? T('The map-name request timed out. Please try again later.')
       : state.error === 'response' ? T('The map-name service returned an incomplete response. Please try again later.')
       : T('Could not reach the map-name service. It may be unavailable, or your connection may be offline.') : ''}</p>
+    ${ski && state.sourceUpdatedAt ? `<p class="dim visual-keep">${T('Map data: {date}', { date: E(state.sourceUpdatedAt.slice(0, 10)) })}</p>` : ''}
+    ${ski ? `<small class="visual-keep">Data: <a href="https://www.openskidata.org/" target="_blank" rel="noopener noreferrer">OpenSkiData / OpenSkiMap.org</a> · Skimap.org · Who’s On First · © Mapterhorn · <a href="https://sfviking.github.io/loam-analyzer/ski-data/v1/ATTRIBUTION.txt" target="_blank" rel="noopener noreferrer">${T('Data & attribution')}</a></small><br>` : ''}
     <small>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>
   </div>`;
   sec.querySelector('#skiNamesLookup')?.addEventListener('click', () => lookupMapNames(D));
@@ -40345,6 +40440,10 @@ const LOAM_NB = {
   'Names follow the matched sections of your track; they do not prove you skied an entire piste.': 'Navnene gjelder delene av sporet som samsvarer med kartet; de viser ikke at du kjørte hele løypa.',
   'A compact outdoor GPS track is needed to find names. Trim any drive before looking up a resort.': 'Et avgrenset utendørs GPS-spor trengs for å finne navn. Klipp bort eventuell bilkjøring før du søker etter et anlegg.',
   'Finding names…': 'Finner navn…',
+  'Refresh names': 'Oppdater navn',
+  'Map data: {date}': 'Kartdata: {date}',
+  'Data & attribution': 'Data og kreditering',
+  'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.': 'Laster ned regionale skikart fra Loams offentlige nettsted. GPS-sporet og tidspunktene forblir på denne enheten.',
   'Find piste & lift names': 'Finn navn på løyper og heiser',
   'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.': 'Laster ned navn for et avrundet kartområde fra Overpass. GPS-sporet og tidspunktene forblir på denne enheten.',
   'The map-name service could not answer (HTTP {status}). Please try again later.': 'Kartnavntjenesten kunne ikke svare (HTTP {status}). Prøv igjen senere.',
@@ -62406,7 +62505,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '119479586 · 2026-10-28';
+const LOAM_BUILD = '3cf91a1b5 · 2026-10-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
