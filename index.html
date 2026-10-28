@@ -8581,68 +8581,91 @@ function renderRunsPanel(D) {
       drawRuns();
     };
   }
-  renderSkiMapNames(D);
+  renderMapNames(D);
   drawRuns();
   refreshDescentTags(D);
 }
 
-/* ==== Ski map names port ==== */
-const LoamSkiMap = (() => {
-// Map suggestions, not ground truth or segment identities. These tolerances are unvalidated on snow.
-const SKI_MAP_CORRIDOR_M = 35;
-const SKI_MAP_MARGIN_M = 12;
-const SKI_MAP_COVERAGE = 0.7;
-const SKI_MAP_MIN_MATCH_M = 60;
-const SKI_MAP_MIN_ALIGNMENT = 0.5;
-const SKI_MAP_LIFTS = 'cable_car|gondola|mixed_lift|chair_lift|drag_lift|t-bar|j-bar|platter|rope_tow|magic_carpet';
+/* ==== Route map names port ==== */
+const LoamRouteMap = (() => {
+// Map suggestions, not ground truth or segment identities. These tolerances are not field-validated.
+const ROUTE_MAP_CORRIDOR_M = 35;
+const ROUTE_MAP_MARGIN_M = 12;
+const ROUTE_MAP_COVERAGE = 0.7;
+const ROUTE_MAP_MIN_MATCH_M = 60;
+const ROUTE_MAP_MIN_ALIGNMENT = 0.5;
+const ROUTE_MAP_LIFTS = 'cable_car|gondola|mixed_lift|chair_lift|drag_lift|t-bar|j-bar|platter|rope_tow|magic_carpet';
 
-function skiMapPoint(p) {
+function routeMapPoint(p) {
   return Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1])
     && Math.abs(p[0]) <= 85 && Math.abs(p[1]) <= 180;
 }
 
-function skiMapDistance(a, b) {
+function routeMapDistance(a, b) {
   const y = (a[0] - b[0]) * 111320;
   const x = (a[1] - b[1]) * 111320 * Math.cos((a[0] + b[0]) * Math.PI / 360);
   return Math.hypot(x, y);
 }
 
-function skiMapRows(rows, start = -Infinity, end = Infinity) {
+function routeMapRows(rows, start = -Infinity, end = Infinity) {
   return (rows || []).filter(r => r && Number.isFinite(r.t) && r.t >= start && r.t <= end
-    && skiMapPoint([r.latitude, r.longitude])
+    && routeMapPoint([r.latitude, r.longitude])
     && !(r.horizontalAccuracy != null && (r.horizontalAccuracy < 0 || r.horizontalAccuracy >= 50)))
     .slice().sort((a, b) => a.t - b.t);
 }
 
 // Round outward to ~1 km cells: only this area, never the timed track, leaves the device.
-function skiMapBounds(rows) {
-  const pts = skiMapRows(rows);
+function routeMapBounds(rows) {
+  const pts = routeMapRows(rows);
   if (pts.length < 2) return null;
   let s = 90, w = 180, n = -90, e = -180;
   for (const r of pts) { s = Math.min(s, r.latitude); n = Math.max(n, r.latitude); w = Math.min(w, r.longitude); e = Math.max(e, r.longitude); }
   const b = [Math.floor(s * 100 - 1) / 100, Math.floor(w * 100 - 1) / 100,
     Math.ceil(n * 100 + 1) / 100, Math.ceil(e * 100 + 1) / 100];
-  // A resort-sized query only. A drive home or a dateline crossing must not request half a continent.
-  return skiMapPoint(b.slice(0, 2)) && skiMapPoint(b.slice(2))
-    && skiMapDistance([b[0], b[1]], [b[2], b[3]]) <= 30000 ? b : null;
+  // A local-area query only. A drive home or a dateline crossing must not request half a continent.
+  return routeMapPoint(b.slice(0, 2)) && routeMapPoint(b.slice(2))
+    && routeMapDistance([b[0], b[1]], [b[2], b[3]]) <= 30000 ? b : null;
 }
 
-function skiMapQuery(bounds) {
-  if (!Array.isArray(bounds) || bounds.length !== 4 || !skiMapPoint(bounds.slice(0, 2))
-      || !skiMapPoint(bounds.slice(2)) || bounds[0] >= bounds[2] || bounds[1] >= bounds[3]
-      || skiMapDistance(bounds.slice(0, 2), bounds.slice(2)) > 30000) return null;
+function routeMapProfile(sport) {
+  if (['ski', 'skiing'].includes(sport)) return 'ski';
+  if (['mtb', 'emtb', 'road', 'gravel', 'ride', 'cycling', 'bike'].includes(sport)) return 'bike';
+  if (['hike', 'hiking', 'walk', 'walking', 'run', 'running', 'trail_running'].includes(sport)) return 'hike';
+  return null;
+}
+
+function routeMapQuery(bounds, profile = 'ski') {
+  if (!['ski', 'bike', 'hike'].includes(profile)) return null;
+  if (!Array.isArray(bounds) || bounds.length !== 4 || !routeMapPoint(bounds.slice(0, 2))
+      || !routeMapPoint(bounds.slice(2)) || bounds[0] >= bounds[2] || bounds[1] >= bounds[3]
+      || routeMapDistance(bounds.slice(0, 2), bounds.slice(2)) > 30000) return null;
   const box = bounds.join(',');
-  return `[out:json][timeout:20];(way["piste:type"="downhill"](${box});relation["route"="piste"]["piste:type"="downhill"](${box});way["aerialway"~"^(${SKI_MAP_LIFTS})$"](${box}););out geom;`;
+  if (profile !== 'ski') {
+    const routes = profile === 'bike' ? 'bicycle|mtb' : 'hiking|foot';
+    // Named physical paths plus signed routes; crop long route relations to the requested area.
+    return `[out:json][timeout:20];(way["highway"~"^(path|track|cycleway|footway|bridleway|steps)$"][~"^(name|ref)$"~"."](${box});relation["type"="route"]["route"~"^(${routes})$"](${box}););out geom(${box});`;
+  }
+  return `[out:json][timeout:20];(way["piste:type"="downhill"](${box});relation["route"="piste"]["piste:type"="downhill"](${box});way["aerialway"~"^(${ROUTE_MAP_LIFTS})$"](${box}););out geom;`;
 }
 
-function skiMapFeatures(data) {
+function routeMapFeatures(data, profile = 'ski') {
+  if (!['ski', 'bike', 'hike'].includes(profile)) return [];
   const groups = new Map();
-  const liftTypes = new Set(SKI_MAP_LIFTS.split('|'));
+  const liftTypes = new Set(ROUTE_MAP_LIFTS.split('|'));
   for (const el of (data && Array.isArray(data.elements) ? data.elements : [])) {
     if (!el || !['way', 'relation'].includes(el.type) || !Number.isSafeInteger(el.id) || el.id <= 0) continue;
     const tags = el.tags || {};
-    const kind = liftTypes.has(tags.aerialway) ? 'lift' : tags['piste:type'] === 'downhill' ? 'piste' : null;
-    if (!kind || tags.area === 'yes' || (el.type === 'relation' && tags.route !== 'piste')) continue;
+    let kind;
+    if (profile === 'ski') {
+      kind = liftTypes.has(tags.aerialway) ? 'lift' : tags['piste:type'] === 'downhill' ? 'piste' : null;
+      if (el.type === 'relation' && tags.route !== 'piste') continue;
+    } else if (el.type === 'way') {
+      kind = ['path', 'track', 'cycleway', 'footway', 'bridleway', 'steps'].includes(tags.highway) ? 'trail' : null;
+    } else {
+      const routes = profile === 'bike' ? ['bicycle', 'mtb'] : ['hiking', 'foot'];
+      kind = tags.type === 'route' && routes.includes(tags.route) ? 'route' : null;
+    }
+    if (!kind || tags.area === 'yes') continue;
     const name = (kind === 'piste' ? tags['piste:name'] : null) || tags.name;
     const ref = (kind === 'piste' ? tags['piste:ref'] : null) || tags.ref;
     const label = [name, ref && ref !== name ? ref : null].filter(v => typeof v === 'string' && v.trim())
@@ -8654,7 +8677,7 @@ function skiMapFeatures(data) {
       let path = [];
       for (const p of Array.isArray(geometry) ? geometry : []) {
         const point = p && [p.lat, p.lon];
-        if (skiMapPoint(point)) path.push(point);
+        if (routeMapPoint(point)) path.push(point);
         else { if (path.length > 1) paths.push(path); path = []; }
       }
       if (path.length > 1) paths.push(path);
@@ -8675,30 +8698,30 @@ function skiMapFeatures(data) {
   });
 }
 
-function skiMapPathDistance(point, paths, heading) {
+function routeMapPathDistance(point, paths, heading) {
   let best = Infinity;
   const scaleX = 111320 * Math.cos(point[0] * Math.PI / 180);
   for (const path of paths) for (let i = 1; i < path.length; i++) {
     const a = path[i - 1], b = path[i];
     const ax = (a[1] - point[1]) * scaleX, ay = (a[0] - point[0]) * 111320;
     const dx = (b[1] - a[1]) * scaleX, dy = (b[0] - a[0]) * 111320;
-    // Crossing a named piste is not following it. OSM way direction itself is arbitrary.
+    // Crossing a named path is not following it. OSM way direction itself is arbitrary.
     if (heading && Math.abs(dx * heading[0] + dy * heading[1])
-        < SKI_MAP_MIN_ALIGNMENT * Math.hypot(dx, dy) * Math.hypot(...heading)) continue;
+        < ROUTE_MAP_MIN_ALIGNMENT * Math.hypot(dx, dy) * Math.hypot(...heading)) continue;
     const f = Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy || 1)));
     best = Math.min(best, Math.hypot(ax + f * dx, ay + f * dy));
   }
   return best;
 }
 
-function skiMapMatch(rows, window, features, kind) {
-  const points = skiMapRows(rows, window.tStart, window.tEnd);
+function routeMapMatch(rows, window, features, kind) {
+  const points = routeMapRows(rows, window.tStart, window.tEnd);
   const candidates = features.filter(f => f.kind === kind);
   const hits = new Map();
   let totalM = 0;
   for (let i = 1; i < points.length; i++) {
     const a = points[i - 1], b = points[i], dt = b.t - a.t;
-    const length = skiMapDistance([a.latitude, a.longitude], [b.latitude, b.longitude]);
+    const length = routeMapDistance([a.latitude, a.longitude], [b.latitude, b.longitude]);
     if (dt <= 0 || length < 1) continue;
     // Gaps count against coverage but cannot manufacture a match by drawing through a piste.
     totalM += length;
@@ -8708,64 +8731,74 @@ function skiMapMatch(rows, window, features, kind) {
       const f = (j + 0.5) / steps;
       const point = [a.latitude + (b.latitude - a.latitude) * f, a.longitude + (b.longitude - a.longitude) * f];
       const heading = [(b.longitude - a.longitude) * Math.cos(point[0] * Math.PI / 180), b.latitude - a.latitude];
-      const latPad = SKI_MAP_CORRIDOR_M / 111320, lonPad = latPad / Math.cos(point[0] * Math.PI / 180);
+      const latPad = ROUTE_MAP_CORRIDOR_M / 111320, lonPad = latPad / Math.cos(point[0] * Math.PI / 180);
       const ranked = candidates.filter(({ bounds: b }) => point[0] >= b[0] - latPad && point[0] <= b[2] + latPad
           && point[1] >= b[1] - lonPad && point[1] <= b[3] + lonPad)
-        .map(feature => ({ feature, d: skiMapPathDistance(point, feature.paths, heading) }))
-        .filter(x => x.d <= SKI_MAP_CORRIDOR_M).sort((x, y) => x.d - y.d);
-      if (!ranked.length || (ranked[1] && ranked[1].d - ranked[0].d < SKI_MAP_MARGIN_M)) continue;
+        .map(feature => ({ feature, d: routeMapPathDistance(point, feature.paths, heading) }))
+        .filter(x => x.d <= ROUTE_MAP_CORRIDOR_M).sort((x, y) => x.d - y.d);
+      if (!ranked.length || (ranked[1] && ranked[1].d - ranked[0].d < ROUTE_MAP_MARGIN_M)) continue;
       const feature = ranked[0].feature;
       const hit = hits.get(feature) || { label: feature.label, url: feature.url, meters: 0, firstT: a.t + dt * f };
       hit.meters += length / steps;
       hits.set(feature, hit);
     }
   }
-  const names = [...hits.values()].filter(h => h.meters >= SKI_MAP_MIN_MATCH_M).sort((a, b) => a.firstT - b.firstT);
+  const names = [...hits.values()].filter(h => h.meters >= ROUTE_MAP_MIN_MATCH_M).sort((a, b) => a.firstT - b.firstT);
   const coverage = totalM > 0 ? names.reduce((sum, h) => sum + h.meters, 0) / totalM : 0;
-  return { names: coverage >= SKI_MAP_COVERAGE ? names : [], coverage, distanceM: totalM };
+  return { names: coverage >= ROUTE_MAP_COVERAGE ? names : [], coverage, distanceM: totalM };
 }
 
-return { SKI_MAP_CORRIDOR_M, SKI_MAP_MARGIN_M, SKI_MAP_COVERAGE, SKI_MAP_MIN_MATCH_M, SKI_MAP_MIN_ALIGNMENT, SKI_MAP_LIFTS, skiMapPoint, skiMapDistance, skiMapRows, skiMapBounds, skiMapQuery, skiMapFeatures, skiMapPathDistance, skiMapMatch };
+// A physical trail and a signed route can share geometry without competing for the same name.
+// Prefer a sufficiently covered trail; otherwise try the sport's signed routes independently.
+function routeMapTrailNames(rows, window, features) {
+  const trails = routeMapMatch(rows, window, features, 'trail').names;
+  return trails.length ? trails : routeMapMatch(rows, window, features, 'route').names;
+}
+
+return { ROUTE_MAP_CORRIDOR_M, ROUTE_MAP_MARGIN_M, ROUTE_MAP_COVERAGE, ROUTE_MAP_MIN_MATCH_M, ROUTE_MAP_MIN_ALIGNMENT, ROUTE_MAP_LIFTS, routeMapPoint, routeMapDistance, routeMapRows, routeMapBounds, routeMapProfile, routeMapQuery, routeMapFeatures, routeMapPathDistance, routeMapMatch, routeMapTrailNames };
 })();
-/* ==== End ski map names port ==== */
+/* ==== End route map names port ==== */
 
-const skiMapStates = new WeakMap();
-const SKI_MAP_CACHE_KEY = 'loam_ski_map_v1';
+const routeMapStates = new WeakMap();
+const ROUTE_MAP_CACHE_KEY = 'loam_ski_map_v1';
+function routeMapCacheKey(profile) { return profile === 'ski' ? ROUTE_MAP_CACHE_KEY : `loam_trail_map_${profile}_v1`; }
 
-function skiMapState(D) {
-  if (!skiMapStates.has(D)) {
-    const rows = LoamSkiMap.skiMapRows(D.sensors?.location, D.ride?.start, D.ride?.end);
-    const bounds = LoamSkiMap.skiMapBounds(rows);
-    const state = { rows, bounds, features: null, matches: new Map(), pending: false, error: false };
+function routeMapState(D) {
+  const profile = LoamRouteMap.routeMapProfile(displaySport(D));
+  if (routeMapStates.get(D)?.profile !== profile) {
+    const rows = LoamRouteMap.routeMapRows(D.sensors?.location, D.ride?.start, D.ride?.end);
+    const bounds = LoamRouteMap.routeMapBounds(rows);
+    const state = { profile, rows, bounds, features: null, matches: new Map(), pending: false, error: false };
     try {
-      const cached = JSON.parse(localStorage.getItem(SKI_MAP_CACHE_KEY) || 'null');
+      const cached = JSON.parse(localStorage.getItem(routeMapCacheKey(profile)) || 'null');
       if (bounds && cached && Date.now() - cached.at < 7 * 86400000 && cached.at <= Date.now()
-          && LoamSkiMap.skiMapQuery(cached.bounds)
+          && LoamRouteMap.routeMapQuery(cached.bounds, profile)
           && bounds[0] >= cached.bounds[0] && bounds[1] >= cached.bounds[1]
           && bounds[2] <= cached.bounds[2] && bounds[3] <= cached.bounds[3]) {
-        state.features = LoamSkiMap.skiMapFeatures(cached.data);
+        state.features = LoamRouteMap.routeMapFeatures(cached.data, profile);
       }
     } catch (_) { /* A missing cache must not prevent a fresh lookup. */ }
-    skiMapStates.set(D, state);
+    routeMapStates.set(D, state);
   }
-  return skiMapStates.get(D);
+  return routeMapStates.get(D);
 }
 
-function skiMapNamesFor(D, win, kind = 'piste') {
-  if (!D || !isSkiSport(displaySport(D))) return [];
-  const state = skiMapState(D);
+function routeMapNamesFor(D, win, kind) {
+  if (!D || !LoamRouteMap.routeMapProfile(displaySport(D))) return [];
+  const state = routeMapState(D);
+  kind ||= state.profile === 'ski' ? 'piste' : 'trail';
   if (!state.features) return [];
   const key = `${kind}:${win.tStart}:${win.tEnd}`;
-  if (!state.matches.has(key)) state.matches.set(key, LoamSkiMap.skiMapMatch(state.rows, win, state.features, kind).names);
+  if (!state.matches.has(key)) state.matches.set(key, kind === 'trail' ? LoamRouteMap.routeMapTrailNames(state.rows, win, state.features) : LoamRouteMap.routeMapMatch(state.rows, win, state.features, kind).names);
   return state.matches.get(key);
 }
 
-async function lookupSkiMapNames(D) {
-  const state = skiMapState(D);
-  const query = LoamSkiMap.skiMapQuery(state.bounds);
+async function lookupMapNames(D) {
+  const state = routeMapState(D);
+  const query = LoamRouteMap.routeMapQuery(state.bounds, state.profile);
   if (!query || state.pending) return;
   state.pending = true; state.error = false;
-  renderSkiMapNames(D);
+  renderMapNames(D);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
@@ -8778,47 +8811,51 @@ async function lookupSkiMapNames(D) {
     if (raw.length > 4000000) throw new Error('Map area too large');
     const data = JSON.parse(raw);
     if (!Array.isArray(data.elements) || data.remark) throw new Error('Incomplete map response');
-    state.features = LoamSkiMap.skiMapFeatures(data);
+    state.features = LoamRouteMap.routeMapFeatures(data, state.profile);
     state.matches.clear();
     // Cache source geometry, never a verdict: matching is re-derived for old recordings too.
-    try { if (raw.length < 2000000) localStorage.setItem(SKI_MAP_CACHE_KEY, JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
+    try { if (raw.length < 2000000) localStorage.setItem(routeMapCacheKey(state.profile), JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
   } catch (_) { state.error = true; }
   finally { clearTimeout(timeout); state.pending = false; }
-  if (_lastRender?.D !== D || _runsD !== D) return;
-  renderSkiMapNames(D); drawRuns();
+  if (_lastRender?.D !== D || _runsD !== D || routeMapState(D) !== state) return;
+  renderMapNames(D); drawRuns();
 }
 
-function renderSkiMapNames(D) {
+function renderMapNames(D) {
+  // Keep the section id so existing dashboard visibility preferences survive the shared lookup.
   const sec = document.getElementById('skiNamesSection');
   if (!sec) return;
-  if (!isSkiSport(displaySport(D))) { sec.classList.add('hidden'); return; }
+  const profile = LoamRouteMap.routeMapProfile(displaySport(D));
+  if (!profile || (profile !== 'ski' && LoamRouteMap.routeMapRows(D.sensors?.location).length < 2)) { sec.classList.add('hidden'); return; }
   document.getElementById('runsSection')?.insertAdjacentElement('afterend', sec);
-  const state = skiMapState(D);
+  const state = routeMapState(D);
   const T = loamT, E = escapeHtml;
+  const ski = profile === 'ski';
   const runs = segmentRuns(D, 'auto').runs;
-  const lifts = (D.gradeSegments || D.segments || []).filter(s => s.kind === 'lift');
-  const items = [...runs.map((win, i) => ({ win, kind: 'piste', title: T('Run {n}', { n: i + 1 }) })),
+  const lifts = ski ? (D.gradeSegments || D.segments || []).filter(s => s.kind === 'lift') : [];
+  const items = [...runs.map((win, i) => ({ win, kind: ski ? 'piste' : 'trail', title: ski ? T('Run {n}', { n: i + 1 }) : runDisplayLabel(win) })),
     ...lifts.map((win, i) => ({ win, kind: 'lift', title: T('Lift {n}', { n: i + 1 }) }))]
     .sort((a, b) => a.win.tStart - b.win.tStart);
+  if (!ski) items.unshift({ win: { tStart: D.ride.start, tEnd: D.ride.end }, kind: 'trail', title: T('Recorded route') });
   sec.classList.remove('hidden');
-  sec.innerHTML = `<div class="section-title">${T('Piste & lift names')}</div><div class="panel">
+  sec.innerHTML = `<div class="section-title">${T(ski ? 'Piste & lift names' : 'Trail names')}</div><div class="panel">
     <p class="visual-keep">${T('Map suggestions from OpenStreetMap. Nearby or overlapping routes may remain unnamed. Your own names stay unchanged.')}</p>
     ${state.features ? `<div style="overflow-x:auto"><table><thead><tr><th>${T('Segment')}</th><th>${T('Map name')}</th></tr></thead><tbody>${items.map((item, i) => {
-      const names = skiMapNamesFor(D, item.win, item.kind);
+      const names = routeMapNamesFor(D, item.win, item.kind);
       return `<tr><td><button type="button" data-ski-map-row="${i}" style="min-height:44px">${E(item.title)}</button></td><td style="white-space:normal;overflow-wrap:anywhere">${names.length
         ? names.map(n => `<a href="${E(n.url)}" target="_blank" rel="noopener noreferrer">${E(n.label)}</a>`).join(' → ')
         : T('No clear map match')}</td></tr>`;
-    }).join('')}</tbody></table></div><p class="visual-keep">${T('Names follow the matched sections of your track; they do not prove you skied an entire piste.')}</p>` : ''}
-    ${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive before looking up a resort.')}</p>`
-      : !state.features ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : 'Find piste & lift names')}</button>
+    }).join('')}</tbody></table></div><p class="visual-keep">${T(ski ? 'Names follow the matched sections of your track; they do not prove you skied an entire piste.' : 'Names describe matched parts of your recorded track, not completion of an entire trail or route.')}</p>` : ''}
+    ${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.')}</p>`
+      : !state.features ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : ski ? 'Find piste & lift names' : 'Find trail names')}</button>
         <p class="dim visual-keep">${T('Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
     <p class="visual-keep" role="status">${state.error ? T('Names could not be downloaded. Check your connection and try again.') : ''}</p>
     <small>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>
   </div>`;
-  sec.querySelector('#skiNamesLookup')?.addEventListener('click', () => lookupSkiMapNames(D));
+  sec.querySelector('#skiNamesLookup')?.addEventListener('click', () => lookupMapNames(D));
   sec.querySelectorAll('[data-ski-map-row]').forEach(button => button.addEventListener('click', () => {
     const item = items[Number(button.dataset.skiMapRow)];
-    const names = skiMapNamesFor(D, item.win, item.kind);
+    const names = routeMapNamesFor(D, item.win, item.kind);
     focusRunSegment(item.win, names.map(n => n.label).join(' → ') || item.title, false);
     document.getElementById('map')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }));
@@ -9417,7 +9454,7 @@ function drawRuns() {
   document.querySelector('#runsTable tbody').innerHTML = runs.map((r, index) => {
     const m = r.metrics;
     const label = runDisplayLabel(r);
-    const mapNames = skiMapNamesFor(D, r);
+    const mapNames = routeMapNamesFor(D, r);
     const mapNameBadge = mapNames.length ? ` <small class="ski-map-name" style="display:block;font-weight:400;color:var(--text-muted)">${escapeHtml(loamT('Map: {name}', { name: mapNames.map(n => n.label).join(' → ') }))}</small>` : '';
     /* Library actions per run, when it is backed by a descent: tag/retag and compare past laps,
        folded in from the retired Descents section. A matched run's label already comes from its
@@ -39766,6 +39803,12 @@ const LOAM_NB = {
   'On foot (all)': 'Til fots (alle)',
   'E-mountain biking': 'El-terrengsykling',
   'Gravel cycling': 'Grussykling',
+  'Map names': 'Kartnavn',
+  'Trail names': 'Stinavn',
+  'Find trail names': 'Finn stinavn',
+  'Recorded route': 'Registrert rute',
+  'Names describe matched parts of your recorded track, not completion of an entire trail or route.': 'Navnene beskriver samsvarende deler av det registrerte sporet, ikke at du har fullført en hel sti eller rute.',
+  'A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.': 'Et avgrenset utendørs GPS-spor trengs for å finne navn. Klipp bort eventuell bilkjøring eller velg et mindre opptak.',
   'Piste & lift names': 'Navn på løyper og heiser',
   'Map suggestions from OpenStreetMap. Nearby or overlapping routes may remain unnamed. Your own names stay unchanged.': 'Navneforslag fra OpenStreetMap. Nærliggende eller overlappende traséer kan forbli uten navn. Dine egne navn beholdes.',
   'Lift {n}': 'Heis {n}',
@@ -52846,7 +52889,7 @@ const SECTION_CATALOG = [
     lock: 'the map and the key numbers are one section (#statsPanel sits inside it), and every E2E scenario asserts it visible' },
   { id: 'timelineSection', label: 'Timeline',
     lock: 'every E2E scenario asserts it visible' },
-  { id: 'skiNamesSection', label: 'Piste & lift names' },
+  { id: 'skiNamesSection', label: 'Map names' },
   { id: 'runsSection', label: 'Runs' },
   { id: 'runCompareSection', label: 'Compare laps', navResolve: 'compare',
     lock: 'one chip, two possible targets: the nav resolves the element itself, so there is no single element to switch off' },
@@ -61810,7 +61853,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '72143f3d6 · 2026-10-28';
+const LOAM_BUILD = '521c4cac8 · 2026-10-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
