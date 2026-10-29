@@ -2502,10 +2502,13 @@
   #skiNamesSection .panel { padding: 16px; }
   #skiNamesSection p { font-size: 14px; line-height: 1.5; margin: 0 0 14px; }
   #skiNamesSection table { width: 100%; }
-  #skiNamesSection button { min-height: 44px; padding: 8px 12px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
-  #skiNamesSection a { color: var(--accent); }
+  #skiNamesSection button, #skiGpsNames button { min-height: 44px; padding: 8px 12px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+  #skiNamesSection a, #skiGpsNames a { color: var(--accent); }
   #skiNamesSection td { white-space: normal; }
-  #skiNamesSection [role=status]:empty { display: none; }
+  #skiNamesSection [role=status]:empty, #skiGpsNames [role=status]:empty { display: none; }
+  #skiGpsNames { margin-top: 12px; }
+  #skiGpsNames p { font-size: 13px; line-height: 1.5; margin: 0 0 10px; }
+  #skiGpsTable tr[data-t0] { cursor: pointer; }
   #xcskiResults { max-width:1100px; margin:auto; }
   #xcskiResults .panel { padding:20px; margin-bottom:18px; }
   #xcskiResults button, #xcskiResults input, #xcskiResults select { min-height:44px; font:inherit; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 12px; background:var(--bg); }
@@ -4368,6 +4371,7 @@ function loamSeasonRequested(search, host) {
     </div>
     <div id="skiGpsRepeats" class="rp-note analysis-explanation"></div>
     <div class="dim analysis-explanation" id="skiGpsCaveat" style="font-size:12px; margin-top:8px;"></div>
+    <div id="skiGpsNames"></div>
   </section>
 
   <section id="roadDescentHistorySection" class="hidden">
@@ -8997,10 +9001,18 @@ async function lookupMapNames(D, auto = false) {
   if (D.skiDay && !document.getElementById('skiGpsSection')?.classList.contains('hidden')) renderSkiGpsDay(D);
 }
 
+/* A ski day read from a GPS track lists every run and lift in Runs & lifts, so on one its names go
+   in those rows and this lookup's controls sit at the foot of that section. A second table naming
+   the same day with its own numbering (Run 1 / Lift 1 here, A·1 / Lift A there) is what the owner
+   asked to remove (2026-10-29). A phone recording has no day table and keeps this section. */
+function hasSkiDayTable(D) { return !!(D && D.skiDay && isSkiSport(D.gpsSport || 'ride')); }
+
 function renderMapNames(D) {
   // Keep the section id so existing dashboard visibility preferences survive the shared lookup.
   const sec = document.getElementById('skiNamesSection');
   if (!sec) return;
+  const dayHost = document.getElementById('skiGpsNames');
+  if (dayHost) dayHost.innerHTML = '';
   const profile = LoamRouteMap.routeMapProfile(displaySport(D));
   if (!profile || (profile !== 'ski' && LoamRouteMap.routeMapRows(D.sensors?.location).length < 2)) { sec.classList.add('hidden'); return; }
   document.getElementById('runsSection')?.insertAdjacentElement('afterend', sec);
@@ -9017,6 +9029,24 @@ function renderMapNames(D) {
     lookupMapNames(D, true);
     if (state.pending) return; // The lookup already repainted this section, and will again with names.
   }
+  const controls = `${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.')}</p>`
+      : (!state.features || ski) ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending || Date.now() < mapNamesRetryAfter ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : ski && state.features ? 'Refresh names' : ski ? 'Find piste & lift names' : 'Find trail names')}</button>
+        <p class="dim visual-keep">${T(ski ? 'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.' : 'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
+    <p class="visual-keep" role="status">${state.error ? state.error.startsWith('service:')
+      ? T('The map-name service could not answer (HTTP {status}). Please try again later.', { status: state.error.split(':')[1] })
+      : state.error === 'timeout' ? T('The map-name request timed out. Please try again later.')
+      : state.error === 'response' ? T('The map-name service returned an incomplete response. Please try again later.')
+      : T('Could not reach the map-name service. It may be unavailable, or your connection may be offline.') : ''}</p>
+    ${ski && state.sourceUpdatedAt ? `<p class="dim visual-keep">${T('Map data: {date}', { date: E(state.sourceUpdatedAt.slice(0, 10)) })}</p>` : ''}
+    ${ski ? `<small class="visual-keep">Data: <a href="https://www.openskidata.org/" target="_blank" rel="noopener noreferrer">OpenSkiData / OpenSkiMap.org</a> · Skimap.org · Who’s On First · © Mapterhorn · <a href="https://sfviking.github.io/loam-analyzer/ski-data/v1/ATTRIBUTION.txt" target="_blank" rel="noopener noreferrer">${T('Data & attribution')}</a></small><br>` : ''}
+    <small>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>`;
+  if (ski && dayHost && hasSkiDayTable(D)) {
+    sec.classList.add('hidden');
+    dayHost.innerHTML = `<p class="dim visual-keep">${T('Map suggestions from OpenStreetMap. Nearby or overlapping routes may remain unnamed. Your own names stay unchanged.')}${state.features
+      ? ' ' + T('Names follow the matched sections of your track; they do not prove you skied an entire piste.') : ''}</p>${controls}`;
+    dayHost.querySelector('#skiNamesLookup')?.addEventListener('click', () => lookupMapNames(D));
+    return;
+  }
   const runs = segmentRuns(D, 'auto').runs;
   const lifts = ski ? (D.gradeSegments || D.segments || []).filter(s => s.kind === 'lift') : [];
   const items = [...runs.map((win, i) => ({ win, kind: ski ? 'piste' : 'trail', title: ski ? T('Run {n}', { n: i + 1 }) : runDisplayLabel(win) })),
@@ -9032,17 +9062,7 @@ function renderMapNames(D) {
         ? names.map(n => `<a href="${E(n.url)}" target="_blank" rel="noopener noreferrer">${E(n.label)}</a>`).join(' → ')
         : T('No clear map match')}</td></tr>`;
     }).join('')}</tbody></table></div><p class="visual-keep">${T(ski ? 'Names follow the matched sections of your track; they do not prove you skied an entire piste.' : 'Names describe matched parts of your recorded track, not completion of an entire trail or route.')}</p>` : ''}
-    ${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.')}</p>`
-      : (!state.features || ski) ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending || Date.now() < mapNamesRetryAfter ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : ski && state.features ? 'Refresh names' : ski ? 'Find piste & lift names' : 'Find trail names')}</button>
-        <p class="dim visual-keep">${T(ski ? 'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.' : 'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
-    <p class="visual-keep" role="status">${state.error ? state.error.startsWith('service:')
-      ? T('The map-name service could not answer (HTTP {status}). Please try again later.', { status: state.error.split(':')[1] })
-      : state.error === 'timeout' ? T('The map-name request timed out. Please try again later.')
-      : state.error === 'response' ? T('The map-name service returned an incomplete response. Please try again later.')
-      : T('Could not reach the map-name service. It may be unavailable, or your connection may be offline.') : ''}</p>
-    ${ski && state.sourceUpdatedAt ? `<p class="dim visual-keep">${T('Map data: {date}', { date: E(state.sourceUpdatedAt.slice(0, 10)) })}</p>` : ''}
-    ${ski ? `<small class="visual-keep">Data: <a href="https://www.openskidata.org/" target="_blank" rel="noopener noreferrer">OpenSkiData / OpenSkiMap.org</a> · Skimap.org · Who’s On First · © Mapterhorn · <a href="https://sfviking.github.io/loam-analyzer/ski-data/v1/ATTRIBUTION.txt" target="_blank" rel="noopener noreferrer">${T('Data & attribution')}</a></small><br>` : ''}
-    <small>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>
+    ${controls}
   </div>`;
   sec.querySelector('#skiNamesLookup')?.addEventListener('click', () => lookupMapNames(D));
   sec.querySelectorAll('[data-ski-map-row]').forEach(button => button.addEventListener('click', () => {
@@ -9097,7 +9117,13 @@ function syncIntervalsOption(sel, D) {
    section it is a control for -- and the app ships on WebKit, which no test here can reach. Stopping
    the event at the select is enough: the summary's own handler is up the bubble path. */
 function wireRunsFold() {
-  syncFold('runsFold', true);
+  /* On a ski day with a Runs & lifts table, that table is the list of runs and this panel is the
+     run-vs-run comparison, so it starts shut (owner, 2026-10-29). Its open/shut choice is stored
+     apart from the bike and foot one, which stays open by default. */
+  const fold = document.getElementById('runsFold');
+  const skiDay = hasSkiDayTable(_runsD);
+  if (fold) fold.dataset.fold = skiDay ? 'runs-ski' : 'runs';
+  syncFold('runsFold', !skiDay);
   const sel = document.getElementById('runsMode');
   if (sel && !sel._foldGuarded) {
     sel._foldGuarded = true;
@@ -9470,7 +9496,8 @@ function drawRuns() {
      never reads "N runs (descents)": descents -> Descents, laps -> Laps, marks -> Runs. */
   const nounSingular = runsRowNoun(mode);
   const nounTitle = mode === 'descents' ? 'Descents' : mode === 'laps' ? 'Laps' : mode === 'intervals' ? 'Reps' : 'Runs';
-  { const t = document.getElementById('runsTitle'); if (t) t.textContent = loamT(nounTitle); }
+  { const t = document.getElementById('runsTitle');
+    if (t) t.textContent = loamT(mode === 'descents' && hasSkiDayTable(D) ? 'Compare runs' : nounTitle); }
   /* Every word below that names the SPORT comes from here. The row noun above names the MODE. */
   const lex = sportLex(displaySport(D));
   const showTurns = sessionHasBodyTurns(D);
@@ -38183,7 +38210,9 @@ function renderAllGps(D) {
             : '{n} more laps fell outside the trimmed window and are not shown.', { n: dropped }) : '')
       : '', { foot }); }
   if (foot) renderRunDecoupling(D, decoupling);
-  renderRunSegments(D.segments, foot ? ((D.running && D.running.climbs) || []) : [],
+  /* Not on a ski day: Runs & lifts already lists every segment, and the census's climbs are the
+     lifts (owner, 2026-10-29). */
+  if (!ski) renderRunSegments(D.segments, foot ? ((D.running && D.running.climbs) || []) : [],
                     { motionColumns: false, foot });
   renderGpsParams(D);
   if (ski) { renderSkiGpsDay(D); placeSkiDayUnderMap(); }
@@ -38479,7 +38508,8 @@ function renderSkiGpsDay(D) {
   const mapLine = name => name ? `<small class="ski-map-name" style="display:block;min-width:9em;font-weight:400;color:var(--text-muted);white-space:normal">${escapeHtml(name)}</small>` : '';
   for (const lap of day.laps) {
     if (lap.run) {
-      rows.push(`<tr class="${best.has(lap.runIndex) ? 'ski-best' : ''}"><td>${lap.runIndex}</td>`
+      const t0 = lap.tTop ?? lap.t0, t1 = lap.tBottom ?? lap.t1;
+      rows.push(`<tr class="${best.has(lap.runIndex) ? 'ski-best' : ''}" data-t0="${t0}" data-t1="${t1}" data-label="${escapeHtml(runName(lap) || loamT('Run {n}', { n: lap.runIndex }))}"><td>${lap.runIndex}</td>`
         + `<td>${lap.group ? `${lap.group}&middot;${lap.groupLap}` : '&mdash;'}${mapLine(runName(lap))}</td>`
         + `<td>${U.elev(lap.drop)}</td><td>${U.dist(lap.distance)}</td><td>${skiClockT(lap.movingS)}</td>`
         + `<td>${lap.avgMovingSpeed != null ? U.speed(lap.avgMovingSpeed) : '&mdash;'}</td>`
@@ -38500,11 +38530,16 @@ function renderSkiGpsDay(D) {
         L.avgSpeed != null ? U.speed(L.avgSpeed) : null,
         lap.wait != null && lap.wait >= 5 ? loamT('line {t}', { t: skiClockT(lap.wait) }) : null,
       ].filter(Boolean);
-      rows.push(`<tr class="ski-lift-row"><td>${L.down ? '\u21e3' : '\u21e1'}</td><td colspan="8">${escapeHtml(bits.join(' · '))}</td></tr>`);
+      rows.push(`<tr class="ski-lift-row" data-t0="${L.tStart}" data-t1="${L.tEnd}" data-label="${escapeHtml(liftName(L) || bits[0])}"><td>${L.down ? '\u21e3' : '\u21e1'}</td><td colspan="8">${escapeHtml(bits.join(' · '))}</td></tr>`);
     }
   }
   const tb = document.querySelector('#skiGpsTable tbody');
   if (tb) tb.innerHTML = rows.join('') || `<tr><td colspan="9" class="dim">${loamT('No runs found between lifts.')}</td></tr>`;
+  // A row shows its run or lift on the map, as the separate names table's buttons did.
+  tb?.querySelectorAll('tr[data-t0]').forEach(tr => tr.addEventListener('click', () => {
+    if (focusRunSegment({ tStart: +tr.dataset.t0, tEnd: +tr.dataset.t1 }, tr.dataset.label, false))
+      document.getElementById('map')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }));
   const rep = document.getElementById('skiGpsRepeats');
   if (rep) {
     // A group is named only when every member matched the same name.
@@ -40512,6 +40547,7 @@ const LOAM_NB = {
   'Could not reach the map-name service. It may be unavailable, or your connection may be offline.': 'Kunne ikke nå kartnavntjenesten. Tjenesten kan være utilgjengelig, eller enheten kan være uten nettforbindelse.',
   'Map: {name}': 'Kart: {name}',
   'Name from the map': 'Navn fra kartet',
+  'Compare runs': 'Sammenlign nedkjøringer',
   'Open these tracks individually below.': 'Åpne disse sporene enkeltvis nedenfor.',
   'Nordic GPX tracks are supported. Select Cross-country ski if the file has no activity label.': 'GPX-spor for langrenn støttes. Velg Langrenn hvis filen ikke har en aktivitetsmerking.',
   'Cross-country ski (beta)': 'Langrenn (beta)',
@@ -62584,7 +62620,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '770c03266 · 2026-10-29';
+const LOAM_BUILD = '91d721a8c · 2026-10-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
