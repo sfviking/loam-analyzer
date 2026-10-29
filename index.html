@@ -8621,6 +8621,9 @@ const LoamRouteMap = (() => {
 const ROUTE_MAP_CORRIDOR_M = 35;
 const ROUTE_MAP_MARGIN_M = 12;
 const ROUTE_MAP_COVERAGE = 0.7;
+// Share of the run that must be on ONE named line. Converging lines near a lift base refuse 26-38%
+// of a run as ambiguous; those metres count toward coverage, never toward a name (2026-10-29).
+const ROUTE_MAP_MIN_UNIQUE = 0.4;
 const ROUTE_MAP_MIN_MATCH_M = 60;
 const ROUTE_MAP_MIN_ALIGNMENT = 0.5;
 const ROUTE_MAP_LIFTS = 'cable_car|gondola|mixed_lift|chair_lift|drag_lift|t-bar|j-bar|platter|rope_tow|magic_carpet';
@@ -8747,7 +8750,7 @@ function routeMapMatch(rows, window, features, kind) {
   const points = routeMapRows(rows, window.tStart, window.tEnd);
   const candidates = features.filter(f => f.kind === kind);
   const hits = new Map();
-  let totalM = 0;
+  let totalM = 0, ambiguousM = 0;
   for (let i = 1; i < points.length; i++) {
     const a = points[i - 1], b = points[i], dt = b.t - a.t;
     const length = routeMapDistance([a.latitude, a.longitude], [b.latitude, b.longitude]);
@@ -8765,7 +8768,8 @@ function routeMapMatch(rows, window, features, kind) {
           && point[1] >= b[1] - lonPad && point[1] <= b[3] + lonPad)
         .map(feature => ({ feature, d: routeMapPathDistance(point, feature.paths, heading) }))
         .filter(x => x.d <= ROUTE_MAP_CORRIDOR_M).sort((x, y) => x.d - y.d);
-      if (!ranked.length || (ranked[1] && ranked[1].d - ranked[0].d < ROUTE_MAP_MARGIN_M)) continue;
+      if (!ranked.length) continue;
+      if (ranked[1] && ranked[1].d - ranked[0].d < ROUTE_MAP_MARGIN_M) { ambiguousM += length / steps; continue; }
       const feature = ranked[0].feature;
       const hit = hits.get(feature) || { label: feature.label, url: feature.url, meters: 0, firstT: a.t + dt * f };
       hit.meters += length / steps;
@@ -8773,8 +8777,12 @@ function routeMapMatch(rows, window, features, kind) {
     }
   }
   const names = [...hits.values()].filter(h => h.meters >= ROUTE_MAP_MIN_MATCH_M).sort((a, b) => a.firstT - b.firstT);
-  const coverage = totalM > 0 ? names.reduce((sum, h) => sum + h.meters, 0) / totalM : 0;
-  return { names: coverage >= ROUTE_MAP_COVERAGE ? names : [], coverage, distanceM: totalM };
+  const namedM = names.reduce((sum, h) => sum + h.meters, 0);
+  // On mapped lines (named or between two) for most of the run, and on a named one for enough of it.
+  const coverage = totalM > 0 ? (namedM + ambiguousM) / totalM : 0;
+  const unique = totalM > 0 ? namedM / totalM : 0;
+  const named = coverage >= ROUTE_MAP_COVERAGE && unique >= ROUTE_MAP_MIN_UNIQUE;
+  return { names: named ? names : [], coverage, unique, distanceM: totalM };
 }
 
 // A physical trail and a signed route can share geometry without competing for the same name.
@@ -8784,7 +8792,7 @@ function routeMapTrailNames(rows, window, features) {
   return trails.length ? trails : routeMapMatch(rows, window, features, 'route').names;
 }
 
-return { ROUTE_MAP_CORRIDOR_M, ROUTE_MAP_MARGIN_M, ROUTE_MAP_COVERAGE, ROUTE_MAP_MIN_MATCH_M, ROUTE_MAP_MIN_ALIGNMENT, ROUTE_MAP_LIFTS, routeMapPoint, routeMapDistance, routeMapRows, routeMapBounds, routeMapProfile, routeMapQuery, routeMapFeatures, routeMapPathDistance, routeMapMatch, routeMapTrailNames };
+return { ROUTE_MAP_CORRIDOR_M, ROUTE_MAP_MARGIN_M, ROUTE_MAP_COVERAGE, ROUTE_MAP_MIN_UNIQUE, ROUTE_MAP_MIN_MATCH_M, ROUTE_MAP_MIN_ALIGNMENT, ROUTE_MAP_LIFTS, routeMapPoint, routeMapDistance, routeMapRows, routeMapBounds, routeMapProfile, routeMapQuery, routeMapFeatures, routeMapPathDistance, routeMapMatch, routeMapTrailNames };
 })();
 /* ==== End route map names port ==== */
 
@@ -8924,7 +8932,27 @@ function routeMapNamesFor(D, win, kind) {
   return state.matches.get(key);
 }
 
-async function lookupMapNames(D) {
+/* A ski run's or lift's map name as its default TITLE, '' when there is none. Display only: it is
+   matched on each render from cached geometry and never written to a label, a saved descent or a
+   segment, so a later catalogue or matcher fix reaches old sessions and a partial match of a piste
+   never becomes that piste's leaderboard identity. Bike and foot keep "Map:" as a sub-line. */
+function skiMapTitle(D, win, kind) {
+  if (!D || LoamRouteMap.routeMapProfile(displaySport(D)) !== 'ski') return '';
+  return routeMapNamesFor(D, win, kind).map(n => n.label).join(' → ');
+}
+/* A run on the ride on screen: the rider's own name or a saved segment's wins, then the map name,
+   then the generic "Descent N". Needs D because a map name is matched against THIS ride's track,
+   which is why it cannot live in runDisplayLabel: that also titles other rides' laps. */
+function runTitle(D, r) {
+  const own = runDisplayLabel(r);
+  if (!r || runLabel(r.tStart) || (r.src && r.src.autoTag) || !/^(Lap|Run|Descent|Rep) \d+$/.test(r.label || '')) return own;
+  return skiMapTitle(D, r, 'piste') || own;
+}
+
+/* `auto` is the lookup a ski session starts by itself. Its failure stays silent and starts no
+   cooldown: an offline open on the mountain should not greet the skier with an error nobody asked
+   for, and the button that remains gives the real error when tapped. */
+async function lookupMapNames(D, auto = false) {
   const state = routeMapState(D);
   const query = LoamRouteMap.routeMapQuery(state.bounds, state.profile);
   if (!query || state.pending || Date.now() < mapNamesRetryAfter) return;
@@ -8953,9 +8981,11 @@ async function lookupMapNames(D) {
     // Cache source geometry, never a verdict: matching is re-derived for old recordings too.
     try { if (raw.length < 2000000) localStorage.setItem(routeMapCacheKey(state.profile), JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
   } catch (error) {
-    if (/^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
-    state.error = error.message?.startsWith('service:') ? error.message
-      : error.name === 'AbortError' ? 'timeout' : error.message === 'response' ? 'response' : 'download';
+    if (!auto) {
+      if (/^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
+      state.error = error.message?.startsWith('service:') ? error.message
+        : error.name === 'AbortError' ? 'timeout' : error.message === 'response' ? 'response' : 'download';
+    }
   }
   finally { clearTimeout(timeout); state.pending = false; }
   if (Date.now() < mapNamesRetryAfter) setTimeout(() => {
@@ -8963,6 +8993,8 @@ async function lookupMapNames(D) {
   }, mapNamesRetryAfter - Date.now() + 50);
   if (_lastRender?.D !== D || _runsD !== D || routeMapState(D) !== state) return;
   renderMapNames(D); drawRuns();
+  // The day table titles its lifts and runs by map name too, and was painted before the names came.
+  if (D.skiDay && !document.getElementById('skiGpsSection')?.classList.contains('hidden')) renderSkiGpsDay(D);
 }
 
 function renderMapNames(D) {
@@ -8975,6 +9007,16 @@ function renderMapNames(D) {
   const state = routeMapState(D);
   const T = loamT, E = escapeHtml;
   const ski = profile === 'ski';
+  /* Ski names load without a tap (owner, 2026-10-29). The request names one-degree cells on Loam's
+     own site, coarser than the basemap tiles the page already fetches for the same track. Bike and
+     foot names stay behind the button: they query Overpass, a shared volunteer service that was
+     answering 502 under load, and an automatic lookup on every opened ride would add to that. */
+  if (ski && state.bounds && !state.features && !state.pending && !state.autoTried
+      && Date.now() >= mapNamesRetryAfter && navigator.onLine !== false) {
+    state.autoTried = true;
+    lookupMapNames(D, true);
+    if (state.pending) return; // The lookup already repainted this section, and will again with names.
+  }
   const runs = segmentRuns(D, 'auto').runs;
   const lifts = ski ? (D.gradeSegments || D.segments || []).filter(s => s.kind === 'lift') : [];
   const items = [...runs.map((win, i) => ({ win, kind: ski ? 'piste' : 'trail', title: ski ? T('Run {n}', { n: i + 1 }) : runDisplayLabel(win) })),
@@ -9603,9 +9645,13 @@ function drawRuns() {
     : `<tr><th>#</th><th>${nounCap}</th><th>${loamT('Time')}</th><th>${loamT('Dist')}</th><th>${topLabel}</th><th>${avgLabel}</th>${anyGap ? '<th>GAP</th>' : ''}${anySteps ? `<th title="${stepsTitle}">${loamT('Steps')}</th>` : ''}<th>${footSport ? loamT('Elev') : loamT('Drop')}</th>${anyTopo ? `<th class="run-topo" data-i18n-key="Topo (splits column)">${topoWord}</th>` : ''}<th></th></tr>`;
   document.querySelector('#runsTable tbody').innerHTML = runs.map((r, index) => {
     const m = r.metrics;
-    const label = runDisplayLabel(r);
+    const label = runTitle(D, r);
     const mapNames = routeMapNamesFor(D, r);
-    const mapNameBadge = mapNames.length ? ` <small class="ski-map-name" style="display:block;font-weight:400;color:var(--text-muted)">${escapeHtml(loamT('Map: {name}', { name: mapNames.map(n => n.label).join(' → ') }))}</small>` : '';
+    /* A ski run titled by its map name says where the name came from; any other row keeps the
+       "Map:" line under its own name. */
+    const mapTitled = mapNames.length > 0 && label !== runDisplayLabel(r);
+    const mapNameBadge = mapNames.length ? ` <small class="ski-map-name" style="display:block;font-weight:400;color:var(--text-muted)">${escapeHtml(mapTitled
+      ? loamT('Name from the map') : loamT('Map: {name}', { name: mapNames.map(n => n.label).join(' → ') }))}</small>` : '';
     /* Library actions per run, when it is backed by a descent: tag/retag and compare past laps,
        folded in from the retired Descents section. A matched run's label already comes from its
        autoTag, so only show the badge when it adds a name the label does not (e.g. a custom
@@ -9913,7 +9959,7 @@ function openSegmentPage(r, D, focusN, landing) {
   const turns = (D.turns || []).filter(T => T.tPeak >= r.tStart && T.tPeak <= r.tEnd);
   _segTurns = turns;
   _segPinnedN = focusN != null && turns.some(T => T.n === focusN) ? focusN : null;
-  const label = runDisplayLabel(r);
+  const label = runTitle(D, r);
   const m = r.metrics || {};
   document.getElementById('segTitle').textContent = label;
   document.getElementById('segSub').textContent =
@@ -10559,7 +10605,7 @@ function restoreScrollOnceTall(y) {
 }
 
 function showTurnsForRun(r, D) {
-  const label = runDisplayLabel(r);
+  const label = runTitle(D, r);
   focusSegment({ tStart: r.tStart, tEnd: r.tEnd, polyline: r.polyline, label }, D.ride);
   const mapTag = document.getElementById('mapFocusTag');
   if (mapTag && !isRoadAnalysis(D)) {
@@ -10591,7 +10637,7 @@ function filterTurnTableToRun(r, D) {
   /* Filtering to a run is an explicit request to see its turns, so open the (default-collapsed) table. */
   const det = document.getElementById('turnDetails');
   if (det) det.open = true;
-  const label = escapeHtml(runDisplayLabel(r));
+  const label = escapeHtml(runTitle(D, r));
   const tag = document.getElementById('turnFilterTag');
   tag.classList.remove('hidden');
   tag.innerHTML = loamT('Turn-by-turn: <strong>{label}</strong> · {n} turns', { label, n: turns.length })
@@ -18035,7 +18081,10 @@ function drawNordicWindow(D) {
     const all = [];
     for (const chunk of s.route) {
       const points = chunk.map(r => [r.latitude, r.longitude]); all.push(...points);
-      if (points.length > 1) _xcMap._xcTracks.push(L.polyline(points, { color: '#1f7ba6', weight: 4 }).addTo(_xcMap));
+      /* Cased and in the snow track ink, not blue: the piste overlay draws its own runs in blue. */
+      if (points.length > 1) _xcMap._xcTracks.push(
+        L.polyline(points, { color: TRACK_CASING_COLOR, weight: TRACK_CASING_WEIGHT, opacity: 0.75, className: 'track-casing', interactive: false }).addTo(_xcMap),
+        L.polyline(points, { color: TRACK_SNOW_COLORS.descent, weight: TRACK_WEIGHT }).addTo(_xcMap));
     }
     if (all.length) _xcMap.fitBounds(all, { padding: [20, 20], maxZoom: 17 }); else _xcMap.setView([0, 0], 1);
   }
@@ -38422,10 +38471,16 @@ function renderSkiGpsDay(D) {
   if (thead) thead.innerHTML = `<tr><th>#</th><th>${loamT('Piste')}</th><th>${loamT('Drop')}</th><th>${loamT('Dist')}</th>`
     + `<th>${loamT('Moving')}</th><th>${loamT('Avg')}</th><th>${loamT('Top')}</th><th>${loamT('Steepest')}</th><th>${loamT('HR')}</th></tr>`;
   const rows = [];
+  /* Map names, matched on each render and never saved (see skiMapTitle). A lift reads its whole
+     ride; a run reads its fall, the stretch this table measures. */
+  const runName = lap => skiMapTitle(D, { tStart: lap.tTop ?? lap.t0, tEnd: lap.tBottom ?? lap.t1 }, 'piste');
+  const liftName = L => skiMapTitle(D, L, 'lift');
+  // min-width: a narrow column otherwise stacks "Gold Coast Face → Gold Coast" one word per line.
+  const mapLine = name => name ? `<small class="ski-map-name" style="display:block;min-width:9em;font-weight:400;color:var(--text-muted);white-space:normal">${escapeHtml(name)}</small>` : '';
   for (const lap of day.laps) {
     if (lap.run) {
       rows.push(`<tr class="${best.has(lap.runIndex) ? 'ski-best' : ''}"><td>${lap.runIndex}</td>`
-        + `<td>${lap.group ? `${lap.group}&middot;${lap.groupLap}` : '&mdash;'}</td>`
+        + `<td>${lap.group ? `${lap.group}&middot;${lap.groupLap}` : '&mdash;'}${mapLine(runName(lap))}</td>`
         + `<td>${U.elev(lap.drop)}</td><td>${U.dist(lap.distance)}</td><td>${skiClockT(lap.movingS)}</td>`
         + `<td>${lap.avgMovingSpeed != null ? U.speed(lap.avgMovingSpeed) : '&mdash;'}</td>`
         + `<td>${lap.peakSpeed ? U.speed(lap.peakSpeed) : '&mdash;'}</td>`
@@ -38439,6 +38494,7 @@ function renderSkiGpsDay(D) {
       const L = day.lifts[lap.liftIndex - 1];
       const bits = [
         (L.down ? loamT('Lift back down') : loamT('Lift')) + (L.group ? ' ' + L.group : ''),
+        liftName(L) || null,
         skiClockT(L.durationS),
         L.gain != null ? (L.gain >= 0 ? '+' : '\u2212') + U.elev(Math.abs(L.gain)) : null,
         L.avgSpeed != null ? U.speed(L.avgSpeed) : null,
@@ -38451,10 +38507,14 @@ function renderSkiGpsDay(D) {
   if (tb) tb.innerHTML = rows.join('') || `<tr><td colspan="9" class="dim">${loamT('No runs found between lifts.')}</td></tr>`;
   const rep = document.getElementById('skiGpsRepeats');
   if (rep) {
+    // A group is named only when every member matched the same name.
+    const named = (group, names) => names.length && names[0] && names.every(n => n === names[0]) ? `${group} (${names[0]})` : group;
     const lines = day.runGroups.map(g => loamT('Piste {g}: runs {runs}, fastest run {best} in {t} moving.',
-      { g: g.group, runs: g.members.join(', '), best: g.bestRun, t: skiClockT(g.bestMovingS) }))
+      { g: named(g.group, day.laps.filter(l => l.run && l.group === g.group).map(runName)),
+        runs: g.members.join(', '), best: g.bestRun, t: skiClockT(g.bestMovingS) }))
       .concat(day.liftGroups.map(g => loamT('Lift {g}: {n} trips, {t} each, {v} up at {speed}.',
-        { g: g.group, n: g.rides, t: skiClockT(g.meanDurationS), v: U.elev(g.meanGain || 0), speed: U.speed(g.meanSpeed || 0) })));
+        { g: named(g.group, day.lifts.filter(l => l.group === g.group).map(liftName)),
+          n: g.rides, t: skiClockT(g.meanDurationS), v: U.elev(g.meanGain || 0), speed: U.speed(g.meanSpeed || 0) })));
     rep.innerHTML = lines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
   }
   const cav = document.getElementById('skiGpsCaveat');
@@ -40451,6 +40511,7 @@ const LOAM_NB = {
   'The map-name service returned an incomplete response. Please try again later.': 'Kartnavntjenesten returnerte et ufullstendig svar. Prøv igjen senere.',
   'Could not reach the map-name service. It may be unavailable, or your connection may be offline.': 'Kunne ikke nå kartnavntjenesten. Tjenesten kan være utilgjengelig, eller enheten kan være uten nettforbindelse.',
   'Map: {name}': 'Kart: {name}',
+  'Name from the map': 'Navn fra kartet',
   'Open these tracks individually below.': 'Åpne disse sporene enkeltvis nedenfor.',
   'Nordic GPX tracks are supported. Select Cross-country ski if the file has no activity label.': 'GPX-spor for langrenn støttes. Velg Langrenn hvis filen ikke har en aktivitetsmerking.',
   'Cross-country ski (beta)': 'Langrenn (beta)',
@@ -46170,6 +46231,20 @@ function addSeasonFinish(layer, latlng) {
   L.marker(latlng, { interactive: false, keyboard: false, zIndexOffset: 500,
     icon: L.divIcon({ className: '', html: `<div class="season-finish">${mark}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }) }).addTo(layer);
 }
+/* The track's grade colours, and the set a snow page uses instead. On snow the map under the track
+   is a piste map, and its key is green / blue / red / black runs with grey lifts -- the same four
+   hues the grade set uses for descent, flat, climb and lift. So a skier's runs drew as green pistes
+   and their lifts as the map's own lift lines, over a grey relief, and the day vanished into the
+   resort (owner report, 2026-10-29: "Map is hard to read"). The snow set takes hues the piste key
+   does not use, sampled from OpenSnowMap's own tiles rather than assumed: magenta for skiing, orange
+   for a climb, and white for a lift, which the dark casing turns into a cased line no piste draws.
+   Keyed on the PAGE (`data-palette`), not on the basemap: a green track reads as a green run on a
+   ski day over any basemap, and the page does not change under a live basemap swap. */
+const TRACK_GRADE_COLORS = { climb: '#e0573a', descent: '#7fb069', lift: '#9aa2ad', flat: '#5b9bd5' };
+const TRACK_SNOW_COLORS = { climb: '#f08c00', descent: '#d81b8a', lift: '#ffffff', flat: '#f0a6cf' };
+function trackGradeColors() {
+  return document.documentElement.dataset.palette === 'winter' ? TRACK_SNOW_COLORS : TRACK_GRADE_COLORS;
+}
 function renderRunMap(loc, ride, segments, legendHelp) {
   clearTimelineCursor();
   /* Only advertise "lift" in the legend when this ride actually has a detected lift/gondola segment.
@@ -46197,11 +46272,12 @@ function renderRunMap(loc, ride, segments, legendHelp) {
      Merged into one polyline per same-color stretch (see drawColoredTrack). */
   const inSeg = (t) => segments.find(s => t >= s.tStart && t <= s.tEnd);
   const runPausedBrk = pausedLegBreaks(inRide.map(r => r.t), (ride && ride.pausedSpans) || []);
+  const col = trackGradeColors();
   drawColoredTrack(latlngs, (i) => {
     const seg = inSeg(inRide[i].t);
-    /* Lift segments (GPS-only FIT rides) draw gray: transport, not riding. */
-    if (seg && seg.kind === 'lift') return '#9aa2ad';
-    return seg ? (seg.dir === 'down' ? '#7fb069' : '#e0573a') : '#5b9bd5';
+    /* Lift segments (GPS-only FIT rides) draw apart from the riding: transport, not riding. */
+    if (seg && seg.kind === 'lift') return col.lift;
+    return seg ? (seg.dir === 'down' ? col.descent : col.climb) : col.flat;
   }, null, { brokenAt: (i) => runPausedBrk.has(i) });
   /* Start/end markers. */
   L.circleMarker(latlngs[0], { radius: 6, color: '#1a202c', fillColor: '#8caa6d', fillOpacity: 1, weight: 2 }).addTo(mapInstance).bindTooltip('Start');
@@ -55871,8 +55947,11 @@ function setMapLegend(kind, opts = {}) {
     /* Track colors match renderRunMap: climb red (.lg.scrub), descent green (.lg.carry), lift grey.
        The lift swatch only appears when this ride has a detected lift/gondola segment; runs and
        lift-free rides omit it entirely. */
-    const liftEntry = opts.hasLift ? `<span class="lg" style="background:#9aa2ad;"></span>${loamT('lift')}` : '';
-    body.innerHTML = `<span>${loamT('track colour = grade:')}</span>${dot('scrub')}${loamT('climb')}${dot('carry')}${loamT('descent')}${liftEntry}`
+    const col = trackGradeColors(), snow = col === TRACK_SNOW_COLORS;
+    /* A white lift swatch needs the track's casing to show on a pale legend. */
+    const swatch = (cls, c) => snow ? `<span class="lg" style="background:${c};box-shadow:0 0 0 1.5px ${TRACK_CASING_COLOR};"></span>` : dot(cls);
+    const liftEntry = opts.hasLift ? (snow ? swatch('', col.lift) : `<span class="lg" style="background:${col.lift};"></span>`) + loamT('lift') : '';
+    body.innerHTML = `<span>${loamT('track colour = grade:')}</span>${swatch('scrub', col.climb)}${loamT('climb')}${swatch('carry', col.descent)}${loamT('descent')}${liftEntry}`
       + `<span class="map-help" style="opacity:0.6;">${escapeHtml(opts.help || loamT('· start & end marked · tap a segment below to focus'))}</span>`;
   }
 }
@@ -62505,7 +62584,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '3cf91a1b5 · 2026-10-28';
+const LOAM_BUILD = '770c03266 · 2026-10-29';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
