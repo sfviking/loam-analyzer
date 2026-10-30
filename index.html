@@ -2133,6 +2133,14 @@
   .turn-marker.tm-dot .tm-dir { display: none; }
   .turn-marker.tm-dot.highlight { width: 26px; height: 26px; margin: 0; font-size: 10px; border-width: 2px; outline-width: 3px !important; }
   .turn-marker.tm-dot.highlight .tm-dir { display: inline; }
+  /* The RIDE map goes further and HIDES a crowded turn rather than dotting it (daroman, 2026-10-30:
+     "The analysis page has far too much info right now", over a whole-ride view where sixty dots
+     still piled into one blob over the track -- a 10px dot in a ring is ~16px across, so a pile of
+     them is a blob of a different size). Zooming in, or tapping a run, brings them back with their
+     numbers. Hidden on Leaflet's own icon box, not the disc, because the box is what takes the tap
+     and opens the tooltip: an invisible disc in a live box would still answer to a finger. A
+     highlighted (tapped) corner is drawn whatever its neighbours. The comparison maps keep dots. */
+  .leaflet-marker-icon:has(> .turn-marker.tm-hide:not(.highlight)) { visibility: hidden; pointer-events: none; }
 
   .map-legend {
     font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted);
@@ -2544,9 +2552,12 @@
    follows prefers-color-scheme; the header toggle cycles auto/light/dark. */
 (function () {
   try {
-    var view = localStorage.getItem('loam_analysis_view');
-    /* Minimalist was merged into Visual (2026-09-26); a stored Minimalist opens as Visual. */
-    if (view === 'visual' || view === 'minimalist') document.documentElement.dataset.analysisView = 'visual';
+    /* Simple (stored 'visual') unless the athlete chose Detailed: a tester's first look at an
+       analysis was every section with every fold open (daroman, 2026-10-30: "The analysis page has
+       far too much info right now"). Stamped either way, so private mode, where the read throws,
+       still opens in Simple. Minimalist was merged into Visual (2026-09-26) and opens as it. */
+    document.documentElement.dataset.analysisView = 'visual';
+    if (localStorage.getItem('loam_analysis_view') === 'detailed') document.documentElement.dataset.analysisView = 'detailed';
     var t = localStorage.getItem('loamTheme');
     if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
   } catch (e) {}
@@ -2915,8 +2926,8 @@ function loamSeasonRequested(search, host) {
 <div class="analysis-view-bar">
   <label for="analysisView">View
     <select id="analysisView" onchange="setAnalysisView(this.value)">
-      <option value="visual">Simple</option>
-      <option value="detailed" selected>Detailed</option>
+      <option value="visual" selected>Simple</option>
+      <option value="detailed">Detailed</option>
     </select>
   </label>
   <button type="button" id="cropOpenBtn" class="hidden">Trim&hellip;</button>
@@ -2931,7 +2942,7 @@ function loamSeasonRequested(search, host) {
       <!-- The ride page switch lives in the popover rather than on the View bar: on a phone a third
            control on that row wraps it and pushes the session summary below the first screen
            (session-ux pins the summary under 300 px). Offered on the MTB family only. -->
-      <label id="mtbPageToggleLabel" class="mtb-page-toggle hidden" title="Try the descents-first ride layout on this ride; the classic layout stays one tap away"><input type="checkbox" id="mtbPageToggle" onchange="setMtbPage(this.checked)"> New ride page</label>
+      <label id="mtbPageToggleLabel" class="mtb-page-toggle hidden" title="The descents-first ride layout; untick for the classic layout"><input type="checkbox" id="mtbPageToggle" onchange="setMtbPage(this.checked)"> New ride page</label>
       <!-- Offered only while a season is on the calendar (initSeason). In the popover because the app
            hides the masthead, so this is the one switch both the web page and the app can reach. -->
       <label id="seasonToggleLabel" class="season-toggle hidden" title="Halloween colours until 1 November. Untick for the usual Loam look."><input type="checkbox" id="seasonToggle" onchange="setSeasonEnabled(this.checked)"> 🎃 Halloween edition</label>
@@ -43142,8 +43153,8 @@ const LOAM_NB = {
   ' · tap a {row} to open it': ' · trykk på en {row} for å åpne den',
   ' · tap a row to open it': ' · trykk på en rad for å åpne den',
   'Open this row': 'Åpne denne raden',
-  '· number = turn, L/R = side · track colour = speed · tap a run below to focus':
-    '· tall = sving, V/H = side · sporfarge = fart · trykk på en etappe under for å zoome inn',
+  '· number = turn, L/R = side · zoom in for every turn · track colour = speed · tap a run below to focus':
+    '· tall = sving, V/H = side · zoom inn for alle svingene · sporfarge = fart · trykk på en etappe under for å zoome inn',
   'carried · track colour = speed · tap a corner row':
     'båret · sporfarge = fart · trykk på en svingrad',
   'Cross-ride descent comparison': 'Sammenligning av nedkjøringer på tvers av turer',
@@ -53855,9 +53866,8 @@ function dashboardFamily(normalizedSport) {
  *
  * localStorage is a string an athlete, another tab, or a future build can have written, so nothing
  * downstream should have to wonder whether `off` is an array. Anything unreadable comes back null,
- * which every caller treats as "no layout" -- i.e. show everything -- because the failure this is
- * willing to have is a dashboard that shows too much, never one that silently hides a section the
- * athlete never chose to hide.
+ * which every caller treats as "no layout" -- i.e. the shipped default (`DASHBOARD_DEFAULT`), the
+ * same page a new athlete sees, rather than a half-read list that hides sections nobody chose to.
  *
  * Unknown family keys and unknown ids are KEPT, deliberately. The resolver only consults catalog
  * rows, so they cost nothing, and pruning them here would mean a build that temporarily withholds a
@@ -53889,8 +53899,8 @@ function normalizeLayout(raw) {
  * joins whichever presets the release puts it in, so a preset user keeps getting the MAINTAINED
  * layout rather than a snapshot frozen at the moment they chose it.
  *
- * `off` names what each preset HIDES. `full` hides nothing and is the shipped default, which is what
- * makes adding this feature a no-op for anyone who never opens the chooser.
+ * `off` names what each preset HIDES. `full` hides nothing; `DASHBOARD_DEFAULT` below names the
+ * one a family uses until the athlete picks.
  *
  * These are the sections a sport can show, so a preset naming one the recording did not produce is
  * harmless -- the resolver only consults catalog rows, and the chooser only lists what rendered.
@@ -53949,11 +53959,20 @@ const DASHBOARD_PRESETS = {
 const DASHBOARD_CUSTOM = 'custom';
 
 /*
- * The key of the preset that hides nothing. Every family declares one, because it is the SHIPPED
- * state: a build with no `full` row would leave `activePreset` naming a chip the chooser does not
- * draw, so `layout.test.js` asserts the row exists and is empty for every family.
+ * The key of the preset that hides nothing. Every family declares one: it is what "Everything" lights
+ * when the athlete picks it, and the fallback for a family whose table has no default row, so
+ * `layout.test.js` asserts the row exists and is empty for every family.
  */
 const DASHBOARD_FULL = 'full';
+
+/*
+ * The preset a family uses until the athlete picks one: Essentials (owner, 2026-10-30, on daroman's
+ * "The analysis page has far too much info right now"). It was Everything, which made this feature
+ * a no-op for anyone who never opened the chooser -- and that was every tester. A layout shapes
+ * Simple only, so Detailed still shows every section. A family whose table has no row by this key
+ * falls back to Everything rather than to a preset this build does not draw.
+ */
+const DASHBOARD_DEFAULT = 'essentials';
 
 /*
  * The presets offered for a family, always including one the chooser can show as selected. An
@@ -53975,7 +53994,8 @@ function presetsFor(presets, family) {
 function layoutOff(presets, layout, family) {
   const fam = (layout && family && layout[family]) || null;
   const custom = (fam && fam.sections && fam.sections.off) || [];
-  const name = fam && fam.preset;
+  /* Nothing stored for this family is the shipped default, not an empty custom list. */
+  const name = fam ? fam.preset : DASHBOARD_DEFAULT;
   if (!name || name === DASHBOARD_CUSTOM) return custom.slice();
   const hit = presetsFor(presets, family).find((p) => p.key === name);
   return hit ? hit.off.slice() : custom.slice();
@@ -53992,16 +54012,18 @@ function layoutOff(presets, layout, family) {
  * agree. Same bug shape as a Focused-view hint claiming to hide things on a sport whose hidden set
  * is empty: a control describing a state it is not in.
  *
- * Three cases, in order. A stored preset wins, because that is a choice the athlete made by name.
- * Otherwise an `off` list with anything in it is genuinely custom. Otherwise nothing is hidden, and
- * the answer is `full`.
+ * Four cases, in order. Nothing stored for the family is the shipped default (`DASHBOARD_DEFAULT`,
+ * or `full` where the family has no such row). A stored preset wins, because that is a choice the
+ * athlete made by name. Otherwise an `off` list with anything in it is genuinely custom. Otherwise
+ * nothing is hidden, and the answer is `full`.
  *
  * Takes `presets` rather than reading the table, for the reason every function here does: a caller
  * may ask the raw question without a preset table in hand.
  */
 function activePreset(presets, layout, family) {
   const fam = (layout && family && layout[family]) || null;
-  if (fam && fam.preset) return fam.preset;
+  if (!fam) return presetsFor(presets, family).some((p) => p.key === DASHBOARD_DEFAULT) ? DASHBOARD_DEFAULT : DASHBOARD_FULL;
+  if (fam.preset) return fam.preset;
   return layoutOff(presets, layout, family).length ? DASHBOARD_CUSTOM : DASHBOARD_FULL;
 }
 
@@ -54072,17 +54094,19 @@ function applySectionLayout() {
 }
 
 /* Read and write one family's slice of the layout, so the four handlers below cannot each invent a
-   different shape for it. Writing always names the family currently on screen. */
+   different shape for it. Writing always names the family currently on screen. `fam` is null while
+   nothing is stored for the family, which the resolver reads as the shipped default (Essentials); a
+   stand-in empty slice here would read as Everything and light the wrong chip. */
 function dashboardFamilyLayout() {
   const layout = loadDashboardLayout() || { v: DASHBOARD_LAYOUT_VERSION };
   const family = dashboardFamilyNow();
-  return { layout, family, fam: layout[family] || { sections: { off: [] } } };
+  return { layout, family, fam: layout[family] || null };
 }
 function setDashboardFamilyLayout(mutate) {
   const { layout, family, fam } = dashboardFamilyLayout();
   const before = resolveSectionLayout(SECTION_CATALOG, layout, family, DASHBOARD_PRESETS);
-  const next = { sections: { off: (fam.sections && fam.sections.off) || [] } };
-  if (fam.preset) next.preset = fam.preset;
+  const next = { sections: { off: (fam && fam.sections && fam.sections.off) || [] } };
+  if (fam && fam.preset) next.preset = fam.preset;
   mutate(next);
   layout[family] = next;
   layout.v = DASHBOARD_LAYOUT_VERSION;
@@ -54198,8 +54222,7 @@ function closeDashboardModal() {
 
 /* One preference covers every activity, including the standalone indoor-sport views. */
 function analysisView() {
-  const view = document.documentElement.dataset.analysisView;
-  return view === 'visual' ? view : 'detailed';
+  return document.documentElement.dataset.analysisView === 'detailed' ? 'detailed' : 'visual';
 }
 function setAnalysisView(value) {
   const view = value === 'visual' || value === 'minimalist' ? 'visual' : 'detailed';
@@ -54681,9 +54704,11 @@ function renderAll(D) {
    render passes through hideAllSections) puts them back where the classic layout expects them.
    What this file adds on top is the summary layer those sections never had.
 
-   Opt-in through the "New ride page" box in the View bar (`loam_mtb_page` in localStorage), so the
-   owner can flip between the two layouts on the same real ride; it applies to the MTB family only
-   and leaves a ski day and a road FIT on the classic layout. */
+   The "New ride page" box in the View bar (`loam_mtb_page` in localStorage) flips between the two
+   layouts on the same real ride; it applies to the MTB family only and leaves a ski day and a road
+   FIT on the classic layout. ON BY DEFAULT since 2026-10-30 (owner, on daroman's "far too much
+   info"): it was opt-in while the two were compared, so a rider who never ticked it saw only the
+   classic layout. Unticking it is stored as '0' and kept. */
 const MTB_PAGE_LS = 'loam_mtb_page';
 /* The lap-compare hues, in the fixed order the dataviz palette validates them (never cycled: a
    ninth descent wears the muted ink and is told apart by its number). */
@@ -54691,8 +54716,8 @@ const MP_RUN_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#
 let _mpRenderSeq = 0;
 
 function mtbPageWanted() {
-  try { const v = localStorage.getItem(MTB_PAGE_LS); return v === '1' || v === '"1"' || v === 'true'; }
-  catch (e) { return false; }
+  try { const v = localStorage.getItem(MTB_PAGE_LS); return v == null || v === '1' || v === '"1"' || v === 'true'; }
+  catch (e) { return true; }
 }
 function mtbPageApplies(D) {
   return !!D && isMtbFamily(displaySport(D)) && !isRoadAnalysis(D);
@@ -56086,7 +56111,7 @@ function setMapLegend(kind, opts = {}) {
   const dot = (cls) => `<span class="lg ${cls}"></span>`;
   if (kind === 'turns') {
     body.innerHTML = `<span>${loamT('turn ring = speed kept:')}</span>${dot('scrub')}${loamT('scrubbed')}${dot('held')}${loamT('held')}${dot('carry')}${loamT('carried')}`
-      + `<span class="analysis-explanation" style="opacity:0.6;">${loamT('· number = turn, L/R = side · track colour = speed · tap a run below to focus')}</span>`;
+      + `<span class="analysis-explanation" style="opacity:0.6;">${loamT('· number = turn, L/R = side · zoom in for every turn · track colour = speed · tap a run below to focus')}</span>`;
   } else {
     /* Track colors match renderRunMap: climb red (.lg.scrub), descent green (.lg.carry), lift grey.
        The lift swatch only appears when this ride has a detected lift/gondola segment; runs and
@@ -58208,7 +58233,7 @@ const TURN_FOCUS_MIN_ZOOM = 16;   /* floor for the no-fixes fallback */
 const TURN_MARKER_DENSE_PX = 28;  /* nearest-neighbour spacing (px) below which a disc becomes a dot */
 const JUMP_MARKER_DENSE_PX = 34;  /* the same, for jump diamonds, which are 32px against a turn's 26 */
 /* One nearest-neighbour pass over one KIND of marker, toggling `cls` on the crowded ones.
-   See .turn-marker.tm-dot / .jump-marker-wrap.jm-dot in the stylesheet. */
+   See .turn-marker.tm-dot / .tm-hide / .jump-marker-wrap.jm-dot in the stylesheet. */
 function thinMarkerLayer(markers, densePx, cls, map = mapInstance) {
   const ms = Object.values(markers || {}).filter(m => m && m.getLatLng && m._icon);
   let pts;
@@ -58234,7 +58259,8 @@ function thinMarkerLayer(markers, densePx, cls, map = mapInstance) {
    at all, so the same ride looks fine and then blobs the moment its head-unit file is imported. */
 function updateTurnMarkerDensity() {
   if (!mapInstance) return;
-  thinMarkerLayer(turnMarkers, TURN_MARKER_DENSE_PX, 'tm-dot');
+  /* Hidden, not dotted, on the ride map: see .tm-hide in the stylesheet. */
+  thinMarkerLayer(turnMarkers, TURN_MARKER_DENSE_PX, 'tm-hide');
   thinMarkerLayer(jumpMarkers, JUMP_MARKER_DENSE_PX, 'jm-dot');
 }
 function rideLocRows() {
@@ -62728,7 +62754,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'b2177885d · 2026-10-29';
+const LOAM_BUILD = '16aa1d981 · 2026-10-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
