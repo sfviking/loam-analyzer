@@ -3227,6 +3227,26 @@ function loamSeasonRequested(search, host) {
   .strength-table { width: 100%; border-collapse: collapse; }
   .strength-table th, .strength-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border, #2a2e37); font-variant-numeric: tabular-nums; }
   .strength-table th { font: 600 10px 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: .1em; color: var(--text-muted, #7a808c); }
+  .lift-history-label { display: none; }
+  .lift-history-value { white-space: nowrap; }
+  @media (max-width: 600px) {
+    /* Keep the table headers for assistive technology while each session reflows into a card. */
+    .lift-history-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .lift-history-table, .lift-history-table tbody { display: block; }
+    .lift-history-table tbody { display: grid; gap: 10px; }
+    .lift-history-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 16px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+    .lift-history-table tbody td { padding: 0; border: 0; min-width: 0; font-size: 13px; text-align: left; }
+    .lift-history-table td:first-child { font: 600 15px 'Bricolage Grotesque', sans-serif; }
+    .lift-history-table td:nth-child(2) { display: flex; justify-content: flex-end; align-items: baseline; gap: 5px; color: var(--text-dim); }
+    .lift-history-table td:nth-child(4) { text-align: right; }
+    .lift-history-label { display: block; font: 400 11px/1.4 'Bricolage Grotesque', sans-serif; color: var(--text-muted); margin-bottom: 3px; }
+    .lift-history-table td:nth-child(2) .lift-history-label { margin: 0; }
+    .lift-history-table td:last-child { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding-top: 9px; border-top: 1px solid var(--border); }
+    .lift-history-table td:last-child .lift-history-label { margin: 0; }
+    #liftHistoryPanel .swim-hist-n { display: grid; gap: 8px; }
+    #liftHistoryPanel .swim-hist-n > span { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    #liftHistoryPanel .swim-hist-n b { white-space: nowrap; }
+  }
   /* Rep-by-rep detail: one mini bar chart per set (bar speed per rep) + per-rep depth. */
   .rep-detail-title { font: 600 13px 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--text, #e8eaed); margin-bottom: 12px; }
   .rep-detail-title .subtitle { display: block; font: 400 11px/1.5 'JetBrains Mono', monospace; text-transform: none; letter-spacing: 0; color: var(--text-muted, #7a808c); margin-top: 3px; }
@@ -8643,6 +8663,10 @@ function renderRunsPanel(D) {
       drawRuns();
     };
   }
+  // Position names only while building the page. Later lookups must not follow a runs table
+  // that the bike dashboard has since moved, taking the reader's section with it.
+  const names = document.getElementById('skiNamesSection');
+  if (sec && names) sec.insertAdjacentElement('afterend', names);
   renderMapNames(D);
   drawRuns();
   refreshDescentTags(D);
@@ -8992,7 +9016,8 @@ async function lookupMapNames(D, auto = false) {
   state.pending = true; state.error = false;
   renderMapNames(D);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  // Overpass may queue for 15 s before running our 20 s query. Leave time for transport too.
+  const timeout = setTimeout(() => controller.abort(), state.profile === 'ski' ? 25000 : 45000);
   try {
     let data, raw;
     if (state.profile === 'ski') {
@@ -9015,7 +9040,7 @@ async function lookupMapNames(D, auto = false) {
     try { if (raw.length < 2000000) localStorage.setItem(routeMapCacheKey(state.profile), JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
   } catch (error) {
     if (!auto) {
-      if (/^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
+      if (error.name === 'AbortError' || /^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
       state.error = error.message?.startsWith('service:') ? error.message
         : error.name === 'AbortError' ? 'timeout' : error.message === 'response' ? 'response' : 'download';
     }
@@ -9047,7 +9072,6 @@ function renderMapNames(D) {
   if (dayHost) dayHost.innerHTML = '';
   const profile = LoamRouteMap.routeMapProfile(displaySport(D));
   if (!profile || (profile !== 'ski' && LoamRouteMap.routeMapRows(D.sensors?.location).length < 2)) { sec.classList.add('hidden'); return; }
-  document.getElementById('runsSection')?.insertAdjacentElement('afterend', sec);
   const state = routeMapState(D);
   const T = loamT, E = escapeHtml;
   const ski = profile === 'ski';
@@ -13930,7 +13954,8 @@ function formAskCoach() {
   scrollToCoach();
   sendCoach(_form.turn
     ? LoamFormCoach.formTurnQuestion(formCoachFacts(_form.D, _form.turn, _form.S))
-    : LoamFormCoach.formSegmentQuestion(formSegmentCoachFacts(_form.D, _form.run, _form.S)));
+    : LoamFormCoach.formSegmentQuestion(formSegmentCoachFacts(_form.D, _form.run, _form.S)),
+    { scroll: true });
 }
 
 function formSelectTurn(D, turn) {
@@ -15926,7 +15951,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 27;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh)
+const ANALYSIS_CACHE_VERSION = 28;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one)
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -32237,11 +32262,11 @@ function liftHistorySection(history) {
     const vsRef = ref && ref.medianTopLoadKg ? (p.topLoadKg / ref.medianTopLoadKg - 1) * 100 : null;
     return `<tr>
       <td>${when(p.start)}</td>
-      <td>${p.nSets}</td>
-      <td>${kgToDisp(p.topLoadKg)} ${u} &times; ${p.topLoadReps}</td>
-      <td>${fmtVol(p.volumeKg)}</td>
-      <td class="${vsRef == null ? '' : cls(vsRef)}">${vsRef == null ? '&mdash;'
-        : (vsRef > 0 ? '+' : '') + vsRef.toFixed(1) + '%'}</td>
+      <td><span class="lift-history-value">${p.nSets}</span><span class="lift-history-label" aria-hidden="true">${loamT(p.nSets === 1 ? 'set' : 'sets')}</span></td>
+      <td><span class="lift-history-label" aria-hidden="true">${loamT('top set')}</span><span class="lift-history-value">${kgToDisp(p.topLoadKg)} ${u} &times; ${p.topLoadReps}</span></td>
+      <td><span class="lift-history-label" aria-hidden="true">${loamT('work')}</span><span class="lift-history-value">${fmtVol(p.volumeKg)}</span></td>
+      <td class="${vsRef == null ? '' : cls(vsRef)}"><span class="lift-history-label" aria-hidden="true">${loamT('vs your median')}</span><span class="lift-history-value">${vsRef == null ? '&mdash;'
+        : (vsRef > 0 ? '+' : '') + vsRef.toFixed(1) + '%'}</span></td>
     </tr>`;
   }).join('');
 
@@ -32266,7 +32291,7 @@ function liftHistorySection(history) {
       <p class="analysis-explanation">${escapeHtml(loamT(read.mechanism))}</p>
       <p class="swim-hist-a analysis-explanation">${escapeHtml(loamT(read.action))}</p>
     </div>
-    <div class="swim-tablewrap"><table class="strength-table">
+    <div class="swim-tablewrap"><table class="strength-table lift-history-table">
       <thead><tr><th>${loamT('session')}</th><th>${loamT('sets')}</th><th>${loamT('top set')}</th><th>${loamT('work')}</th><th>${loamT('vs your median')}</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     ${leadNote(
@@ -50269,7 +50294,11 @@ function turnMechanics(D, metric) {
   return Object.keys(out).length ? out : null;
 }
 
-function scrollToCoach() { const c = document.getElementById('coachSection'); if (c) c.scrollIntoView({ behavior: 'smooth' }); }
+function scrollToCoach() {
+  /* An explicit question must reveal a panel hidden by the view or saved layout before scrolling.
+     The evidence doorway also focuses the section without opening the phone keyboard. */
+  openRunEvidence('coachSection');
+}
 
 /* A local "what mattered" read computed from the same metrics the coach gets, shown as a hero card up
    top so the narrative is the first thing seen (no API key or scroll needed). 2-3 bullets, mechanics
@@ -50409,7 +50438,9 @@ function openRunEvidence(id) {
   if (!el || el.classList.contains('hidden')) return;
   if (getComputedStyle(el).display === 'none') setAnalysisView('detailed');
   if (id === 'roadSection') setRoadClimbsHidden(false);
-  const fold = id === 'roadSection' ? null : el.querySelector('details');
+  /* A fold marked to stay closed in Detailed stays closed here too: the coach section's first fold on
+     the training page is Coach settings, which a question must not open. */
+  const fold = id === 'roadSection' ? null : el.querySelector('details:not([data-detailed-stay-closed])');
   if (fold) fold.open = true;
   el.setAttribute('tabindex', '-1');
   el.focus({ preventScroll: true });
@@ -52793,7 +52824,7 @@ async function restoreCachedCoach(state, sport) {
   if (thread) thread.scrollTop = 1e9;
 }
 
-async function sendCoach(text) {
+async function sendCoach(text, { scroll = false } = {}) {
   if (!coachState || coachState.streaming) return;
   /* Checked BEFORE the stream slot is claimed, so this path has no slot to release. */
   if (coachTurnsUsed(coachState) >= COACH_MAX_TURNS) {
@@ -52801,6 +52832,7 @@ async function sendCoach(text) {
       `That is ${COACH_MAX_TURNS} questions in this conversation, which is where it stops. ` +
       `Open this session again to start a fresh one — the analysis above is unchanged.`);
     lockCoachInput('Conversation limit reached');
+    if (scroll) scrollToCoach();
     return;
   }
   if (coachDailyExhausted()) {
@@ -52808,6 +52840,7 @@ async function sendCoach(text) {
       `That is ${COACH_MAX_DAILY_BUNDLED} coach questions today on Loam's shared account, which is the daily limit. ` +
       `It resets tomorrow; to keep going now, add your own Anthropic API key in the coach settings.`);
     lockCoachInput('Daily limit on the shared account reached');
+    if (scroll) scrollToCoach();
     return;
   }
   /* Claim the stream slot before the first await, so a rapid double-click cannot pass the
@@ -52846,6 +52879,7 @@ async function sendCoach(text) {
       coachState.messages.push({ role: 'assistant', content: hit.text });
       document.getElementById('coachThread').scrollTop = 1e9;
       coachState.streaming = false;
+      if (scroll) scrollToCoach();
       return;
     }
   }
@@ -52883,6 +52917,9 @@ async function sendCoach(text) {
   if (asCards) system.push({ type: 'text', text: coachCardsLayout(coachState.sport) });
   const bubble = appendCoachBubble('assistant', '');
   bubble.innerHTML = `<span class="coach-typing">${escapeHtml(loamT('thinking…'))}</span>`;
+  /* The first question expands the thread after the history/cache awaits. Re-anchor now, before
+     the network wait, or scrolling the empty panel can leave the reply below a phone's viewport. */
+  if (scroll) scrollToCoach();
   coachAbort = new AbortController();
 
   if (onDevice) {
@@ -62967,7 +63004,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '969a54bf1 · 2026-10-30';
+const LOAM_BUILD = '25a21a904 · 2026-10-30';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
