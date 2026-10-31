@@ -44078,6 +44078,9 @@ const LOAM_NB = {
   'The checked sensor streams were complete. Coverage alone does not validate every measurement.':
     'Sensorstrømmene som ble sjekket, var komplette. Dekning alene validerer ikke hver enkelt måling.',
   'One input was thin: {what}.': 'Ett av grunnlagene var tynt: {what}.',
+  'Most sensor streams were complete, but {name} had gaps.': 'De fleste sensorstrømmene var komplette, men {name} hadde hull.',
+  'Most sensor streams were complete, but both worn sensors had gaps.':
+    'De fleste sensorstrømmene var komplette, men begge sensorene du hadde på deg, hadde hull.',
   '{n} inputs were thin, so some numbers below rest on less than a full recording.':
     '{n} av grunnlagene var tynne, så noen av tallene under hviler på mindre enn et helt opptak.',
   /* The Spotter Cam keeps its name: it is the feature's name rather than copy, the same rule the
@@ -47475,6 +47478,19 @@ function longestUnexplainedGapS(locRows, t0, t1, explained = []) {
   return worst;
 }
 
+/** The longest stretch a worn stream (wrist or AirPods) went missing, in unexplained seconds,
+ *  counting the activity's start and end as well as the holes between samples: a stream that began
+ *  late or ended early has a gap too. Pauses and seams are subtracted the way the track's are. */
+function streamGapsS(times, t0, t1, explained = []) {
+  const ts = (times || []).filter((t) => Number.isFinite(t) && t >= t0 && t <= t1).sort((a, b) => a - b);
+  const edges = [t0, ...ts, t1];
+  let worst = 0;
+  for (let i = 1; i < edges.length; i++) {
+    worst = Math.max(worst, (edges[i] - edges[i - 1]) - rqExplainedS(explained, edges[i - 1], edges[i]));
+  }
+  return worst;
+}
+
 /*
  * The facts, in the order a rider would want them: the two they can do something about first.
  *
@@ -47655,8 +47671,13 @@ function recordingQuality(D) {
     const times = (rows || []).map((r) => r && r.t).filter(Number.isFinite);
     const cov = streamCoverage(times, t0, t1);
     const level = !times.length ? 'absent' : (cov < RQ_STREAM_MIN_FRAC ? 'thin' : 'ok');
+    /* Over the coverage bar is not the same as complete: the 2026-10-31 ride's AirPods covered 64%
+       and the summary called every stream complete. A gap longer than the track's own `RQ_GAP_S`
+       marks the stream for the summary; the row's own wording is unchanged. */
+    const gappy = level === 'ok' && streamGapsS(times, t0, t1, (D && D.explainedSpans) || []) > RQ_GAP_S;
     facts.push({
       id, level, coverage: cov,
+      ...(gappy ? { gappy: true } : {}),
       ...(level === 'absent' && own.lead ? { lead: own.lead } : {}),
       headline: level === 'absent' ? `No ${name} data in this recording`
         : `${name} motion covered ${Math.round(cov * 100)}% of the activity`,
@@ -47684,6 +47705,12 @@ function recordingQualitySummary(q) {
   const lead = facts.find((f) => f.level === 'absent' && f.lead);
   if (lead) return lead.lead;
   const thin = facts.filter((f) => f.level === 'thin');
+  const gappy = facts.filter((f) => f.gappy);
+  if (!thin.length && gappy.length) {
+    return gappy.length === 1
+      ? `Most sensor streams were complete, but ${gappy[0].id === 'wrist' ? 'Apple Watch' : 'AirPods'} had gaps.`
+      : 'Most sensor streams were complete, but both worn sensors had gaps.';
+  }
   if (!thin.length) {
     const absent = facts.filter((f) => f.level === 'absent').length;
     return absent
@@ -47691,8 +47718,10 @@ function recordingQualitySummary(q) {
       : 'The checked sensor streams were complete. Coverage alone does not validate every measurement.';
   }
   if (thin.length === 1 && thin[0].id === 'pose' && thin[0].weakens !== 'Turn direction from phone motion') return 'Turn sides and lean balance are uncertain: calibration does not match the riding pose.';
+  /* Lowercased to sit mid-sentence, except a name: it printed "apple Watch motion covered...". */
+  const mid = (h) => (/^(Apple Watch|AirPods)\b/.test(h) ? h : h.charAt(0).toLowerCase() + h.slice(1));
   return thin.length === 1
-    ? `One input was thin: ${thin[0].headline.charAt(0).toLowerCase()}${thin[0].headline.slice(1)}.`
+    ? `One input was thin: ${mid(thin[0].headline)}.`
     : `${thin.length} inputs were thin, so some numbers below rest on less than a full recording.`;
 }
 
@@ -47742,8 +47771,10 @@ function modCopyT(s) {
        this table already knows, so it is translated as one and lowercased again. */
     if (vars.what) {
       const head = vars.what.charAt(0).toUpperCase() + vars.what.slice(1);
-      const t = loamT(head);
-      vars.what = t.charAt(0).toLowerCase() + t.slice(1);
+      /* modCopyT, not loamT: the thin headlines that carry a number are shapes, not keys, so an
+         exact lookup left them English inside a Norwegian sentence. A name keeps its capital. */
+      const t = modCopyT(head);
+      vars.what = /^(Apple Watch|AirPods)\b/.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1);
     }
     /* With no entry for the key this reassembles the English sentence it just took apart, which is
        the same fallback every other miss produces. */
@@ -47790,6 +47821,8 @@ const MOD_COPY_SHAPES = [
   [/^(\d+) inputs were thin, so some numbers below rest on less than a full recording\.$/,
     '{n} inputs were thin, so some numbers below rest on less than a full recording.', ['n']],
   [/^One input was thin: (.+)\.$/, 'One input was thin: {what}.', ['what']],
+  [/^Most sensor streams were complete, but (Apple Watch|AirPods) had gaps\.$/,
+    'Most sensor streams were complete, but {name} had gaps.', ['name']],
   /* Aerobic decoupling: the same arrangement one panel over. */
   [/^heart rate covers only (\d+)% of this effort$/, 'heart rate covers only {pct}% of this effort', ['pct']],
   [/^needs (\d+) minutes of steady effort after the warmup \(this has (\d+)\)$/,
@@ -63086,7 +63119,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '794444905 · 2026-10-31';
+const LOAM_BUILD = 'a2fa0c4fe · 2026-10-31';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
