@@ -8940,38 +8940,266 @@ return { SKI_CATALOG_ROOT, skiCatalogCells, skiCatalogFeatures, downloadSkiCatal
 })();
 /* ==== End ski catalogue port ==== */
 
+/* ==== Trail tiles port ==== */
+const LoamTrailTiles = (() => {
+const { routeMapPoint, routeMapRows, routeMapDistance, ROUTE_MAP_CORRIDOR_M } = LoamRouteMap;
+
+/* Bike and foot names come from OpenFreeMap's public OpenMapTiles build (2026-10-31): every public
+   Overpass server returned 502/504 or timed out. Its terms allow an app's user-requested area download
+   of at most 3,000 tiles or 50 MB, over at most 4 parallel requests, with an identifying user-agent. */
+const TRAIL_TILE_ROOT = 'https://tiles.openfreemap.org/';
+const TRAIL_TILE_ZOOM = 14; // The build's deepest zoom, and the only one naming most footpaths.
+const TRAIL_TILE_MAX = 120;
+const TRAIL_TILE_PARALLEL = 4;
+const TRAIL_TILE_MAX_BYTES = 50000000;
+const TRAIL_SUBCLASSES = ['path', 'footway', 'cycleway', 'bridleway', 'steps'];
+// Walking networks are in the build; cycling networks were absent from every tile checked.
+const TRAIL_ROUTE_NETWORKS = { bike: ['icn', 'ncn', 'rcn', 'lcn'], hike: ['iwn', 'nwn', 'rwn', 'lwn'] };
+
+function trailTileXY(lat, lon) {
+  const n = 2 ** TRAIL_TILE_ZOOM, r = lat * Math.PI / 180;
+  const x = Math.floor((lon + 180) / 360 * n), y = Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n);
+  return [((x % n) + n) % n, Math.max(0, Math.min(n - 1, y))];
+}
+
+// The z14 squares (about 1-2 km) within the matching corridor of the track. Only these leave the device.
+function trailTiles(rows) {
+  const pts = routeMapRows(rows);
+  if (pts.length < 2) return null;
+  const tiles = new Map();
+  const add = (lat, lon) => {
+    const latPad = ROUTE_MAP_CORRIDOR_M / 111320, lonPad = latPad / Math.cos(lat * Math.PI / 180);
+    for (const a of [lat - latPad, lat + latPad]) for (const o of [lon - lonPad, lon + lonPad]) {
+      const [x, y] = trailTileXY(a, o);
+      tiles.set(`${x}/${y}`, [x, y]);
+    }
+  };
+  for (let i = 0; i < pts.length; i++) {
+    const b = pts[i], a = pts[i - 1];
+    add(b.latitude, b.longitude);
+    if (!a || b.t - a.t > 10) continue;
+    // routeMapMatch samples every 20 m along hops of up to 100 m: those samples need their squares too.
+    const d = routeMapDistance([a.latitude, a.longitude], [b.latitude, b.longitude]);
+    if (d > 100) continue;
+    for (let j = 1, steps = Math.ceil(d / 20); j < steps; j++) {
+      add(a.latitude + (b.latitude - a.latitude) * j / steps, a.longitude + (b.longitude - a.longitude) * j / steps);
+    }
+  }
+  const list = [...tiles.values()].sort((p, q) => p[1] - q[1] || p[0] - q[0]);
+  return list.length <= TRAIL_TILE_MAX ? list : null;
+}
+
+function trailVarint(bytes, s) {
+  // Feature ids exceed 2^32, so the value is built in floating point rather than with bit operators.
+  let value = 0, scale = 1, byte;
+  do {
+    if (s.p >= s.end || scale > 2 ** 63) throw new Error('response');
+    byte = bytes[s.p++];
+    value += (byte & 127) * scale;
+    scale *= 128;
+  } while (byte & 128);
+  return value;
+}
+
+// Calls visit(field, wire, a, b) per protobuf field: [a, b) for a length-delimited field, a = value for
+// a varint. A visit returning false stops the walk.
+function trailFields(bytes, start, end, visit) {
+  const s = { p: start, end };
+  while (s.p < end) {
+    const key = trailVarint(bytes, s), field = Math.floor(key / 8), wire = key % 8;
+    let go;
+    if (wire === 0) go = visit(field, wire, trailVarint(bytes, s));
+    else if (wire === 2) {
+      const length = trailVarint(bytes, s), from = s.p;
+      s.p += length;
+      if (s.p > end) throw new Error('response');
+      go = visit(field, wire, from, s.p);
+    } else if (wire === 1 || wire === 5) {
+      s.p += wire === 1 ? 8 : 4;
+      if (s.p > end) throw new Error('response');
+    } else throw new Error('response');
+    if (go === false) return;
+  }
+}
+
+function trailPacked(bytes, from, to) {
+  const out = [], s = { p: from, end: to };
+  while (s.p < to) out.push(trailVarint(bytes, s));
+  return out;
+}
+
+const trailText = new TextDecoder();
+
+// The transportation_name lines of one Mapbox Vector Tile, as { props, paths } with [lat, lon] paths.
+function decodeTrailTile(bytes, x, y) {
+  const out = [], n = 2 ** TRAIL_TILE_ZOOM;
+  trailFields(bytes, 0, bytes.length, (field, wire, from, to) => {
+    if (field !== 3 || wire !== 2) return;
+    let name = null;
+    trailFields(bytes, from, to, (f, w, a, b) => {
+      if (f === 1 && w === 2) { name = trailText.decode(bytes.subarray(a, b)); return false; }
+    });
+    if (name !== 'transportation_name') return;
+    let extent = 4096;
+    const keys = [], values = [], features = [];
+    trailFields(bytes, from, to, (f, w, a, b) => {
+      if (f === 2 && w === 2) features.push([a, b]);
+      else if (f === 3 && w === 2) keys.push(trailText.decode(bytes.subarray(a, b)));
+      else if (f === 4 && w === 2) {
+        let value = null;
+        trailFields(bytes, a, b, (vf, vw, va, vb) => { if (vf === 1 && vw === 2) value = trailText.decode(bytes.subarray(va, vb)); });
+        values.push(value);
+      } else if (f === 5 && w === 0) extent = a;
+    });
+    if (!(extent > 0)) throw new Error('response');
+    for (const [a, b] of features) {
+      let type = 0, tags = [], geometry = [];
+      trailFields(bytes, a, b, (f, w, p, q) => {
+        if (f === 2 && w === 2) tags = trailPacked(bytes, p, q);
+        else if (f === 3 && w === 0) type = p;
+        else if (f === 4 && w === 2) geometry = trailPacked(bytes, p, q);
+      });
+      if (type !== 2) continue; // LINESTRING only: names of areas and points do not follow a track.
+      const props = {};
+      for (let i = 0; i + 1 < tags.length; i += 2) {
+        if (tags[i] >= keys.length || tags[i + 1] >= values.length) throw new Error('response');
+        if (typeof values[tags[i + 1]] === 'string') props[keys[tags[i]]] = values[tags[i + 1]];
+      }
+      const paths = [];
+      let path = null, cx = 0, cy = 0;
+      for (let i = 0; i < geometry.length;) {
+        const command = geometry[i] % 8, count = Math.floor(geometry[i] / 8);
+        i++;
+        if (command === 7) continue;
+        if ((command !== 1 && command !== 2) || (command === 2 && !path) || i + count * 2 > geometry.length) throw new Error('response');
+        for (let c = 0; c < count; c++) {
+          const dx = geometry[i++], dy = geometry[i++];
+          cx += dx % 2 ? -(dx + 1) / 2 : dx / 2;
+          cy += dy % 2 ? -(dy + 1) / 2 : dy / 2;
+          if (command === 1) { if (path?.length > 1) paths.push(path); path = []; }
+          const wx = (x + cx / extent) / n, wy = (y + cy / extent) / n;
+          const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * wy))) * 180 / Math.PI;
+          path.push([Math.round(lat * 1e6) / 1e6, Math.round((wx * 360 - 180) * 1e6) / 1e6]);
+        }
+      }
+      if (path?.length > 1) paths.push(path);
+      if (paths.length) out.push({ props, paths });
+    }
+    return false;
+  });
+  return out;
+}
+
+// Named paths and tracks are trails; the profile's signed routes ride along on the lines they use.
+function trailTileFeatures(lines, profile) {
+  const networks = TRAIL_ROUTE_NETWORKS[profile];
+  if (!networks) return [];
+  const groups = new Map();
+  const add = (kind, name, ref, paths) => {
+    const label = [name, ref && ref !== name ? ref : null].filter(v => typeof v === 'string' && v.trim())
+      .map(v => v.trim()).join(' · ').slice(0, 160);
+    if (!label) return;
+    const key = kind + ':' + label;
+    if (groups.has(key)) groups.get(key).paths.push(...paths);
+    else groups.set(key, { kind, label, paths: [...paths] });
+  };
+  for (const { props: p, paths } of lines) {
+    if (p.class === 'track' || (p.class === 'path' && TRAIL_SUBCLASSES.includes(p.subclass))) add('trail', p.name, p.ref, paths);
+    for (let k = 1; k <= 12; k++) {
+      if (networks.includes(p[`route_${k}_network`])) add('route', p[`route_${k}_name`], p[`route_${k}_ref`], paths);
+    }
+  }
+  return [...groups.values()];
+}
+
+/* Adds what matching and the name links need. Shared by a fresh download and the cache, so a cached
+   or malformed copy is validated the same way. A tile carries no reliable OSM id, so the link opens
+   OSM's feature query on a point of the line. */
+function trailFeatureSet(features) {
+  if (!Array.isArray(features) || features.length > 50000) throw new Error('response');
+  return features.map(f => {
+    if (!f || !['trail', 'route'].includes(f.kind) || typeof f.label !== 'string' || !f.label.trim() || f.label.length > 160
+        || !Array.isArray(f.paths) || !f.paths.length
+        || f.paths.some(p => !Array.isArray(p) || p.length < 2 || p.some(v => !routeMapPoint(v)))) throw new Error('response');
+    const bounds = [90, 180, -90, -180];
+    let longest = f.paths[0];
+    for (const path of f.paths) {
+      if (path.length > longest.length) longest = path;
+      for (const [lat, lon] of path) {
+        bounds[0] = Math.min(bounds[0], lat); bounds[1] = Math.min(bounds[1], lon);
+        bounds[2] = Math.max(bounds[2], lat); bounds[3] = Math.max(bounds[3], lon);
+      }
+    }
+    const [lat, lon] = longest[Math.floor(longest.length / 2)].map(v => v.toFixed(5));
+    return { kind: f.kind, label: f.label, paths: f.paths, bounds,
+      url: `https://www.openstreetmap.org/query?lat=${lat}&lon=${lon}#map=18/${lat}/${lon}` };
+  });
+}
+
+async function downloadTrailTiles(tiles, { root = TRAIL_TILE_ROOT, signal, fetcher = fetch } = {}) {
+  if (!Array.isArray(tiles) || !tiles.length || tiles.length > TRAIL_TILE_MAX) throw new Error('response');
+  // The origin only, never the page path or query; no cookies.
+  const options = { signal, credentials: 'omit', referrerPolicy: 'origin' };
+  const index = await fetcher(root + 'planet', { ...options, cache: 'no-cache' });
+  if (!index.ok) throw new Error('service:' + index.status);
+  let template;
+  try { template = JSON.parse(await index.text())?.tiles?.[0]; } catch (_) { throw new Error('response'); }
+  // The build is versioned in its path; the index names the current one.
+  const version = /^https:\/\/tiles\.openfreemap\.org\/planet\/([A-Za-z0-9_]{1,64})\/\{z\}\/\{x\}\/\{y\}\.pbf$/.exec(template)?.[1];
+  if (!version) throw new Error('response');
+  const decoded = new Array(tiles.length);
+  let next = 0, bytes = 0, failed = false;
+  const worker = async () => {
+    while (next < tiles.length && !failed) {
+      const i = next++, [x, y] = tiles[i];
+      try {
+        const response = await fetcher(`${root}planet/${version}/${TRAIL_TILE_ZOOM}/${x}/${y}.pbf`, options);
+        if (!response.ok) throw new Error('service:' + response.status);
+        const data = new Uint8Array(await response.arrayBuffer());
+        bytes += data.length;
+        if (bytes > TRAIL_TILE_MAX_BYTES) throw new Error('response');
+        try { decoded[i] = decodeTrailTile(data, x, y); } catch (_) { throw new Error('response'); }
+      } catch (error) { failed = true; throw error; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(TRAIL_TILE_PARALLEL, tiles.length) }, worker));
+  const lines = [];
+  for (const tile of decoded) for (const line of tile) lines.push(line);
+  return lines;
+}
+
+return { TRAIL_TILE_ROOT, TRAIL_TILE_ZOOM, TRAIL_TILE_MAX, TRAIL_TILE_PARALLEL, TRAIL_TILE_MAX_BYTES, trailTiles, decodeTrailTile, trailTileFeatures, trailFeatureSet, downloadTrailTiles };
+})();
+/* ==== End trail tiles port ==== */
+
 const routeMapStates = new WeakMap();
 const ROUTE_MAP_CACHE_KEY = 'loam_ski_catalog_v1';
-function routeMapCacheKey(profile) { return profile === 'ski' ? ROUTE_MAP_CACHE_KEY : `loam_trail_map_${profile}_v1`; }
+// Bike/foot caches moved from Overpass JSON to tile features (2026-10-31); the old keys are dropped.
+function routeMapCacheKey(profile) { return profile === 'ski' ? ROUTE_MAP_CACHE_KEY : `loam_trail_tiles_${profile}_v1`; }
 
 let mapNamesRetryAfter = 0;
 
-function mapNamesRequest(bounds, profile) {
-  if (location.protocol === 'loam:') {
-    // Custom-scheme pages have no HTTP referrer. Native code identifies Loam to Overpass.
-    return ['loam://app/map-names?profile=' + encodeURIComponent(profile) + '&bbox=' + encodeURIComponent(bounds.join(',')), { credentials: 'omit' }];
-  }
-  return ['https://overpass-api.de/api/interpreter', {
-    method: 'POST', body: new URLSearchParams({ data: LoamRouteMap.routeMapQuery(bounds, profile) }),
-    // Overpass requires browser identification. Send only the origin, never a session URL.
-    credentials: 'omit', referrerPolicy: 'origin',
-  }];
-}
+// Custom-scheme pages go through native code, which identifies Loam with its own user-agent.
+function trailTileRoot() { return location.protocol === 'loam:' ? 'loam://app/trail-tiles/' : LoamTrailTiles.TRAIL_TILE_ROOT; }
 
 function routeMapState(D) {
   const profile = LoamRouteMap.routeMapProfile(displaySport(D));
   if (routeMapStates.get(D)?.profile !== profile) {
     const rows = LoamRouteMap.routeMapRows(D.sensors?.location, D.ride?.start, D.ride?.end);
     const bounds = LoamRouteMap.routeMapBounds(rows);
-    const state = { profile, rows, bounds, features: null, matches: new Map(), pending: false, error: false };
+    // Bike and foot request the squares along the track, and only for a track a ride's area can hold.
+    const tiles = profile && profile !== 'ski' && bounds ? LoamTrailTiles.trailTiles(rows) : null;
+    const state = { profile, rows, bounds, tiles, features: null, matches: new Map(), pending: false, error: false };
     try {
       const cached = JSON.parse(localStorage.getItem(routeMapCacheKey(profile)) || 'null');
-      if (bounds && cached && Date.now() - cached.at < (profile === 'ski' ? 1 : 7) * 86400000 && cached.at <= Date.now()
-          && LoamRouteMap.routeMapQuery(cached.bounds, profile)
+      const fresh = cached && Date.now() - cached.at < (profile === 'ski' ? 1 : 7) * 86400000 && cached.at <= Date.now();
+      if (profile === 'ski' && bounds && fresh && LoamRouteMap.routeMapQuery(cached.bounds, profile)
           && bounds[0] >= cached.bounds[0] && bounds[1] >= cached.bounds[1]
           && bounds[2] <= cached.bounds[2] && bounds[3] <= cached.bounds[3]) {
-        state.features = profile === 'ski' ? LoamSkiCatalog.skiCatalogFeatures(cached.data) : LoamRouteMap.routeMapFeatures(cached.data, profile);
+        state.features = LoamSkiCatalog.skiCatalogFeatures(cached.data);
         state.sourceUpdatedAt = cached.data.sourceUpdatedAt;
+      } else if (tiles && fresh && Array.isArray(cached.tiles) && tiles.every(t => cached.tiles.includes(t.join('/')))) {
+        state.features = LoamTrailTiles.trailFeatureSet(cached.data.features);
       }
     } catch (_) { /* A missing cache must not prevent a fresh lookup. */ }
     routeMapStates.set(D, state);
@@ -9011,12 +9239,12 @@ function runTitle(D, r) {
    for, and the button that remains gives the real error when tapped. */
 async function lookupMapNames(D, auto = false) {
   const state = routeMapState(D);
-  const query = LoamRouteMap.routeMapQuery(state.bounds, state.profile);
-  if (!query || state.pending || Date.now() < mapNamesRetryAfter) return;
+  const area = state.profile === 'ski' ? LoamRouteMap.routeMapQuery(state.bounds, 'ski') : state.tiles;
+  if (!area || state.pending || Date.now() < mapNamesRetryAfter) return;
   state.pending = true; state.error = false;
   renderMapNames(D);
   const controller = new AbortController();
-  // Overpass may queue for 15 s before running our 20 s query. Leave time for transport too.
+  // Up to 120 trail squares, four at a time; the ski catalogue is a manifest and a few regional files.
   const timeout = setTimeout(() => controller.abort(), state.profile === 'ski' ? 25000 : 45000);
   try {
     let data, raw;
@@ -9026,18 +9254,18 @@ async function lookupMapNames(D, auto = false) {
       state.features = LoamSkiCatalog.skiCatalogFeatures(data);
       state.sourceUpdatedAt = data.sourceUpdatedAt;
     } else {
-      const [url, options] = mapNamesRequest(state.bounds, state.profile);
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      if (!response.ok) throw new Error('service:' + response.status);
-      raw = await response.text();
-      if (raw.length > 4000000) throw new Error('response');
-      try { data = JSON.parse(raw); } catch (_) { throw new Error('response'); }
-      if (!Array.isArray(data?.elements) || data.remark) throw new Error('response');
-      state.features = LoamRouteMap.routeMapFeatures(data, state.profile);
+      const lines = await LoamTrailTiles.downloadTrailTiles(state.tiles, { root: trailTileRoot(), signal: controller.signal });
+      data = { features: LoamTrailTiles.trailTileFeatures(lines, state.profile) };
+      raw = JSON.stringify(data);
+      state.features = LoamTrailTiles.trailFeatureSet(data.features);
     }
     state.matches.clear();
     // Cache source geometry, never a verdict: matching is re-derived for old recordings too.
-    try { if (raw.length < 2000000) localStorage.setItem(routeMapCacheKey(state.profile), JSON.stringify({ at: Date.now(), bounds: state.bounds, data })); } catch (_) {}
+    try {
+      if (state.profile !== 'ski') localStorage.removeItem(`loam_trail_map_${state.profile}_v1`);
+      if (raw.length < 2000000) localStorage.setItem(routeMapCacheKey(state.profile), JSON.stringify({ at: Date.now(), bounds: state.bounds,
+        ...(state.tiles ? { tiles: state.tiles.map(t => t.join('/')) } : {}), data }));
+    } catch (_) {}
   } catch (error) {
     if (!auto) {
       if (error.name === 'AbortError' || /^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
@@ -9077,17 +9305,17 @@ function renderMapNames(D) {
   const ski = profile === 'ski';
   /* Ski names load without a tap (owner, 2026-10-29). The request names one-degree cells on Loam's
      own site, coarser than the basemap tiles the page already fetches for the same track. Bike and
-     foot names stay behind the button: they query Overpass, a shared volunteer service that was
-     answering 502 under load, and an automatic lookup on every opened ride would add to that. */
+     foot names stay behind the button: they download up to 120 squares from OpenFreeMap, whose terms
+     allow a download the user asks for, not one made on every opened ride. */
   if (ski && state.bounds && !state.features && !state.pending && !state.autoTried
       && Date.now() >= mapNamesRetryAfter && navigator.onLine !== false) {
     state.autoTried = true;
     lookupMapNames(D, true);
     if (state.pending) return; // The lookup already repainted this section, and will again with names.
   }
-  const controls = `${!state.bounds ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.')}</p>`
+  const controls = `${!(ski ? state.bounds : state.tiles) ? `<p class="visual-keep">${T('A compact outdoor GPS track is needed to find names. Trim any drive or select a smaller recording.')}</p>`
       : (!state.features || ski) ? `<button type="button" id="skiNamesLookup" style="min-height:44px"${state.pending || Date.now() < mapNamesRetryAfter ? ' disabled' : ''}>${T(state.pending ? 'Finding names…' : ski && state.features ? 'Refresh names' : ski ? 'Find piste & lift names' : 'Find trail names')}</button>
-        <p class="dim visual-keep">${T(ski ? 'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.' : 'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.')}</p>` : ''}
+        <p class="dim visual-keep">${T(ski ? 'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.' : 'Downloads the map squares your route passes through from OpenFreeMap. Your GPS track and times stay on this device.')}</p>` : ''}
     <p class="visual-keep" role="status">${state.error ? state.error.startsWith('service:')
       ? T('The map-name service could not answer (HTTP {status}). Please try again later.', { status: state.error.split(':')[1] })
       : state.error === 'timeout' ? T('The map-name request timed out. Please try again later.')
@@ -9095,7 +9323,7 @@ function renderMapNames(D) {
       : T('Could not reach the map-name service. It may be unavailable, or your connection may be offline.') : ''}</p>
     ${ski && state.sourceUpdatedAt ? `<p class="dim visual-keep">${T('Map data: {date}', { date: E(state.sourceUpdatedAt.slice(0, 10)) })}</p>` : ''}
     ${ski ? `<small class="visual-keep">Data: <a href="https://www.openskidata.org/" target="_blank" rel="noopener noreferrer">OpenSkiData / OpenSkiMap.org</a> · Skimap.org · Who’s On First · © Mapterhorn · <a href="https://sfviking.github.io/loam-analyzer/ski-data/v1/ATTRIBUTION.txt" target="_blank" rel="noopener noreferrer">${T('Data & attribution')}</a></small><br>` : ''}
-    <small>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>`;
+    <small>${ski ? '' : '<a href="https://openfreemap.org" target="_blank" rel="noopener noreferrer">OpenFreeMap</a> · <a href="https://www.openmaptiles.org/" target="_blank" rel="noopener noreferrer">© OpenMapTiles</a> · '}© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> · ODbL</small>`;
   if (ski && dayHost && hasSkiDayTable(D)) {
     sec.classList.add('hidden');
     dayHost.innerHTML = `<p class="dim visual-keep">${T('Map suggestions from OpenStreetMap. Nearby or overlapping routes may remain unnamed. Your own names stay unchanged.')}${state.features
@@ -40845,7 +41073,7 @@ const LOAM_NB = {
   'Data & attribution': 'Data og kreditering',
   'Downloads regional ski maps from Loam’s public site. Your GPS track and times stay on this device.': 'Laster ned regionale skikart fra Loams offentlige nettsted. GPS-sporet og tidspunktene forblir på denne enheten.',
   'Find piste & lift names': 'Finn navn på løyper og heiser',
-  'Downloads names for a rounded map area from Overpass. Your GPS track and times stay on this device.': 'Laster ned navn for et avrundet kartområde fra Overpass. GPS-sporet og tidspunktene forblir på denne enheten.',
+  'Downloads the map squares your route passes through from OpenFreeMap. Your GPS track and times stay on this device.': 'Laster ned kartrutene ruten din går gjennom fra OpenFreeMap. GPS-sporet og tidspunktene forblir på denne enheten.',
   'The map-name service could not answer (HTTP {status}). Please try again later.': 'Kartnavntjenesten kunne ikke svare (HTTP {status}). Prøv igjen senere.',
   'The map-name request timed out. Please try again later.': 'Forespørselen om kartnavn tok for lang tid. Prøv igjen senere.',
   'The map-name service returned an incomplete response. Please try again later.': 'Kartnavntjenesten returnerte et ufullstendig svar. Prøv igjen senere.',
@@ -63119,7 +63347,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'a2fa0c4fe · 2026-10-31';
+const LOAM_BUILD = '4d38d09a3 · 2026-11-02';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
