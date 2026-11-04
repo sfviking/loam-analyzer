@@ -9157,7 +9157,8 @@ async function downloadTrailTiles(tiles, { root = TRAIL_TILE_ROOT, signal, fetch
         if (!response.ok) throw new Error('service:' + response.status);
         const data = new Uint8Array(await response.arrayBuffer());
         bytes += data.length;
-        if (bytes > TRAIL_TILE_MAX_BYTES) throw new Error('response');
+        // Its own error: the same route asks for the same squares, so a retry can never pass the cap.
+        if (bytes > TRAIL_TILE_MAX_BYTES) throw new Error('size');
         try { decoded[i] = decodeTrailTile(data, x, y); } catch (_) { throw new Error('response'); }
       } catch (error) { failed = true; throw error; }
     }
@@ -9270,7 +9271,7 @@ async function lookupMapNames(D, auto = false) {
     if (!auto) {
       if (error.name === 'AbortError' || /^service:(406|429|502|503|504)$/.test(error.message)) mapNamesRetryAfter = Date.now() + 30000;
       state.error = error.message?.startsWith('service:') ? error.message
-        : error.name === 'AbortError' ? 'timeout' : error.message === 'response' ? 'response' : 'download';
+        : error.name === 'AbortError' ? 'timeout' : error.message === 'response' || error.message === 'size' ? error.message : 'download';
     }
   }
   finally { clearTimeout(timeout); state.pending = false; }
@@ -9320,6 +9321,7 @@ function renderMapNames(D) {
       ? T('The map-name service could not answer (HTTP {status}). Please try again later.', { status: state.error.split(':')[1] })
       : state.error === 'timeout' ? T('The map-name request timed out. Please try again later.')
       : state.error === 'response' ? T('The map-name service returned an incomplete response. Please try again later.')
+      : state.error === 'size' ? T('The map squares along this route are too large to download. Trim the recording to your activity and try again.')
       : T('Could not reach the map-name service. It may be unavailable, or your connection may be offline.') : ''}</p>
     ${ski && state.sourceUpdatedAt ? `<p class="dim visual-keep">${T('Map data: {date}', { date: E(state.sourceUpdatedAt.slice(0, 10)) })}</p>` : ''}
     ${ski ? `<small class="visual-keep">Data: <a href="https://www.openskidata.org/" target="_blank" rel="noopener noreferrer">OpenSkiData / OpenSkiMap.org</a> · Skimap.org · Who’s On First · © Mapterhorn · <a href="https://sfviking.github.io/loam-analyzer/ski-data/v1/ATTRIBUTION.txt" target="_blank" rel="noopener noreferrer">${T('Data & attribution')}</a></small><br>` : ''}
@@ -18070,6 +18072,10 @@ const LoamXC = (() => {
    100 m hop guards follow Capture/LiveMetrics; no running speed or alpine lift gate. */
 const XC_VERSION = 1;
 const XC_GAP_S = 5;
+/* Heart rate gets its own gap. The watch relays live heart rate about every 5 s, often a little
+   more, so the GPS gate above dropped ~half of a real watch session's legs (the zone time and the
+   coverage with them). The 30 s the zone panel uses for every other sport, HR_ZONE_MAX_GAP_S. */
+const XC_HR_GAP_S = 30;
 const XC_HACC_M = 50;
 const XC_HOP_M = 100;
 const XC_STYLES = ['unspecified', 'classic', 'skate', 'mixed'];
@@ -18151,7 +18157,7 @@ function xcValidateEdits(laps, span) {
 function xcSummary(sensors, span, pauses = xcPauses(sensors.annotations, span.end)) {
   const inside = rows => sorted(rows).filter(r => r.t >= span.start && r.t <= span.end);
   const seam = sorted(sensors.annotations).filter(m => String(m.text).toLowerCase() === 'new recording');
-  const validLeg = (a, b) => b.t > a.t && b.t - a.t <= XC_GAP_S
+  const validLeg = (a, b, gap = XC_GAP_S) => b.t > a.t && b.t - a.t <= gap
     && !xcOverlap(pauses, a.t, b.t) && !seam.some(m => m.t > a.t && m.t <= b.t);
   const elapsed = span.end - span.start, duration = Math.max(0, elapsed - xcOverlap(pauses, span.start, span.end));
   const loc = inside(sensors.location);
@@ -18178,7 +18184,7 @@ function xcSummary(sensors, span, pauses = xcPauses(sensors.annotations, span.en
   let hrCoveredS = 0, hrSum = 0;
   for (let i = 1; i < hr.length; i++) {
     const a = hr[i - 1], b = hr[i];
-    if (!validLeg(a, b)) continue;
+    if (!validLeg(a, b, XC_HR_GAP_S)) continue;
     const dt = b.t - a.t;
     hrCoveredS += dt; hrSum += (a.bpm + b.bpm) / 2 * dt;
   }
@@ -18259,7 +18265,7 @@ function xcCoachPrompt() {
   return 'You are a cross-country skiing session coach. Describe only the supplied route, timing, marked laps and recorded heart rate, with their coverage. Classic/skate are user labels. Incomplete laps are not comparable completed efforts. Do not infer that laps cover the same ground. Never infer fatigue, technique, pole force, cycles, symmetry, glide efficiency, VO2 max or power. Snow, wind, equipment, traffic and style may affect comparisons. Do not prescribe faster descents. Ask for context when a causal interpretation is requested. Technique analysis is not available.';
 }
 
-return { XC_VERSION, XC_GAP_S, XC_STYLES, xcAnalyze, xcSummary, xcPauses, xcOverlap, xcValidateEdits, xcFitInput, xcDigest, xcCoachPrompt };
+return { XC_VERSION, XC_GAP_S, XC_HR_GAP_S, XC_STYLES, xcAnalyze, xcSummary, xcPauses, xcOverlap, xcValidateEdits, xcFitInput, xcDigest, xcCoachPrompt };
 })();
 /* ==== End Nordic session port ==== */
 
@@ -18407,11 +18413,11 @@ function drawNordicWindow(D) {
   }
   const traces = [];
   const seams = (D.sensors.annotations || []).filter(m => m.text.toLowerCase() === 'new recording').map(m => m.t);
-  const series = (rows, value, name, unit) => {
+  const series = (rows, value, name, unit, gapS = LoamXC.XC_GAP_S) => {
     const x = [], y = []; let prev = null;
     for (const r of rows || []) {
       if (r.t < span.start || r.t > span.end) continue;
-      if (prev && (r.t - prev.t > LoamXC.XC_GAP_S || seams.some(t => t > prev.t && t <= r.t) || LoamXC.xcOverlap(D.nordic.pauses, prev.t, r.t))) { x.push(r.t / 60); y.push(null); }
+      if (prev && (r.t - prev.t > gapS || seams.some(t => t > prev.t && t <= r.t) || LoamXC.xcOverlap(D.nordic.pauses, prev.t, r.t))) { x.push(r.t / 60); y.push(null); }
       x.push(r.t / 60); y.push(LoamXC.xcOverlap(D.nordic.pauses, r.t, r.t + 0.001) ? null : value(r)); prev = r;
     }
     if (y.some(Number.isFinite)) traces.push({ x, y, name: T(name) + ' (' + unit + ')', type: 'scatter', mode: 'lines', connectgaps: false,
@@ -18420,7 +18426,7 @@ function drawNordicWindow(D) {
   series(s.speedSeries, r => Number.isFinite(r.speed) && r.speed >= 0 ? U.speedNum(r.speed) : null, 'Speed', U.speedUnit());
   const b = D.sensors.baro || [];
   series(b.length ? b : D.sensors.location, r => Number.isFinite(b.length ? r.relativeAltitude : r.altitude) ? U.smallNum(b.length ? r.relativeAltitude : r.altitude) : null, 'Recorded altitude', U.smallUnit());
-  series(D.sensors.heartRate, r => r.bpm > 0 && r.bpm < 255 ? r.bpm : null, 'Heart rate', 'bpm');
+  series(D.sensors.heartRate, r => r.bpm > 0 && r.bpm < 255 ? r.bpm : null, 'Heart rate', 'bpm', LoamXC.XC_HR_GAP_S);
   const layout = { height: Math.max(250, traces.length * 180), margin: { l: 60, r: 20, t: 25, b: 45 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: { color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() },
     showlegend: false, xaxis: { title: T('Time (minutes)'), range: [span.start / 60, span.end / 60] } };
@@ -18433,7 +18439,7 @@ function drawNordicWindow(D) {
   Plotly.react('xcTimeline', traces, layout, { responsive: true, displayModeBar: false });
   const max = loamMaxHR();
   const zonePauses = [...D.nordic.pauses, ...seams.map(t => ({start:t - 0.000001,end:t}))];
-  const zones = timeInHrZones((D.sensors.heartRate || []).filter(r => r.bpm < 255), { maxHR: max.bpm, start: span.start, end: span.end, pausedSpans: zonePauses, maxGapS: LoamXC.XC_GAP_S });
+  const zones = timeInHrZones((D.sensors.heartRate || []).filter(r => r.bpm < 255), { maxHR: max.bpm, start: span.start, end: span.end, pausedSpans: zonePauses, maxGapS: LoamXC.XC_HR_GAP_S });
   document.getElementById('xcZones').innerHTML = zones.coveredS ? `<h3>${escapeHtml(T('Time in heart-rate zones'))}</h3><p>${escapeHtml(T('Current max HR'))}: ${max.bpm} bpm</p><p>${zones.seconds.map((v, i) => 'Z' + (i + 1) + ': ' + fmtDuration(v)).join(' · ')}</p>` : '';
 }
 async function analyzeNordicGpx(file, superseded) {
@@ -32186,9 +32192,17 @@ const LIFT_CARD_PER_ROW = 12;
 function liftCardBest(D, top, history) {
   const lift = top && top.set && top.set.lift;
   if (!lift || lift === 'unlabeled' || lift === 'other') return null;
+  /* Quarter squats tapped Partial are left out of the history this compares against (history.js), so
+     a partial top set would be weighed against full-range squats: 160 kg x 6 quarters is no best. */
+  if (top.set.depthTarget === 'partial') return null;
+  /* "Previous" means EARLIER: reopening January's session in March must not call March's lighter
+     sessions its previous best. Same start as liftHistoryRemember stores; unknown starts still count. */
+  const dt = typeof parseUTCFromFilename === 'function' ? parseUTCFromFilename(D.title || '') : null;
+  const start = dt ? Math.round(dt.getTime() / 1000) : null;
   let prevKg = null, n = 0;
   for (const r of history || []) {
     if (!r || r.key === D.key) continue;   // the stored history already holds this session
+    if (start != null && r.start != null && r.start >= start) continue;
     for (const x of r.byLift || []) {
       if (x.lift !== lift || !x.hasLoad || !(x.topLoadKg > 0)) continue;
       n++;
@@ -32664,10 +32678,14 @@ function liftApplyRepCorr(D) {
      read the graded bench session at half its reps. So when the recording's sensors are at hand (they
      ride along in the render object and its cache), the analysis runs again with the relabels standing
      in for the taps, and the corrections layer onto THAT; its per-set counts become the "auto" counts
-     the tooltip quotes and a cleared cell falls back to. A relabel between any other two lifts changes
-     no count, and a render object without its sensors keeps the label-only path below. */
+     the tooltip quotes and a cleared cell falls back to. A TAPPED squat is counted under its own rules
+     too (countRepsWrist: hands-on-bar dips refused, the 1.2 s merge, the slow-single pass), so a
+     relabel into or out of Squat recounts as well -- compared on the tap itself, since an untapped set
+     is counted under the general rules. A relabel between any other two lifts changes no count, and a
+     render object without its sensors keeps the label-only path below. */
   let base = D;
-  const benchMoved = (D.strength.sets || []).some((s, i) => lifts[i] && ((s.lift === 'bench') !== (lifts[i] === 'bench')));
+  const countRules = l => l === 'bench' ? 'bench' : l === 'squat' ? 'squat' : 'other';
+  const benchMoved = (D.strength.sets || []).some((s, i) => lifts[i] && countRules(s.lift) !== countRules(lifts[i]));
   /* Only over LIVE sensors. A cache replay carries the projected copy (cacheableRender: accel and gyro
      dropped, every wrist row cut to t and roll), and recounting that zeroes every wrist count and falls
      to the pocket counter -- 10/6/4/5/5/8 read 2/1/4/2/2/2 on the 2026-07-15 squats. */
@@ -38955,8 +38973,17 @@ function renderGpsParams(D) {
    read from position, altitude and the watch's heart rate; the notice and the upsell say what is not. */
 function skiClockT(sec) {
   if (sec == null || !isFinite(sec)) return '\u2014';
-  const m = Math.floor(sec / 60), s = Math.round(sec - m * 60);
-  return s === 60 ? (m + 1) + ':00' : m + ':' + String(s).padStart(2, '0');
+  /* Rounded once, so 59.6 s reads 1:00 rather than 0:60. A clock past the hour gains one: the
+     airtime card stamps a jump by its time into the day, and three hours in read "184:12". */
+  const t = Math.round(sec), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+}
+/* One line per lift ridden more than once. A gondola ridden back DOWN groups like any other lift
+   (both stations match), so its mean gain is negative, and "-533 m up" is what U.elev made of it. */
+function skiLiftGroupLine(g, label = g.group) {
+  const gain = g.meanGain || 0;
+  return loamT(gain < 0 ? 'Lift {g}: {n} trips, {t} each, {v} down at {speed}.' : 'Lift {g}: {n} trips, {t} each, {v} up at {speed}.',
+    { g: label, n: g.rides, t: skiClockT(g.meanDurationS), v: U.elev(Math.abs(gain)), speed: U.speed(g.meanSpeed || 0) });
 }
 function renderSkiGpsStats(D) {
   const day = D.skiDay, T = day.totals, s = D.summary || {};
@@ -39057,9 +39084,7 @@ function renderSkiGpsDay(D) {
     const lines = day.runGroups.map(g => loamT('Piste {g}: runs {runs}, fastest run {best} in {t} moving.',
       { g: named(g.group, day.laps.filter(l => l.run && l.group === g.group).map(runName)),
         runs: g.members.join(', '), best: g.bestRun, t: skiClockT(g.bestMovingS) }))
-      .concat(day.liftGroups.map(g => loamT('Lift {g}: {n} trips, {t} each, {v} up at {speed}.',
-        { g: named(g.group, day.lifts.filter(l => l.group === g.group).map(liftName)),
-          n: g.rides, t: skiClockT(g.meanDurationS), v: U.elev(g.meanGain || 0), speed: U.speed(g.meanSpeed || 0) })));
+      .concat(day.liftGroups.map(g => skiLiftGroupLine(g, named(g.group, day.lifts.filter(l => l.group === g.group).map(liftName)))));
     rep.innerHTML = lines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
   }
   const cav = document.getElementById('skiGpsCaveat');
@@ -41091,6 +41116,7 @@ const LOAM_NB = {
   'The map-name service could not answer (HTTP {status}). Please try again later.': 'Kartnavntjenesten kunne ikke svare (HTTP {status}). Prøv igjen senere.',
   'The map-name request timed out. Please try again later.': 'Forespørselen om kartnavn tok for lang tid. Prøv igjen senere.',
   'The map-name service returned an incomplete response. Please try again later.': 'Kartnavntjenesten returnerte et ufullstendig svar. Prøv igjen senere.',
+  'The map squares along this route are too large to download. Trim the recording to your activity and try again.': 'Kartrutene langs denne ruten er for store til å lastes ned. Beskjær opptaket til selve økten og prøv igjen.',
   'Could not reach the map-name service. It may be unavailable, or your connection may be offline.': 'Kunne ikke nå kartnavntjenesten. Tjenesten kan være utilgjengelig, eller enheten kan være uten nettforbindelse.',
   'Map: {name}': 'Kart: {name}',
   'Name from the map': 'Navn fra kartet',
@@ -44555,6 +44581,8 @@ const LOAM_NB = {
     'Løype {g}: nedkjøring {runs}, raskest nedkjøring {best} med {t} i bevegelse.',
   'Lift {g}: {n} trips, {t} each, {v} up at {speed}.':
     'Heis {g}: {n} turer, {t} hver, {v} opp i {speed}.',
+  'Lift {g}: {n} trips, {t} each, {v} down at {speed}.':
+    'Heis {g}: {n} turer, {t} hver, {v} ned i {speed}.',
   'Read from the GPS track alone. A run is the lap between two lifts, measured from the top of its fall to the bottom. Top speed is the fastest speed held for 3 s, and speed comes from GPS positions, so treat it as approximate. A line is timed from reaching the lift to loading; a break is 20 minutes or more in one place. Turns, lean and jumps need a Loam recording.':
     'Lest fra GPS-sporet alene. En nedkjøring er runden mellom to heiser, målt fra toppen av fallet til bunnen. Toppfart er den høyeste farten holdt i 3 s, og farten kommer fra GPS-posisjoner, så les den som omtrentlig. Heiskø måles fra du kommer til heisen til du sitter på; en pause er 20 minutter eller mer på samme sted. Svinger, helning og hopp krever et Loam-opptak.',
   'GPS-only ski day.': 'Skidag med bare GPS.',
@@ -63362,7 +63390,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'f2042f43f · 2026-11-04';
+const LOAM_BUILD = '750325364 · 2026-11-04';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
