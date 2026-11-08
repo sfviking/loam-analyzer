@@ -1944,7 +1944,7 @@
   /* The Cooper test's result, above the splits it was run inside. The figures wrap as whole
      figure-plus-caption pairs, so a 375px phone stacks them rather than splitting a number from
      what it measures. */
-  #runCooper { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 14px; }
+  #runCooper, #runRockport { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 14px; }
   .cooper-figs { display: flex; flex-wrap: wrap; gap: 10px 32px; margin: 4px 0 2px; }
   .cooper-fig .cooper-num {
     font-family: 'Bricolage Grotesque', sans-serif; font-weight: 600; font-size: 26px;
@@ -4153,6 +4153,7 @@ function loamSeasonRequested(search, host) {
     </div>
     <div class="panel">
       <div id="runCooper" class="hidden"></div>
+      <div id="runRockport" class="hidden"></div>
       <div id="runPacing" class="run-pacing hidden analysis-explanation"></div>
       <div style="overflow-x:auto;">
         <!-- THERE IS NO TIME COLUMN, and that is not a cut for room (owner, 2026-09-17: "I don't
@@ -16046,6 +16047,111 @@ function cooperTest(annotations, loc, ride) {
     tStart, tEnd, complete, seconds, pausedS, meters,
     speedMps: meters != null && seconds > 0 ? meters / seconds : null,
     vo2max: complete && meters != null ? cooperVo2max(meters) : null,
+  };
+}
+
+/* ========== Rockport walk test (ported from analyzer/sports/running/rockport.js) ===== *
+ * How long the mile took after the capture app's `Rockport Test` mark, the heart rate at its finish,
+ * and the VO2 max Kline's regression (1987) estimates from those and the walker's age, weight and sex.
+ *
+ * Until this the result was one spoken line at the finish and the page had no Rockport read at all,
+ * so a walker who missed it had no score anywhere (owner report, 2026-11-08). The mile is timed on
+ * beCheckpoints, the ground the splits table measures; age, weight and sex come from Apple Health
+ * on request (`rockportBiometrics`), only for a page showing this test. See the module header. */
+const ROCKPORT_METERS = 1609.344;
+const ROCKPORT_MARK = 'rockport test';
+/* Under 10 minutes a mile is a jog, and the regression is for a walk (RockportTest.minSecondsForEstimate). */
+const ROCKPORT_MIN_S = 600;
+/* The finishing heart rate: the reading nearest the finish, up to this old (RockportTest.maxHeartRateAgeS)... */
+const ROCKPORT_HR_AGE_S = 15;
+/* ...or this late, since the app's finish and this one can sit a second apart. */
+const ROCKPORT_HR_AFTER_S = 5;
+
+function rockportHasBio(bio) {
+  return !!bio && bio.weightKg > 0 && Number.isFinite(bio.age) && (bio.sex === 'male' || bio.sex === 'female');
+}
+
+function rockportVo2max(seconds, bpm, bio) {
+  if (!(seconds >= ROCKPORT_MIN_S) || !(bpm >= 60 && bpm <= 220)) return null;
+  if (!rockportHasBio(bio) || !(bio.age >= 18)) return null;
+  const pounds = bio.weightKg * 2.20462;
+  const male = bio.sex === 'male' ? 1 : 0;
+  const v = 132.853 - 0.0769 * pounds - 0.3877 * bio.age + 6.315 * male
+    - 3.2649 * (seconds / 60) - 0.1565 * bpm;
+  return v > 0 ? v : null;
+}
+
+/* The capture app's voice's reasons, in its order: 'hr', 'jog', 'reach', 'bio'. */
+function rockportWithheld(seconds, bpm, bio, vo2max) {
+  if (vo2max != null) return null;
+  if (bpm == null) return 'hr';
+  if (!(seconds >= ROCKPORT_MIN_S)) return 'jog';
+  return rockportHasBio(bio) ? 'reach' : 'bio';
+}
+
+function findRockportStart(annotations) {
+  let t = null;
+  for (const a of (annotations || [])) {
+    if (!a || !Number.isFinite(a.t)) continue;
+    if (String(a.text == null ? '' : a.text).trim().toLowerCase() !== ROCKPORT_MARK) continue;
+    if (t == null || a.t < t) t = a.t;
+  }
+  return t;
+}
+
+function rockportTimeAt(pts, target, tFrom, tUntil) {
+  for (let i = 1; i < pts.length; i++) {
+    const hi = pts[i];
+    if (hi.t <= tFrom) continue;
+    if (hi.t > tUntil) return null;
+    if (hi.d < target) continue;
+    const lo = pts[i - 1];
+    const span = hi.d - lo.d;
+    return span > 0 ? lo.t + (hi.t - lo.t) * (target - lo.d) / span : hi.t;
+  }
+  return null;
+}
+
+function rockportFinishBpm(hr, tEnd) {
+  let best = null, bestGap = Infinity;
+  for (const r of (hr || [])) {
+    if (!r || !Number.isFinite(r.t) || !(r.bpm > 0)) continue;
+    if (r.t > tEnd + ROCKPORT_HR_AFTER_S || r.t < tEnd - ROCKPORT_HR_AGE_S) continue;
+    const gap = Math.abs(r.t - tEnd);
+    if (gap < bestGap) { best = r; bestGap = gap; }
+  }
+  return best ? best.bpm : null;
+}
+
+function rockportTest(annotations, loc, ride, hr, bio) {
+  const tStart = findRockportStart(annotations);
+  if (tStart == null) return null;
+  const paused = (ride && ride.pausedSpans) || [];
+  const pts = beCheckpoints(loc, { start: -Infinity, end: Infinity, pausedSpans: paused });
+  let lastT = tStart;
+  for (const r of (loc || [])) if (r && Number.isFinite(r.t) && r.t > lastT) lastT = r.t;
+  let seamT = Infinity;
+  for (const a of (annotations || [])) {
+    if (a && Number.isFinite(a.t) && a.t > tStart && a.t < seamT && isSeamMark(a.text)) seamT = a.t;
+  }
+  if (seamT < lastT) {
+    lastT = tStart;
+    for (const r of (loc || [])) if (r && Number.isFinite(r.t) && r.t < seamT && r.t > lastT) lastT = r.t;
+  }
+  const g0 = pts.length >= 2 ? cooperGroundAt(pts, tStart) : null;
+  const tFinish = g0 == null ? null : rockportTimeAt(pts, g0 + ROCKPORT_METERS, tStart, lastT);
+  const complete = tFinish != null;
+  const tEnd = complete ? tFinish : lastT;
+  const pausedS = pausedOverlapS(paused, tStart, tEnd);
+  const seconds = Math.max(0, tEnd - tStart - pausedS);
+  const meters = g0 == null ? null : complete ? ROCKPORT_METERS : cooperGroundAt(pts, tEnd) - g0;
+  const bpm = complete ? rockportFinishBpm(hr, tEnd) : null;
+  const vo2max = complete ? rockportVo2max(seconds, bpm, bio) : null;
+  return {
+    tStart, tEnd, complete, seconds, pausedS, meters,
+    speedMps: meters != null && seconds > 0 ? meters / seconds : null,
+    bpm, vo2max,
+    withheld: complete ? rockportWithheld(seconds, bpm, bio, vo2max) : null,
   };
 }
 
@@ -38495,6 +38601,9 @@ function renderRunDistanceReads(D, decoupling) {
   const cooper = cooperTest((D.sensors && D.sensors.annotations) || [], rows, D.ride);
   renderRunCooper(cooper);
   reportCooperTest(cooper);
+  /* The Rockport walk test, likewise only behind the capture app's mark. Its estimate also needs
+     age, weight and sex, which the app answers asynchronously (see showRunRockport). */
+  showRunRockport((D.sensors && D.sensors.annotations) || [], rows, D.ride, hrRows);
   /* Pacing reads the same splits and the same altitude series the Climbs panel uses, so its
      grade adjustment and the GAP column can never disagree about the hill. */
   const pacing = runPacing(splits, alts);
@@ -43883,6 +43992,29 @@ const LOAM_NB = {
     'Ingen estimert VO2 maks under {dist}: det er gangfart, og formelen beskriver et løp for fullt.',
   'The recording was paused for {t} inside the test, so this is not 12 continuous minutes.':
     'Opptaket sto på pause i {t} under testen, så dette er ikke 12 sammenhengende minutter.',
+  /* The Rockport walk test's block. The title and its line are the app's own Norwegian. */
+  'Rockport walk test': 'Rockport-gangtest',
+  '1 mile, walked as fast as you can': '1 mile (1,6 km), gått så fort du kan',
+  'for the mile': 'på milen',
+  'bpm at the finish': 'slag/min ved mål',
+  'This recording has no GPS track after the test started, so the mile could not be timed.':
+    'Dette opptaket har ikke noe GPS-spor etter at testen startet, så milen kunne ikke tas tid på.',
+  'Cut short: the recording holds {dist} of the mile, in {t}, so there is no result.':
+    'Avbrutt: opptaket inneholder {dist} av milen, på {t}, så det finnes ikke noe resultat.',
+  'No heart rate from the watch at the finish, so no VO2 max estimate. Wear the watch for the test.':
+    'Ingen puls fra klokka ved mål, så ingen estimert VO2 maks. Ha på klokka under testen.',
+  'Under 10 minutes for the mile is a jog, and the estimate is for a walk, so there is none.':
+    'Under 10 minutter på milen er jogging, og estimatet gjelder gange, så det blir ikke noe.',
+  'The estimate is for adults finishing at 60 to 220 beats a minute, so there is none for this walk.':
+    'Estimatet gjelder voksne med 60 til 220 slag i minuttet ved mål, så det blir ikke noe for denne turen.',
+  'The VO2 max estimate also needs your age, weight and sex, which the Loam app reads from Apple Health.':
+    'Estimert VO2 maks trenger også alder, vekt og kjønn, som Loam-appen leser fra Apple Helse.',
+  'Add your date of birth, sex and weight in the Health app, and let Loam read them, for a VO2 max estimate.':
+    'Legg inn fødselsdato, kjønn og vekt i Helse-appen, og la Loam lese dem, for en estimert VO2 maks.',
+  'The recording was paused for {t} during the mile; the time leaves the pause out.':
+    'Opptaket sto på pause i {t} under milen; tiden regner ikke med pausen.',
+  'The time from the start of the test until GPS had you a mile further on, measured under the same rules as the splits below, and the watch\'s heart rate at that moment. VO2 max is the Rockport estimate (Kline, 1987) from those two and your age, weight and sex. It assumes a brisk walk on flat ground, so hills, stops or holding back all read as a lower number.':
+    'Tiden fra testen startet til GPS hadde deg en mile lenger fremme, målt etter de samme reglene som mellomtidene under, og pulsen fra klokka i det øyeblikket. VO2 maks er Rockport-estimatet (Kline, 1987) ut fra de to og alder, vekt og kjønn. Det forutsetter rask gange på flatt underlag, så bakker, stopp eller å holde igjen gir alle et lavere tall.',
   'The ground you covered in the 12 minutes after the test started, measured on GPS under the same rules as the splits below, to the nearest 10 m. VO2 max is Cooper\'s 1968 estimate, (metres − 504.9) ÷ 44.73. It assumes an all-out run on flat ground, so hills, stops or holding back all read as a lower number. On a track, counted laps are more exact than GPS.':
     'Distansen du tilbakela i de 12 minuttene etter at testen startet, målt med GPS etter de samme reglene som mellomtidene under, til nærmeste 10 m. VO2 maks er Coopers estimat fra 1968, (meter − 504,9) ÷ 44,73. Det forutsetter et løp for fullt på flatt underlag, så bakker, stopp eller å holde igjen gir alle et lavere tall. På bane er opptelte runder mer nøyaktige enn GPS.',
 
@@ -49751,6 +49883,84 @@ function renderRunCooper(c) {
     body = `<div class="cooper-figs">${figs.join('')}</div>`
       + notes.map((n) => `<div class="cooper-note">${n}</div>`).join('')
       + `<div class="be-foot">${loamT('The ground you covered in the 12 minutes after the test started, measured on GPS under the same rules as the splits below, to the nearest 10 m. VO2 max is Cooper\'s 1968 estimate, (metres − 504.9) ÷ 44.73. It assumes an all-out run on flat ground, so hills, stops or holding back all read as a lower number. On a track, counted laps are more exact than GPS.')}</div>`;
+  }
+  el.innerHTML = title + body;
+  el.classList.remove('hidden');
+}
+
+/* Age, weight and sex from Apple Health for the Rockport estimate: undefined until the app answers
+   (and always on the web, which has no Health), null when Health is missing one of them. Asked for
+   ONLY by a page showing a Rockport test, so no other page is handed them; the answer is the same
+   person's whichever recording asked, so it is kept for the next one. */
+let _rockportBio;
+let _rockportAsked = false;
+/* The inputs of the test on screen, for the re-render when Health answers; null when the run on
+   screen is not a test, so a late answer paints nothing. */
+let _rockportArgs = null;
+
+function showRunRockport(annotations, loc, ride, hr) {
+  const r = rockportTest(annotations, loc, ride, hr, _rockportBio);
+  _rockportArgs = r ? [annotations, loc, ride, hr] : null;
+  renderRunRockport(r);
+  /* Only a finished test with a heart rate can use the answer; asking for any other would hand the
+     page age and sex for nothing. */
+  if (!r || !r.complete || r.bpm == null || _rockportAsked || _rockportBio !== undefined) return;
+  if (!(LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam)) return;
+  _rockportAsked = true;
+  try { window.webkit.messageHandlers.loam.postMessage({ type: 'rockportBiometrics' }); } catch (e) {}
+}
+
+/* The app's answer to `rockportBiometrics`: { age, weightKg, sex: 'male' | 'female' }, or null when
+   Health is missing one (or Loam may not read it). */
+window.loamOnRockportBiometrics = function (bio) {
+  _rockportBio = bio && typeof bio === 'object'
+    ? { age: Number(bio.age), weightKg: Number(bio.weightKg), sex: bio.sex }
+    : null;
+  if (_rockportArgs) renderRunRockport(rockportTest(..._rockportArgs, _rockportBio));
+};
+
+/*
+ * The Rockport one-mile walk test, when this recording is one (`rockportTest` returned a result).
+ *
+ * Sits where the Cooper block does, at the top of the splits panel. The time and the finishing heart
+ * rate are the result; the VO2 max is added when every input is there, and otherwise the reason it
+ * is not is said in the capture app's own words (`rockportResult`), because the fix is the walker's
+ * to make. Cut short and no-GPS say there is no result.
+ */
+function renderRunRockport(r) {
+  const el = document.getElementById('runRockport');
+  if (!el) return;
+  if (!r) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const clock = (sec) => { const tot = Math.round(sec); return Math.floor(tot / 60) + ':' + String(tot % 60).padStart(2, '0'); };
+  const title = `<div class="be-title">${loamT('Rockport walk test')} <span class="be-sub">${loamT('1 mile, walked as fast as you can')}</span></div>`;
+  /* Why a number is missing is kept in Simple view too: it is the answer to "where is my score",
+     and the fix is the walker's. The pause caveat is detail. */
+  const why = (text) => `<div class="cooper-note visual-keep">${text}</div>`;
+  let body;
+  if (r.meters == null) {
+    body = why(loamT('This recording has no GPS track after the test started, so the mile could not be timed.'));
+  } else if (!r.complete) {
+    body = why(loamT('Cut short: the recording holds {dist} of the mile, in {t}, so there is no result.', { dist: U.dist(r.meters), t: clock(r.seconds) }));
+  } else {
+    const also = U.metric() ? ' · ' + U.dist(ROCKPORT_METERS) : '';
+    const figs = [`<div class="cooper-fig accent"><div class="cooper-num">${clock(r.seconds)}</div><div class="cooper-cap">${loamT('for the mile')}${also}</div></div>`];
+    if (r.bpm != null) figs.push(`<div class="cooper-fig"><div class="cooper-num">${Math.round(r.bpm)}</div><div class="cooper-cap">${loamT('bpm at the finish')}</div></div>`);
+    if (r.vo2max != null) figs.push(`<div class="cooper-fig"><div class="cooper-num">${Math.round(r.vo2max)}</div><div class="cooper-cap">${loamT('estimated VO2 max · ml/kg/min')}</div></div>`);
+    const notes = [];
+    if (r.withheld === 'hr') notes.push(loamT('No heart rate from the watch at the finish, so no VO2 max estimate. Wear the watch for the test.'));
+    else if (r.withheld === 'jog') notes.push(loamT('Under 10 minutes for the mile is a jog, and the estimate is for a walk, so there is none.'));
+    else if (r.withheld === 'reach') notes.push(loamT('The estimate is for adults finishing at 60 to 220 beats a minute, so there is none for this walk.'));
+    else if (r.withheld === 'bio') {
+      /* In the app, nothing until Health has answered; on the web there is no Health to answer. */
+      if (!LOAM_EMBEDDED) notes.push(loamT('The VO2 max estimate also needs your age, weight and sex, which the Loam app reads from Apple Health.'));
+      else if (_rockportBio === null) notes.push(loamT('Add your date of birth, sex and weight in the Health app, and let Loam read them, for a VO2 max estimate.'));
+    }
+    const pause = r.pausedS > 0
+      ? `<div class="cooper-note analysis-detailed-only">${loamT('The recording was paused for {t} during the mile; the time leaves the pause out.', { t: clock(r.pausedS) })}</div>`
+      : '';
+    body = `<div class="cooper-figs">${figs.join('')}</div>`
+      + notes.map(why).join('') + pause
+      + `<div class="be-foot">${loamT('The time from the start of the test until GPS had you a mile further on, measured under the same rules as the splits below, and the watch\'s heart rate at that moment. VO2 max is the Rockport estimate (Kline, 1987) from those two and your age, weight and sex. It assumes a brisk walk on flat ground, so hills, stops or holding back all read as a lower number.')}</div>`;
   }
   el.innerHTML = title + body;
   el.classList.remove('hidden');
@@ -63405,7 +63615,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '3f5e5d4b2 · 2026-11-04';
+const LOAM_BUILD = 'eb9a250c5 · 2026-11-08';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
