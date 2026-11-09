@@ -1980,6 +1980,15 @@
   .be-gain + .be-vs { margin-top: 3px; }
   .be-vs-best { color: var(--accent); font-weight: 600; }
   .be-vs-dim { color: var(--text-muted); }
+  /* Leaves the session a library best came from out of the comparison (a drive saved as a run). A
+     text button on its own line, quiet until it is wanted. The page's touch rule makes it 44 px tall
+     with the label centred, so the negative margins pull the label up under its line while the whole
+     44 px stays tappable. */
+  .be-notrun { display: block; margin: -11px 0 -9px; padding: 0; border: 0; background: none;
+    font: inherit; font-size: 11.5px; color: var(--text-muted); text-decoration: underline;
+    text-underline-offset: 2px; cursor: pointer; }
+  .be-notrun:hover, .be-notrun:focus-visible { color: var(--accent); }
+  .be-notrun:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
   .be-pr { margin: 6px 0 2px; font-size: 13px; font-weight: 600; color: var(--accent); }
   .be-pr .be-pr-sub { display: block; font-size: 11.5px; font-weight: 400; color: var(--text-muted); }
   .be-foot { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
@@ -16184,7 +16193,9 @@ function effortsByMeters(block) {
 /*
  * The read, one entry per distance THIS run covers, shortest first.
  *
- *   { meters, label, seconds, previousBest, previousAt, sessions, verdict, marginS, marginInsideNoise }
+ *   { meters, label, seconds, previousBest, previousAt, previousId, sessions, verdict, marginS, marginInsideNoise }
+ *
+ * `previousId` is the library row id holding `previousBest`, or null when the row carries none.
  *
  * `verdict` is 'first' (no earlier session carries this distance), 'fastest' (nothing earlier is
  * quicker) or 'slower'. `sessions` counts the EARLIER sessions carrying this distance, plus this
@@ -16198,18 +16209,18 @@ function effortPRRead({ efforts, history, minSessions = EFFORT_PR_MIN_SESSIONS,
                                noiseFrac = EFFORT_PR_NOISE_FRAC } = {}) {
   if (!Array.isArray(efforts) || !efforts.length) return [];
   const past = (Array.isArray(history) ? history : [])
-    .map(r => ({ at: r && r.recordedAt, by: effortsByMeters(r && r.bestEfforts) }))
+    .map(r => ({ at: r && r.recordedAt, id: r && r.id != null ? r.id : null, by: effortsByMeters(r && r.bestEfforts) }))
     .filter(r => r.by.size);
   const out = [];
   for (const e of efforts) {
     const m = Number(e && e.meters), s = Number(e && e.seconds);
     if (!Number.isFinite(m) || !Number.isFinite(s) || m <= 0 || s <= 0) continue;
-    let previousBest = null, previousAt = null, sessions = 1;
+    let previousBest = null, previousAt = null, previousId = null, sessions = 1;
     for (const r of past) {
       if (!r.by.has(m)) continue;
       sessions++;
       const v = r.by.get(m);
-      if (previousBest == null || v < previousBest) { previousBest = v; previousAt = r.at || null; }
+      if (previousBest == null || v < previousBest) { previousBest = v; previousAt = r.at || null; previousId = r.id; }
     }
     const verdict = previousBest == null ? 'first' : (s < previousBest ? 'fastest' : 'slower');
     /* Signed: negative is faster than the previous best, matching how a runner reads a split. Null
@@ -16217,7 +16228,7 @@ function effortPRRead({ efforts, history, minSessions = EFFORT_PR_MIN_SESSIONS,
     const marginS = previousBest == null ? null : s - previousBest;
     out.push({
       meters: m, label: e.label || null, seconds: s,
-      previousBest, previousAt, sessions,
+      previousBest, previousAt, previousId, sessions,
       verdict,
       /* Enough earlier sessions for the superlative to mean anything. The caller states the fact
          either way and only the WORDING changes -- see the header. */
@@ -16233,7 +16244,8 @@ function effortPRRead({ efforts, history, minSessions = EFFORT_PR_MIN_SESSIONS,
 }
 
 /*
- * The library rows a run is ranked against: the same sport, carrying a stored block, and not THIS run.
+ * The library rows a run is ranked against: the same sport, carrying a stored block, not marked as
+ * not a run (`effortsExcluded`, see the header), and not THIS run.
  *
  * `self` is `{ id, analysisKey, sport }` from the render. A row is this run when EITHER key matches:
  * the library row id the save returned, or the analysis key the render was computed and cached under,
@@ -16251,6 +16263,7 @@ function effortPRHistory(rides, { id = null, analysisKey = null, sport = null } 
   const key = typeof analysisKey === 'string' && analysisKey ? analysisKey : null;
   return (Array.isArray(rides) ? rides : []).filter(r => r
     && Array.isArray(r.bestEfforts) && r.bestEfforts.length
+    && !r.effortsExcluded
     && !(id != null && r.id === id)
     && !(key != null && r.analysisKey === key)
     && !(sport && r.sport !== sport));
@@ -16386,9 +16399,25 @@ async function saveRide(record) {
     || (record.sourceSession && (r.sourceSession === record.sourceSession || (!r.sourceSession && r.filename === record.sourceSession))));
   const now = new Date().toISOString();
   if (prior) {
-    return _req(store.put({ ...record, id: prior.id, recordedAt: prior.recordedAt || record.recordedAt, savedAt: now }));
+    /* `effortsExcluded` is the athlete's own mark (setRideEffortsExcluded), not something the analysis
+       computes, so a re-analysis that rewrites the row must keep it: otherwise reopening a drive that
+       was marked "not a run" puts its 0:44 400 m straight back into every comparison. */
+    return _req(store.put({ ...record, id: prior.id, recordedAt: prior.recordedAt || record.recordedAt, savedAt: now,
+      ...(prior.effortsExcluded ? { effortsExcluded: true } : {}) }));
   }
   return _req(store.add({ ...record, savedAt: now }));
+}
+
+/* Mark a library row as not a run (or clear the mark), so its stored best efforts stop being what
+   other runs are measured against. See `effortPRHistory`. Resolves false when the row is gone. */
+async function setRideEffortsExcluded(id, excluded) {
+  const db = await openLibrary();
+  const store = _tx(db, 'rides', 'readwrite');
+  const row = await _req(store.get(id));
+  if (!row) return false;
+  if (excluded) row.effortsExcluded = true; else delete row.effortsExcluded;
+  await _req(store.put(row));
+  return true;
 }
 
 /* One-time cleanup of duplicate ride records left by the pre-upsert library
@@ -43968,7 +43997,7 @@ const LOAM_NB = {
   'Best efforts': 'Beste strekk',
   'fastest continuous stretch of each distance, on moving time':
     'det raskeste sammenhengende strekket på hver distanse, målt på tid i bevegelse',
-  '{t} faster than your best split': '{t} raskere enn din beste mellomtid',
+  '{t} faster than your fastest split this run': '{t} raskere enn den raskeste mellomtiden din på denne turen',
   'your fastest split was this stretch': 'den raskeste mellomtiden din var nettopp dette strekket',
   'Found by sliding each distance across the whole run rather than reading it off the split markers, so a fast stretch that straddled a marker still counts. Ground covered while you were standing still does not: those fixes wander, and a window that counted them would report a mile you did not run.':
     'Funnet ved å skyve hver distanse gjennom hele turen i stedet for å lese den av mellomtidsmerkene, slik at et raskt strekk som lå på tvers av et merke også teller. Distanse du dekket mens du sto stille, teller ikke: de GPS-punktene vandrer, og et vindu som tok dem med, ville rapportert en kilometer du aldri løp.',
@@ -44029,12 +44058,21 @@ const LOAM_NB = {
     'Ingen {rows} i dette opptaket. Velg en annen modus over — <strong>Auto</strong> velger den som passer.',
   'Best 5s pace': 'Beste 5 s-tempo',
   'nothing earlier to compare': 'ingenting tidligere å sammenligne med',
-  'fastest of {n} in Loam': 'raskeste av {n} i Loam',
-  'fastest of {n} in Loam, by {t}': 'raskeste av {n} i Loam, med {t}',
-  'fastest of {n} in Loam, by less than GPS can tell': 'raskeste av {n} i Loam, med mindre enn GPS-en kan skille',
-  '{t} off your best of {n}': '{t} bak din beste av {n}',
+  'fastest of {n} {sessions} in Loam': 'raskeste av {n} {sessions} i Loam',
+  'fastest of {n} {sessions} in Loam, by {t}': 'raskeste av {n} {sessions} i Loam, med {t}',
+  'fastest of {n} {sessions} in Loam, by less than GPS can tell': 'raskeste av {n} {sessions} i Loam, med mindre enn GPS-en kan skille',
+  '{t} slower than your fastest of {n} {sessions} ({best}, {date})': '{t} tregere enn din raskeste av {n} {sessions} ({best}, {date})',
+  '{t} slower than your fastest of {n} {sessions} ({best})': '{t} tregere enn din raskeste av {n} {sessions} ({best})',
   'Your fastest {label} in Loam': 'Din raskeste {label} i Loam',
-  'under a second off your best of {n}': 'under ett sekund bak din beste av {n}',
+  'under a second slower than your fastest of {n} {sessions} ({date})': 'under ett sekund tregere enn din raskeste av {n} {sessions} ({date})',
+  'under a second slower than your fastest of {n} {sessions}': 'under ett sekund tregere enn din raskeste av {n} {sessions}',
+  'Not a {session}?': 'Ikke en {session}?',
+  'Leave the session this best came from out of your fastest times': 'Hold økta denne beste tiden kom fra utenfor de raskeste tidene dine',
+  'Leave the {date} session out of your fastest times in Loam? Use this when it was a drive, a ride or a test. Nothing else about it changes.':
+    'Vil du holde økta fra {date} utenfor de raskeste tidene dine i Loam? Bruk dette når det var en kjøretur, en sykkeltur eller en test. Ingenting annet ved den endres.',
+  'Leave that session out of your fastest times in Loam? Use this when it was a drive, a ride or a test. Nothing else about it changes.':
+    'Vil du holde den økta utenfor de raskeste tidene dine i Loam? Bruk dette når det var en kjøretur, en sykkeltur eller en test. Ingenting annet ved den endres.',
+  'That session could not be changed. Try again.': 'Den økta kunne ikke endres. Prøv igjen.',
   '{t} quicker than your best of {n} earlier sessions at this distance': '{t} raskere enn din beste av {n} tidligere økter på denne distansen',
   'Avg': 'Snitt',
   'Median apex radius': 'Median apexradius',
@@ -49805,7 +49843,7 @@ function renderRunBestEfforts(efforts, splits) {
     const gain = matches ? splitSec - e.seconds : 0;
     /* Sub-second gaps are the end-of-window snap, not a finding, so they are not narrated. */
     const note = matches && gain >= 1
-      ? `<span class="be-gain">${loamT('{t} faster than your best split', { t: clock(gain) })}</span>`
+      ? `<span class="be-gain">${loamT('{t} faster than your fastest split this run', { t: clock(gain) })}</span>`
       : matches
         ? `<span class="be-gain dim">${loamT('your fastest split was this stretch')}</span>`
         : '';
@@ -50013,29 +50051,81 @@ async function refreshRunBestEffortPRs(D, efforts) {
     const m = Math.floor(tot / 60), s = tot - m * 60;
     return m + ':' + String(s).padStart(2, '0');
   };
+  /* The count is NAMED ("of 3 walks"). A bare "off your best of 3" read as a best-of-three series
+     (owner report, 2026-11-08). Always plural: any verdict but 'first' counts at least two. */
+  const many = sportNounT(displaySport(D), { plural: true });
+  /* The day the library best was run. Named on a slower row with the best's own time, so the
+     comparison can be checked against the bold time beside it -- and so a best nobody could have
+     run (a stretch of a drive saved under a run) is visible as one rather than buried in a margin. */
+  const bestDay = (at) => {
+    const d = at ? new Date(at) : null;
+    if (!d || isNaN(d)) return null;
+    const opts = d.getFullYear() === new Date().getFullYear()
+      ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' };
+    return d.toLocaleDateString(loamLang() === 'nb' ? 'nb-NO' : undefined, opts);
+  };
   for (const r of read) {
     const cell = table.querySelector(`tr[data-be-m="${r.meters}"] .be-vs`);
     if (!cell) continue;
+    const at = { n: r.sessions, sessions: many };
     if (r.verdict === 'first') {
       cell.innerHTML = `<span class="be-vs-dim">${loamT('nothing earlier to compare')}</span>`;
     } else if (r.verdict === 'fastest' && r.marginInsideNoise) {
       /* Fastest recorded, and the margin does not say the runner ran faster. Stated, not hidden:
          the table's own numbers show which is smaller. */
-      cell.innerHTML = `<span class="be-vs-dim">${loamT('fastest of {n} in Loam, by less than GPS can tell', { n: r.sessions })}</span>`;
+      cell.innerHTML = `<span class="be-vs-dim">${loamT('fastest of {n} {sessions} in Loam, by less than GPS can tell', at)}</span>`;
     } else if (r.verdict === 'fastest' && !r.enoughSessions) {
-      cell.innerHTML = `<span class="be-vs-dim">${loamT('fastest of {n} in Loam', { n: r.sessions })}</span>`;
+      cell.innerHTML = `<span class="be-vs-dim">${loamT('fastest of {n} {sessions} in Loam', at)}</span>`;
     } else if (r.verdict === 'fastest') {
-      cell.innerHTML = `<span class="be-vs-best">${loamT('fastest of {n} in Loam, by {t}', { n: r.sessions, t: clock(r.marginS) })}</span>`;
+      cell.innerHTML = `<span class="be-vs-best">${loamT('fastest of {n} {sessions} in Loam, by {t}', { ...at, t: clock(r.marginS) })}</span>`;
     } else if (Math.round(r.marginS) === 0) {
-      /* A margin that rounds to nothing would print "0:00 off", which reads as a tie the clock did
-         not measure. */
-      cell.innerHTML = `<span class="be-vs-dim">${loamT('under a second off your best of {n}', { n: r.sessions })}</span>`;
+      /* A margin that rounds to nothing would print "0:00 slower", which reads as a tie the clock
+         did not measure. */
+      const date = bestDay(r.previousAt);
+      cell.innerHTML = `<span class="be-vs-dim">${date
+        ? loamT('under a second slower than your fastest of {n} {sessions} ({date})', { ...at, date })
+        : loamT('under a second slower than your fastest of {n} {sessions}', at)}</span>`;
     } else {
-      cell.innerHTML = `<span class="be-vs-dim">${loamT('{t} off your best of {n}', { t: clock(r.marginS), n: r.sessions })}</span>`;
+      /* The best's own time and day beside the named count: a margin alone left the reader to
+         subtract to find what it was measured from, and a best nobody could have run (a stretch of a
+         drive saved as a run) hid inside the margin instead of showing as one. */
+      const date = bestDay(r.previousAt);
+      const vals = { ...at, t: clock(r.marginS), best: clock(r.previousBest), date };
+      cell.innerHTML = `<span class="be-vs-dim">${date
+        ? loamT('{t} slower than your fastest of {n} {sessions} ({best}, {date})', vals)
+        : loamT('{t} slower than your fastest of {n} {sessions} ({best})', vals)}</span>`;
+    }
+    /* A row measured against a library best can leave that best's session out: a recording saved as
+       a run that took in a drive holds a 400 m nobody ran (0:44 on the owner's library, 2026-11-08),
+       and every later run reads tens of seconds slow against it until the athlete says so. */
+    if (r.verdict === 'slower' && r.previousId != null) {
+      const day = bestDay(r.previousAt);
+      cell.insertAdjacentHTML('beforeend', `<button type="button" class="be-notrun" data-ride-id="${escapeHtml(String(r.previousId))}"
+        data-day="${escapeHtml(day || '')}" title="${escapeHtml(loamT('Leave the session this best came from out of your fastest times'))}">${
+        escapeHtml(loamT('Not a {session}?', { session: sportNounT(displaySport(D)) }))}</button>`);
     }
   }
+  table.querySelectorAll('.be-notrun').forEach((b) => {
+    b.onclick = async () => {
+      const day = b.dataset.day;
+      const ask = day
+        ? loamT('Leave the {date} session out of your fastest times in Loam? Use this when it was a drive, a ride or a test. Nothing else about it changes.', { date: day })
+        : loamT('Leave that session out of your fastest times in Loam? Use this when it was a drive, a ride or a test. Nothing else about it changes.');
+      if (!confirm(ask)) return;
+      b.disabled = true;
+      let ok = false;
+      try { ok = await setRideEffortsExcluded(Number(b.dataset.rideId), true); } catch (e) { ok = false; }
+      if (!ok) { b.disabled = false; alert(loamT('That session could not be changed. Try again.')); return; }
+      /* Redrawn from the library rather than patched: the next best, the count and the headline all
+         move, and the read is the one place that knows how. */
+      refreshRunBestEffortPRs(D, efforts);
+    };
+  });
   const head = effortPRHeadline(read);
   const pr = document.getElementById('runBestEffortsPR');
+  /* Hidden again when nothing qualifies: after a session is left out the bar can be missed again
+     (it counts sessions), and this redraw runs over a table whose headline the last fill showed. */
+  if (!head && pr) { pr.classList.add('hidden'); pr.innerHTML = ''; }
   if (head && pr) {
     /* ONE line, for the LONGEST qualifying distance. A runner who set their fastest 400 m, 1 km and
        mile in one run ran one fast mile; naming all three would report the same effort at three
@@ -63615,7 +63705,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'eb9a250c5 · 2026-11-08';
+const LOAM_BUILD = '6effade46 · 2026-11-08';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
