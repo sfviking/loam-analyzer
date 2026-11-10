@@ -7263,7 +7263,10 @@ function rowEdges(acc, tArr, first, last) {
   });
   const binOf = (t) => Math.min(n - 1, Math.max(0, Math.floor((t - lo) / ROW_EDGE_BIN_S)));
   const inside = sm.slice(binOf(first.t1), binOf(last.t0) + 1).sort((x, y) => x - y);
-  const thr = ROW_EDGE_FRACTION * ROW_EDGE_FRACTION * (inside.length ? inside[Math.floor(inside.length / 2)] : 0);
+  /* A run of three windows or fewer has no bins strictly inside it. A zero threshold there let the
+     edges walk out to the whole search span: 5 s of rhythm read as 55 s of rowing. */
+  const ref = inside.length ? inside[Math.floor(inside.length / 2)] : Math.max(...sm.slice(binOf(first.t0), binOf(last.t1) + 1));
+  const thr = ROW_EDGE_FRACTION * ROW_EDGE_FRACTION * ref;
   let s = binOf((first.t0 + first.t1) / 2), e = binOf((last.t0 + last.t1) / 2);
   while (s > 0 && sm[s - 1] >= thr) s--;
   while (e < n - 1 && sm[e + 1] >= thr) e++;
@@ -28388,7 +28391,9 @@ async function analyze(files) {
       };
       /* The average stroke of the longest piece: where the handle hand and the head are along the rail. */
       const longest = read.pieces.slice().sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
-      const cyc = longest ? rowStrokeCycle(sensors, longest) : null;
+      /* Only when the wrist is the source the read kept: a watch left beside the rower is noise, and
+         its "stroke" drew a 0.00 m replay captioned as measured. */
+      const cyc = longest && read.source === 'wrist' ? rowStrokeCycle(sensors, longest) : null;
       const r3 = (xs) => xs.map(v => +v.toFixed(3));
       const stroke = cyc ? { ...cyc, handle: r3(cyc.handle), head: cyc.head ? r3(cyc.head) : null,
         strokes: cyc.strokes.map(k => ({ t: +k.t.toFixed(1), periodS: +k.periodS.toFixed(2), lengthM: +k.lengthM.toFixed(3), driveS: +k.driveS.toFixed(2),
@@ -37419,8 +37424,13 @@ function renderRowing(D) {
 /* What the rowing coach is given: the numbers on the page and nothing else, with the limits spelled
    out, because the coach will otherwise fill the gaps with what rowing coaches usually say about
    legs, backs, splits and watts, none of which this recording carries. */
+/* The average stroke, only when the wrist is the source the read kept. Checked here as well as where
+   it is computed, because a session saved before that check still carries a stroke from an idle watch. */
+function rowStrokeOf(D) {
+  return D && D.stroke && D.rowing && D.rowing.source === 'wrist' ? D.stroke : null;
+}
 function rowDigest(D) {
-  const s = D.rowing, c = D.stroke, r2 = (v) => (v == null ? null : +(+v).toFixed(2));
+  const s = D.rowing, c = rowStrokeOf(D), r2 = (v) => (v == null ? null : +(+v).toFixed(2));
   return {
     sport: 'rowing machine',
     time_rowing_s: r2(s.rowingS), recording_s: r2(s.windowS), pieces: (D.pieces || []).map(p => ({ start_s: p.start, end_s: p.end, strokes_per_min: p.spm, strokes_estimated: p.strokes })),
@@ -37477,7 +37487,7 @@ function rowFigurePose(c, m) {
 function renderRowStroke(D) {
   const el = document.getElementById('rowStrokeHost');
   if (!el) return;
-  const c = D && D.stroke;
+  const c = rowStrokeOf(D);
   if (!c) { el.innerHTML = ''; return; }
   const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
   const pctT = (v) => Math.round(v * 100) + '%';
@@ -43699,6 +43709,9 @@ const LOAM_NB = {
   'how do I pace a long climb?': 'hvordan legger jeg opp farten i en lang stigning?',
   'how do I carry more speed on the descents?': 'hvordan tar jeg med mer fart i nedkjøringene?',
   'how consistent were my runs?': 'hvor jevne var nedkjøringene mine?',
+  'is my recovery rushed?': 'er framglidingen min for rask?',
+  'was my stroke rate steady?': 'var takten min jevn?',
+  'Was my stroke rate steady?': 'Var takten min jevn?',
   'which corner cost me the most speed?': 'hvilken sving kostet meg mest fart?',
   'drills for my weaker turn direction': 'øvelser for den svakeste svingretningen min',
   'what should I focus on next session?': 'hva bør jeg fokusere på neste økt?',
@@ -43807,6 +43820,12 @@ const LOAM_NB = {
     'Analyser svømmeøkten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
   'Analyze this ski day and coach me: what stands out, what does it mean, and what should I focus on?':
     'Analyser skidagen og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this rowing session and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser roøkten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this ski session and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser skiøkten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
+  'Analyze this session and coach me: what stands out, what does it mean, and what should I focus on?':
+    'Analyser økten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
   'Analyze this lift session and coach me: what stands out, what does it mean, and what should I focus on?':
     'Analyser styrkeøkten og gi meg coaching: hva skiller seg ut, hva betyr det, og hva bør jeg fokusere på?',
   'Analyze this range session and coach me: what stands out, what does it mean, and what should I focus on?':
@@ -53940,6 +53959,10 @@ function promptCoachKey() {
    sport's digest and system prompt can actually answer. isMtbFamily/isLiftSport/isGolfSport are
    explicit here so an unrecognized sport lands on the neutral fallback instead of inheriting MTB's. */
 function coachChips(sport, opts) {
+  /* Two of rowing's three ask about the average stroke (recovery against drive, the arms). With no
+     wrist stream, or too few clean strokes, the digest's `average_stroke` is null and the coach
+     could only refuse them -- the open-water rule, one sport over. */
+  if (sport === 'rowing' && opts && opts.noStroke) return ['What should I work on first?', 'Was my stroke rate steady?', 'What should I focus on next session?'];
   if (sport === 'rowing') return ['What should I work on first?', 'Is my recovery rushed?', 'Give me a drill for my arms'];
   if (sport === 'xcski' || sport === 'nordic') return ['How did my recorded heart rate change?', 'What can I compare between these laps?', 'What context would help explain this session?'];
   /* The training plan's chips come from its own port, so a chip can never ask for what that digest
@@ -54004,6 +54027,7 @@ function coachInputPlaceholder(sport, opts) {
     : sport === 'road' ? 'how do I pace a long climb?'
     : sport === 'ride' ? 'how do I carry more speed on the descents?'
     : isSkiSport(sport) ? 'how consistent were my runs?'
+    : sport === 'rowing' ? ((opts && opts.noStroke) ? 'was my stroke rate steady?' : 'is my recovery rushed?')
     : isMtbFamily(sport) ? ((opts && opts.sidesUnreliable) ? 'which corner cost me the most speed?' : 'drills for my weaker turn direction')
     : 'what should I focus on next session?';
   /* The frame and the example are two keys: the caller translates the whole return value, which
@@ -54146,7 +54170,8 @@ function renderCoachPanelChips(D, sport, chips) {
     try { sidesUnreliable = !!sidesUnreliableFor(D); } catch (e) { sidesUnreliable = false; }
   }
   const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false), sidesUnreliable,
-    fastWalk: sport === 'walking' && isFastWalk(D && D.summary), gpsOnly: !!(D && D.gpsOnly) };
+    fastWalk: sport === 'walking' && isFastWalk(D && D.summary), gpsOnly: !!(D && D.gpsOnly),
+    noStroke: sport === 'rowing' && !rowStrokeOf(D) };
   /* Translated HERE rather than inside `coachChips`, which is a pure per-sport picker with some
      twenty return sites. The chip's text is also the QUESTION sent to the coach, and the coach
      already answers in the reader's language (`coachLanguage`), so asking in it is the consistent
@@ -54221,6 +54246,19 @@ function coachSendFromInput() {
   if (!t) return;
   inp.value = '';
   sendCoach(t);
+}
+
+/* Put the START of a turn at the top of the thread: the question, with the answer beginning under
+   it. The thread used to be pinned to its bottom on every streamed chunk, which dragged the reader
+   to the end of an answer they were still reading the top of, and opened a saved reply at its last
+   line (owner, 2026-11-10: "stop scrolling to the bottom of the generated response"). */
+function coachScrollToTurn(bubble) {
+  const thread = document.getElementById('coachThread');
+  const msg = bubble && bubble.closest('.coach-msg');
+  if (!thread || !msg) return;
+  const prev = msg.previousElementSibling;
+  const top = prev && prev.classList.contains('coach-user') ? prev : msg;
+  thread.scrollTop += top.getBoundingClientRect().top - thread.getBoundingClientRect().top;
 }
 
 function appendCoachBubble(role, text) {
@@ -54318,7 +54356,13 @@ function coachAnalyzePrompt(sport) {
        which is the failure the comment above predicts in as many words. `ski day` is the lexicon's
        own noun for a whole ski recording, so this line and `SPORT_LEX` agree. */
     : isSkiSport(sport) ? 'ski day'
-    : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk' : 'ride';
+    /* Rowing and cross-country skiing both shipped on the catch-all too (owner report, 2026-11-10: a
+       Concept2 piece opened with "Analyze this ride"). So the catch-all is no longer 'ride': the
+       wheeled sports are named, and a sport nobody listed gets the neutral word. */
+    : sport === 'rowing' ? 'rowing session'
+    : (sport === 'xcski' || sport === 'nordic') ? 'ski session'
+    : (sport === 'running' || sport === 'run') ? 'run' : (sport === 'walking' || sport === 'walk') ? 'walk'
+    : (isMtbFamily(sport) || sport === 'road' || sport === 'ride') ? 'ride' : 'session';
   return `Analyze this ${noun} and coach me: what stands out, what does it mean, and what should I focus on?`;
 }
 
@@ -54419,8 +54463,7 @@ async function restoreCachedCoach(state, sport) {
   setCoachReply(bubble, hit.text, { cards: asCards, sport },
     '<div style="margin-top:8px;font-size:11px;opacity:0.55">' + escapeHtml(loamT('cached reply, no API call')) + '</div>');
   state.messages.push({ role: 'assistant', content: hit.text });
-  const thread = document.getElementById('coachThread');
-  if (thread) thread.scrollTop = 1e9;
+  coachScrollToTurn(bubble);
 }
 
 async function sendCoach(text, { scroll = false } = {}) {
@@ -54476,7 +54519,7 @@ async function sendCoach(text, { scroll = false } = {}) {
       setCoachReply(cachedBubble, hit.text, { cards: asCards, sport: coachState.sport },
         '<div style="margin-top:8px;font-size:11px;opacity:0.55">' + escapeHtml(loamT('cached reply, no API call')) + '</div>');
       coachState.messages.push({ role: 'assistant', content: hit.text });
-      document.getElementById('coachThread').scrollTop = 1e9;
+      coachScrollToTurn(cachedBubble);
       coachState.streaming = false;
       if (scroll) scrollToCoach();
       return;
@@ -54533,8 +54576,8 @@ async function sendCoach(text, { scroll = false } = {}) {
     onText: (_d, full) => {
       if (coachState !== state) return;
       streamed = full;
+      /* No scroll here: the reader stays where they are while the answer grows. */
       setCoachReply(bubble, full, { cards: asCards, sport: state.sport, partial: true });
-      document.getElementById('coachThread').scrollTop = 1e9;
     },
     onNotice: (msg) => { if (coachState !== state) return; bubble.innerHTML = `<span class="coach-typing">${escapeHtml(msg)}</span>`; },
     onDone: (full) => {
@@ -64640,7 +64683,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'c21a8b54a · 2026-11-10';
+const LOAM_BUILD = '1d2d648a0 · 2026-11-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
