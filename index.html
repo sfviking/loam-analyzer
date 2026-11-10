@@ -7349,7 +7349,173 @@ function rowSummary(read, hrRows, ride) {
     hrN: hr.length,
     hrAvg: hr.length ? Math.round(hr.reduce((a, r) => a + r.bpm, 0) / hr.length) : null,
     hrMax: hr.length ? Math.max(...hr.map(r => r.bpm)) : null,
+    hrFirst: hr.length >= 2 ? hr[0].bpm : null,
+    hrLast: hr.length >= 2 ? hr[hr.length - 1].bpm : null,
   };
+}
+
+/* ===== The average stroke ===================================================================
+   Where the handle hand and the head are along the rail through one stroke, averaged over a piece.
+   Each is the source's acceleration along the piece's principal axis, integrated twice. The drift a
+   double integral collects is removed by subtracting a moving average exactly one stroke long, which
+   for a repeating motion is its mean and so leaves the stroke's own shape alone.
+
+   WHAT THIS IS NOT. The legs and the trunk are not measured. A pocketed phone was tried for the thigh
+   and slid in the pocket: on the graded piece its swing read 55 degrees early on and 35 later. So the
+   head's travel cannot be split into slide and body swing, and nothing here claims the order of legs
+   and back. What two sensors do give is the handle against the head: when the arms bend and straighten
+   relative to the body.
+
+   WHICH END IS THE CATCH. Acceleration has no sign that says front from back. The handle dwells at
+   the finish (it slows into the body and turns) and reverses quickly at the catch: on the graded
+   piece it spent 29% of the stroke in the last 15% of its travel at one end and 16% at the other.
+   When the two ends dwell alike (ROW_DWELL_RATIO) the direction is not guessed and no cycle is
+   returned.
+
+   NOT GRADED. There is no video of the piece. Handle travel read 1.41 m and head travel 1.08 m with
+   6 cm and 3 cm of stroke-to-stroke spread, and the drive 0.92 s against a 0.96 s recovery. */
+const ROW_CYCLE_FS = 50;
+const ROW_CYCLE_N = 60;
+const ROW_CYCLE_MIN_STROKES = 8;
+/* Strokes in each third of a piece before its first third is set against its last. */
+const ROW_CYCLE_MIN_THIRD = 5;
+const ROW_DWELL_BAND = 0.15;
+const ROW_DWELL_RATIO = 1.25;
+
+/** Drift-free position (m) along the principal axis for one source over [start, end], at ROW_CYCLE_FS. */
+function rowTravel(rows, start, end, periodS) {
+  const src = (rows || []).filter(r => r && r.t >= start && r.t <= end);
+  const w = Math.round(periodS * ROW_CYCLE_FS);
+  const n = Math.floor((end - start) * ROW_CYCLE_FS);
+  if (src.length < ROW_MIN_SAMPLES || !(w >= 10) || n < 4 * w) return null;
+  const grid = [];
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    const t = start + i / ROW_CYCLE_FS;
+    while (j + 1 < src.length && src[j + 1].t <= t) j++;
+    const a = src[j], b = src[Math.min(j + 1, src.length - 1)];
+    const f = b.t > a.t ? Math.min(Math.max((t - a.t) / (b.t - a.t), 0), 1) : 0;
+    grid.push({ t, x: a.x + f * (b.x - a.x), y: a.y + f * (b.y - a.y), z: a.z + f * (b.z - a.z) });
+  }
+  const integrate = (xs) => { let acc = 0; return xs.map(v => (acc += v / ROW_CYCLE_FS)); };
+  /* Centred mean over one stroke; the ends, where the window is not whole, are dropped below. */
+  const detrend = (xs) => {
+    const pre = [0];
+    for (const v of xs) pre.push(pre[pre.length - 1] + v);
+    const h = Math.floor(w / 2);
+    return xs.map((v, i) => (i - h < 0 || i - h + w > xs.length ? null : v - (pre[i - h + w] - pre[i - h]) / w));
+  };
+  const vel = detrend(integrate(rowPrincipal(grid)));
+  const lo = vel.findIndex(v => v != null), hi = vel.length - 1 - vel.slice().reverse().findIndex(v => v != null);
+  const pos = detrend(integrate(vel.slice(lo, hi + 1)));
+  const out = [];
+  pos.forEach((p, i) => { if (p != null) out.push({ t: grid[lo + i].t, p }); });
+  return out.length >= 3 * w ? out : null;
+}
+
+/**
+ * The average stroke of one piece: the handle (wrist) and, when AirPods were worn, the head, as
+ * metres from the catch at ROW_CYCLE_N points, with the drive and recovery times. Null when there is
+ * no wrist stream, too few clean strokes, or the catch cannot be told from the finish.
+ */
+function rowStrokeCycle(sensors, piece) {
+  if (!piece || !(piece.spm > 0)) return null;
+  const period = 60 / piece.spm;
+  const hand = rowTravel(rowAccelRows(sensors, 'wrist'), piece.start, piece.end, period);
+  if (!hand) return null;
+  const sorted = hand.map(s => s.p).sort((a, b) => a - b);
+  const p2 = sorted[Math.floor(0.02 * (sorted.length - 1))], p98 = sorted[Math.floor(0.98 * (sorted.length - 1))];
+  const range = p98 - p2;
+  if (!(range > 0)) return null;
+  const near = (v, edge) => Math.abs(v - edge) <= ROW_DWELL_BAND * range;
+  const atHi = hand.filter(s => near(Math.min(s.p, p98), p98)).length;
+  const atLo = hand.filter(s => near(Math.max(s.p, p2), p2)).length;
+  if (Math.max(atHi, atLo) < ROW_DWELL_RATIO * Math.min(atHi, atLo)) return null;
+  const sign = atHi > atLo ? 1 : -1;
+  const hp = hand.map(s => sign * s.p);
+  const floor = (sign > 0 ? p2 : -p98) + 0.3 * range;
+  const minGap = Math.round(0.6 * period * ROW_CYCLE_FS);
+  const catches = [];
+  for (let i = 1; i < hp.length - 1; i++) {
+    if (!(hp[i] < hp[i - 1] && hp[i] <= hp[i + 1] && hp[i] < floor)) continue;
+    const last = catches[catches.length - 1];
+    if (last == null || i - last >= minGap) catches.push(i);
+    else if (hp[i] < hp[last]) catches[catches.length - 1] = i;
+  }
+  let head = null;
+  const raw = rowTravel(rowAccelRows(sensors, 'head'), piece.start, piece.end, period);
+  if (raw) {
+    /* The same clock as the hand, and the same direction: the head travels with the handle. */
+    const at = (t) => { const i = Math.round((t - raw[0].t) * ROW_CYCLE_FS); return i >= 0 && i < raw.length ? raw[i].p : null; };
+    const hv = hand.map(s => at(s.t));
+    let dot = 0;
+    hv.forEach((v, i) => { if (v != null) dot += v * hp[i]; });
+    head = hv.map(v => (v == null ? null : (dot >= 0 ? v : -v)));
+  }
+  const N = ROW_CYCLE_N;
+  const sumHand = new Array(N).fill(0), sumHead = new Array(N).fill(0);
+  const periods = [], strokes = [];
+  let n = 0, nHead = 0;
+  for (let k = 0; k + 1 < catches.length; k++) {
+    const a = catches[k], b = catches[k + 1], len = (b - a) / ROW_CYCLE_FS;
+    if (len < 0.7 * period || len > 1.4 * period) continue;
+    const lerp = (xs, q) => { const i = Math.floor(q), f = q - i; const u = xs[i], v = xs[Math.min(i + 1, xs.length - 1)]; return u == null || v == null ? null : u + f * (v - u); };
+    const hs = [], ds = [];
+    for (let m = 0; m < N; m++) { const q = a + (b - a) * m / N; hs.push(lerp(hp, q)); ds.push(head ? lerp(head, q) : null); }
+    hs.forEach((v, m) => { sumHand[m] += v; });
+    if (head && ds.every(v => v != null)) { ds.forEach((v, m) => { sumHead[m] += v; }); nHead++; }
+    periods.push(len); n++;
+    /* This stroke on its own: its length, where its handle turned, and the handle's top speed on
+       the drive (a three-point slope, so one noisy sample does not set it). */
+    const lo = Math.min(...hs), top = hs.indexOf(Math.max(...hs));
+    let peak = 0, peakAt = 0;
+    for (let m = 1; m < top; m++) {
+      const v = (hs[m + 1] - hs[m - 1]) / (2 * len / N);
+      if (v > peak) { peak = v; peakAt = m; }
+    }
+    strokes.push({ t: hand[a].t, periodS: len, lengthM: hs[top] - lo, driveS: len * top / N,
+      peakSpeedMps: peak, peakAt: top > 0 ? peakAt / top : null });
+  }
+  if (n < ROW_CYCLE_MIN_STROKES) return null;
+  const handle = sumHand.map(v => v / n);
+  const base = Math.min(...handle);
+  const H = handle.map(v => v - base);
+  const finish = H.indexOf(Math.max(...H));
+  const ps = periods.slice().sort((a, b) => a - b), periodS = ps[Math.floor(ps.length / 2)];
+  const med = (xs) => { const q = xs.filter(Number.isFinite).sort((a, b) => a - b); return q.length ? q[Math.floor(q.length / 2)] : null; };
+  const lens = strokes.map(k => k.lengthM), lenMean = lens.reduce((a, b) => a + b, 0) / lens.length;
+  const third = Math.floor(strokes.length / 3), thirds = third >= ROW_CYCLE_MIN_THIRD;
+  const first = strokes.slice(0, third), last = strokes.slice(strokes.length - third);
+  const out = {
+    n, periodS, finishIndex: finish,
+    strokes,
+    lengthSdM: Math.sqrt(lens.reduce((a, v) => a + (v - lenMean) * (v - lenMean), 0) / lens.length),
+    lengthFirstM: thirds ? med(first.map(k => k.lengthM)) : null, lengthLastM: thirds ? med(last.map(k => k.lengthM)) : null,
+    driveFirstS: thirds ? med(first.map(k => k.driveS)) : null, driveLastS: thirds ? med(last.map(k => k.driveS)) : null,
+    periodFirstS: thirds ? med(first.map(k => k.periodS)) : null, periodLastS: thirds ? med(last.map(k => k.periodS)) : null,
+    peakSpeedMps: med(strokes.map(k => k.peakSpeedMps)), peakAt: med(strokes.map(k => k.peakAt)),
+    driveS: periodS * finish / N, recoveryS: periodS * (N - finish) / N,
+    handle: H, handleTravelM: Math.max(...H),
+    head: null, headTravelM: null, armTravelM: null, armAtHalfBody: null, armLeftAtBodyForward: null,
+  };
+  if (nHead >= ROW_CYCLE_MIN_STROKES) {
+    const hd = sumHead.map(v => v / nHead), h0 = hd[0];
+    const D = hd.map(v => v - h0);
+    out.head = D;
+    out.headTravelM = Math.max(...D) - Math.min(...D);
+    /* The handle's lead over the head: how far the arms have drawn. */
+    const arm = H.map((v, m) => v - D[m]);
+    const armMax = arm[finish];
+    out.armTravelM = armMax;
+    if (armMax > 0.05 && D[finish] > 0.05) {
+      const half = D.findIndex((v, m) => m <= finish && v >= 0.5 * D[finish]);
+      if (half >= 0) out.armAtHalfBody = Math.min(Math.max(arm[half] / armMax, 0), 1);
+      let back = -1;
+      for (let m = finish; m < N; m++) if (D[m] <= 0.1 * D[finish]) { back = m; break; }
+      if (back >= 0) out.armLeftAtBodyForward = Math.min(Math.max(arm[back] / armMax, 0), 1);
+    }
+  }
+  return out;
 }
 
 /* ===== Brisk minutes =================================================================
@@ -11153,21 +11319,27 @@ function closeFootSegmentPage() {
 /* Charts size themselves after they are drawn, which can be several frames on a busy machine, and a
    scrollTo issued while the page is still shorter than y is clamped and never revisited: Back landed
    353 px short on the CI Mac mini (PR #1011) while one extra frame was enough everywhere else. So
-   keep re-applying y for up to ~1 s of frames while the page grows, and stop the moment the reader
-   scrolls or touches, so this never fights a reader who has already moved on. */
+   keep re-applying y while the page grows, and stop the moment the reader scrolls or touches, so
+   this never fights a reader who has already moved on.
+   The window is WALL-CLOCK time on a timer, not a count of animation frames. Sixty frames is a
+   second at 60 Hz, half that on a 120 Hz screen, and no time at all where frames are not being
+   delivered; the same 353 px came back on that Mac three times on 2026-11-10 with the frame count
+   in place. */
+const SCROLL_RESTORE_WINDOW_MS = 1500;
 function restoreScrollOnceTall(y) {
   window.scrollTo(0, y);
-  let frames = 0, cancelled = false;
+  const t0 = performance.now();
+  let cancelled = false;
   const cancel = () => { cancelled = true; };
   const opts = { passive: true, once: true };
   ['wheel', 'touchstart', 'keydown'].forEach(ev => window.addEventListener(ev, cancel, opts));
   const done = () => ['wheel', 'touchstart', 'keydown'].forEach(ev => window.removeEventListener(ev, cancel, opts));
   const step = () => {
-    if (cancelled || ++frames > 60) { done(); return; }
+    if (cancelled || performance.now() - t0 > SCROLL_RESTORE_WINDOW_MS) { done(); return; }
     if (Math.abs(window.scrollY - y) > 2) window.scrollTo(0, y);
-    requestAnimationFrame(step);
+    setTimeout(step, 16);
   };
-  requestAnimationFrame(step);
+  setTimeout(step, 16);
 }
 
 function showTurnsForRun(r, D) {
@@ -28213,7 +28385,14 @@ async function analyze(files) {
       const channels = {
         wristRows: (sensors.wrist || []).length, headphoneRows: (sensors.headphone || []).length, heartRateN: summary.hrN,
       };
-      const rowRender = { rowing: summary, series, channels,
+      /* The average stroke of the longest piece: where the handle hand and the head are along the rail. */
+      const longest = read.pieces.slice().sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
+      const cyc = longest ? rowStrokeCycle(sensors, longest) : null;
+      const r3 = (xs) => xs.map(v => +v.toFixed(3));
+      const stroke = cyc ? { ...cyc, handle: r3(cyc.handle), head: cyc.head ? r3(cyc.head) : null,
+        strokes: cyc.strokes.map(k => ({ t: +k.t.toFixed(1), periodS: +k.periodS.toFixed(2), lengthM: +k.lengthM.toFixed(3), driveS: +k.driveS.toFixed(2),
+          peakSpeedMps: +k.peakSpeedMps.toFixed(2), peakAt: k.peakAt == null ? null : +k.peakAt.toFixed(2) })) } : null;
+      const rowRender = { rowing: summary, series, channels, stroke,
         pieces: read.pieces.map(p => ({ start: +p.start.toFixed(1), end: +p.end.toFixed(1), spm: +p.spm.toFixed(1), strokes: p.strokes })),
         sport: 'rowing', spanS: spanRide.end - spanRide.start, imuRateHz,
         title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)) };
@@ -32384,6 +32563,7 @@ function liftSkeleton(thighDeg, leanDeg, barPos, lift) {
   const R = Math.PI / 180, frac = barPos === 'low' ? 0.17 : 0.05, BARBACK = 15;
   if (lift === 'bench') return liftBenchSkeleton(thighDeg, leanDeg, L);
   if (lift === 'deadlift') return liftDeadliftSkeleton(thighDeg, leanDeg, L);
+  if (lift === 'clean' || lift === 'cleanjerk') return liftCleanSkeleton(thighDeg, leanDeg, L, lift === 'cleanjerk');
   const isCurl = lift === 'curl';
   // 'upright' (a lift with no dedicated pose) and the curl hold the bar in the hands rather than racked
   // behind the shoulders. Upright adds no descent (thighDeg stays 0) so it reads as a
@@ -32488,6 +32668,71 @@ function liftDeadliftSkeleton(pct, leanDeg, L) {
   const head = { x: shoulder.x + (L.neck + L.headR) * td.x, y: shoulder.y + (L.neck + L.headR) * td.y };
   return { ankle, knee, hip, shoulder, head, bar, elbow: undefined, td, headR: L.headR, foot: L.foot,
     deadlift: true, barInHands: true, curl: false, plateR: PLATE_R,
+    extents: [{ x: bar.x - PLATE_R, y: bar.y - PLATE_R }, { x: bar.x + PLATE_R, y: bar.y + PLATE_R }] };
+}
+
+/* The clean, and the clean and jerk. A MODEL of the movement, not a reconstruction: nothing the
+   phone or watch records places the bar on the shoulders or overhead, so every rep is the same drawn
+   lift, and only its count and timing come from the set. `pct` runs from the top of the lift (0: the
+   bar racked on the shoulders for a clean, locked out overhead for a clean and jerk) down to the
+   floor (100), the same direction as the deadlift's, so the rep clock's bottom is the bar on the
+   floor and its drive is the lift.
+   The clean has three stretches. The pull is the deadlift's own skeleton from the floor to standing
+   with the bar at arm's length, so the two lifts start alike. The turnover takes the bar from there to
+   the shoulders while the knees rebend into a quarter-squat catch (a power clean: the watch cannot
+   tell it from a full one). Then the legs stand it up. The jerk is a dip, a drive, a shallow rebend
+   under the bar (a push jerk: a split's feet are not something a side view with one leg can draw)
+   and the stand, with a short hold in the rack between the two lifts.
+   The arm is two equal links at the deadlift's arm length, solved by IK on the branch that puts the
+   elbow behind the bar while it is below the shoulder and in front once it is racked, so the elbows
+   come under and through instead of swapping sides. */
+function liftCleanSkeleton(pct, leanDeg, L, jerk) {
+  const R = Math.PI / 180, ARM = 140, LINK = 70, PLATE_R = 48;
+  const CATCH = 50, DIP = 28, REBEND = 18, RACK = { x: 6, y: 12 };
+  const PULL = 0.45, TURN = 0.78;                       // the clean's stretches, as fractions of the clean
+  const CLEAN_END = jerk ? 0.5 : 1, JERK_START = 0.58;   // of the whole path; between them, the rack hold
+  const c01 = x => Math.max(0, Math.min(1, x)), sm = x => { const t = c01(x); return t * t * (3 - 2 * t); };
+  const q = 1 - c01((+pct || 0) / 100);                  // 0 = on the floor, 1 = the top of the lift
+  const u = Math.min(1, q / CLEAN_END);
+  const v = jerk ? c01((q - JERK_START) / (1 - JERK_START)) : 0;
+  const hold = { x: 0, y: 0 };
+  let ankle, knee, hip, shoulder, td, bar;
+  if (u < PULL) {
+    const d = liftDeadliftSkeleton(100 * (1 - u / PULL), leanDeg, L);
+    ({ ankle, knee, hip, shoulder, td, bar } = d);
+  } else {
+    let legDeg, w = 0, s = 1;
+    if (v > 0) {
+      legDeg = v < 0.3 ? DIP * sm(v / 0.3) : v < 0.5 ? DIP * (1 - sm((v - 0.3) / 0.2))
+        : v < 0.75 ? REBEND * sm((v - 0.5) / 0.25) : REBEND * (1 - sm((v - 0.75) / 0.25));
+      w = sm((v - 0.4) / 0.45);                          // the bar leaves the shoulders as the legs finish the drive
+    } else if (u < TURN) {
+      s = (u - PULL) / (TURN - PULL);
+      legDeg = CATCH * sm((s - 0.35) / 0.65);            // full extension first, then under the bar
+    } else {
+      legDeg = CATCH * (1 - sm((u - TURN) / (1 - TURN)));
+    }
+    const shinDeg = Math.min(22, legDeg * 0.24), lean = (+leanDeg || 0) + legDeg * 0.12;
+    ankle = { x: 16, y: 14 };
+    knee = { x: ankle.x + L.shank * Math.sin(shinDeg * R), y: ankle.y + L.shank * Math.cos(shinDeg * R) };
+    hip = { x: knee.x - L.thigh * Math.sin(legDeg * R), y: knee.y + L.thigh * Math.cos(legDeg * R) };
+    td = { x: Math.sin(lean * R), y: Math.cos(lean * R) };
+    shoulder = { x: hip.x + L.torso * td.x, y: hip.y + L.torso * td.y };
+    /* Racked, the bar sits just in front of and above the shoulder joint. Overhead it is straight
+       above it, and it stays in front until it has cleared the head. */
+    hold.x = RACK.x * (1 - sm((w - 0.4) / 0.6)); hold.y = RACK.y + (ARM - RACK.y) * w;
+    const top = { x: shoulder.x + hold.x, y: shoulder.y + hold.y };
+    if (s < 1) {
+      const hang = liftDeadliftSkeleton(0, leanDeg, L).bar, k = sm(s);
+      bar = { x: hang.x + (top.x - hang.x) * k, y: hang.y + (top.y - hang.y) * k };
+    } else bar = top;
+  }
+  const head = { x: shoulder.x + (L.neck + L.headR) * td.x, y: shoulder.y + (L.neck + L.headR) * td.y };
+  const dx = bar.x - shoulder.x, dy = bar.y - shoulder.y, dd = Math.max(1e-6, Math.hypot(dx, dy));
+  const d = Math.min(2 * LINK, dd), h = Math.sqrt(Math.max(0, LINK * LINK - d * d / 4));
+  const elbow = { x: shoulder.x + (d / 2) * dx / dd + h * dy / dd, y: shoulder.y + (d / 2) * dy / dd - h * dx / dd };
+  return { ankle, knee, hip, shoulder, head, bar, elbow, td, headR: L.headR, foot: L.foot,
+    deadlift: false, barInHands: true, curl: false, plateR: PLATE_R,
     extents: [{ x: bar.x - PLATE_R, y: bar.y - PLATE_R }, { x: bar.x + PLATE_R, y: bar.y + PLATE_R }] };
 }
 
@@ -33180,22 +33425,25 @@ function onLiftReps(i, val) {
 let _liftForm = { raf: 0, D: null, setIdx: 0, playing: true, t0: 0, tf: null, tfKey: '', planKey: '', plan: null, repIdx: -1, trail: [], ghosts: [] };
 function liftFormCharKey() { try { return localStorage.getItem('loam.liftChar') || 'stick'; } catch (e) { return 'stick'; } }
 /* Squat, deadlift, bench and curl have real, fact-driven poses (squat descent, hip hinge, the supine
-   press, elbow-flexion curl). Any OTHER explicitly tapped lift (press, dips, other, row, ...) has no
+   press, elbow-flexion curl). The clean and the clean and jerk have a MODELLED one (liftCleanSkeleton),
+   drawn because the owner asked to see the lift and captioned as a model. Any OTHER explicitly tapped lift (press, dips, other, row, ...) has no
    dedicated pose yet and is drawn as a neutral upright standing hold, not a misleading squat: no
    descent (dmax 0), a small upright lean, and the bar in the hands. An unlabeled set stays a squat
    (the analyzer's default). */
-function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift' && set.lift !== 'curl' && set.lift !== 'bench'; }
+function liftFormNoPose(set) { return !!set.lift && set.lift !== 'squat' && set.lift !== 'deadlift' && set.lift !== 'curl' && set.lift !== 'bench' && !liftFormModelled(set); }
+/* A lift whose pose is a drawn movement with nothing measured in it but the count and the clock. */
+function liftFormModelled(set) { return !!set && (set.lift === 'clean' || set.lift === 'clean and jerk'); }
 /* For a curl, dmax is the elbow-flexion sweep (degrees from arm-straight-down), not a squat depth; for a
    bench it is the bar's descent from lockout to the chest, in percent, so a rep's relative ROM scales
    it like a squat's and the skeleton stops at the chest for anything past 100. A deadlift's is the
    bar's descent from lockout to the floor, in percent, and every rep is drawn to 100 (liftRepTimeline). */
-function liftDepthMaxDeg(set) { if (set.lift === 'deadlift') return 100; if (set.lift === 'curl') return 145; if (set.lift === 'bench') return 100; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : set.depthTarget === 'partial' ? 45 : 94; }
+function liftDepthMaxDeg(set) { if (set.lift === 'deadlift' || liftFormModelled(set)) return 100; if (set.lift === 'curl') return 145; if (set.lift === 'bench') return 100; if (liftFormNoPose(set)) return 0; return set.depthTarget === 'full' ? 102 : set.depthTarget === 'parallel' ? 86 : set.depthTarget === 'partial' ? 45 : 94; }
 /* The one angle that shapes the pose: torso lean for a standing lift (from the bar-position tap), and
    for a bench the MEASURED forearm angle at the chest (`set.forearmDeg`, the watch's x axis against
    gravity at the reversal), with 15 degrees standing in where no watch measured it. */
-function liftLeanDeg(set) { if (set.lift === 'bench') return set.forearmDeg != null && Number.isFinite(+set.forearmDeg) ? Math.max(0, Math.min(60, +set.forearmDeg)) : 15; if (set.lift === 'deadlift') return 6; if (set.lift === 'curl' || liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
+function liftLeanDeg(set) { if (set.lift === 'bench') return set.forearmDeg != null && Number.isFinite(+set.forearmDeg) ? Math.max(0, Math.min(60, +set.forearmDeg)) : 15; if (set.lift === 'deadlift' || liftFormModelled(set)) return 6; if (set.lift === 'curl' || liftFormNoPose(set)) return 5; return set.barPosition === 'low' ? 20 : set.barPosition === 'high' ? 10 : 15; }
 function liftBarPos(set) { return set.barPosition === 'low' ? 'low' : 'high'; }
-function liftFormLift(set) { return set.lift === 'deadlift' ? 'deadlift' : set.lift === 'curl' ? 'curl' : set.lift === 'bench' ? 'bench' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
+function liftFormLift(set) { return set.lift === 'clean' ? 'clean' : set.lift === 'clean and jerk' ? 'cleanjerk' : set.lift === 'deadlift' ? 'deadlift' : set.lift === 'curl' ? 'curl' : set.lift === 'bench' ? 'bench' : (liftFormNoPose(set) ? 'upright' : 'squat'); }
 
 /* The phone's per-rep depth (`repThighDeg`, degrees from the set's standing pose; see thighSwingDeg)
    when it can stand for a squat's depth, else null. Only for a squat-posed set (tapped squat, or
@@ -33226,9 +33474,17 @@ function liftRepTimeline(set) {
   const nr = Math.round(+(set && set.reps));
   const n = Number.isFinite(nr) && nr > 0 ? nr : 1;
   const rawTempo = +(set && set.tempoS);
-  const fallback = Math.max(1.6, Number.isFinite(rawTempo) && rawTempo > 0 ? rawTempo : 3);
   const detectorAligned = !set || set.repSource !== 'manual';
   const times = Array.isArray(set && set.repTimes) ? set.repTimes.map(Number) : [];
+  /* A clean or a clean and jerk is one rep to the lifter and two or more bar movements to the
+     counter (4 reps read 10 on the 2026-11-09 session), so its median tempo is a movement's, not a
+     rep's. Once the lifter has corrected the count, the reps are spread over the span the counter
+     saw movement in; uncorrected, each counted movement is still drawn as a lift. */
+  const olympic = !!set && (set.lift === 'clean' || set.lift === 'clean and jerk');
+  const spanS = times.length > 1 && times.every(Number.isFinite) ? times[times.length - 1] - times[0] : NaN;
+  const spread = olympic && !detectorAligned && n > 1 && spanS > 0;
+  const fallback = spread ? Math.max(1.6, Math.min(20, spanS / (n - 1)))
+    : Math.max(1.6, Number.isFinite(rawTempo) && rawTempo > 0 ? rawTempo : 3);
   const cadenceMeasured = detectorAligned && times.length === n && n > 1
     && times.every((v, i) => Number.isFinite(v) && (i === 0 || v > times[i - 1]));
   const phases = Array.isArray(set && set.repPhaseTimes) ? set.repPhaseTimes : [];
@@ -33242,7 +33498,7 @@ function liftRepTimeline(set) {
   /* A deadlift starts every rep on the floor, which is a stop the bar cannot pass, and a pull that
      measures shorter than the set's median cannot say which end it lost -- the floor or the lockout.
      So every deadlift rep is drawn to the floor; the measured ROM is still each rep's `depthM`. */
-  const floorPull = !!set && set.lift === 'deadlift';
+  const floorPull = !!set && (set.lift === 'deadlift' || olympic);
   const sortedDepths = validDepths ? depths.slice().sort((a, b) => a - b) : [];
   const medDepth = sortedDepths.length
     ? (sortedDepths[(sortedDepths.length - 1) >> 1] + sortedDepths[sortedDepths.length >> 1]) / 2 : null;
@@ -33255,8 +33511,10 @@ function liftRepTimeline(set) {
   const reps = anchors.map((bottomS, i) => {
     const cadenceS = cadenceAt(i);
     const p = phasesMeasured ? phases[i] : null;
-    const eccS = Math.min(cadenceS * 0.72, Math.max(0.12, p ? +p.eccS : cadenceS * 0.45));
-    const conS = Math.min(cadenceS * 0.72, Math.max(0.12, p ? +p.conS : cadenceS * 0.37));
+    /* The modelled split: an Olympic lift spends longer going up (the pull, the catch, the jerk) than
+       the bar takes to come back down. */
+    const eccS = Math.min(cadenceS * 0.72, Math.max(0.12, p ? +p.eccS : cadenceS * (olympic ? 0.25 : 0.45)));
+    const conS = Math.min(cadenceS * 0.72, Math.max(0.12, p ? +p.conS : cadenceS * (olympic ? 0.5 : 0.37)));
     /* The measured dwell at the reversal (the chest on a bench, the hole on a squat). The counter's
        `conS` runs from the velocity bottom to the end of the drive and so already contains it, which
        is why the hold is carved out of the drive rather than added: the rep ends where it ended.
@@ -33294,6 +33552,7 @@ function liftRepTimeline(set) {
     depthMeasured: validDepths,
     depthSource: validDepths ? (thighs ? 'thigh' : 'wrist') : null,
     floorPull,
+    spreadOverSet: spread,
     pauseMeasured: reps.some(r => r.holdS > r.bottomS),
   };
 }
@@ -33471,6 +33730,9 @@ function liftFormCompose(st, set, elapsedS) {
 function liftFormCompose3D(st, set, frame, P) {
   const cam3 = st.cam || (st.cam = { yaw: 35, pitch: 18 });
   const cam = liftCamera3D(cam3.yaw, cam3.pitch, 300, 320);
+  /* The default camera frames a standing lifter. A jerk's lockout puts the plates 1.4 body heights
+     up, so that one lift is seen from further back and aimed higher, for the whole set. */
+  if (P.lk === 'cleanjerk') { cam.scale *= 0.7; cam.lookY = 245; }
   const col = P.c.neon || P.c.skin;
   const sk = liftSkeleton3D(liftSkeleton(P.thigh, P.ln, P.bp, P.lk), P.lk);
   if (!st.trail3 || P.keyChanged || st.trail3Rep !== frame.repIdx) { st.trail3 = []; st.trail3Rep = frame.repIdx; }
@@ -33571,7 +33833,9 @@ function liftFormFrame(ts) {
   if (keyChanged) {
     const ghostOn = liftGhostEnabled();
     const note = document.getElementById('liftFormNote');
-    if (note) note.textContent = liftFormNoteFor(set, st.plan, ghostOn) + (liftForm3DEnabled() ? ' ' + loamT('The 3D view is the same measured depth and tempo on a modelled stance and grip; drag the figure to orbit.') : '');
+    if (note) note.textContent = liftFormNoteFor(set, st.plan, ghostOn) + (liftForm3DEnabled() ? ' ' + (liftFormModelled(set)
+      ? loamT('The 3D view is the same model on a modelled stance and grip; drag the figure to orbit.')
+      : loamT('The 3D view is the same measured depth and tempo on a modelled stance and grip; drag the figure to orbit.')) : '');
     /* Offer the toggle only where the comparison exists at all. Asked with the ghost forced ON, so
        switching it off cannot also hide the control that switches it back on. */
     const gb = document.getElementById('liftFormGhost');
@@ -33605,7 +33869,7 @@ function liftFormShowNoPose(set) {
     `<div class="lf-nopose">
        <div class="lf-nopose-icon">🏋️</div>
        <div class="lf-nopose-title">${loamT('No form view for {lift} yet', { lift: escapeHtml(name) })}</div>
-       <div class="lf-nopose-sub">${loamT('We only animate lifts we can show honestly (squat, deadlift, bench, curl). Your reps, tempo, and bar speed above are still the real numbers.')}</div>
+       <div class="lf-nopose-sub">${loamT('We only animate lifts we can show honestly (squat, deadlift, bench, curl, clean, clean and jerk). Your reps, tempo, and bar speed above are still the real numbers.')}</div>
      </div>`;
   const note = document.getElementById('liftFormNote'); if (note) note.textContent = '';
   const rc = document.getElementById('liftFormRep'); if (rc) rc.textContent = '';
@@ -33834,7 +34098,8 @@ function renderLiftForm(D) {
   liftFormStart();
 }
 /* Honest per-lift caption: squat, deadlift, bench and curl have real poses (squat descent, hip hinge, the
-   supine press, elbow flexion); press/dips/other have no dedicated pose yet, so the body is a neutral
+   supine press, elbow flexion); the clean and the clean and jerk have a modelled one and say so;
+   press/dips/other have no dedicated pose yet, so the body is a neutral
    standing hold. */
 function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEnabled()) {
   /* Assembled from whole sentences joined by a space rather than from fragments carrying their own
@@ -33856,6 +34121,14 @@ function liftFormNoteFor(set, plan = liftRepTimeline(set), ghostOn = liftGhostEn
   if (set.lift === 'deadlift') return join(loamT('Deadlift hip-hinge replay.'), clock, phases, hold,
     loamT('Every rep is drawn down to the floor, where a deadlift starts.'), path);
   if (set.lift === 'curl') return join(loamT('Curl elbow-flexion replay.'), clock, phases, hold, path);
+  if (liftFormModelled(set)) {
+    const lead = set.lift === 'clean' ? loamT('Clean replay.') : loamT('Clean and jerk replay.');
+    const move = set.lift === 'clean'
+      ? loamT('The movement is a model of a power clean, the same for every rep: only the rep count and the timing come from your set.')
+      : loamT('The movement is a model of a power clean and a push jerk, the same for every rep: only the rep count and the timing come from your set.');
+    const olyClock = plan.spreadOverSet ? loamT('Your corrected reps are spread evenly over the time the set took.') : clock;
+    return join(lead, move, olyClock, plan.spreadOverSet ? '' : phases);
+  }
   if (liftFormNoPose(set)) return loamT('{Lift}: no dedicated form view yet, so this is a neutral standing hold, not the real {lift} motion. Your reps and tempo are the real numbers.',
     { Lift: liftNameCap(set.lift), lift: liftNameLower(set.lift) });
   const target = liftDepthCap(set.depthTarget) ? liftDepthCap(set.depthTarget).toLowerCase() : null;
@@ -37129,9 +37402,216 @@ function renderRowing(D) {
     <div class="panel">
       <div id="rowRateChart" class="chart" style="height:${hasHr ? 300 : 240}px"></div>
       <div class="strength-tablenote analysis-explanation">${loamT('One reading per stretch counted as rowing. A gap is time that was not: a rest between pieces, or setting up.')}</div>
-    </div>`;
+    </div>
+    <div id="rowStrokeHost"></div>`;
   drawRowingRate(D);
+  renderRowStroke(D);
+  renderCoachPanel(D, 'rowing', { digest: rowDigest(D) });
   setTimeout(decorateCardShares, 0);
+}
+
+/* What the rowing coach is given: the numbers on the page and nothing else, with the limits spelled
+   out, because the coach will otherwise fill the gaps with what rowing coaches usually say about
+   legs, backs, splits and watts, none of which this recording carries. */
+function rowDigest(D) {
+  const s = D.rowing, c = D.stroke, r2 = (v) => (v == null ? null : +(+v).toFixed(2));
+  return {
+    sport: 'rowing machine',
+    time_rowing_s: r2(s.rowingS), recording_s: r2(s.windowS), pieces: (D.pieces || []).map(p => ({ start_s: p.start, end_s: p.end, strokes_per_min: p.spm, strokes_estimated: p.strokes })),
+    stroke_rate: { median_spm: r2(s.rateMedian), p10_spm: r2(s.rateP10), p90_spm: r2(s.rateP90), first_half_spm: r2(s.rateFirstHalf), second_half_spm: r2(s.rateSecondHalf), read_from: s.source },
+    strokes_estimated: s.strokes,
+    heart_rate: s.hrAvg == null ? null : { avg_bpm: s.hrAvg, max_bpm: s.hrMax, first_bpm: s.hrFirst, last_bpm: s.hrLast, samples: s.hrN },
+    average_stroke: !c ? null : {
+      strokes_averaged: c.n, stroke_s: r2(c.periodS), drive_s: r2(c.driveS), recovery_s: r2(c.recoveryS), recovery_per_drive: r2(c.recoveryS / c.driveS),
+      handle_travel_m: r2(c.handleTravelM), handle_travel_sd_m: r2(c.lengthSdM),
+      handle_travel_first_third_m: r2(c.lengthFirstM), handle_travel_last_third_m: r2(c.lengthLastM),
+      drive_first_third_s: r2(c.driveFirstS), drive_last_third_s: r2(c.driveLastS),
+      peak_handle_speed_mps: r2(c.peakSpeedMps), peak_handle_speed_at_fraction_of_drive: r2(c.peakAt),
+      head_travel_m: r2(c.headTravelM), arm_travel_m: r2(c.armTravelM),
+      arm_pull_done_when_body_halfway_through_drive: r2(c.armAtHalfBody),
+      arm_reach_left_when_body_forward_again: r2(c.armLeftAtBodyForward),
+    },
+    limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. Distance, split, pace, watts, calories and drag factor are NOT measured: they are the machine monitor\'s. The stroke count is time times rate. Checked against one session on one machine.',
+  };
+}
+function rowCoachPrompt(level) {
+  return 'You are an indoor rowing (rowing machine) coach reading one recorded session. Use ONLY the numbers in the digest; quote them. '
+    + 'What is measured: stroke rate, time rowing, an estimated stroke count, heart rate when present, and the average stroke as the handle\'s and the head\'s travel along the rail, with drive and recovery times and how the arms move relative to the body. '
+    + 'What is NOT measured and must never be stated, estimated or implied: distance, split or pace per 500 m, watts, calories, drag factor; leg drive, knee angle, seat position, shin angle, back angle, layback, posture, or whether legs or back moved first. If asked, say it is not in the recording and that the machine\'s monitor is the source for distance, split and watts. '
+    + 'The arm reads are the handle\'s travel minus the head\'s. They have not been checked against video: present them as what the sensors suggest, not as fact. '
+    + 'You may compare the measured numbers with standard teaching: legs then body then arms on the drive with the arms straight until late; arms away, then body, then slide on the recovery; a recovery near twice the drive at steady rates of 18 to 24 strokes a minute, closing toward even above about 30. Say plainly when a number is already in a sensible range. '
+    + 'Give at most three priorities, most useful first, each with one concrete drill or cue the athlete can try on the next session, and say which number would show it worked. Heart rate is descriptive only: no zones, no fitness or medical claims. Do not invent trends from a single session. Keep it short. '
+    + 'Athlete level: ' + (level || 'intermediate') + '.';
+}
+
+/* The STROKE REPLAY: the average stroke of the longest piece. The handle and the head are measured
+   (rowStrokeCycle); the figure round them is drawn to fit, and says so. */
+const ROW_FIG = { shin: 0.46, thigh: 0.46, trunk: 0.56, upper: 0.30, fore: 0.33, slideShare: 0.55, leanCatchDeg: -25, px: 150, footX: 1.2 };
+/* The middle joint of a two-bone limb from a to z; `side` picks which way it bends. A limb asked to
+   reach further than it can is drawn straight. */
+function rowFigJoint(a, z, l1, l2, side) {
+  const dx = z.x - a.x, dy = z.y - a.y, L = Math.hypot(dx, dy) || 1e-6, d = Math.min(L, l1 + l2 - 1e-4);
+  const k = (l1 * l1 - l2 * l2 + d * d) / (2 * d), hgt = Math.sqrt(Math.max(l1 * l1 - k * k, 0));
+  return { x: a.x + k * dx / L - side * hgt * dy / L, y: a.y + k * dy / L + side * hgt * dx / L };
+}
+function rowFigurePose(c, m) {
+  const F = ROW_FIG, N = c.handle.length;
+  const head = c.head[m], travel = Math.max(...c.head) || 1;
+  const b = Math.min(Math.max(head / travel, 0), 1);
+  /* NOT measured: the head's travel is shared evenly between the slide and the body swing. */
+  const slide = F.slideShare * travel, swing = (1 - F.slideShare) * travel;
+  const s0 = Math.sin(F.leanCatchDeg * Math.PI / 180);
+  const lean = Math.asin(Math.min(Math.max(s0 + swing * b / F.trunk, -0.9), 0.9));
+  const foot = { x: F.footX, y: 0.16 };
+  const hip = { x: foot.x + 0.34 + slide * b, y: 0.10 };
+  const sh = { x: hip.x + F.trunk * Math.sin(lean), y: hip.y + F.trunk * Math.cos(lean) };
+  return { b, foot, hip, sh, knee: rowFigJoint(hip, foot, F.thigh, F.shin, -1), handleY: 0.46,
+    headC: { x: sh.x + 0.07 * Math.sin(lean), y: sh.y + 0.17 }, N };
+}
+function renderRowStroke(D) {
+  const el = document.getElementById('rowStrokeHost');
+  if (!el) return;
+  const c = D && D.stroke;
+  if (!c) { el.innerHTML = ''; return; }
+  const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
+  const pctT = (v) => Math.round(v * 100) + '%';
+  const tiles = [
+    tile(c.handleTravelM.toFixed(2) + ' m', loamT('stroke length'), loamT('how far the handle travels')),
+    tile(c.driveS.toFixed(2) + ' s', senseT('drive', 'rowing')),
+    tile(c.recoveryS.toFixed(2) + ' s', senseT('recovery', 'rowing')),
+    tile('1 : ' + (c.recoveryS / c.driveS).toFixed(1), loamT('drive to recovery')),
+    tile('&plusmn; ' + (c.lengthSdM * 100).toFixed(0) + ' cm', loamT('stroke length, stroke to stroke')),
+    c.lengthFirstM != null ? tile(`${c.lengthFirstM.toFixed(2)} &rarr; ${c.lengthLastM.toFixed(2)} m`, loamT('stroke length, first third to last third')) : '',
+    c.driveFirstS != null ? tile(`${c.driveFirstS.toFixed(2)} &rarr; ${c.driveLastS.toFixed(2)} s`, loamT('drive, first third to last third')) : '',
+    c.peakSpeedMps ? tile(c.peakSpeedMps.toFixed(1) + ' m/s', loamT('fastest handle speed'), c.peakAt != null ? loamT('{p}% of the way through the drive', { p: Math.round(c.peakAt * 100) }) : '') : '',
+    c.armAtHalfBody != null ? tile(pctT(c.armAtHalfBody), loamT('of the arm pull done'), loamT('when your body was halfway through the drive')) : '',
+    c.armLeftAtBodyForward != null ? tile(pctT(c.armLeftAtBodyForward), loamT('of the arm reach still to come'), loamT('when your body was forward again')) : '',
+  ].filter(Boolean).join('');
+  const lead = c.head
+    ? loamT('<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch and the head is your AirPods; both are measured. <strong>The legs and the lean of the body are drawn to fit and are not measured</strong>, so this shows when your arms work against your body, not the order of legs and back.', { n: c.n })
+    : loamT('<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch. With AirPods in as well, Loam can also show your body and when the arms work against it.', { n: c.n });
+  const rest = loamT('Nothing here was checked against video. The usual teaching, for comparison: on the drive the legs go first with the arms straight and the arms finish it; on the way back the hands go away first, then the body, then the slide; and at a steady rate the recovery takes about twice as long as the drive, closing toward even as the rate climbs past 30.');
+  el.innerHTML = `
+    <div class="section-title" style="margin-top:22px">${loamT('Stroke replay')} <span class="beta-badge">${loamT('EXPERIMENTAL')}</span></div>
+    ${leadNote(lead, rest, 'strength-tablenote', loamT('How this is read'))}
+    <div class="stiles ski-stiles">${tiles}</div>
+    <div class="panel">
+      ${c.head ? `<div class="row-fig-wrap"><svg id="rowFigure" viewBox="0 0 640 230" role="img" aria-label="${escapeHtml(loamT('Stroke replay'))}" style="width:100%;max-width:720px;display:block;margin:0 auto"></svg>
+      <div style="display:flex;gap:14px;align-items:center;justify-content:center;font-size:13px;color:var(--text-dim);margin:4px 0 10px">
+        <span id="rowFigPhase" style="min-width:90px;text-align:right"></span>
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="rowFigSlow" checked> ${loamT('Slow motion')}</label>
+      </div></div>` : ''}
+      <div id="rowStrokeChart" class="chart" style="height:240px"></div>
+      <div class="strength-tablenote analysis-explanation">${loamT('Distance from the catch through one stroke. The shaded part is the drive. Where the two lines pull apart, the arms are bending; where they close, the arms are straightening.')}</div>
+    </div>
+    <div class="section-title" style="margin-top:22px">${loamT('Stroke by stroke')}<span class="subtitle">${loamT('length and drive time of every stroke')}</span></div>
+    <div class="panel">
+      <div id="rowStrokesChart" class="chart" style="height:260px"></div>
+      <div class="strength-tablenote analysis-explanation">${loamT('Each dot is one stroke. A length that shortens or a drive that slows toward the end is what tiring looks like here; a flat line is a piece you held together.')}</div>
+    </div>`;
+  drawRowStrokeChart(c);
+  drawRowStrokesChart(c);
+  if (c.head) animateRowFigure(c);
+}
+function drawRowStrokeChart(c) {
+  const el = document.getElementById('rowStrokeChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const N = c.handle.length, x = c.handle.map((_, m) => +(c.periodS * m / N).toFixed(3));
+  const close = (xs) => xs.concat([xs[0]]), xc = x.concat([c.periodS]);
+  const traces = [{ x: xc, y: close(c.handle), type: 'scatter', mode: 'lines', name: loamT('Handle'), line: { color: '#3d7a5a', width: 2 },
+    hovertemplate: '%{x:.2f} s<br>%{y:.2f} m<extra></extra>' }];
+  if (c.head) traces.push({ x: xc, y: close(c.head), type: 'scatter', mode: 'lines', name: loamT('Head'), line: { color: '#c14e2e', width: 1.6 },
+    hovertemplate: '%{x:.2f} s<br>%{y:.2f} m<extra></extra>' });
+  loamPlot(el, traces, {
+    margin: { l: 44, r: 12, t: 8, b: 42 },
+    xaxis: { title: loamT('seconds from the catch'), fixedrange: true },
+    yaxis: { title: 'm', fixedrange: true },
+    shapes: [{ type: 'rect', xref: 'x', yref: 'paper', x0: 0, x1: c.driveS, y0: 0, y1: 1, fillcolor: 'rgba(61,122,90,0.10)', line: { width: 0 } }],
+    showlegend: !!c.head, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  }, { displayModeBar: false, responsive: true });
+}
+function drawRowStrokesChart(c) {
+  const el = document.getElementById('rowStrokesChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const ks = c.strokes || [];
+  if (ks.length < 2) { el.innerHTML = ''; return; }
+  const x = ks.map(k => k.t / 60);
+  loamPlot(el, [
+    { x, y: ks.map(k => k.lengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Stroke length'), line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
+      hovertemplate: '%{x:.1f} min<br>%{y:.2f} m<extra></extra>' },
+    { x, y: ks.map(k => k.driveS), type: 'scatter', mode: 'lines+markers', name: loamT('Drive time'), yaxis: 'y2', line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 },
+      hovertemplate: '%{x:.1f} min<br>%{y:.2f} s<extra></extra>' },
+  ], {
+    margin: { l: 44, r: 44, t: 8, b: 42 },
+    xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
+    /* From zero, so a steady piece reads as steady: autoscaled, four centimetres looks like a cliff. */
+    yaxis: { title: 'm', fixedrange: true, rangemode: 'tozero' },
+    yaxis2: { title: 's', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false, rangemode: 'tozero' },
+    showlegend: true, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  }, { displayModeBar: false, responsive: true });
+}
+function animateRowFigure(c) {
+  const svg = document.getElementById('rowFigure');
+  if (!svg) return;
+  const F = ROW_FIG, N = c.handle.length;
+  const X = (m) => m * F.px, Y = (m) => 196 - m * F.px;
+  /* Where the handle sits at the catch: as far forward as straight arms allow at the tightest point
+     of the stroke, so the arms are never drawn longer than they are. */
+  const reach = Math.sqrt(Math.max((F.upper + F.fore) ** 2 - 0.1 ** 2, 0)) - 0.01;
+  let h0 = -Infinity;
+  for (let m = 0; m < N; m++) { const p = rowFigurePose(c, m); h0 = Math.max(h0, p.sh.x - reach - c.handle[m]); }
+  const ink = 'var(--text)', dim = 'var(--text-dim)';
+  svg.innerHTML = `
+    <line x1="${X(0.1)}" y1="${Y(0.02)}" x2="${X(4.1)}" y2="${Y(0.02)}" stroke="${dim}" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="${X(0.4)}" cy="${Y(0.33)}" r="44" fill="none" stroke="${dim}" stroke-width="3"/>
+    <line x1="${X(F.footX - 0.06)}" y1="${Y(0.02)}" x2="${X(F.footX + 0.04)}" y2="${Y(0.30)}" stroke="${dim}" stroke-width="4" stroke-linecap="round"/>
+    <line id="rfChain" stroke="${dim}" stroke-width="1.5" stroke-dasharray="3 3"/>
+    <polyline id="rfLeg" fill="none" stroke="${dim}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    <line id="rfTrunk" stroke="${dim}" stroke-width="9" stroke-linecap="round" opacity="0.55"/>
+    <polyline id="rfArm" fill="none" stroke="${ink}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect id="rfSeat" width="34" height="7" rx="3" fill="${dim}"/>
+    <circle id="rfHead" r="15" fill="none" stroke="#c14e2e" stroke-width="4"/>
+    <circle id="rfHandle" r="7" fill="#3d7a5a"/>`;
+  const q = (id) => svg.querySelector('#' + id);
+  const pts = (ps) => ps.map(p => `${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(' ');
+  const draw = (phase) => {
+    const f = phase * N, m = Math.floor(f) % N, m2 = (m + 1) % N, t = f - Math.floor(f);
+    const a = rowFigurePose(c, m), z = rowFigurePose(c, m2);
+    const mix = (u, v) => ({ x: u.x + t * (v.x - u.x), y: u.y + t * (v.y - u.y) });
+    const hip = mix(a.hip, z.hip), sh = mix(a.sh, z.sh), knee = mix(a.knee, z.knee), hd = mix(a.headC, z.headC);
+    const handle = { x: h0 + c.handle[m] + t * (c.handle[m2] - c.handle[m]), y: a.handleY };
+    const elbow = rowFigJoint(sh, handle, F.upper, F.fore, 1);
+    q('rfLeg').setAttribute('points', pts([a.foot, knee, hip]));
+    q('rfTrunk').setAttribute('x1', X(hip.x)); q('rfTrunk').setAttribute('y1', Y(hip.y));
+    q('rfTrunk').setAttribute('x2', X(sh.x)); q('rfTrunk').setAttribute('y2', Y(sh.y));
+    q('rfArm').setAttribute('points', pts([sh, elbow, handle]));
+    q('rfSeat').setAttribute('x', X(hip.x) - 17); q('rfSeat').setAttribute('y', Y(0.07));
+    q('rfHead').setAttribute('cx', X(hd.x)); q('rfHead').setAttribute('cy', Y(hd.y));
+    q('rfHandle').setAttribute('cx', X(handle.x)); q('rfHandle').setAttribute('cy', Y(handle.y));
+    q('rfChain').setAttribute('x1', X(0.62)); q('rfChain').setAttribute('y1', Y(0.44));
+    q('rfChain').setAttribute('x2', X(handle.x)); q('rfChain').setAttribute('y2', Y(handle.y));
+    const ph = document.getElementById('rowFigPhase');
+    if (ph) ph.textContent = m < c.finishIndex ? senseT('drive', 'rowing') : senseT('recovery', 'rowing');
+  };
+  draw(0);
+  /* For the browser test, which has to look at a phase and not at whichever one the clock is on:
+     it sets data-hold, which stops the loop drawing, and draws the phase it wants. */
+  svg._rowDraw = draw;
+  /* One loop per figure: a re-render replaces the svg, and the old loop ends when its node is gone.
+     Reduced motion gets the catch pose and no loop. */
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  let phase = 0, last = null;
+  const tick = (now) => {
+    if (!svg.isConnected) return;
+    if (last != null && !document.hidden && !svg.dataset.hold) {
+      const slow = document.getElementById('rowFigSlow');
+      phase = (phase + (now - last) / 1000 / c.periodS * (slow && slow.checked ? 0.25 : 1)) % 1;
+      draw(phase);
+    }
+    last = now;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 function drawRowingRate(D) {
@@ -42261,6 +42741,8 @@ const LOAM_NB = {
     'Vis løfteren i 3D: samme målte dybde og tempo på en modellert stilling. Dra i figuren for å snurre rundt.',
   '3D · MODELLED STANCE': '3D · MODELLERT STILLING',
   'DRAG TO ORBIT': 'DRA FOR Å SNURRE',
+  'The 3D view is the same model on a modelled stance and grip; drag the figure to orbit.':
+    '3D-visningen er den samme modellen på en modellert stilling og et modellert grep; dra i figuren for å snurre rundt.',
   'The 3D view is the same measured depth and tempo on a modelled stance and grip; drag the figure to orbit.':
     '3D-visningen er samme målte dybde og tempo på en modellert stilling og et modellert grep; dra i figuren for å snurre rundt.',
   'Rep timing measured · 3D pose modeled': 'Rep-timing målt · 3D-stilling modellert',
@@ -42282,6 +42764,13 @@ const LOAM_NB = {
   'The down/drive split is modeled.': 'Fordelingen mellom ned og opp er modellert.',
   'The side-view bar path is modeled, not measured fore-aft travel.': 'Stangbanen sett fra siden er modellert, ikke målt bevegelse frem og tilbake.',
   'Deadlift hip-hinge replay.': 'Avspilling av hoftehengslet i markløft.',
+  'Clean replay.': 'Avspilling av clean.',
+  'Clean and jerk replay.': 'Avspilling av støt.',
+  'The movement is a model of a power clean, the same for every rep: only the rep count and the timing come from your set.':
+    'Bevegelsen er en modell av en power clean, lik for hver repetisjon: bare antall repetisjoner og tidsbruken kommer fra settet ditt.',
+  'The movement is a model of a power clean and a push jerk, the same for every rep: only the rep count and the timing come from your set.':
+    'Bevegelsen er en modell av en power clean og en push jerk, lik for hver repetisjon: bare antall repetisjoner og tidsbruken kommer fra settet ditt.',
+  'Your corrected reps are spread evenly over the time the set took.': 'De korrigerte repetisjonene dine er fordelt jevnt over tiden settet tok.',
   'Every rep is drawn down to the floor, where a deadlift starts.': 'Hver repetisjon tegnes helt ned til gulvet, der et markløft starter.',
   'Curl elbow-flexion replay.': 'Avspilling av albuebøyen i curl.',
   'Relative wrist depth is normalized to your set\'s tapped {target} target.': 'Relativ dybde i håndleddet er normalisert mot {target}-målet du trykket inn for settet.',
@@ -42306,8 +42795,8 @@ const LOAM_NB = {
   'Replay could not be shared': 'Avspillingen kunne ikke deles',
   'This replay could not be recorded, so nothing was shared.': 'Avspillingen kunne ikke tas opp, så ingenting ble delt.',
   'No form view for {lift} yet': 'Ingen teknikkvisning for {lift} ennå',
-  'We only animate lifts we can show honestly (squat, deadlift, bench, curl). Your reps, tempo, and bar speed above are still the real numbers.':
-    'Vi animerer bare øvelser vi kan vise ærlig (knebøy, markløft, benkpress, curl). Repetisjonene, tempoet og stangfarten over er fortsatt ekte tall.',
+  'We only animate lifts we can show honestly (squat, deadlift, bench, curl, clean, clean and jerk). Your reps, tempo, and bar speed above are still the real numbers.':
+    'Vi animerer bare øvelser vi kan vise ærlig (knebøy, markløft, benkpress, curl, clean, støt). Repetisjonene, tempoet og stangfarten over er fortsatt ekte tall.',
   'Bench press replay.': 'Avspilling av benkpress.',
   'The hold at the chest is measured.': 'Stoppet ved brystet er målt.',
   'The hold at the bottom is measured.': 'Stoppet nederst er målt.',
@@ -45032,6 +45521,42 @@ const LOAM_NB = {
   'This was read as a rowing-machine session, and less than half a minute of steady rowing was found in it. Stroke rate is read from a watch on your wrist, AirPods, or the phone in a pocket; a phone lying beside the rower feels nothing.':
     'Dette ble lest som en økt på romaskin, og det ble funnet under et halvt minutt med jevn roing i den. Takten leses fra en klokke på håndleddet, AirPods eller telefonen i en lomme; en telefon som ligger ved siden av romaskinen, kjenner ingenting.',
   'Rowing machine': 'Romaskin',
+  /* The stroke replay (renderRowStroke). */
+  'Stroke replay': 'Takreprise',
+  'stroke length, stroke to stroke': 'taklengde, fra tak til tak',
+  'stroke length, first third to last third': 'taklengde, første til siste tredel',
+  'drive, first third to last third': 'drag, første til siste tredel',
+  'fastest handle speed': 'høyeste håndtaksfart',
+  '{p}% of the way through the drive': '{p}% ut i draget',
+  'Stroke by stroke': 'Tak for tak',
+  'length and drive time of every stroke': 'lengde og dragtid for hvert tak',
+  'Stroke length': 'Taklengde',
+  'Drive time': 'Dragtid',
+  'Each dot is one stroke. A length that shortens or a drive that slows toward the end is what tiring looks like here; a flat line is a piece you held together.':
+    'Hver prikk er ett tak. En lengde som blir kortere, eller et drag som blir tregere mot slutten, er slik tretthet ser ut her; en flat linje er et drag du holdt sammen.',
+  'What should I work on first?': 'Hva bør jeg jobbe med først?',
+  'Is my recovery rushed?': 'Er framglidingen min for rask?',
+  'Give me a drill for my arms': 'Gi meg en øvelse for armene',
+  'stroke length': 'taklengde',
+  'how far the handle travels': 'hvor langt håndtaket går',
+  'drive [rowing]': 'drag',
+  'recovery [rowing]': 'framgliding',
+  'drive to recovery': 'drag mot framgliding',
+  'of the arm pull done': 'av armtrekket gjort',
+  'when your body was halfway through the drive': 'da kroppen var halvveis i draget',
+  'of the arm reach still to come': 'av armstrekket gjensto',
+  'when your body was forward again': 'da kroppen var framme igjen',
+  'Slow motion': 'Sakte film',
+  'Handle': 'Håndtak',
+  'seconds from the catch': 'sekunder fra isettet',
+  'Distance from the catch through one stroke. The shaded part is the drive. Where the two lines pull apart, the arms are bending; where they close, the arms are straightening.':
+    'Avstand fra isettet gjennom ett tak. Det skraverte feltet er draget. Der de to linjene går fra hverandre, bøyes armene; der de nærmer seg, strekkes armene.',
+  '<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch and the head is your AirPods; both are measured. <strong>The legs and the lean of the body are drawn to fit and are not measured</strong>, so this shows when your arms work against your body, not the order of legs and back.':
+    '<strong>Ditt gjennomsnittlige tak, fra {n} tak i det lengste draget.</strong> Håndtaket er klokken din og hodet er AirPods; begge er målt. <strong>Beina og kroppens helning er tegnet for å passe og er ikke målt</strong>, så dette viser når armene arbeider mot kroppen, ikke rekkefølgen på bein og rygg.',
+  '<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch. With AirPods in as well, Loam can also show your body and when the arms work against it.':
+    '<strong>Ditt gjennomsnittlige tak, fra {n} tak i det lengste draget.</strong> Håndtaket er klokken din. Med AirPods i ørene kan Loam også vise kroppen og når armene arbeider mot den.',
+  'Nothing here was checked against video. The usual teaching, for comparison: on the drive the legs go first with the arms straight and the arms finish it; on the way back the hands go away first, then the body, then the slide; and at a steady rate the recovery takes about twice as long as the drive, closing toward even as the rate climbs past 30.':
+    'Ingenting her er sjekket mot video. Den vanlige læren, til sammenligning: i draget går beina først med strake armer, og armene avslutter; på vei tilbake går hendene bort først, så kroppen, så sleiden; og i jevn takt tar framglidingen omtrent dobbelt så lang tid som draget, og nærmer seg likt når takten går over 30.',
   'Stroke rate [rowing]': 'Takt',
   'time rowing': 'tid du rodde',
   'stroke rate range, p10 to p90': 'taktområde, p10 til p90',
@@ -51942,6 +52467,7 @@ function sessionDigest(D, sport) {
 
 function buildDigest(D, sport, metric) {
   if (sport === 'xcski' || sport === 'nordic') return LoamXC.xcDigest(D);
+  if (sport === 'rowing') return rowDigest(D);
   const s = D.summary || {};
   const u = digestUnits(metric);
   const r1 = (x, n = 1) => (x == null || isNaN(x)) ? null : +(+x).toFixed(n);
@@ -52657,6 +53183,7 @@ function coachUnitsRule(metric) {
 function coachSystemPrompt(sport, level, metric, source) {
   const units = coachUnitsRule(metric);
   if (sport === 'xcski' || sport === 'nordic') return LoamXC.xcCoachPrompt() + units;
+  if (sport === 'rowing') return rowCoachPrompt(level) + units;
   /* Swim carries its own unit rule (the pool's, not the athlete's toggle), so it takes `level` only
      -- plus `source`, which selects between two prompts that forbid opposite things. The imported
      prompt tells the coach not to send the swimmer off to record a swim in Loam; giving that to
@@ -53404,6 +53931,7 @@ function promptCoachKey() {
    sport's digest and system prompt can actually answer. isMtbFamily/isLiftSport/isGolfSport are
    explicit here so an unrecognized sport lands on the neutral fallback instead of inheriting MTB's. */
 function coachChips(sport, opts) {
+  if (sport === 'rowing') return ['What should I work on first?', 'Is my recovery rushed?', 'Give me a drill for my arms'];
   if (sport === 'xcski' || sport === 'nordic') return ['How did my recorded heart rate change?', 'What can I compare between these laps?', 'What context would help explain this session?'];
   /* The training plan's chips come from its own port, so a chip can never ask for what that digest
      does not carry (the same rule as the open-water and withheld-sides branches below). */
@@ -64103,7 +64631,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'e5320932c · 2026-11-10';
+const LOAM_BUILD = '219e984f7 · 2026-11-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
