@@ -20166,7 +20166,7 @@ function detectStrength(sensors, ride) {
 /* ==== ported from analyzer/sports/strength/history.js ==== */
 /*
  * Lift history (BETA): what changed between this session and the last ones, per lift.
- * Full rationale (why load-vs-reps, why no estimated 1RM, why an unweighed session is left out,
+ * Full rationale (why load-vs-reps, where an estimated 1RM is and is not shown, why an unweighed session is left out,
  * and why the rep-count caveat is load-bearing) lives in the module. Pinned to it by
  * analyzer/sports/strength/drift.test.js.
  */
@@ -20219,6 +20219,25 @@ function classifyLiftEffort(loadPct, repsPct, bandPct) {
   return 'holding';
 }
 
+/* Past this many reps a set stops saying much about a single: the formulas were fitted on low-rep
+   sets and spread apart from each other above them, so a 12-rep set is not turned into a max. */
+const E1RM_MAX_REPS = 5;
+
+/*
+ * Estimated one-rep max from one set, by Epley: load x (1 + reps / 30). A single is its own answer
+ * (the formula would add 3% to a weight that was lifted exactly once). Null for a set that cannot
+ * carry an estimate: no load, no counted rep, or more than E1RM_MAX_REPS.
+ *
+ * This is a formula fitted to other lifters, not a measurement of this one, and it is only as good
+ * as the rep count under it. The counter's documented miss is UNDER-counting slow heavy reps, which
+ * is the set this reads, so an uncorrected count makes the estimate low rather than high.
+ */
+function liftEstimated1RM(loadKg, reps) {
+  if (!(typeof loadKg === 'number' && Number.isFinite(loadKg) && loadKg > 0)) return null;
+  if (!Number.isInteger(reps) || reps < 1 || reps > E1RM_MAX_REPS) return null;
+  return reps === 1 ? loadKg : loadKg * (1 + reps / 30);
+}
+
 /*
  * The compact record persisted for one lift session.
  *
@@ -20234,7 +20253,9 @@ function classifyLiftEffort(loadPct, repsPct, bandPct) {
  */
 function liftHistoryRecord({ key, start, title, sets, loadsKg }) {
   if (!key) return null;
-  const t = Number(start);
+  /* `Number(null)` is 0, which is a date in 1970 rather than no date: a recording whose name
+     carries no clock time has to stay undated. */
+  const t = start == null ? NaN : Number(start);
   const rows = sets || [];
   const loads = loadsKg || [];
 
@@ -20247,7 +20268,9 @@ function liftHistoryRecord({ key, start, title, sets, loadsKg }) {
        naming that here rather than inventing an "unknown" bucket keeps one session's sets together. */
     const lift = set.lift || 'squat';
     if (!byLift.has(lift)) byLift.set(lift, { lift, nSets: 0, nReps: 0, nSetsNoLoad: 0,
-                                              volumeKg: 0, topLoadKg: null, topLoadReps: null });
+                                              volumeKg: 0, topLoadKg: null, topLoadReps: null,
+                                              liftedLoadKg: null, liftedReps: null,
+                                              e1rmKg: null, e1rmLoadKg: null, e1rmReps: null });
     const row = byLift.get(lift);
     row.nSets++;
     row.nReps += set.reps || 0;
@@ -20261,6 +20284,23 @@ function liftHistoryRecord({ key, start, title, sets, loadsKg }) {
       row.topLoadKg = w;
       row.topLoadReps = set.reps || 0;
     }
+    /* The heaviest set with a counted rep in it. Usually the top set; it differs when the counter
+       saw nothing in the heaviest one, and a load nobody was seen to lift is not a best. */
+    const reps = set.reps || 0;
+    if (reps >= 1 && (row.liftedLoadKg == null || w > row.liftedLoadKg
+        || (w === row.liftedLoadKg && reps > row.liftedReps))) {
+      row.liftedLoadKg = w;
+      row.liftedReps = reps;
+    }
+    /* The set the one-rep-max estimate rests on is the one that estimates highest, which is not
+       always the heaviest: 100 kg x 5 projects above 105 kg x 1. Kept per session so `liftBests`
+       never needs the individual sets back. */
+    const e = liftEstimated1RM(w, set.reps || 0);
+    if (e != null && (row.e1rmKg == null || e > row.e1rmKg)) {
+      row.e1rmKg = e;
+      row.e1rmLoadKg = w;
+      row.e1rmReps = set.reps;
+    }
   });
 
   return {
@@ -20270,6 +20310,7 @@ function liftHistoryRecord({ key, start, title, sets, loadsKg }) {
     byLift: [...byLift.values()].map(r => ({
       ...r,
       volumeKg: +r.volumeKg.toFixed(1),
+      e1rmKg: r.e1rmKg == null ? null : +r.e1rmKg.toFixed(1),
       /* Reps at the top load, which is the rep factor that pairs with the load factor. Session total
          reps is kept too, but the pair that decomposes work at the working weight is this one. */
       hasLoad: r.topLoadKg != null,
@@ -20447,9 +20488,60 @@ function liftHistoryReference(trend) {
   };
 }
 
+/*
+ * Per lift, across every saved session: the heaviest set actually logged, and the estimated one-rep
+ * max. This is what the app's Stats tab shows (the page posts it over the bridge), most-trained lift
+ * first.
+ *
+ *   best    the heaviest load with at least one counted rep, ties to the set with more reps. Exact
+ *           in its load (the lifter typed it) and never an estimate.
+ *   e1rm    the highest `liftEstimated1RM` over the sessions, with the set it came from so the
+ *           screen can name it. Null when no set of five reps or fewer carries a load.
+ *   points  the top set of each session that logged a load, oldest first, for a small trend.
+ *
+ * A record written before these fields existed has no `e1rmKg` or `liftedLoadKg`; its top set stands
+ * in for both, which is the same answer unless a lighter set of that session projected higher.
+ * Reopening the session rewrites its record.
+ */
+function liftBests(records) {
+  const by = new Map();
+  for (const s of records || []) {
+    /* Records saved before 2026-11-10 wrote an undated session as 0. */
+    const start = s.start > 0 ? s.start : null;
+    for (const r of s.byLift || []) {
+      if (!by.has(r.lift)) by.set(r.lift, { lift: r.lift, nSessions: 0, nSessionsWithLoad: 0,
+                                            lastStart: null, best: null, e1rm: null, points: [] });
+      const b = by.get(r.lift);
+      b.nSessions++;
+      if (start != null && (b.lastStart == null || start > b.lastStart)) b.lastStart = start;
+      if (!r.hasLoad) continue;
+      b.nSessionsWithLoad++;
+      const reps = r.topLoadReps || 0;
+      b.points.push({ start, loadKg: r.topLoadKg, reps });
+      const lifted = r.liftedLoadKg != null ? { loadKg: r.liftedLoadKg, reps: r.liftedReps }
+        : (reps >= 1 ? { loadKg: r.topLoadKg, reps } : null);
+      if (lifted && (!b.best || lifted.loadKg > b.best.loadKg
+          || (lifted.loadKg === b.best.loadKg && lifted.reps > b.best.reps))) {
+        b.best = { ...lifted, start };
+      }
+      let e = null;
+      if (r.e1rmKg != null) {
+        e = { kg: r.e1rmKg, loadKg: r.e1rmLoadKg, reps: r.e1rmReps, start };
+      } else {
+        const kg = liftEstimated1RM(r.topLoadKg, reps);
+        if (kg != null) e = { kg: +kg.toFixed(1), loadKg: r.topLoadKg, reps, start };
+      }
+      if (e && (!b.e1rm || e.kg > b.e1rm.kg)) b.e1rm = e;
+    }
+  }
+  return [...by.values()].sort((a, b) => (b.nSessions - a.nSessions) || (a.lift < b.lift ? -1 : 1));
+}
+
+
   return { parseSetMarks, analyzeStrength, detectStrength, classifyBarPositions, estimateConcentricVelocity, countRepsWrist, computeStrengthSummary,
            liftTrend, classifyLiftEffort, liftHistoryRecord, liftHistoryUpsert, liftHistoryLifts,
            liftHistoryTrend, liftHistoryRead, liftHistoryGap, liftHistoryReference,
+           liftEstimated1RM, liftBests,
            /* For the per-set relabel picker: the list annotation-contract.test.js pins to the capture
               app's chips, so the picker cannot drift from what a tap can stamp. */
            LIFT_LABELS };
@@ -32849,7 +32941,7 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf, opts = {}) 
    climbs to a top set reads as the climb it was rather than as two rows of four that cut it in half.
 
    The badge compares the top set with the lifter's own logged history of the SAME lift and nothing
-   else: no estimated 1RM (analyzer/sports/strength/history.js says why), no first-session "best"
+   else: no estimated 1RM (that is the app's Stats tab, beside the set it came from), no first-session "best"
    claimed against nothing, and no claim for an untapped set, which could be any lift. */
 const LIFT_CARD_PER_ROW = 12;
 function liftCardBest(D, top, history) {
@@ -33114,8 +33206,27 @@ function liftHistorySave(records) {
        to protect, and a two-year-old session is describing a different body anyway. */
     const keep = records.slice(-LIFT_HISTORY_MAX);
     localStorage.setItem(LIFT_HISTORY_KEY, JSON.stringify(keep));
+    liftHistoryPostToApp(keep);
     return keep;
   } catch (e) { return records; }
+}
+
+/* Hand the per-lift bests to the app, whose Stats tab shows them (heaviest logged set, estimated
+   one-rep max, last trained). The history lives in this page's storage, which the native side cannot
+   read, so it is posted: on every save, and once when an embedded page loads so sessions saved
+   before the app listened arrive without being reopened. Only when embedded; a browser has nowhere
+   to put it. Loads are kilograms; the app shows its own unit. */
+const LIFT_BRIDGE_POINTS = 12;
+function liftHistoryPostToApp(records) {
+  try {
+    if (!LOAM_EMBEDDED || !window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.loam) return;
+    const recs = records || liftHistoryLoad();
+    window.webkit.messageHandlers.loam.postMessage({
+      type: 'liftHistory',
+      sessionStarts: recs.map(r => r.start).filter(t => t > 0),
+      lifts: LoamStrength.liftBests(recs).map(b => ({ ...b, points: b.points.slice(-LIFT_BRIDGE_POINTS) })),
+    });
+  } catch (e) { /* a lift that cannot be reported must still analyze */ }
 }
 
 /* Remember this session (with whatever loads and rep corrections are currently entered) and hand
@@ -64297,6 +64408,7 @@ try { localStorage.removeItem('loam_focus'); } catch (e) { /* private mode */ }
    the landing chrome so the in-app view is just results + coach. */
 const LOAM_EMBEDDED = new URLSearchParams(location.search).get('embedded') === '1';
 if (LOAM_EMBEDDED) document.body.classList.add('embedded');
+if (LOAM_EMBEDDED) liftHistoryPostToApp();
 
 /* The host injects a bare session name (e.g. "2026-06-21_17-15-40") with no file
    extension, but analyze() only accepts files whose name ends in .zip/.csv. Stamp a
@@ -64683,7 +64795,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '1d2d648a0 · 2026-11-10';
+const LOAM_BUILD = '89e3ebcb1 · 2026-11-10';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
