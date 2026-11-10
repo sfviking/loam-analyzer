@@ -2727,6 +2727,7 @@ function loamSeasonRequested(search, host) {
       <option value="swimming">Swimming (beta)</option>
       <option value="skiing">Ski (beta)</option>
       <option value="xcski">Cross-country ski (beta)</option>
+      <option value="rowing">Rowing machine (beta)</option>
     </select>
   </div>
   <!-- Pool length is asked, never inferred: nothing in a wrist stream reveals how long the pool is,
@@ -6296,6 +6297,7 @@ const SPORT_LEX = {
      segmentation mode (descent / lap / run) as for every other sport, so "ski day" is the whole
      RECORDING: "drop another ski day covering this segment". */
   xcski: { activity: 'Cross-country ski', signature: 'XC SKI', ctaVerb: 'ski', gerund: 'skiing', done: 'skied', legend: 'route', noun: 'ski session', nounPlural: 'ski sessions' },
+  row:  { activity: 'Row',  signature: 'ROW',  ctaVerb: 'row',  gerund: 'rowing', done: 'rowed', legend: 'strokes', noun: 'rowing session', nounPlural: 'rowing sessions' },
   ski:  { activity: 'Ski',  signature: 'SKI',  ctaVerb: 'ski',  gerund: 'skiing', done: 'skied', legend: 'turns', noun: 'ski day', nounPlural: 'ski days' },
 };
 /* `noun`/`nounPlural` name a whole RECORDING, for the copy that talks about OTHER recordings: "drop
@@ -6356,6 +6358,7 @@ function normalizeSport(sport) {
   if (sport === 'nordic' || sport === 'xcski') return 'xcski';
   if (sport === 'running') return 'run';
   if (sport === 'walking') return 'walk';
+  if (sport === 'rowing') return 'row';
   if (isLiftSport(sport)) return 'lift';
   if (isGolfSport(sport)) return 'golf';
   if (isSwimSport(sport)) return 'swim';
@@ -6485,6 +6488,8 @@ function activityIcon(sport) {
     body = `<path d="M8 3v17m0-16 8 2.6L8 9.2M4 20h8"/><circle cx="18.5" cy="18.5" r="1.5"/>`;
   } else if (kind === 'swim') {
     body = `<circle cx="15.8" cy="7" r="2.1"/><path d="M3 12c2.2-2 4.2-2 6.2 0s4 2 6 0 4-2 5.8-.2M3 16c2.2-2 4.2-2 6.2 0s4 2 6 0 4-2 5.8-.2m-12.3-4 3.1-4 3.8 2.1"/>`;
+  } else if (kind === 'row') {
+    body = `<circle cx="9" cy="6.2" r="2.1"/><path d="m8.3 10-2 5.5h5.2l3.5 3.5M9 11.5l4.5 2 5.5-3.5M3 19.5h18"/>`;
   } else if (kind === 'ski' || kind === 'xcski') {
     body = `<circle cx="14.7" cy="4.2" r="2"/><path d="m12.8 8.1-2.9 4.4 4.1 2.3 3.3 4.1M10 12.5l-4.1 1.2m6.9-5.6 3 3 3.7.4M3 19.5l7.1 1.1m2.2-.3 8.7 1.2M7.2 9l-2.7 10"/>`;
   } else {
@@ -7110,6 +7115,238 @@ function treadmillSummary(gait, R, hrRows, ride) {
     hrMax: hr.length ? Math.max(...hr.map(r => r.bpm)) : null,
     oscMedian: rr.oscSource === 'head' && rr.oscMedian != null ? rr.oscMedian : null,
     oscSource: rr.oscSource === 'head' ? 'head' : null,
+  };
+}
+
+/* ===== Rowing-machine read ============================================================
+   Ported from analyzer/sports/rowing/erg.js and pinned to it by that module's drift guard. A
+   DECLARED session on an indoor rower: stroke rate, time rowing and a stroke count from the watch,
+   the AirPods or the phone. Distance, pace and power are the flywheel's and are not estimated. The
+   reasoning and the one recording it is graded on live in the module header. */
+const ROW_WIN_S = 15;
+const ROW_HOP_S = 5;
+/* 15 to 45 strokes a minute. Steady rowing sits at 18-30 and racing starts reach the low 40s. The
+   slow edge is where a 2nd harmonic of an even slower stroke could land; nothing is graded there. */
+const ROW_LO_HZ = 0.25, ROW_HI_HZ = 0.75, ROW_STEP_HZ = 0.005;
+/* m/s2 RMS along the principal axis. The one graded piece reads 2.4-8.9 across the three sources; a
+   device lying still reads under 0.1. REASONED between the two, not measured on easy paddling. */
+const ROW_MIN_RMS_MPS2 = 0.5;
+/* On the graded piece a window that is all rowing scores 0.57-0.94 and one that is all setting up
+   scores 0.45 or less (wrist 0.65+ against 0.29). Part-rowing windows land either side, which is why
+   the piece's edges are refined on amplitude below and not taken from the windows. */
+const ROW_MIN_CONF = 0.5;
+const ROW_HARMONICS = 3;
+const ROW_SUBHARMONIC = 0.5;
+const ROW_MIN_SAMPLES = 120;
+/* Below this there is no piece to describe. */
+const ROW_MIN_ROWING_S = 30;
+/* Idle windows between two rowing windows that still MOVED are rowing too (treadmill.js' rule): a
+   missed stroke or a hand off the handle to wipe a face does not end a piece. */
+const ROW_BRIDGE_WINDOWS = 2;
+const ROW_PREFER_FRACTION = 0.8;
+const ROW_EDGE_BIN_S = 1, ROW_EDGE_SMOOTH_BINS = 3, ROW_EDGE_FRACTION = 0.5;
+const ROW_MIN_HALF_READINGS = 4;
+const ROW_G = 9.80665;
+
+/**
+ * { t, x, y, z } rows in m/s2 for one source. The watch and the AirPods report user acceleration in
+ * g; the phone reports m/s2.
+ */
+function rowAccelRows(sensors, source) {
+  const s = sensors || {};
+  const ok = (r) => Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.z);
+  if (source === 'wrist') return (s.wrist || []).map(r => ({ t: r.t, x: r.ax * ROW_G, y: r.ay * ROW_G, z: r.az * ROW_G })).filter(ok);
+  if (source === 'head') return (s.headphone || []).map(r => ({ t: r.t, x: r.accelerationX * ROW_G, y: r.accelerationY * ROW_G, z: r.accelerationZ * ROW_G })).filter(ok);
+  return (s.accel || []).map(r => ({ t: r.t, x: r.x, y: r.y, z: r.z })).filter(ok);
+}
+
+/** The mean-removed rows projected onto their own principal axis. */
+function rowPrincipal(rows) {
+  const n = rows.length;
+  let mx = 0, my = 0, mz = 0;
+  for (const r of rows) { mx += r.x; my += r.y; mz += r.z; }
+  mx /= n; my /= n; mz /= n;
+  let cxx = 0, cyy = 0, czz = 0, cxy = 0, cxz = 0, cyz = 0;
+  for (const r of rows) {
+    const x = r.x - mx, y = r.y - my, z = r.z - mz;
+    cxx += x * x; cyy += y * y; czz += z * z; cxy += x * y; cxz += x * z; cyz += y * z;
+  }
+  /* Power iteration from the largest-variance axis, so the start is never orthogonal to the answer. */
+  let v = cxx >= cyy && cxx >= czz ? [1, 0, 0] : cyy >= czz ? [0, 1, 0] : [0, 0, 1];
+  for (let i = 0; i < 24; i++) {
+    const w = [cxx * v[0] + cxy * v[1] + cxz * v[2], cxy * v[0] + cyy * v[1] + cyz * v[2], cxz * v[0] + cyz * v[1] + czz * v[2]];
+    const m = Math.hypot(w[0], w[1], w[2]);
+    if (!(m > 0)) break;
+    v = [w[0] / m, w[1] / m, w[2] / m];
+  }
+  return rows.map(r => (r.x - mx) * v[0] + (r.y - my) * v[1] + (r.z - mz) * v[2]);
+}
+
+/**
+ * How much of the signal is a repeat at `f`: the energy at f, 2f and 3f over the total, as an
+ * amplitude ratio (0 to 1; any waveform that repeats exactly at f scores 1, whatever its shape).
+ */
+function rowPeriodicity(sig, ts, f, rms) {
+  if (!(rms > 0) || !(f > 0)) return 0;
+  let e = 0;
+  for (let k = 1; k <= ROW_HARMONICS; k++) { const m = dftMagAt(sig, ts, k * f); e += 2 * m * m; }
+  return Math.min(Math.sqrt(e) / rms, 1);
+}
+
+/**
+ * Windows over `span` for one source's acceleration rows. Each is { t0, t1, rowing, rms, spm, conf };
+ * `rateSeries` is the rowing windows' own readings (bridged windows carry none).
+ */
+function rowWindows(rows, span) {
+  const empty = { windows: [], rateSeries: [] };
+  if (!span || !Number.isFinite(span.start) || !Number.isFinite(span.end)) return empty;
+  const acc = (rows || []).filter(r => r && r.t >= span.start && r.t <= span.end);
+  if (acc.length < ROW_MIN_SAMPLES) return empty;
+  const tArr = acc.map(r => r.t);
+  const lower = (arr, x) => { let a = 0, b = arr.length; while (a < b) { const m = (a + b) >> 1; if (arr[m] < x) a = m + 1; else b = m; } return a; };
+  const windows = [], rateSeries = [];
+  for (let w0 = span.start; w0 + ROW_WIN_S <= span.end + 1e-6; w0 += ROW_HOP_S) {
+    const w1 = w0 + ROW_WIN_S;
+    const i0 = lower(tArr, w0), i1 = lower(tArr, w1);
+    if (i1 - i0 < ROW_MIN_SAMPLES) continue;
+    const sig = rowPrincipal(acc.slice(i0, i1));
+    const rms = Math.sqrt(sig.reduce((s, v) => s + v * v, 0) / sig.length);
+    const ts = tArr.slice(i0, i1).map(t => t - w0);
+    let f = dftPeakFreq(sig, ts, ROW_LO_HZ, ROW_HI_HZ, ROW_STEP_HZ);
+    /* A slow stroke with a sharp catch can carry more at 2f than at f, and from 15 to 22 strokes a
+       minute 2f is still inside the band. A real stroke at f has nothing at f/2; a doubled one does. */
+    if (f / 2 >= ROW_LO_HZ && dftMagAt(sig, ts, f / 2) >= ROW_SUBHARMONIC * dftMagAt(sig, ts, f)) f = f / 2;
+    const conf = rowPeriodicity(sig, ts, f, rms);
+    const rowing = rms >= ROW_MIN_RMS_MPS2 && conf > ROW_MIN_CONF;
+    windows.push({ t0: w0, t1: w1, rowing, rms, spm: f * 60, conf });
+    if (rowing) rateSeries.push({ t: (w0 + w1) / 2, spm: f * 60, conf });
+  }
+  for (let i = 1; i < windows.length; i++) {
+    if (windows[i].rowing || !windows[i - 1].rowing) continue;
+    let j = i;
+    while (j < windows.length && !windows[j].rowing && windows[j].rms >= ROW_MIN_RMS_MPS2) j++;
+    const len = j - i;
+    if (len >= 1 && len <= ROW_BRIDGE_WINDOWS && j < windows.length && windows[j].rowing
+        && windows[j].t0 - windows[i - 1].t0 <= (len + 1) * ROW_HOP_S + 1e-6) {
+      for (let k = i; k < j; k++) { windows[k].rowing = true; windows[k].bridged = true; }
+    }
+    i = Math.max(i, j - 1);
+  }
+  return { windows, rateSeries };
+}
+
+/**
+ * Where a stretch of rowing actually starts and stops. The windows place an edge to the nearest hop
+ * at best, and a window that is only part rowing passes or fails on how clean the source is, so the
+ * same piece read 100 s from the wrist and 120 s from the head. The edge is refined on AMPLITUDE:
+ * mean-square acceleration in ROW_EDGE_BIN_S bins, smoothed over ROW_EDGE_SMOOTH_BINS, walked outward
+ * from inside the piece until it drops under ROW_EDGE_FRACTION of the piece's own median energy.
+ */
+function rowEdges(acc, tArr, first, last) {
+  const lower = (x) => { let a = 0, b = tArr.length; while (a < b) { const m = (a + b) >> 1; if (tArr[m] < x) a = m + 1; else b = m; } return a; };
+  const lo = first.t0 - ROW_WIN_S, hi = last.t1 + ROW_WIN_S;
+  const n = Math.max(1, Math.round((hi - lo) / ROW_EDGE_BIN_S));
+  const raw = [];
+  for (let b = 0; b < n; b++) {
+    const i0 = lower(lo + b * ROW_EDGE_BIN_S), i1 = lower(lo + (b + 1) * ROW_EDGE_BIN_S);
+    let e = 0;
+    for (let i = i0; i < i1; i++) e += acc[i].x * acc[i].x + acc[i].y * acc[i].y + acc[i].z * acc[i].z;
+    raw.push(i1 > i0 ? e / (i1 - i0) : 0);
+  }
+  const h = (ROW_EDGE_SMOOTH_BINS - 1) / 2;
+  const sm = raw.map((_, b) => {
+    let e = 0, c = 0;
+    for (let k = Math.max(0, b - h); k <= Math.min(n - 1, b + h); k++) { e += raw[k]; c++; }
+    return e / c;
+  });
+  const binOf = (t) => Math.min(n - 1, Math.max(0, Math.floor((t - lo) / ROW_EDGE_BIN_S)));
+  const inside = sm.slice(binOf(first.t1), binOf(last.t0) + 1).sort((x, y) => x - y);
+  const thr = ROW_EDGE_FRACTION * ROW_EDGE_FRACTION * (inside.length ? inside[Math.floor(inside.length / 2)] : 0);
+  let s = binOf((first.t0 + first.t1) / 2), e = binOf((last.t0 + last.t1) / 2);
+  while (s > 0 && sm[s - 1] >= thr) s--;
+  while (e < n - 1 && sm[e + 1] >= thr) e++;
+  /* The smoothing reaches a bin or two past a sharp edge; step back in over bins that are quiet. */
+  while (s < e && raw[s] < thr) s++;
+  while (e > s && raw[e] < thr) e--;
+  return { start: lo + s * ROW_EDGE_BIN_S, end: lo + (e + 1) * ROW_EDGE_BIN_S };
+}
+
+/**
+ * The pieces in one source's read: each run of rowing windows, with its refined edges, the median of
+ * its own stroke-rate readings, and a stroke count (duration times the mean reading: an estimate by
+ * construction, and labelled as one where it is shown).
+ */
+function rowPieces(rows, span) {
+  const { windows, rateSeries } = rowWindows(rows, span);
+  const acc = (rows || []).filter(r => r && span && r.t >= span.start && r.t <= span.end);
+  const tArr = acc.map(r => r.t);
+  const pieces = [];
+  for (let i = 0; i < windows.length; i++) {
+    if (!windows[i].rowing) continue;
+    let j = i;
+    while (j + 1 < windows.length && windows[j + 1].rowing && windows[j + 1].t0 - windows[j].t0 <= ROW_HOP_S + 1e-6) j++;
+    const edge = rowEdges(acc, tArr, windows[i], windows[j]);
+    const prev = pieces[pieces.length - 1];
+    const start = Math.max(edge.start, span.start, prev ? prev.end : -Infinity), end = Math.min(edge.end, span.end);
+    const rates = rateSeries.filter(c => c.t >= windows[i].t0 && c.t <= windows[j].t1).map(c => c.spm).sort((a, b) => a - b);
+    const spm = rates.length ? rates[Math.floor(rates.length / 2)] : null;
+    /* The MEAN rate for the count: a piece that changes rate is counted over all of it. */
+    const mean = rates.reduce((a, b) => a + b, 0) / (rates.length || 1);
+    if (end > start && spm != null) pieces.push({ start, end, spm, strokes: Math.round((end - start) * mean / 60) });
+    i = j;
+  }
+  return { windows, rateSeries, pieces };
+}
+
+/** Seconds of rowing across the pieces. */
+function rowRowingS(pieces) {
+  return (pieces || []).reduce((s, p) => s + (p.end - p.start), 0);
+}
+
+/**
+ * Read every source the recording carries and keep one: the first of wrist, head, phone that found
+ * at least ROW_PREFER_FRACTION of the most rowing any source found. Null when none found any.
+ */
+function rowRead(sensors, span) {
+  let best = 0;
+  const reads = ['wrist', 'head', 'phone'].map(source => {
+    const r = rowPieces(rowAccelRows(sensors, source), span);
+    const rowingS = rowRowingS(r.pieces);
+    if (rowingS > best) best = rowingS;
+    return { source, rowingS, windows: r.windows, rateSeries: r.rateSeries, pieces: r.pieces };
+  });
+  if (!(best > 0)) return null;
+  return reads.find(r => r.rowingS >= ROW_PREFER_FRACTION * best);
+}
+
+/** The numbers the rowing view shows. `ride` is the recording span the read was made over. */
+function rowSummary(read, hrRows, ride) {
+  const rd = read || { rateSeries: [], pieces: [] };
+  const pieces = rd.pieces || [];
+  const rates = (rd.rateSeries || []).map(c => c.spm);
+  const sorted = rates.slice().sort((a, b) => a - b);
+  const at = (p) => sorted.length ? sorted[Math.floor(p * (sorted.length - 1))] : null;
+  const med = (xs) => { const s = xs.slice().sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+  const half = Math.floor(rates.length / 2);
+  const firstHalf = rates.slice(0, half), secondHalf = rates.slice(half);
+  const halves = firstHalf.length >= ROW_MIN_HALF_READINGS && secondHalf.length >= ROW_MIN_HALF_READINGS;
+  const hr = (hrRows || []).filter(r => r && r.bpm > 0 && pieces.some(p => r.t >= p.start && r.t <= p.end));
+  return {
+    source: rd.source || null,
+    rowingS: rowRowingS(pieces),
+    pieces: pieces.length,
+    start: pieces.length ? pieces[0].start : null,
+    end: pieces.length ? pieces[pieces.length - 1].end : null,
+    windowS: ride ? ride.end - ride.start : null,
+    rateN: rates.length,
+    rateMedian: med(rates),
+    rateP10: at(0.1), rateP90: at(0.9),
+    rateFirstHalf: halves ? med(firstHalf) : null,
+    rateSecondHalf: halves ? med(secondHalf) : null,
+    strokes: pieces.reduce((s, p) => s + p.strokes, 0),
+    hrN: hr.length,
+    hrAvg: hr.length ? Math.round(hr.reduce((a, r) => a + r.bpm, 0) / hr.length) : null,
+    hrMax: hr.length ? Math.max(...hr.map(r => r.bpm)) : null,
   };
 }
 
@@ -27954,6 +28191,38 @@ async function analyze(files) {
         contentKey: contentHash || sensorFile.name, cacheKey, file: sensorFile, superseded,
         recordedAt: phoneStartUTC ? phoneStartUTC.toISOString() : null });
     }
+    /* A ROWING MACHINE: declared only. It is read from the recording's whole span, with or without
+       GPS, because nothing in it needs a position. On Auto an erg session has no GPS and goes to the
+       stationary detectors, which read it as a lift; that is issue #592 and is not changed here.
+       The lift chip "Row" is the barbell row and does not route here. */
+    if (userSport === 'rowing') {
+      if (spanRide.start == null) throw new Error('No motion data found in this recording');
+      onProgress('reading a rowing session');
+      const read = rowRead(sensors, spanRide);
+      const summary = rowSummary(read, sensors.heartRate || [], spanRide);
+      if (!read || summary.rowingS < ROW_MIN_ROWING_S)
+        throw new Error('This was read as a rowing-machine session, and less than half a minute of steady rowing was found in it. Stroke rate is read from a watch on your wrist, AirPods, or the phone in a pocket; a phone lying beside the rower feels nothing.');
+      let lastHrT = -Infinity;
+      const series = {
+        rate: read.rateSeries.map(c => ({ t: +c.t.toFixed(1), spm: +c.spm.toFixed(1) })),
+        hr: (sensors.heartRate || []).filter(r => r && r.t >= spanRide.start && r.t <= spanRide.end && r.bpm > 0
+          && (r.t - lastHrT >= 2 ? (lastHrT = r.t, true) : false)).map(r => ({ t: +r.t.toFixed(1), bpm: r.bpm })),
+      };
+      const channels = {
+        wristRows: (sensors.wrist || []).length, headphoneRows: (sensors.headphone || []).length, heartRateN: summary.hrN,
+      };
+      const rowRender = { rowing: summary, series, channels,
+        pieces: read.pieces.map(p => ({ start: +p.start.toFixed(1), end: +p.end.toFixed(1), spm: +p.spm.toFixed(1), strokes: p.strokes })),
+        sport: 'rowing', spanS: spanRide.end - spanRide.start, imuRateHz,
+        title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)) };
+      if (superseded()) return;
+      await loadingDraw(onProgress); if (superseded()) return;
+      hideAllSections(); hide('loading'); hide('results'); show('treadmillResults');
+      if (cacheKey) { putCachedAnalysis(cacheKey, 'rowing', rowRender); setViewHash('#/ride/' + encodeURIComponent(cacheKey)); }
+      renderRowing(rowRender);
+      setStatus(loamT('Rowing session loaded ({rate} strokes a minute)', { rate: Math.round(summary.rateMedian) }), true);
+      return;
+    }
 
     /* phoneStartUTC is parsed up at the FIT track repair now (the repair needs the same sync this
        used to be the only consumer of), so it is already in scope here. */
@@ -36827,6 +37096,73 @@ function drawTreadmillCadence(D) {
   }, { displayModeBar: false, responsive: true });
 }
 
+/* The ROWING-MACHINE view (erg.js). It shares the indoor host with the treadmill view: both are a
+   declared session with no track, and only one of them is ever on screen. */
+function renderRowing(D) {
+  _lastRender = { fn: renderRowing, D };
+  { const cl = document.getElementById('calibStrategyLabel'); if (cl) cl.classList.add('hidden'); }
+  const el = document.getElementById('treadmillResults');
+  if (!el) return;
+  const s = (D && D.rowing) || {};
+  const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
+  const from = s.source === 'wrist' ? loamT('from your watch') : s.source === 'head' ? loamT('from your AirPods') : loamT('from the phone');
+  const tiles = [
+    tile(s.rowingS != null ? fmtDuration(s.rowingS) : '—', loamT('time rowing')),
+    s.rateMedian != null ? tile(Math.round(s.rateMedian) + ' spm', senseT('Stroke rate', 'rowing'), from) : '',
+    s.rateP10 != null && s.rateP90 != null ? tile(`${Math.round(s.rateP10)}&ndash;${Math.round(s.rateP90)}`, loamT('stroke rate range, p10 to p90')) : '',
+    s.rateFirstHalf != null ? tile(`${Math.round(s.rateFirstHalf)} &rarr; ${Math.round(s.rateSecondHalf)}`, loamT('stroke rate, first half to second half')) : '',
+    s.strokes ? tile('&asymp; ' + s.strokes, loamT('strokes, from stroke rate')) : '',
+    s.pieces > 1 ? tile(String(s.pieces), loamT('pieces'), loamT('stretches of rowing with a rest between')) : '',
+    s.hrAvg != null ? tile(`${s.hrAvg} / ${s.hrMax}`, loamT('heart rate avg / max')) : '',
+  ].filter(Boolean).join('');
+  const lead = loamT('<strong>Read from how your body moved on the rower</strong>: stroke rate, time rowing, strokes and, when a watch was worn, heart rate. <strong>Distance, pace and power are not here.</strong> They depend on how hard the flywheel is pulled, which only the machine&rsquo;s own monitor measures, so they are left out rather than estimated.');
+  const rest = loamT('Each stroke carries your hands, head and hips along the rail once. A fifteen-second stretch counts as rowing when that back-and-forth is both strong and regular, between {lo} and {hi} strokes a minute. The stroke count is the time rowing multiplied by the rate, so it is an estimate. Checked against one session on a Concept2 at 31 strokes a minute; other rates and interval sessions are not checked yet.',
+    { lo: Math.round(ROW_LO_HZ * 60), hi: Math.round(ROW_HI_HZ * 60) });
+  const hasHr = (D && D.series && D.series.hr || []).length >= 2;
+  el.innerHTML = `
+    <div class="section-title"><span class="activity-title">${activityIcon('rowing')}<span>${loamT('Rowing machine')}</span></span> <span class="beta-badge">${loamT('BETA')}</span></div>
+    ${leadNote(lead, rest, 'strength-tablenote', loamT('How this is read'))}
+    <div class="stiles ski-stiles">${tiles}</div>
+    <div class="section-title" style="margin-top:22px">${senseT('Stroke rate', 'rowing')}<span class="subtitle">${hasHr ? loamT('strokes per minute, with heart rate') : loamT('strokes per minute')}</span></div>
+    <div class="panel">
+      <div id="rowRateChart" class="chart" style="height:${hasHr ? 300 : 240}px"></div>
+      <div class="strength-tablenote analysis-explanation">${loamT('One reading per stretch counted as rowing. A gap is time that was not: a rest between pieces, or setting up.')}</div>
+    </div>`;
+  drawRowingRate(D);
+  setTimeout(decorateCardShares, 0);
+}
+
+function drawRowingRate(D) {
+  const el = document.getElementById('rowRateChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const rate = (D && D.series && D.series.rate) || [];
+  const hr = (D && D.series && D.series.hr) || [];
+  if (rate.length < 2) { el.innerHTML = `<div class="strength-tablenote">${loamT('No stroke rate reading in this recording.')}</div>`; return; }
+  const xs = [], ys = [];
+  for (let i = 0; i < rate.length; i++) {
+    if (i && rate[i].t - rate[i - 1].t > (ROW_BRIDGE_WINDOWS + 1) * ROW_HOP_S) { xs.push(null); ys.push(null); }
+    xs.push(rate[i].t / 60); ys.push(rate[i].spm);
+  }
+  const traces = [{
+    x: xs, y: ys, type: 'scatter', mode: 'lines', name: senseT('Stroke rate', 'rowing'),
+    line: { color: '#3d7a5a', width: 1.8 }, connectgaps: false,
+    hovertemplate: '%{x:.1f} min<br>%{y:.0f} spm<extra></extra>',
+  }];
+  if (hr.length >= 2) traces.push({
+    x: hr.map(p => p.t / 60), y: hr.map(p => p.bpm), type: 'scatter', mode: 'lines', name: loamT('Heart rate'),
+    yaxis: 'y2', line: { color: '#c14e2e', width: 1.2 }, connectgaps: false,
+    hovertemplate: '%{x:.1f} min<br>%{y} bpm<extra></extra>',
+  });
+  loamPlot(el, traces, {
+    margin: { l: 44, r: hr.length >= 2 ? 44 : 12, t: 8, b: 42 },
+    xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
+    /* A steady piece varies by under one stroke a minute; autoscaled, that reads as a sawtooth. */
+    yaxis: { title: 'spm', fixedrange: true, range: [Math.floor(Math.min(...rate.map(p => p.spm))) - 3, Math.ceil(Math.max(...rate.map(p => p.spm))) + 3] },
+    ...(hr.length >= 2 ? { yaxis2: { title: 'bpm', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false } } : {}),
+    showlegend: hr.length >= 2, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  }, { displayModeBar: false, responsive: true });
+}
+
 function renderSwim(D) {
   _lastRender = { fn: renderSwim, D };
   /* A swim is read off the wrist with the phone flat on a pool deck, so there is no body frame to
@@ -43163,6 +43499,7 @@ const LOAM_NB = {
   'walking [gerund]': 'gåing',
   'lifting [gerund]': 'løfting',
   'swinging [gerund]': 'svinging',
+  'rowing [gerund]': 'roing',
   'swimming [gerund]': 'svømming',
   'skiing [gerund]': 'skikjøring',
   'recording [gerund]': 'opptak',
@@ -44100,6 +44437,9 @@ const LOAM_NB = {
   'ski day [activity]': 'skidag',
   'ski days [activity]': 'skidager',
   'range session [activity]': 'økt på range',
+  'rowing session [activity]': 'roøkt',
+  'rowing sessions [activity]': 'roøkter',
+  'the rowing session [activity]': 'roøkten',
   'range sessions [activity]': 'økter på range',
   'session [activity]': 'økt',
   'sessions [activity]': 'økter',
@@ -44118,6 +44458,7 @@ const LOAM_NB = {
   'to swim': 'svøm',
   'to lift': 'løft',
   'to swing': 'slå',
+  'to row': 'ro',
   'to record': 'ta opp',
   'you ride': 'du sykler',
   'you run': 'du løper',
@@ -44126,6 +44467,7 @@ const LOAM_NB = {
   'you swim': 'du svømmer',
   'you lift': 'du løfter',
   'you swing': 'du slår',
+  'you row': 'du ror',
   'you record': 'du tar opp',
   'skip it for corner coaching': 'hoppe over den i svingveiledningen',
   'leave it out of the lap comparison': 'holde den utenfor rundesammenligningen',
@@ -44188,6 +44530,7 @@ const LOAM_NB = {
   'swum [done]': 'svømt',
   'lifted [done]': 'løftet',
   'swung [done]': 'slått',
+  'rowed [done]': 'rodd',
   'covered [done]': 'tilbakelagt',
   'Beta:': 'Beta:',
   'Why': 'Hvorfor',
@@ -44672,6 +45015,28 @@ const LOAM_NB = {
   'DTW: {n} descents': 'DTW: {n} nedkjøringer',
   '{n} walk break': '{n} gåpause',
   '{n} walk breaks': '{n} gåpauser',
+  /* The rowing-machine view (renderRowing). */
+  'reading a rowing session': 'leser en roøkt',
+  'Rowing session loaded ({rate} strokes a minute)': 'Roøkt lastet ({rate} tak i minuttet)',
+  'This was read as a rowing-machine session, and less than half a minute of steady rowing was found in it. Stroke rate is read from a watch on your wrist, AirPods, or the phone in a pocket; a phone lying beside the rower feels nothing.':
+    'Dette ble lest som en økt på romaskin, og det ble funnet under et halvt minutt med jevn roing i den. Takten leses fra en klokke på håndleddet, AirPods eller telefonen i en lomme; en telefon som ligger ved siden av romaskinen, kjenner ingenting.',
+  'Rowing machine': 'Romaskin',
+  'Stroke rate [rowing]': 'Takt',
+  'time rowing': 'tid du rodde',
+  'stroke rate range, p10 to p90': 'taktområde, p10 til p90',
+  'stroke rate, first half to second half': 'takt, første til andre halvdel',
+  'strokes, from stroke rate': 'tak, fra takten',
+  'pieces': 'drag',
+  'stretches of rowing with a rest between': 'strekk med roing med pause imellom',
+  'strokes per minute, with heart rate': 'tak per minutt, med puls',
+  'strokes per minute': 'tak per minutt',
+  'One reading per stretch counted as rowing. A gap is time that was not: a rest between pieces, or setting up.':
+    'Én avlesning per strekk som ble regnet som roing. Et hull er tid som ikke ble det: en pause mellom drag, eller klargjøring.',
+  'No stroke rate reading in this recording.': 'Ingen taktavlesning i dette opptaket.',
+  '<strong>Read from how your body moved on the rower</strong>: stroke rate, time rowing, strokes and, when a watch was worn, heart rate. <strong>Distance, pace and power are not here.</strong> They depend on how hard the flywheel is pulled, which only the machine&rsquo;s own monitor measures, so they are left out rather than estimated.':
+    '<strong>Lest fra hvordan kroppen din beveget seg på romaskinen</strong>: takt, tid du rodde, tak og, når en klokke ble brukt, puls. <strong>Distanse, tempo og effekt er ikke her.</strong> De avhenger av hvor hardt svinghjulet trekkes, noe bare maskinens egen monitor måler, så de er utelatt i stedet for anslått.',
+  'Each stroke carries your hands, head and hips along the rail once. A fifteen-second stretch counts as rowing when that back-and-forth is both strong and regular, between {lo} and {hi} strokes a minute. The stroke count is the time rowing multiplied by the rate, so it is an estimate. Checked against one session on a Concept2 at 31 strokes a minute; other rates and interval sessions are not checked yet.':
+    'Hvert tak fører hendene, hodet og hoftene dine langs skinnen én gang. Et strekk på femten sekunder teller som roing når den bevegelsen fram og tilbake er både kraftig og jevn, mellom {lo} og {hi} tak i minuttet. Antall tak er tiden du rodde ganget med takten, så det er et anslag. Sjekket mot én økt på en Concept2 på 31 tak i minuttet; andre takter og intervalløkter er ikke sjekket ennå.',
   'Indoor walk loaded ({cadence})': 'Innendørs gåtur lastet ({cadence})',
   'Indoor run loaded ({cadence})': 'Innendørs løpetur lastet ({cadence})',
   'reading an indoor session': 'leser en innendørsøkt',
@@ -62015,7 +62380,7 @@ function errorGuidance(msg, sport) {
      off. */
   /* The indoor walk/run refusal names its cause (no stepping) and its remedy (where to carry the
      phone); the catch-all would add "Location and Motion", and Location is not what it needs. */
-  if (/read entirely from the wrist|too little phone orientation|indoor ski session|read as an indoor (walk|run), and/i.test(m)) return '';
+  if (/read entirely from the wrist|too little phone orientation|indoor ski session|read as an indoor (walk|run), and|read as a rowing-machine session/i.test(m)) return '';
   if (/moving window/i.test(m)) return loamT('No moving window was found in the GPS. The recording may be too short, or Location was off during capture.');
   if (/run window|accel samples/i.test(m)) return loamT('The moving part of this recording had no usable GPS, so there was nothing to analyze. GPS most likely dropped out mid-recording (phone in a pocket on a When-In-Use location grant). Set Location to <strong>Always</strong> and re-record, or {pick}.', { pick });
   if (/accel or GPS|Missing accel/i.test(m)) return loamT('No usable motion or GPS was found. Check that both Location and Motion sensors were enabled during capture.');
@@ -62250,6 +62615,12 @@ function renderCachedAnalysis(cached) {
   if (d && d.treadmill) {
     hideAllSections(); hide('results'); show('treadmillResults');
     renderTreadmill(d);
+    return;
+  }
+  /* A rowing-machine session, in the same host. Keyed on the data for the same reason. */
+  if (d && d.rowing) {
+    hideAllSections(); hide('results'); show('treadmillResults');
+    renderRowing(d);
     return;
   }
   if (d && d.nordic) { renderNordic(d); return; }
@@ -63706,7 +64077,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'e6c531393 · 2026-11-09';
+const LOAM_BUILD = '30f92fec9 · 2026-11-09';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
