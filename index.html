@@ -4294,6 +4294,18 @@ function loamSeasonRequested(search, host) {
     </div>
   </section>
 
+  <section id="shiftReviewSection" class="hidden">
+    <div class="section-title">Shifts and climbs</div>
+    <div class="panel panel-content">
+      <label><span>Climb</span> <select id="shiftReviewClimb"></select></label>
+      <label><span>Shift</span> <select id="shiftReviewShift"></select></label>
+      <p id="shiftReviewSummary"></p>
+      <p id="shiftReviewReadback" aria-live="polite" hidden></p>
+      <div id="shiftReviewChart" class="chart"></div>
+      <details id="shiftReviewScatter"><summary>Cadence vs motor power</summary><div id="shiftReviewPairs" class="chart"></div></details>
+    </div>
+  </section>
+
   <section id="cadPowerSection" class="hidden">
     <div class="section-title">
       Cadence vs motor power
@@ -5236,6 +5248,11 @@ function emptyCombinedSensors() {
 function addCombinedRow(out, r) {
   const t = r.seconds_elapsed;
   if (t == null) return;
+  if (r.bike_batteryPercent != null || r.bike_rearGear != null || r.bike_speedKmh != null || r.bike_cadenceRpm != null ||
+      r.bike_riderPowerW != null || r.bike_motorPowerW != null || r.bike_assistMode != null) {
+    (out.bike ||= []).push({ t, gear: r.bike_rearGear, speed: r.bike_speedKmh,
+      battery: r.bike_batteryPercent, cadence: r.bike_cadenceRpm, rider: r.bike_riderPowerW, motor: r.bike_motorPowerW, assist: r.bike_assistMode });
+  }
   if (r.gravity_x != null && r.gravity_y != null && r.gravity_z != null)
     out.gravity.push({ t, x: r.gravity_x, y: r.gravity_y, z: r.gravity_z });
   if (r.gyroscope_x != null && r.gyroscope_y != null && r.gyroscope_z != null)
@@ -16804,7 +16821,8 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 33;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks)
+const ANALYSIS_CACHE_VERSION = 34;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks)
+// v34: reanalyze stored rides for live Levo telemetry and GX shift events.
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
    100 Hz CSV is 100+ MB structured-cloned. Bound it two ways so one huge ride cannot stall the main
@@ -17290,6 +17308,7 @@ function estimateRenderBytes(data) {
        ride the estimator called cacheable blow the store for every other ride. */
     return (r && typeof r === 'object') ? Math.max(32, Object.keys(r).length * 16) : 288;
   };
+  n += len(s.bike) * rowBytes(s.bike);
   n += len(s.wrist) * rowBytes(s.wrist);
   n += len(s.headphone) * rowBytes(s.headphone);
   n += (len(s.baro) + len(s.heartRate)) * 64;                          /* {t, value} objects */
@@ -32525,7 +32544,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','xcskiResults','skiNamesSection','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','xcskiResults','skiNamesSection','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','shiftReviewSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -40232,6 +40251,7 @@ function renderAllGps(D) {
   if (!foot && D.ridingJumps && D.ridingJumps.length) {
     show('jumpsSection'); renderJumpSummary(D); renderJumpLaps(D); renderJumpsTable(D.ridingJumps);
   }
+  if (!foot) renderShiftReview(D);
   if (!foot && D.fitInRide && D.fitInRide.length) { renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
   renderGpsUpsell(D);
   renderEstimatedPower(D);
@@ -42343,6 +42363,7 @@ const LOAM_NB = {
   'Motor on the descents': 'Motor i nedkjøringene',
   'average while descending': 'snitt nedover',
   'Assist mode': 'Assistmodus',
+  'Rear gear': 'Bakgir',
   'share of moving time, as this bike labels its modes': 'andel av tiden i bevegelse, slik denne sykkelen navngir modusene',
   'Mode {n}': 'Modus {n}',
   'Each climb': 'Hver stigning',
@@ -44918,6 +44939,18 @@ const LOAM_NB = {
   'Pedaling': 'Tråkking',
   'Your watts': 'Dine watt',
   'Avg HR': 'Snittpuls',
+  'Samples before and after the shift': 'Målinger før og etter girskiftet',
+  'No paired readings within five seconds of this shift.': 'Ingen målinger på begge sider innen fem sekunder fra girskiftet.',
+  'Shifts and climbs': 'Girskift og stigninger',
+  'Shift': 'Girskift',
+  'All shifts': 'Alle girskift',
+  'Rider work': 'Syklistens arbeid',
+  'Motor work': 'Motorens arbeid',
+  'Observed shifts': 'Registrerte girskift',
+  'Elapsed minutes': 'Minutter fra start',
+  'Full ride': 'Hele turen',
+  'Gear': 'Gir',
+  'Off': 'Av',
   'Cadence vs motor power': 'Kadens mot motoreffekt',
   'per-climb cadence, assist, and lugging (grade > 3% sustained)':
     'kadens, assistanse og for tung utveksling per stigning (helning > 3 % vedvarende)',
@@ -56225,6 +56258,7 @@ const SECTION_CATALOG = [
   { id: 'hrZonesSection', label: 'HR zones' },
   { id: 'estPowerSection', label: 'Power estimate' },
   { id: 'runDecouplingSection', label: 'HR drift' },
+  { id: 'shiftReviewSection', label: 'Shifts and climbs' },
   { id: 'cadPowerSection', label: 'Cadence · power' },
   { id: 'analogSection', label: 'Motor off' },
   { id: 'runSegmentsSection', label: 'Segments' },
@@ -57123,6 +57157,7 @@ function renderAll(D) {
   /* The FIT's channels over time are rows of the timeline now (renderBikeTimeline); what stays down
      here are the two reads a time series cannot give -- cadence against motor power, and the
      motor-off stretches. */
+  renderShiftReview(D);
   if (D.fitInRide && D.fitInRide.length) { renderCadPower(D.fitInRide, D.ride); renderAnalog(D.fitInRide, D.ride); }
   currentRide = D.ride;
   renderRunsPanel(D);
@@ -57916,6 +57951,7 @@ function mtbPageHTML(D, M) {
         <div class="mp-card mp-selected" id="mpSelected"></div>
       </div>
       <div id="mpSlotTimeline" class="mp-slot"></div>
+      <div id="mpSlotShiftReview" class="mp-slot"></div>
       <div id="mpSlotSignature" class="mp-slot"></div>
     </section>
     <section id="mpRuns" class="mp-section" aria-label="${escapeHtml(runsNoun)}">
@@ -58092,7 +58128,7 @@ function mpShowRunsTable() {
   t.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 const MP_SLOTS = [
-  ['mpSlotSignature', 'rideSignatureSection'], ['mpSlotMap', 'overviewSection'], ['mpSlotTimeline', 'timelineSection'],
+  ['mpSlotSignature', 'rideSignatureSection'], ['mpSlotMap', 'overviewSection'], ['mpSlotTimeline', 'timelineSection'], ['mpSlotShiftReview', 'shiftReviewSection'],
   ['mpSlotRuns', 'runsSection'], ['mpSlotTurns', 'turnSection'], ['mpSlotRadius', 'radiusSection'],
   ['mpSlotJumps', 'jumpsSection'], ['mpSlotAirtime', 'airtimeSection'], ['mpSlotReplay', 'formReplaySection'],
   ['mpSlotHr', 'hrZonesSection'], ['mpSlotEstPower', 'estPowerSection'], ['mpSlotCadPower', 'cadPowerSection'],
@@ -59678,7 +59714,27 @@ function bikeTimelineRows(D) {
       traces: [{ x: gapX, y: gapY, line: { color: '#8caa6d', width: 1.2 },
         name: loamT('Cadence'), connectgaps: false, hovertemplate: '%{y:.0f} rpm' }] });
   }
-  if (isRoadAnalysis(D)) rows.sort((a, b) => ['speed', 'elevation', 'hr', 'power', 'cadence'].indexOf(a.key) - ['speed', 'elevation', 'hr', 'power', 'cadence'].indexOf(b.key));
+  const bike = (D.sensors?.bike || []).filter(inRide);
+  if (bike.length) {
+    // Mark actual sample times, including zero power while coasting. A disconnected interval stays blank.
+    const addBikeRow = (key, field, title, color, convert = v => v) => {
+      const samples = bike.filter(r => Number.isFinite(r[field]));
+      if (!samples.length) return;
+      const row = { key, label: title, title, color, rawBike: true, traces: [{
+        x: samples.map(r => r.t - ride.start), y: samples.map(r => convert(r[field])),
+        mode: 'markers', marker: { color, size: 4 }, name: title, hovertemplate: '%{y}<extra>%{fullData.name}</extra>'
+      }] };
+      const i = rows.findIndex(r => r.key === key);
+      if (i >= 0) rows[i] = row; else rows.push(row);
+    };
+    if (!has('speed')) addBikeRow('speed', 'speed', loamT('wheel speed ({u})', { u: U.speedUnit() }), '#6da7c4', v => U.speedNum(v / 3.6));
+    if (!has('power')) addBikeRow('bikeRider', 'rider', loamT('Rider power (W)'), '#a8453a');
+    if (!has('motorPower')) addBikeRow('bikeMotor', 'motor', loamT('Motor power (W)'), '#8b6fd6');
+    if (!has('cad')) addBikeRow('cadence', 'cadence', loamT('Cadence (rpm)'), '#8caa6d');
+    addBikeRow('gear', 'gear', loamT('Rear gear'), '#a47333');
+    addBikeRow('assist', 'assist', loamT('Assist mode'), '#477e78');
+  }
+  if (isRoadAnalysis(D)) rows.sort((a, b) => ['speed', 'elevation', 'hr', 'power', 'bikeRider', 'bikeMotor', 'cadence', 'gear', 'assist'].indexOf(a.key) - ['speed', 'elevation', 'hr', 'power', 'bikeRider', 'bikeMotor', 'cadence', 'gear', 'assist'].indexOf(b.key));
   return rows;
 }
 
@@ -59720,7 +59776,7 @@ function renderBikeTimeline(D) {
     // Elevation remains the profile used by the descent detector; smooth the measured signals.
     // 30 s on speed, HR, power and cadence -- the run pace row's window and the usual power
     // smoothing; anything shorter left the box with no visible effect on 1 Hz GPS.
-    traces.push(...(r.key === 'elevation' ? lines : smoothTimelineTraces(lines, r.key === 'turning' ? 0.5 : 30))
+    traces.push(...(r.key === 'elevation' || r.rawBike ? lines : smoothTimelineTraces(lines, r.key === 'turning' ? 0.5 : 30))
       .map(tr => timelineClockTrace(tr, clock)));
   }
 
@@ -59837,6 +59893,8 @@ function renderBikeTimeline(D) {
 
   const lastAxis = rows.length ? rows[rows.length - 1].axis : 'y';
   const layout = {
+    // The export clone has no host element to inherit the stacked rows' height from.
+    height: hostPx,
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { family: 'IBM Plex Sans', color: '#475569', size: 12 },
     margin,
@@ -63328,6 +63386,156 @@ function batteryUse(rows) {
   };
 }
 
+// Gear and motor packets arrive independently. A gap can hide shifts or unobserved work.
+function recordedBikeReview(D) {
+  const { ride, sensors } = D;
+  const bike = (sensors?.bike || []).filter(r => r.t >= ride.start && r.t <= ride.end);
+  if (!bike.some(r => [r.rider, r.motor, r.cadence, r.gear].some(Number.isFinite))) return null;
+  const pauses = ride.pausedSpans || [];
+  const continuous = (a, b, maxGap) => b > a && b - a <= maxGap && !hrZonesOverlapsPause(a, b, pauses);
+  const gears = bike.filter(r => Number.isInteger(r.gear) && r.gear >= 1 && r.gear <= 12);
+  const shifts = [];
+  for (let i = 1; i < gears.length; i++) {
+    const a = gears[i - 1], b = gears[i];
+    if (a.gear !== b.gear && continuous(a.t, b.t, 2)) shifts.push({ t: b.t, from: a.gear, to: b.gear });
+  }
+  const segments = D.gradeSegments || markLiftSegments(detectGradeSegments(sensors.baro || [], sensors.location || [], ride), sensors.location || []);
+  const climbs = segments.filter(s => s.dir === 'up' && s.kind !== 'lift' && bike.some(r => r.t >= s.tStart && r.t <= s.tEnd));
+  const elevation = climbAltSeries(sensors.baro || [], sensors.location || [], ride);
+  return { bike, shifts, climbs, elevation, continuous };
+}
+
+function bikeWorkWh(rows, field, start, end, continuous) {
+  let prev = null, work = 0, seconds = 0;
+  for (const r of rows) {
+    if (!Number.isFinite(r[field])) continue;
+    if (prev && continuous(prev.t, r.t, 5)) {
+      const lo = Math.max(prev.t, start), hi = Math.min(r.t, end);
+      if (hi > lo) {
+        const f = ((lo + hi) / 2 - prev.t) / (r.t - prev.t);
+        work += (prev[field] + f * (r[field] - prev[field])) * (hi - lo);
+        seconds += hi - lo;
+      }
+    }
+    prev = r;
+  }
+  return seconds ? work / 3600 : null;
+}
+
+function renderShiftReview(D) {
+  const model = recordedBikeReview(D);
+  if (!model) return;
+  show('shiftReviewSection');
+  const el = id => document.getElementById(id);
+  const { bike, shifts, climbs, elevation, continuous } = model;
+  const { start, end } = D.ride;
+  const climb = el('shiftReviewClimb'), shift = el('shiftReviewShift');
+  const clock = t => fmtClock(t - start);
+  const option = (label, value) => new Option(label, String(value));
+  climb.replaceChildren(option(loamT('Full ride'), ''), ...climbs.map((c, i) =>
+    option(loamT('Climb {n}', { n: i + 1 }) + ' · ' + clock(c.tStart) + '–' + clock(c.tEnd), i)));
+  function scope() {
+    if (climb.value === '') return [start, end];
+    const c = climbs[Number(climb.value)];
+    return [c.tStart, c.tEnd];
+  }
+  function chooseClimb() {
+    const [lo, hi] = scope();
+    shift.replaceChildren(option(loamT('All shifts'), ''), ...shifts.flatMap((s, i) =>
+      s.t >= lo && s.t <= hi ? [option(clock(s.t) + ' · ' + s.from + ' → ' + s.to, i)] : []));
+    shift.disabled = shift.options.length === 1;
+    draw();
+  }
+  function draw() {
+    const [lo, hi] = scope();
+    const selected = shift.value === '' ? null : shifts[Number(shift.value)];
+    const left = selected ? Math.max(start, selected.t - 10) : lo;
+    const right = selected ? Math.min(end, selected.t + 10) : hi;
+    const work = ['rider', 'motor'].map(f => bikeWorkWh(bike, f, lo, hi, continuous));
+    const summary = [];
+    if (work[0] != null) summary.push(loamT('Rider work') + ' ' + loamNum(work[0], 1) + ' Wh');
+    if (work[1] != null) summary.push(loamT('Motor work') + ' ' + loamNum(work[1], 1) + ' Wh');
+    const battery = bike.filter(r => Number.isFinite(r.battery) && r.t >= lo && r.t <= hi);
+    if (battery.length >= 2) summary.push(loamT('Battery') + ' ' + battery[0].battery + ' → ' + battery[battery.length - 1].battery + '%');
+    if (bike.some(r => Number.isFinite(r.gear))) summary.push(loamT('Observed shifts') + ' ' + (shift.options.length - 1));
+    el('shiftReviewSummary').textContent = [climb.selectedOptions[0].textContent, ...summary].join(' · ');
+    const readback = el('shiftReviewReadback');
+    readback.hidden = !selected;
+    if (selected) {
+      // Display the closest actual samples on each side. The motor polls more slowly than the GX.
+      const nearby = bike.filter(r => r.t >= left && r.t <= right && Math.abs(r.t - selected.t) <= 5
+        && !hrZonesOverlapsPause(Math.min(r.t, selected.t), Math.max(r.t, selected.t), D.ride.pausedSpans || []));
+      const changes = [['cadence', 'rpm'], ['rider', 'W']].flatMap(([field, unit]) => {
+        const samples = nearby.filter(r => Number.isFinite(r[field]));
+        const before = samples.filter(r => r.t < selected.t).at(-1), after = samples.find(r => r.t >= selected.t);
+        if (!before || !after) return [];
+        return [loamT(field === 'cadence' ? 'Cadence' : 'Rider power') + ' ' + Math.round(before[field]) + ' → ' + Math.round(after[field]) + ' ' + unit];
+      });
+      readback.textContent = changes.length ? loamT('Samples before and after the shift') + ' · ' + changes.join(' · ')
+        : loamT('No paired readings within five seconds of this shift.');
+    }
+    const traces = [], axes = {};
+    const lanes = [
+      [U.metric() ? 'm' : 'ft', [[elevation, 'alt', 'Elevation', '#81705d']]],
+      ['W', [[bike, 'rider', 'Rider power', '#178071'], [bike, 'motor', 'Motor power', '#c35e29']]],
+      ['rpm', [[bike, 'cadence', 'Cadence', '#32736b']]],
+      [loamT('Gear'), [[bike, 'gear', 'Rear gear', '#795696']]],
+      [loamT('Assist'), [[bike, 'assist', 'Assist mode', '#986b25']]]
+    ];
+    const visible = lanes.filter(([, channels]) => channels.some(([source, key]) => source.some(r => Number.isFinite(r[key]))));
+    visible.forEach(([unit, channels], i) => {
+      const suffix = i ? String(i + 1) : '';
+      const axis = axes['yaxis' + suffix] = { domain: [1 - (i + 1) / visible.length, 1 - (i + 0.18) / visible.length],
+        title: { text: unit }, fixedrange: true, automargin: true };
+      for (const [source, key, label, color] of channels) {
+        const step = key === 'gear' || key === 'assist';
+        const x = [], y = [];
+        let prev = null;
+        for (const r of source) {
+          if (r.t < left || r.t > right || !Number.isFinite(r[key])) continue;
+          if (prev && !continuous(prev.t, r.t, key === 'gear' ? 2 : 5)) { x.push(null); y.push(null); }
+          x.push((r.t - start) / 60);
+          y.push(key === 'alt' && !U.metric() ? r.alt / 0.3048 : r[key]);
+          prev = r;
+        }
+        if (key === 'assist') Object.assign(axis, { tickvals: [0,1,2,3], ticktext: ['Off','Eco','Trail','Turbo'].map(k => loamT(k)), range: [-0.5,3.5] });
+        if (x.length) traces.push({ x, y, yaxis: 'y' + suffix, name: loamT(label), mode: 'lines+markers', marker: { size: 2 },
+          line: { color, width: 1.5, shape: step ? 'hv' : 'linear' }, connectgaps: false });
+      }
+    });
+    const gearLane = visible.findIndex(([, channels]) => channels.some(([, key]) => key === 'gear'));
+    const events = shifts.map((s, i) => ({ ...s, index: i })).filter(s => s.t >= left && s.t <= right && s.t >= lo && s.t <= hi);
+    if (gearLane >= 0 && events.length) traces.push({ x: events.map(s => (s.t - start) / 60), y: events.map(s => s.to),
+      yaxis: gearLane ? 'y' + (gearLane + 1) : 'y', name: loamT('Shift'), showlegend: false, mode: 'markers',
+      marker: { size: 8, color: '#795696' }, customdata: events.map(s => s.index),
+      text: events.map(s => s.from + ' → ' + s.to), hovertemplate: '%{text}<extra></extra>' });
+    const xShift = selected ? (selected.t - start) / 60 : null;
+    loamPlot('shiftReviewChart', traces, { ...axes, height: Math.max(300, visible.length * 100 + 90),
+      margin: { l: 46, r: 10, t: 12, b: 52 }, legend: { orientation: 'h', y: -0.14 }, hovermode: 'x',
+      xaxis: { anchor: visible.length > 1 ? 'y' + visible.length : 'y', range: [(left - start) / 60, (right - start) / 60], title: { text: loamT('Elapsed minutes') } },
+      shapes: selected ? [{ type: 'line', x0: xShift, x1: xShift, yref: 'paper', y0: 0, y1: 1, line: { color: '#876691', dash: 'dot', width: 1 } }] : []
+    }, PLOT_CFG).then(chart => chart.on('plotly_click', event => {
+      const index = event.points?.find(point => Number.isInteger(point.customdata))?.customdata;
+      if (index == null || shift.value === String(index)) return;
+      shift.value = String(index);
+      draw();
+    }));
+    const pairs = bike.filter(r => r.t >= left && r.t <= right && Number.isFinite(r.cadence) && Number.isFinite(r.motor));
+    const scatter = el('shiftReviewScatter');
+    scatter.hidden = !pairs.length;
+    if (pairs.length) loamPlot('shiftReviewPairs', [{ x: pairs.map(r => r.cadence), y: pairs.map(r => r.motor),
+      type: 'scatter', mode: 'markers', marker: { color: '#178071', size: 6, opacity: 0.6 },
+      hovertemplate: '%{x:.0f} rpm · %{y:.0f} W<extra></extra>' }], {
+      height: 250, margin: { l: 52, r: 15, t: 12, b: 44 }, xaxis: { title: { text: loamT('Cadence') + ' (rpm)' } },
+      yaxis: { title: { text: loamT('Motor power') + ' (W)' } }
+    }, PLOT_CFG);
+  }
+  climb.onchange = chooseClimb;
+  shift.onchange = draw;
+  el('shiftReviewScatter').ontoggle = e => { if (e.target.open && el('shiftReviewPairs').data) Plotly.Plots.resize(el('shiftReviewPairs')); };
+  chooseClimb();
+}
+
 function renderCadPower(fitInRide, ride) {
   const sec = document.getElementById('cadPowerSection');
   if (!sec) return;
@@ -65213,7 +65421,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '21946643e · 2026-11-11';
+const LOAM_BUILD = '206bf423c · 2026-11-11';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
