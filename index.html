@@ -28117,6 +28117,7 @@ function replayCachedRender(cached, cropKey, storedCrop) {
      crop. Without it a cached ride could only ever be trimmed further, never widened back, since
      the cached sensors ARE the cropped ones. */
   setupCropUI(cropKey, cropCtxLoad(cropKey), storedCrop);
+  cropReportNative(storedCrop);
   setStatus(loamT('Loaded from cache ({noun})', { noun: nounT(cachedSportNoun(cached)) }), true);
 }
 
@@ -28475,6 +28476,7 @@ async function analyze(files) {
     const crop = normalizeCrop(storedCrop, cropCtx && cropCtx.span);
     if (cropCtx) cropCtxStore(cropKey, cropCtx);
     setupCropUI(cropKey, cropCtx, crop);
+    cropReportNative(crop);
     const sensors = crop ? cropSensors(sensorsFull, crop) : sensorsFull;
     if (crop) onProgress('trimming to your window');
 
@@ -64764,6 +64766,19 @@ let _cropDraft = null;    /* the panel's working window */
 let _cropSuggestOK = false;
 function setCropSuggestable(ok) { _cropSuggestOK = !!ok; renderCropNotice(); }
 
+/* Tell the app which window this recording is trimmed to, so its Strava upload is cut the same way
+   (UploadCrop in the app). Without it a trimmed ride uploaded whole. Sent on every render of a phone
+   recording, not only when the trim changes, so a ride trimmed before the app listened reaches it the
+   next time it is opened. Called only from the sensor-recording paths: their t is seconds_elapsed,
+   the clock the app cuts on. A null crop clears the app's copy. */
+function cropReportNative(crop) {
+  if (!(LOAM_EMBEDDED && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loam)) return;
+  try {
+    window.webkit.messageHandlers.loam.postMessage({ type: 'crop',
+      start: crop ? crop.start : null, end: crop ? crop.end : null });
+  } catch (e) { /* bridge absent */ }
+}
+
 function setupCropUI(key, ctx, applied) {
   _cropKey = key || null;
   _cropCtx = ctx || null;
@@ -65427,7 +65442,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'd27002692 · 2026-11-14';
+const LOAM_BUILD = '19d511ef0 · 2026-11-15';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
