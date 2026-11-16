@@ -4166,6 +4166,7 @@ function loamSeasonRequested(search, host) {
       All channels
       <span class="subtitle"><span class="analysis-explanation">every ticked channel on one plot · the first two name the left and right axes</span>
         <label class="smooth-lbl" title="Rolling median that suppresses the spikes from stops"><input type="checkbox" class="smoothToggle" onchange="onSmoothToggle(this)"> smooth</label>
+        <label id="overlayRunOnlyLbl" class="smooth-lbl hidden" title="Leave stops and walked stretches out of pace and GAP, as cadence already does."><input id="overlayRunOnly" type="checkbox" onchange="onOverlayRunOnlyToggle(this)"> running only</label>
       </span>
     </div>
     <div id="runOverlayChans" class="tl-chans">
@@ -41817,6 +41818,36 @@ function smoothRunPace(times, values, windowS = 30) {
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   });
 }
+/* The pace axis's range, so a few stretches far slower or faster than the run cannot set the scale
+   for all of it (owner, 2026-11-16: "maybe an auto floor for Y axis?"). Pace is 1/speed, so a stop's
+   edge or a Doppler low reaches 18-20 min/mi and the auto-range spent half the height on it. Tukey's
+   fences (1.5 x IQR past the quartiles) over every value drawn on the axis: the conventional outlier
+   rule rather than a tuned percentile, and one that keeps a real second pace -- an interval session's
+   reps, the faster half of a negative split -- since those move the quartiles themselves. On a
+   steady run the quartiles sit close together and the fences alone would cut a real two-minute hill,
+   so a pace within PACE_AXIS_KEEP of the median is never cut (a display choice, not a measured
+   constant: 8:00 keeps 6:24 to 10:00). A clipped line runs off the plot edge, so the cut is visible.
+   Null (Plotly's auto-range) when nothing lies past a fence, or with too few points or no spread to
+   judge. Returned low-to-high; the caller reverses it. */
+const PACE_AXIS_KEEP = 1.25;
+function paceAxisRange(...series) {
+  const v = series.flat().filter(Number.isFinite).sort((a, b) => a - b);
+  if (v.length < 20) return null;
+  const q = (p) => { const i = (v.length - 1) * p, k = Math.floor(i); return v[k] + (v[Math.min(k + 1, v.length - 1)] - v[k]) * (i - k); };
+  const q1 = q(0.25), med = q(0.5), q3 = q(0.75), iqr = q3 - q1;
+  if (!(iqr > 0)) return null;
+  const lo = Math.max(v[0], Math.min(q1 - 1.5 * iqr, med / PACE_AXIS_KEEP));
+  const hi = Math.min(v[v.length - 1], Math.max(q3 + 1.5 * iqr, med * PACE_AXIS_KEEP));
+  if (lo === v[0] && hi === v[v.length - 1]) return null;
+  const pad = 0.05 * (hi - lo);
+  return [lo - pad, hi + pad];
+}
+/* Plotly ignores an explicit range under `autorange: 'reversed'`, so a reversed axis with a range is
+   given the range high-to-low instead. */
+function axisRangeProps(c) {
+  if (c.range) return { autorange: false, range: c.reversed ? [c.range[1], c.range[0]] : c.range };
+  return c.reversed ? { autorange: 'reversed' } : {};
+}
 /* Display-only smoothing: keep event markers and the source analysis untouched. A fixed
    sub-second window disappears at whole-ride scale, so use 1/200 of the timeline duration
    (about two pixels on a phone), capped at 30 s to retain sustained efforts and stops.
@@ -41867,9 +41898,48 @@ function loamOverlayChan(k) {
    running render for them is both slow on a long run and what moved the page under the reader. */
 function onOverlayChanToggle(el) {
   try { localStorage.setItem('loam_ov_' + el.dataset.ovChan, el.checked ? '1' : '0'); } catch (e) {}
+  redrawRunOverlay(el);
+}
+function redrawRunOverlay(el) {
   if (_footSeg && _footSeg.winD) renderRunOverlay(_footSeg.winD);
   else if (_lastRender && _lastRender.D && (_lastRender.fn === renderAllRunning || _lastRender.fn === renderAllGps)) renderRunOverlay(_lastRender.D);
   else rerenderUnits(el);
+}
+/* The overlay's "running only" box (owner, 2026-11-16: the pace line is "very choppy compared to HR
+   and cadence"). Cadence keeps only its confident windows and bridges the rest, so a stop never
+   reaches its line; pace draws whatever the GPS said there. A walk, a stop where Doppler jitters
+   around 1 m/s, or iOS's low-accuracy Doppler plateau mid-run (the live-pace entry in
+   decisions/analyzer-and-app.md: 1.7 m/s against a 2.4 m/s track at 159 spm) can hold 15-20 min/mi
+   for the half of the 30 s median window it takes to show. Which of the three made the reported
+   spikes is not known: that recording was not available. A log axis was the other suggestion and
+   does not help: pace is already 1/speed, and on that chart's 6-20 min/mi axis a log scale lifts
+   the 7-13 band only from 43% to 51% of the height while the spikes stay. Off by default, per
+   browser. */
+function loamOverlayRunOnly() { try { return localStorage.getItem('loam_ov_runonly') === '1'; } catch (e) { return false; } }
+function onOverlayRunOnlyToggle(el) {
+  try { localStorage.setItem('loam_ov_runonly', el.checked ? '1' : '0'); } catch (e) {}
+  redrawRunOverlay(el);
+}
+/* For each time, whether classifyGait's window centred nearest it (of those covering it) is not a
+   run: a walk, or idle. The same nearest-centre rule applyGaitBandCadence uses to pick a cadence
+   band, so pace and cadence leave out the same stretches. A time no window covers is kept: unknown
+   is not a stop. Returns null when there are no windows to read. */
+function gaitNotRunning(times, windows) {
+  if (!windows || !windows.length) return null;
+  const ws = windows.slice().sort((a, b) => a.t0 - b.t0);
+  const maxLen = ws.reduce((m, w) => Math.max(m, w.t1 - w.t0), 0);
+  return times.map((t) => {
+    let lo = 0, hi = ws.length - 1, k = -1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (ws[m].t0 <= t) { k = m; lo = m + 1; } else hi = m - 1; }
+    let best = null, bestD = Infinity;
+    for (let j = k; j >= 0 && ws[j].t0 >= t - maxLen; j--) {
+      const w = ws[j];
+      if (t > w.t1) continue;
+      const d = Math.abs((w.t0 + w.t1) / 2 - t);
+      if (d < bestD) { bestD = d; best = w; }
+    }
+    return !!best && best.gait !== 'run';
+  });
 }
 function onTimelineChanToggle(el) {
   const k = el.dataset.chan;
@@ -43424,6 +43494,9 @@ const LOAM_NB = {
     'alle avhukede kanaler i ett plott · de to første gir navn til venstre og høyre akse',
   'Rolling median that suppresses the spikes from stops':
     'Glidende median som demper toppene fra stopp',
+  'running only': 'bare løping',
+  'Leave stops and walked stretches out of pace and GAP, as cadence already does.':
+    'Utelater stopp og gåstrekk fra tempo og GAP, slik kadensen allerede gjør.',
   'Estimated from the phone or AirPods, not measured: treat it as a trend, not a number.':
     'Anslått fra telefonen eller AirPods, ikke målt: les det som en trend, ikke et tall.',
   'Rider power': 'Ryttereffekt',
@@ -48702,6 +48775,7 @@ function renderRunTimeline(D) {
     }
     if (paceOn || gapOn) {
       chans.push({ key: 'pace', axis: paceAxis, label: paceOn ? loamT('pace') : 'GAP', color: paceOn ? '#6da7c4' : '#b899db', reversed: true,
+        range: paceAxisRange(...traces.filter(tr => tr.yaxis === paceAxis).map(tr => tr.y)),
         title: paceOn ? loamT('pace ({u})', { u: U.metric() ? 'min/km' : 'min/mi' }) : `GAP (${U.metric() ? 'min/km' : 'min/mi'})` });
     }
   } else {
@@ -48979,8 +49053,7 @@ function renderRunTimeline(D) {
     layout[axisKey(c.axis)] = {
       title: { text: c.title, font: { color: c.color, size: 11 } },
       gridcolor: '#e2e8f0', tickfont: { color: c.color },
-      ...(c.reversed ? { autorange: 'reversed' } : {}),
-      ...(c.range ? { range: c.range } : {}),
+      ...axisRangeProps(c),
       ...(stacked ? { domain: domains[i] }
         /* The single-plot path is unchanged: altitude overlays the first axis on the right. */
         : i > 0 ? { overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)' } : {}),
@@ -49051,21 +49124,31 @@ function renderRunOverlay(D) {
 
   const loc = runPaceSamples(D.sensors.location.filter(r => r.t >= ride.start && r.t <= ride.end), ride.pausedSpans);
   const t = loc.map(r => X(r.t));
-  const paceY = loc.map(r => (r.speed != null && !isNaN(r.speed) && r.speed >= 1.0) ? perUnit / r.speed / 60 : null);
+  const paceRaw = loc.map(r => (r.speed != null && !isNaN(r.speed) && r.speed >= 1.0) ? perUnit / r.speed / 60 : null);
+  /* "running only": the box is offered when it would drop something from the line, and only on a
+     run, since on a walk the gait read's other answer is a stop the 1 m/s floor already gaps. */
+  const notRun = sport === 'run' ? gaitNotRunning(loc.map(r => r.t), D.gait && D.gait.windows) : null;
+  const runOnlyOffered = !!notRun && paceRaw.some((p, i) => p != null && notRun[i]);
+  const runOnly = runOnlyOffered && loamOverlayRunOnly();
+  { const lbl = document.getElementById('overlayRunOnlyLbl'), cb = document.getElementById('overlayRunOnly');
+    if (lbl) lbl.classList.toggle('hidden', !runOnlyOffered);
+    if (cb) cb.checked = loamOverlayRunOnly(); }
+  const keepRun = (v, i) => (runOnly && notRun[i]) ? null : v;
+  const paceY = paceRaw.map(keepRun);
   if (paceY.some(p => p != null)) {
     const y = smooth ? smoothRunPace(t, paceY) : paceY;
     ch.pace = { traces: [{ x: t, y, type: 'scatter', mode: 'lines', line: { color: '#6da7c4', width: smooth ? 2.5 : 1.5 },
       name: loamT('Pace ({u})', { u: unitPace }), connectgaps: false, text: y.map(fmtPace), hovertemplate: '%{text}<extra></extra>' }],
-      color: '#6da7c4', title: loamT('pace ({u})', { u: unitPace }), reversed: true };
+      color: '#6da7c4', title: loamT('pace ({u})', { u: unitPace }), reversed: true, paceAxis: true };
   }
   const baroRows = D.sensors.baro || [];
   const altPts = climbAltSeries(baroRows, D.sensors.location, ride);
-  const gapY = timelineGapSpeeds(loc, altPts).map(v => Number.isFinite(v) && v > 0 ? perUnit / v / 60 : null);
+  const gapY = timelineGapSpeeds(loc, altPts).map(v => Number.isFinite(v) && v > 0 ? perUnit / v / 60 : null).map(keepRun);
   if (gapY.some(p => p != null)) {
     const y = smooth ? smoothRunPace(t, gapY) : gapY;
     ch.gap = { traces: [{ x: t, y, type: 'scatter', mode: 'lines', line: { color: '#b899db', width: smooth ? 2.5 : 1.5 },
       name: `GAP (${unitPace})`, connectgaps: false, text: y.map(fmtPace), hovertemplate: 'GAP %{text}<extra></extra>' }],
-      color: '#b899db', title: `GAP (${unitPace})`, reversed: true, shareWith: 'pace' };
+      color: '#b899db', title: `GAP (${unitPace})`, reversed: true, shareWith: 'pace', paceAxis: true };
   }
   const hrRows = (D.sensors.heartRate || []).filter(r => r.t >= ride.start && r.t <= ride.end && r.bpm != null);
   if (hrRows.length > 1) {
@@ -49128,8 +49211,7 @@ function renderRunOverlay(D) {
     layout['yaxis' + id.slice(1)] = {
       title: { text: i < 2 ? c.title : '', font: { color: c.color, size: 11 } },
       tickfont: { color: c.color }, gridcolor: i === 0 ? '#e2e8f0' : 'rgba(0,0,0,0)', zeroline: false,
-      ...(c.reversed ? { autorange: 'reversed' } : {}),
-      ...(c.range ? { range: c.range } : {}),
+      ...axisRangeProps(c.paceAxis ? { ...c, range: paceAxisRange(...traces.filter(tr => tr.yaxis === id).map(tr => tr.y)) } : c),
       ...(i > 0 ? { overlaying: 'y', side: 'right' } : {}),
       ...(i > 1 ? { visible: false } : {}),
     };
@@ -65442,7 +65524,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '19d511ef0 · 2026-11-15';
+const LOAM_BUILD = '37048f622 · 2026-11-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
