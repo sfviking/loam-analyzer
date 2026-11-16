@@ -5242,7 +5242,7 @@ function parseUTCFromFilename(name) {
 }
 
 function emptyCombinedSensors() {
-  return { gravity: [], gyro: [], accel: [], location: [], baro: [], headphone: [], wrist: [], annotations: [], heartRate: [], pedometer: [], activity: [] };
+  return { gravity: [], gyro: [], accel: [], location: [], baro: [], headphone: [], wrist: [], annotations: [], heartRate: [], pedometer: [], activity: [], erg: [] };
 }
 /* Append one combined-CSV row to the per-channel arrays. Factored out of extractFromCombined so the
    streaming parser (loadCombinedCSV) can feed rows in one at a time, never holding the whole file. */
@@ -5328,6 +5328,15 @@ function addCombinedRow(out, r) {
     out.pedometer.push({ t, steps: r.pedometer_steps });
   if (r.heartRate_bpm != null)
     out.heartRate.push({ t, bpm: r.heartRate_bpm });
+  /* A rowing machine's own monitor (`erg_*`, written only for a declared rowing recording). Sparse:
+     a few rows a second. Read by rowErg. */
+  if (r.erg_distance != null || r.erg_strokeCount != null || r.erg_strokeRate != null || r.erg_power != null || r.erg_avgPower != null) {
+    const e = { t };
+    for (const k of ['elapsed', 'distance', 'speed', 'strokeRate', 'pace', 'avgPace', 'power', 'avgPower', 'calories', 'heartRate', 'strokeCount',
+      'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState'])
+      if (r['erg_' + k] != null) e[k] = r['erg_' + k];
+    out.erg.push(e);
+  }
   /* CoreMotion's own activity classifier (`CMMotionActivity`: stationary / walking / running /
      cycling / automotive / unknown), sparse, written since the schema was defined and never read
      until the indoor ski view wanted a third opinion about a leg the barometer had already ruled
@@ -7461,6 +7470,67 @@ function rowSummary(read, hrRows, ride) {
     hrMax: hr.length ? Math.max(...hr.map(r => r.bpm)) : null,
     hrFirst: hr.length >= 2 ? hr[0].bpm : null,
     hrLast: hr.length >= 2 ? hr[hr.length - 1].bpm : null,
+  };
+}
+
+/* ===== The machine's own monitor =============================================================
+   A Concept2 PM5's numbers, read over Bluetooth by the capture app and written as `erg_*` columns
+   (ios/Sources/Capture/PM5Frames.swift). Distance and the monitor's clock are summed from their
+   own increases, so a monitor reset mid-recording does not subtract a workout. The monitor may
+   send a stroke's data more than once; the last copy of each stroke number is kept. */
+const ROW_ERG_FIELDS = ['elapsed', 'distance', 'speed', 'strokeRate', 'pace', 'avgPace', 'power', 'avgPower', 'calories', 'heartRate', 'strokeCount',
+  'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState'];
+const ROW_ERG_MIN_STROKES = 5;
+const ROW_ERG_PACE_STEP_S = 2;
+function rowErg(ergRows, ride) {
+  const rows = (ergRows || []).filter(r => r && Number.isFinite(r.t) && (!ride || (r.t >= ride.start && r.t <= ride.end)))
+    .slice().sort((a, b) => a.t - b.t);
+  const num = (k) => rows.filter(r => Number.isFinite(r[k])).map(r => r[k]);
+  const med = (xs) => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+  const mean = (xs) => { const s = xs.filter(Number.isFinite); return s.length ? s.reduce((a, v) => a + v, 0) / s.length : null; };
+  const gained = (xs) => { let g = 0; for (let i = 1; i < xs.length; i++) if (xs[i] > xs[i - 1]) g += xs[i] - xs[i - 1]; return g; };
+  const dist = num('distance');
+  if (dist.length < 2) return null;
+  const distanceM = gained(dist), elapsedS = gained(num('elapsed'));
+  const strokes = [];
+  let cur = null;
+  for (const r of rows) {
+    if (Number.isFinite(r.strokeCount) && (!cur || r.strokeCount !== cur.n)) { cur = { n: r.strokeCount, t: r.t }; strokes.push(cur); }
+    if (!cur) continue;
+    if (Number.isFinite(r.strokeCount)) {
+      cur.driveLengthM = r.driveLength; cur.driveS = r.driveTime; cur.recoveryS = r.recoveryTime;
+      cur.strokeDistanceM = r.strokeDistance; cur.peakForceN = r.peakForce; cur.avgForceN = r.avgForce; cur.workJ = r.work;
+    }
+    if (Number.isFinite(r.power) && r.power > 0) cur.powerW = r.power;
+  }
+  const real = strokes.filter(k => k.driveLengthM > 0 && k.driveS > 0);
+  const third = Math.floor(real.length / 3);
+  const thirds = third >= ROW_ERG_MIN_STROKES;
+  const first = thirds ? real.slice(0, third) : [], last = thirds ? real.slice(-third) : [];
+  const powers = real.map(k => k.powerW).filter(Number.isFinite);
+  const paceSeries = [];
+  for (const r of rows) {
+    if (!(r.pace > 0)) continue;
+    if (!paceSeries.length || r.t - paceSeries[paceSeries.length - 1].t >= ROW_ERG_PACE_STEP_S) paceSeries.push({ t: r.t, paceS: r.pace });
+  }
+  const avgPower = num('avgPower').filter(v => v > 0), cal = num('calories');
+  return {
+    n: rows.length,
+    distanceM, elapsedS,
+    pace500S: distanceM > 0 && elapsedS > 0 ? 500 * elapsedS / distanceM : null,
+    strokes: real.length,
+    rateMedian: med(num('strokeRate').filter(v => v > 0)),
+    powerAvgW: powers.length >= ROW_ERG_MIN_STROKES ? mean(powers) : (avgPower.length ? avgPower[avgPower.length - 1] : null),
+    powerMaxW: powers.length ? Math.max(...powers) : null,
+    dragFactor: med(num('dragFactor').filter(v => v > 0)),
+    calories: cal.length ? Math.max(...cal) : null,
+    driveLengthM: med(real.map(k => k.driveLengthM)), driveS: med(real.map(k => k.driveS)), recoveryS: med(real.map(k => k.recoveryS).filter(v => v > 0)),
+    strokeDistanceM: med(real.map(k => k.strokeDistanceM).filter(v => v > 0)),
+    peakForceN: med(real.map(k => k.peakForceN).filter(v => v > 0)), avgForceN: med(real.map(k => k.avgForceN).filter(v => v > 0)),
+    workJ: med(real.map(k => k.workJ).filter(v => v > 0)),
+    powerFirstW: thirds ? mean(first.map(k => k.powerW)) : null, powerLastW: thirds ? mean(last.map(k => k.powerW)) : null,
+    driveLengthFirstM: thirds ? med(first.map(k => k.driveLengthM)) : null, driveLengthLastM: thirds ? med(last.map(k => k.driveLengthM)) : null,
+    perStroke: real, paceSeries,
   };
 }
 
@@ -28601,7 +28671,14 @@ async function analyze(files) {
       const stroke = cyc ? { ...cyc, handle: r3(cyc.handle), head: cyc.head ? r3(cyc.head) : null,
         strokes: cyc.strokes.map(k => ({ t: +k.t.toFixed(1), periodS: +k.periodS.toFixed(2), lengthM: +k.lengthM.toFixed(3), driveS: +k.driveS.toFixed(2),
           peakSpeedMps: +k.peakSpeedMps.toFixed(2), peakAt: k.peakAt == null ? null : +k.peakAt.toFixed(2) })) } : null;
-      const rowRender = { rowing: summary, series, channels, stroke,
+      /* The machine's own monitor, when the app was connected to one. */
+      const ergRead = rowErg(sensors.erg, spanRide);
+      const r2e = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
+      const erg = ergRead ? { ...ergRead,
+        perStroke: ergRead.perStroke.map(k => ({ t: r2e(k.t, 1), powerW: r2e(k.powerW, 0), driveLengthM: r2e(k.driveLengthM), driveS: r2e(k.driveS), recoveryS: r2e(k.recoveryS), peakForceN: r2e(k.peakForceN, 0) })),
+        paceSeries: ergRead.paceSeries.map(c => ({ t: r2e(c.t, 1), paceS: r2e(c.paceS, 1) })) } : null;
+      channels.ergRows = ergRead ? ergRead.n : 0;
+      const rowRender = { rowing: summary, series, channels, stroke, erg,
         pieces: read.pieces.map(p => ({ start: +p.start.toFixed(1), end: +p.end.toFixed(1), spm: +p.spm.toFixed(1), strokes: p.strokes })),
         sport: 'rowing', spanS: spanRide.end - spanRide.start, imuRateHz,
         title: sensorFile && sensorFile.name, key: nativeRecordingKey(contentHash || (sensorFile && sensorFile.name)) };
@@ -37899,24 +37976,31 @@ function renderRowing(D) {
   if (!el) return;
   const s = (D && D.rowing) || {};
   const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
+  const e = D && D.erg;
+  const pace = (v) => (v > 0 ? `${Math.floor(v / 60)}:${(v % 60).toFixed(1).padStart(4, '0')}` : '—');
   const from = s.source === 'wrist' ? loamT('from your watch') : s.source === 'head' ? loamT('from your AirPods') : loamT('from the phone');
   const tiles = [
+    e && e.distanceM > 0 ? tile(Math.round(e.distanceM) + ' m', loamT('metres rowed'), loamT('from the monitor')) : '',
+    e && e.pace500S ? tile(pace(e.pace500S), loamT('average per 500 m'), loamT('from the monitor')) : '',
+    e && e.powerAvgW ? tile(Math.round(e.powerAvgW) + ' W', loamT('average power'), loamT('from the monitor')) : '',
     tile(s.rowingS != null ? fmtDuration(s.rowingS) : '—', loamT('time rowing')),
     s.rateMedian != null ? tile(Math.round(s.rateMedian) + ' spm', senseT('Stroke rate', 'rowing'), from) : '',
     s.rateP10 != null && s.rateP90 != null ? tile(`${Math.round(s.rateP10)}&ndash;${Math.round(s.rateP90)}`, loamT('stroke rate range, p10 to p90')) : '',
     s.rateFirstHalf != null ? tile(`${Math.round(s.rateFirstHalf)} &rarr; ${Math.round(s.rateSecondHalf)}`, loamT('stroke rate, first half to second half')) : '',
-    s.strokes ? tile('&asymp; ' + s.strokes, loamT('strokes, from stroke rate')) : '',
+    e && e.strokes ? tile(String(e.strokes), loamT('strokes, counted by the monitor')) : s.strokes ? tile('&asymp; ' + s.strokes, loamT('strokes, from stroke rate')) : '',
     s.pieces > 1 ? tile(String(s.pieces), loamT('pieces'), loamT('stretches of rowing with a rest between')) : '',
     s.hrAvg != null ? tile(`${s.hrAvg} / ${s.hrMax}`, loamT('heart rate avg / max')) : '',
   ].filter(Boolean).join('');
-  const lead = loamT('<strong>Read from how your body moved on the rower</strong>: stroke rate, time rowing, strokes and, when a watch was worn, heart rate. <strong>Distance, pace and power are not here.</strong> They depend on how hard the flywheel is pulled, which only the machine&rsquo;s own monitor measures, so they are left out rather than estimated.');
+  const leadErg = loamT('<strong>Distance, pace and power are the machine&rsquo;s own</strong>, read from its monitor over Bluetooth while you rowed. Stroke rate, time rowing, the stroke replay and heart rate are read from how your body moved.');
+  const leadBody = loamT('<strong>Read from how your body moved on the rower</strong>: stroke rate, time rowing, strokes and, when a watch was worn, heart rate. <strong>Distance, pace and power are not here.</strong> They depend on how hard the flywheel is pulled, which only the machine&rsquo;s own monitor measures, so they are left out rather than estimated.');
   const rest = loamT('Each stroke carries your hands, head and hips along the rail once. A fifteen-second stretch counts as rowing when that back-and-forth is both strong and regular, between {lo} and {hi} strokes a minute. The stroke count is the time rowing multiplied by the rate, so it is an estimate. Checked against one session on a Concept2 at 31 strokes a minute; other rates and interval sessions are not checked yet.',
     { lo: Math.round(ROW_LO_HZ * 60), hi: Math.round(ROW_HI_HZ * 60) });
   const hasHr = (D && D.series && D.series.hr || []).length >= 2;
   el.innerHTML = `
     <div class="section-title"><span class="activity-title">${activityIcon('rowing')}<span>${loamT('Rowing machine')}</span></span> <span class="beta-badge">${loamT('BETA')}</span></div>
-    ${leadNote(lead, rest, 'strength-tablenote', loamT('How this is read'))}
+    ${leadNote(e ? leadErg : leadBody, e ? rest + ' ' + loamT('With the monitor connected, the stroke count shown is the monitor&rsquo;s own, not that estimate.') : rest, 'strength-tablenote', loamT('How this is read'))}
     <div class="stiles ski-stiles">${tiles}</div>
+    <div id="rowErgHost"></div>
     <div class="section-title" style="margin-top:22px">${senseT('Stroke rate', 'rowing')}<span class="subtitle">${hasHr ? loamT('strokes per minute, with heart rate') : loamT('strokes per minute')}</span></div>
     <div class="panel">
       <div id="rowRateChart" class="chart" style="height:${hasHr ? 300 : 240}px"></div>
@@ -37924,9 +38008,62 @@ function renderRowing(D) {
     </div>
     <div id="rowStrokeHost"></div>`;
   drawRowingRate(D);
+  renderRowErg(D);
   renderRowStroke(D);
   renderCoachPanel(D, 'rowing', { digest: rowDigest(D) });
   setTimeout(decorateCardShares, 0);
+}
+
+/* FROM THE MONITOR: each stroke as the machine measured it, and how the watch's reads compare. */
+function renderRowErg(D) {
+  const el = document.getElementById('rowErgHost');
+  if (!el) return;
+  const e = D && D.erg, s = (D && D.rowing) || {}, c = rowStrokeOf(D);
+  if (!e || !e.strokes) { el.innerHTML = ''; return; }
+  const tile = (v, l) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div></div>`;
+  const tiles = [
+    e.driveLengthM ? tile(e.driveLengthM.toFixed(2) + ' m', loamT('drive length')) : '',
+    e.driveS ? tile(e.driveS.toFixed(2) + ' s', loamT('drive time')) : '',
+    e.recoveryS ? tile(e.recoveryS.toFixed(2) + ' s', loamT('recovery time')) : '',
+    e.peakForceN ? tile(Math.round(e.peakForceN) + ' N', loamT('peak force on the handle')) : '',
+    e.workJ ? tile(Math.round(e.workJ) + ' J', loamT('work per stroke')) : '',
+    e.dragFactor ? tile(String(Math.round(e.dragFactor)), loamT('drag factor')) : '',
+    e.powerFirstW != null && e.powerLastW != null ? tile(`${Math.round(e.powerFirstW)} &rarr; ${Math.round(e.powerLastW)} W`, loamT('power, first third to last third')) : '',
+  ].filter(Boolean).join('');
+  const agree = [];
+  if (e.rateMedian != null && s.rateMedian != null)
+    agree.push(loamT('Stroke rate: the monitor read {a}, Loam read {b} from your movement.', { a: Math.round(e.rateMedian), b: Math.round(s.rateMedian) }));
+  if (c && e.driveLengthM)
+    agree.push(loamT('Handle travel: the monitor measured {a} m a stroke, your watch {b} m.', { a: e.driveLengthM.toFixed(2), b: c.handleTravelM.toFixed(2) }));
+  if (c && e.driveS)
+    agree.push(loamT('Drive time: the monitor measured {a} s, your watch {b} s.', { a: e.driveS.toFixed(2), b: c.driveS.toFixed(2) }));
+  el.innerHTML = `
+    <div class="section-title" style="margin-top:22px">${loamT('From the monitor')}<span class="subtitle">${loamT('each stroke as the machine measured it')}</span></div>
+    <div class="panel">
+      <div class="stiles ski-stiles">${tiles}</div>
+      <div id="rowErgChart" class="chart" style="height:260px"></div>
+      <div class="strength-tablenote analysis-explanation">${loamT('One point per stroke. Power is what reached the flywheel; drive length is how far the handle travelled, by the machine&rsquo;s own sensor.')}${agree.length ? ' ' + agree.join(' ') : ''}</div>
+    </div>`;
+  drawRowErgChart(e);
+}
+function drawRowErgChart(e) {
+  const el = document.getElementById('rowErgChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const ks = (e.perStroke || []).filter(k => k.powerW != null || k.driveLengthM != null);
+  if (ks.length < 2) { el.innerHTML = ''; return; }
+  const x = ks.map(k => k.t / 60);
+  loamPlot(el, [
+    { x, y: ks.map(k => k.powerW), type: 'scatter', mode: 'lines+markers', name: loamT('Power'), line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 },
+      hovertemplate: '%{x:.1f} min<br>%{y:.0f} W<extra></extra>' },
+    { x, y: ks.map(k => k.driveLengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Drive length'), yaxis: 'y2', line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
+      hovertemplate: '%{x:.1f} min<br>%{y:.2f} m<extra></extra>' },
+  ], {
+    margin: { l: 44, r: 44, t: 8, b: 42 },
+    xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
+    yaxis: { title: 'W', fixedrange: true, rangemode: 'tozero' },
+    yaxis2: { title: 'm', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false, rangemode: 'tozero' },
+    showlegend: true, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  }, { displayModeBar: false, responsive: true });
 }
 
 /* What the rowing coach is given: the numbers on the page and nothing else, with the limits spelled
@@ -37938,7 +38075,7 @@ function rowStrokeOf(D) {
   return D && D.stroke && D.rowing && D.rowing.source === 'wrist' ? D.stroke : null;
 }
 function rowDigest(D) {
-  const s = D.rowing, c = rowStrokeOf(D), r2 = (v) => (v == null ? null : +(+v).toFixed(2));
+  const s = D.rowing, c = rowStrokeOf(D), e = D.erg, r2 = (v) => (v == null ? null : +(+v).toFixed(2));
   return {
     sport: 'rowing machine',
     time_rowing_s: r2(s.rowingS), recording_s: r2(s.windowS), pieces: (D.pieces || []).map(p => ({ start_s: p.start, end_s: p.end, strokes_per_min: p.spm, strokes_estimated: p.strokes })),
@@ -37955,13 +38092,26 @@ function rowDigest(D) {
       arm_pull_done_when_body_halfway_through_drive: r2(c.armAtHalfBody),
       arm_reach_left_when_body_forward_again: r2(c.armLeftAtBodyForward),
     },
-    limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. Distance, split, pace, watts, calories and drag factor are NOT measured: they are the machine monitor\'s. The stroke count is time times rate. Checked against one session on one machine.',
+    monitor: !e ? null : {
+      source: 'the rowing machine\'s own monitor, over Bluetooth',
+      distance_m: r2(e.distanceM), monitor_time_s: r2(e.elapsedS), average_pace_s_per_500m: r2(e.pace500S),
+      average_power_w: r2(e.powerAvgW), max_stroke_power_w: r2(e.powerMaxW), power_first_third_w: r2(e.powerFirstW), power_last_third_w: r2(e.powerLastW),
+      strokes_counted: e.strokes, stroke_rate_median_spm: r2(e.rateMedian), drag_factor: r2(e.dragFactor), calories: r2(e.calories),
+      drive_length_m: r2(e.driveLengthM), drive_length_first_third_m: r2(e.driveLengthFirstM), drive_length_last_third_m: r2(e.driveLengthLastM),
+      drive_s: r2(e.driveS), recovery_s: r2(e.recoveryS), recovery_per_drive: e.driveS > 0 && e.recoveryS > 0 ? r2(e.recoveryS / e.driveS) : null,
+      distance_per_stroke_m: r2(e.strokeDistanceM), peak_handle_force_n: r2(e.peakForceN), average_handle_force_n: r2(e.avgForceN), work_per_stroke_j: r2(e.workJ),
+    },
+    limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. '
+      + (e ? 'Distance, pace, watts, drag factor and the per-stroke drive numbers under `monitor` are the machine\'s own and may be quoted as measured; where `monitor` and `average_stroke` disagree, the monitor is the reference.'
+        : 'Distance, split, pace, watts, calories and drag factor are NOT measured: they are the machine monitor\'s. The stroke count is time times rate.')
+      + ' Checked against one session on one machine.',
   };
 }
 function rowCoachPrompt(level) {
   return 'You are an indoor rowing (rowing machine) coach reading one recorded session. Use ONLY the numbers in the digest; quote them. '
     + 'What is measured: stroke rate, time rowing, an estimated stroke count, heart rate when present, and the average stroke as the handle\'s and the head\'s travel along the rail, with drive and recovery times and how the arms move relative to the body. '
-    + 'What is NOT measured and must never be stated, estimated or implied: distance, split or pace per 500 m, watts, calories, drag factor; leg drive, knee angle, seat position, shin angle, back angle, layback, posture, or whether legs or back moved first. If asked, say it is not in the recording and that the machine\'s monitor is the source for distance, split and watts. '
+    + 'When the digest has a `monitor` block, the session was recorded with the machine\'s own monitor connected: its distance, pace per 500 m, watts, drag factor, stroke count and per-stroke drive length, drive time, recovery time, force and work are measured by the machine and may be quoted and coached on. '
+    + 'What is NOT measured and must never be stated, estimated or implied: without a `monitor` block, distance, split or pace per 500 m, watts, calories and drag factor; with or without it, leg drive, knee angle, seat position, shin angle, back angle, layback, posture, or whether legs or back moved first. If asked, say it is not in the recording and that the machine\'s monitor is the source for distance, split and watts. '
     + 'The arm reads are the handle\'s travel minus the head\'s. They have not been checked against video: present them as what the sensors suggest, not as fact. '
     + 'You may compare the measured numbers with standard teaching: legs then body then arms on the drive with the arms straight until late; arms away, then body, then slide on the recovery; a recovery near twice the drive at steady rates of 18 to 24 strokes a minute, closing toward even above about 30. Say plainly when a number is already in a sensible range. '
     + 'Give at most three priorities, most useful first, each with one concrete drill or cue the athlete can try on the next session, and say which number would show it worked. Heart rate is descriptive only: no zones, no fitness or medical claims. Do not invent trends from a single session. Keep it short. '
@@ -46194,6 +46344,29 @@ const LOAM_NB = {
     'Ingenting her er sjekket mot video. Den vanlige læren, til sammenligning: i draget går beina først med strake armer, og armene avslutter; på vei tilbake går hendene bort først, så kroppen, så sleiden; og i jevn takt tar framglidingen omtrent dobbelt så lang tid som draget, og nærmer seg likt når takten går over 30.',
   'Stroke rate [rowing]': 'Takt',
   'time rowing': 'tid du rodde',
+  'metres rowed': 'meter rodd',
+  'average per 500 m': 'snitt per 500 m',
+  'average power': 'snitteffekt',
+  'from the monitor': 'fra monitoren',
+  'strokes, counted by the monitor': 'tak, talt av monitoren',
+  '<strong>Distance, pace and power are the machine&rsquo;s own</strong>, read from its monitor over Bluetooth while you rowed. Stroke rate, time rowing, the stroke replay and heart rate are read from how your body moved.':
+    '<strong>Distanse, tempo og effekt er maskinens egne</strong>, lest fra monitoren over Bluetooth mens du rodde. Takt, tid du rodde, takvisningen og puls er lest fra hvordan kroppen din beveget seg.',
+  'From the monitor': 'Fra monitoren',
+  'With the monitor connected, the stroke count shown is the monitor&rsquo;s own, not that estimate.': 'Med monitoren tilkoblet er antall tak monitorens eget, ikke det anslaget.',
+  'each stroke as the machine measured it': 'hvert tak slik maskinen målte det',
+  'drive length': 'draglengde',
+  'drive time': 'dragtid',
+  'recovery time': 'returtid',
+  'peak force on the handle': 'toppkraft på håndtaket',
+  'work per stroke': 'arbeid per tak',
+  'drag factor': 'dragfaktor',
+  'power, first third to last third': 'effekt, første til siste tredel',
+  'Drive length': 'Draglengde',
+  'One point per stroke. Power is what reached the flywheel; drive length is how far the handle travelled, by the machine&rsquo;s own sensor.':
+    'Ett punkt per tak. Effekt er det som nådde svinghjulet; draglengde er hvor langt håndtaket gikk, målt av maskinens egen sensor.',
+  'Stroke rate: the monitor read {a}, Loam read {b} from your movement.': 'Takt: monitoren leste {a}, Loam leste {b} fra bevegelsen din.',
+  'Handle travel: the monitor measured {a} m a stroke, your watch {b} m.': 'Håndtakets vei: monitoren målte {a} m per tak, klokken din {b} m.',
+  'Drive time: the monitor measured {a} s, your watch {b} s.': 'Dragtid: monitoren målte {a} s, klokken din {b} s.',
   'stroke rate range, p10 to p90': 'taktområde, p10 til p90',
   'stroke rate, first half to second half': 'takt, første til andre halvdel',
   'strokes, from stroke rate': 'tak, fra takten',
@@ -65524,7 +65697,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '37048f622 · 2026-11-16';
+const LOAM_BUILD = '771034581 · 2026-11-16';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
