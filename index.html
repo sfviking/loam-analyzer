@@ -7546,14 +7546,21 @@ function rowErg(ergRows, ride) {
    and back. What two sensors do give is the handle against the head: when the arms bend and straighten
    relative to the body.
 
-   WHICH END IS THE CATCH. Acceleration has no sign that says front from back. The handle dwells at
-   the finish (it slows into the body and turns) and reverses quickly at the catch: on the graded
-   piece it spent 29% of the stroke in the last 15% of its travel at one end and 16% at the other.
-   When the two ends dwell alike (ROW_DWELL_RATIO) the direction is not guessed and no cycle is
-   returned.
+   WHICH END IS THE CATCH. Acceleration has no sign that says front from back. With the machine's
+   monitor connected, the monitor names it (rowErgFinishSign). Without one, the end the handle dwells
+   at is taken as the catch: the rower slows the slide into it, and the hands turn quickly away from
+   the finish. That premise was the other way round until the first session recorded with a monitor
+   (2026-11-19), where the handle spent 20% of the stroke near the catch and 14% near the finish, and
+   the old rule drew every stroke back to front. When the two ends dwell alike (ROW_DWELL_RATIO) the
+   direction is not guessed and no cycle is returned. A rower who lingers at the finish instead is
+   still read backwards without a monitor.
 
-   NOT GRADED. There is no video of the piece. Handle travel read 1.41 m and head travel 1.08 m with
-   6 cm and 3 cm of stroke-to-stroke spread, and the drive 0.92 s against a 0.96 s recovery. */
+   WHAT THE DRIVE HERE IS. Catch to finish of the HANDLE: 0.95 s on that session at 30 strokes a
+   minute, where the monitor timed 0.60 s of drive. The monitor times only the part that speeds the
+   flywheel up, so the two are different quantities and the watch's is the longer.
+
+   Handle travel read 1.50 m against the monitor's 1.36 m drive length on that session; the
+   stroke-to-stroke spread and the thirds are not graded. No video. */
 const ROW_CYCLE_FS = 50;
 const ROW_CYCLE_N = 60;
 const ROW_CYCLE_MIN_STROKES = 8;
@@ -7561,6 +7568,13 @@ const ROW_CYCLE_MIN_STROKES = 8;
 const ROW_CYCLE_MIN_THIRD = 5;
 const ROW_DWELL_BAND = 0.15;
 const ROW_DWELL_RATIO = 1.25;
+/* The monitor sends a stroke's data as the drive ends, over Bluetooth, so it arrives after the
+   handle has reached the finish. Read the handle this long before each notification. On the
+   2026-11-19 session the handle sat on the finish side at every one of 55 notifications for any
+   offset from -0.45 s to +0.15 s; this centres that range. */
+const ROW_ERG_FINISH_LEAD_S = 0.15;
+/* Strokes that must agree before the monitor's answer is taken over the dwell's. */
+const ROW_ERG_ORIENT_AGREE = 0.8;
 
 /** Drift-free position (m) along the principal axis for one source over [start, end], at ROW_CYCLE_FS. */
 function rowTravel(rows, start, end, periodS) {
@@ -7594,9 +7608,35 @@ function rowTravel(rows, start, end, periodS) {
 }
 
 /**
+ * Which way along the rail is the finish, from the machine's monitor: +1 when the handle trace is
+ * high at the end of each drive, -1 when it is low, null without enough strokes that agree. The
+ * first copy of each stroke number is the one sent as the drive ends (a second copy follows when the
+ * recovery completes).
+ */
+function rowErgFinishSign(hand, ergRows, start, end) {
+  if (!hand || !hand.length || !ergRows || !ergRows.length) return null;
+  const t0 = hand[0].t;
+  const at = (t) => { const i = Math.round((t - t0) * ROW_CYCLE_FS); return i >= 0 && i < hand.length ? hand[i].p : null; };
+  const rows = ergRows.filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.strokeCount)).sort((a, b) => a.t - b.t);
+  let up = 0, down = 0, last = null;
+  for (const r of rows) {
+    if (r.strokeCount === last) continue;
+    last = r.strokeCount;
+    if (!(r.driveTime > 0) || r.t < start || r.t > end) continue;
+    const v = at(r.t - ROW_ERG_FINISH_LEAD_S);
+    if (v > 0) up++;
+    else if (v < 0) down++;
+  }
+  const n = up + down;
+  if (n < ROW_CYCLE_MIN_STROKES || Math.max(up, down) < ROW_ERG_ORIENT_AGREE * n) return null;
+  return up > down ? 1 : -1;
+}
+
+/**
  * The average stroke of one piece: the handle (wrist) and, when AirPods were worn, the head, as
  * metres from the catch at ROW_CYCLE_N points, with the drive and recovery times. Null when there is
- * no wrist stream, too few clean strokes, or the catch cannot be told from the finish.
+ * no wrist stream, too few clean strokes, or the catch cannot be told from the finish. `sensors.erg`,
+ * the monitor's rows when it was connected, decides the catch when it can.
  */
 function rowStrokeCycle(sensors, piece) {
   if (!piece || !(piece.spm > 0)) return null;
@@ -7610,8 +7650,12 @@ function rowStrokeCycle(sensors, piece) {
   const near = (v, edge) => Math.abs(v - edge) <= ROW_DWELL_BAND * range;
   const atHi = hand.filter(s => near(Math.min(s.p, p98), p98)).length;
   const atLo = hand.filter(s => near(Math.max(s.p, p2), p2)).length;
-  if (Math.max(atHi, atLo) < ROW_DWELL_RATIO * Math.min(atHi, atLo)) return null;
-  const sign = atHi > atLo ? 1 : -1;
+  /* +1 when the high end is the finish. The dwell's answer is kept beside the monitor's so a session
+     with both grades the dwell rule. */
+  const fromDwell = Math.max(atHi, atLo) < ROW_DWELL_RATIO * Math.min(atHi, atLo) ? null : (atHi > atLo ? -1 : 1);
+  const fromMonitor = rowErgFinishSign(hand, sensors.erg, piece.start, piece.end);
+  const sign = fromMonitor || fromDwell;
+  if (!sign) return null;
   const hp = hand.map(s => sign * s.p);
   const floor = (sign > 0 ? p2 : -p98) + 0.3 * range;
   const minGap = Math.round(0.6 * period * ROW_CYCLE_FS);
@@ -7668,6 +7712,7 @@ function rowStrokeCycle(sensors, piece) {
   const first = strokes.slice(0, third), last = strokes.slice(strokes.length - third);
   const out = {
     n, periodS, finishIndex: finish,
+    orientedBy: fromMonitor ? 'monitor' : 'dwell', dwellAgrees: fromMonitor && fromDwell ? fromDwell === fromMonitor : null,
     strokes,
     lengthSdM: Math.sqrt(lens.reduce((a, v) => a + (v - lenMean) * (v - lenMean), 0) / lens.length),
     lengthFirstM: thirds ? med(first.map(k => k.lengthM)) : null, lengthLastM: thirds ? med(last.map(k => k.lengthM)) : null,
@@ -16892,7 +16937,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 34;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks)
+const ANALYSIS_CACHE_VERSION = 35;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session)
 // v34: reanalyze stored rides for live Levo telemetry and GX shift events.
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
@@ -38036,7 +38081,7 @@ function renderRowErg(D) {
   if (c && e.driveLengthM)
     agree.push(loamT('Handle travel: the monitor measured {a} m a stroke, your watch {b} m.', { a: e.driveLengthM.toFixed(2), b: c.handleTravelM.toFixed(2) }));
   if (c && e.driveS)
-    agree.push(loamT('Drive time: the monitor measured {a} s, your watch {b} s.', { a: e.driveS.toFixed(2), b: c.driveS.toFixed(2) }));
+    agree.push(loamT('Drive time: the monitor measured {a} s, the part of the drive that speeds the flywheel up; your watch {b} s, the handle from the catch to the finish.', { a: e.driveS.toFixed(2), b: c.driveS.toFixed(2) }));
   el.innerHTML = `
     <div class="section-title" style="margin-top:22px">${loamT('From the monitor')}<span class="subtitle">${loamT('each stroke as the machine measured it')}</span></div>
     <div class="panel">
@@ -38052,16 +38097,21 @@ function drawRowErgChart(e) {
   const ks = (e.perStroke || []).filter(k => k.powerW != null || k.driveLengthM != null);
   if (ks.length < 2) { el.innerHTML = ''; return; }
   const x = ks.map(k => k.t / 60);
-  loamPlot(el, [
+  /* Power only when the monitor sent it: the 2026-11-19 recording has none (the app dropped every
+     power notification), and an empty trace drew a bare 0-4 W axis. */
+  const power = ks.some(k => k.powerW != null);
+  const length = { x, y: ks.map(k => k.driveLengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Drive length'), line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
+    hovertemplate: '%{x:.1f} min<br>%{y:.2f} m<extra></extra>' };
+  const lengthAxis = { title: 'm', fixedrange: true, rangemode: 'tozero' };
+  loamPlot(el, power ? [
     { x, y: ks.map(k => k.powerW), type: 'scatter', mode: 'lines+markers', name: loamT('Power'), line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 },
       hovertemplate: '%{x:.1f} min<br>%{y:.0f} W<extra></extra>' },
-    { x, y: ks.map(k => k.driveLengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Drive length'), yaxis: 'y2', line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
-      hovertemplate: '%{x:.1f} min<br>%{y:.2f} m<extra></extra>' },
-  ], {
-    margin: { l: 44, r: 44, t: 8, b: 42 },
+    { ...length, yaxis: 'y2' },
+  ] : [length], {
+    margin: { l: 44, r: power ? 44 : 12, t: 8, b: 42 },
     xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
-    yaxis: { title: 'W', fixedrange: true, rangemode: 'tozero' },
-    yaxis2: { title: 'm', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false, rangemode: 'tozero' },
+    yaxis: power ? { title: 'W', fixedrange: true, rangemode: 'tozero' } : lengthAxis,
+    ...(power ? { yaxis2: { ...lengthAxis, overlaying: 'y', side: 'right', showgrid: false } } : {}),
     showlegend: true, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
   }, { displayModeBar: false, responsive: true });
 }
@@ -38084,8 +38134,8 @@ function rowDigest(D) {
     heart_rate: s.hrAvg == null ? null : { avg_bpm: s.hrAvg, max_bpm: s.hrMax, first_bpm: s.hrFirst, last_bpm: s.hrLast, samples: s.hrN },
     average_stroke: !c ? null : {
       strokes_averaged: c.n, stroke_s: r2(c.periodS), drive_s: r2(c.driveS), recovery_s: r2(c.recoveryS), recovery_per_drive: r2(c.recoveryS / c.driveS),
-      handle_travel_m: r2(c.handleTravelM), handle_travel_sd_m: r2(c.lengthSdM),
-      handle_travel_first_third_m: r2(c.lengthFirstM), handle_travel_last_third_m: r2(c.lengthLastM),
+      drive_timed_as: 'the handle, catch to finish', catch_found_by: c.orientedBy === 'monitor' ? 'the machine\'s monitor' : 'where the hands linger',
+      handle_travel_m: r2(c.handleTravelM),
       drive_first_third_s: r2(c.driveFirstS), drive_last_third_s: r2(c.driveLastS),
       peak_handle_speed_mps: r2(c.peakSpeedMps), peak_handle_speed_at_fraction_of_drive: r2(c.peakAt),
       head_travel_m: r2(c.headTravelM), arm_travel_m: r2(c.armTravelM),
@@ -38102,9 +38152,12 @@ function rowDigest(D) {
       distance_per_stroke_m: r2(e.strokeDistanceM), peak_handle_force_n: r2(e.peakForceN), average_handle_force_n: r2(e.avgForceN), work_per_stroke_j: r2(e.workJ),
     },
     limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. '
+      + 'The watch\'s drive is the handle from catch to finish, which runs longer than a monitor\'s drive (0.95 s against 0.60 s on the one session recorded with both), so its recovery_per_drive reads closer to even and is not the ratio rowing teaching refers to. '
+      + 'Stroke-to-stroke handle length is NOT reported: it did not follow the monitor\'s drive length. '
+      + (c && c.orientedBy !== 'monitor' ? 'Which end is the catch was inferred from where the hands linger; a rower whose arms bend at the catch can be read back to front, which would invert the arm reads. ' : '')
       + (e ? 'Distance, pace, watts, drag factor and the per-stroke drive numbers under `monitor` are the machine\'s own and may be quoted as measured; where `monitor` and `average_stroke` disagree, the monitor is the reference.'
         : 'Distance, split, pace, watts, calories and drag factor are NOT measured: they are the machine monitor\'s. The stroke count is time times rate.')
-      + ' Checked against one session on one machine.',
+      + ' Graded against one session recorded with the monitor connected.',
   };
 }
 function rowCoachPrompt(level) {
@@ -38113,7 +38166,7 @@ function rowCoachPrompt(level) {
     + 'When the digest has a `monitor` block, the session was recorded with the machine\'s own monitor connected: its distance, pace per 500 m, watts, drag factor, stroke count and per-stroke drive length, drive time, recovery time, force and work are measured by the machine and may be quoted and coached on. '
     + 'What is NOT measured and must never be stated, estimated or implied: without a `monitor` block, distance, split or pace per 500 m, watts, calories and drag factor; with or without it, leg drive, knee angle, seat position, shin angle, back angle, layback, posture, or whether legs or back moved first. If asked, say it is not in the recording and that the machine\'s monitor is the source for distance, split and watts. '
     + 'The arm reads are the handle\'s travel minus the head\'s. They have not been checked against video: present them as what the sensors suggest, not as fact. '
-    + 'You may compare the measured numbers with standard teaching: legs then body then arms on the drive with the arms straight until late; arms away, then body, then slide on the recovery; a recovery near twice the drive at steady rates of 18 to 24 strokes a minute, closing toward even above about 30. Say plainly when a number is already in a sensible range. '
+    + 'You may compare the measured numbers with standard teaching: legs then body then arms on the drive with the arms straight until late; arms away, then body, then slide on the recovery; a recovery near twice the drive at steady rates of 18 to 24 strokes a minute, closing toward even above about 30. Hold that ratio against the monitor\'s drive and recovery only: the average stroke\'s drive is the handle from catch to finish, longer than the monitor\'s, so its ratio reads closer to even without the rower doing anything wrong. Say plainly when a number is already in a sensible range. '
     + 'Give at most three priorities, most useful first, each with one concrete drill or cue the athlete can try on the next session, and say which number would show it worked. Heart rate is descriptive only: no zones, no fitness or medical claims. Do not invent trends from a single session. Keep it short. '
     + 'Athlete level: ' + (level || 'intermediate') + '.';
 }
@@ -38154,8 +38207,6 @@ function renderRowStroke(D) {
     tile(c.driveS.toFixed(2) + ' s', senseT('drive', 'rowing')),
     tile(c.recoveryS.toFixed(2) + ' s', senseT('recovery', 'rowing')),
     tile('1 : ' + (c.recoveryS / c.driveS).toFixed(1), loamT('drive to recovery')),
-    tile('&plusmn; ' + (c.lengthSdM * 100).toFixed(0) + ' cm', loamT('stroke length, stroke to stroke')),
-    c.lengthFirstM != null ? tile(`${c.lengthFirstM.toFixed(2)} &rarr; ${c.lengthLastM.toFixed(2)} m`, loamT('stroke length, first third to last third')) : '',
     c.driveFirstS != null ? tile(`${c.driveFirstS.toFixed(2)} &rarr; ${c.driveLastS.toFixed(2)} s`, loamT('drive, first third to last third')) : '',
     c.peakSpeedMps ? tile(c.peakSpeedMps.toFixed(1) + ' m/s', loamT('fastest handle speed'), c.peakAt != null ? loamT('{p}% of the way through the drive', { p: Math.round(c.peakAt * 100) }) : '') : '',
     c.armAtHalfBody != null ? tile(pctT(c.armAtHalfBody), loamT('of the arm pull done'), loamT('when your body was halfway through the drive')) : '',
@@ -38164,7 +38215,9 @@ function renderRowStroke(D) {
   const lead = c.head
     ? loamT('<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch and the head is your AirPods; both are measured. <strong>The legs and the lean of the body are drawn to fit and are not measured</strong>, so this shows when your arms work against your body, not the order of legs and back.', { n: c.n })
     : loamT('<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch. With AirPods in as well, Loam can also show your body and when the arms work against it.', { n: c.n });
-  const rest = loamT('Nothing here was checked against video. The usual teaching, for comparison: on the drive the legs go first with the arms straight and the arms finish it; on the way back the hands go away first, then the body, then the slide; and at a steady rate the recovery takes about twice as long as the drive, closing toward even as the rate climbs past 30.');
+  const rest = loamT('Nothing here was checked against video. The usual teaching, for comparison: on the drive the legs go first with the arms straight and the arms finish it; on the way back the hands go away first, then the body, then the slide; and at a steady rate the recovery takes about twice as long as the drive, closing toward even as the rate climbs past 30.')
+    + ' ' + loamT('Your watch times the drive from the catch to the finish of the handle. A rowing machine&rsquo;s monitor times only the part that speeds the flywheel up, which is shorter, so the ratio here reads closer to even than the monitor&rsquo;s would.')
+    + (c.orientedBy === 'monitor' ? '' : ' ' + loamT('Which end of the stroke is the catch is read from where your hands linger, which is the catch for most rowers; with the rowing machine&rsquo;s monitor connected, the monitor settles it.'));
   el.innerHTML = `
     <div class="section-title" style="margin-top:22px">${loamT('Stroke replay')} <span class="beta-badge">${loamT('EXPERIMENTAL')}</span></div>
     ${leadNote(lead, rest, 'strength-tablenote', loamT('How this is read'))}
@@ -38178,10 +38231,10 @@ function renderRowStroke(D) {
       <div id="rowStrokeChart" class="chart" style="height:240px"></div>
       <div class="strength-tablenote analysis-explanation">${loamT('Distance from the catch through one stroke. The shaded part is the drive. Where the two lines pull apart, the arms are bending; where they close, the arms are straightening.')}</div>
     </div>
-    <div class="section-title" style="margin-top:22px">${loamT('Stroke by stroke')}<span class="subtitle">${loamT('length and drive time of every stroke')}</span></div>
+    <div class="section-title" style="margin-top:22px">${loamT('Stroke by stroke')}<span class="subtitle">${loamT('drive time of every stroke')}</span></div>
     <div class="panel">
       <div id="rowStrokesChart" class="chart" style="height:260px"></div>
-      <div class="strength-tablenote analysis-explanation">${loamT('Each dot is one stroke. A length that shortens or a drive that slows toward the end is what tiring looks like here; a flat line is a piece you held together.')}</div>
+      <div class="strength-tablenote analysis-explanation">${loamT('Each dot is one stroke. A drive that slows toward the end is what tiring looks like here; a flat line is a piece you held together. Length is not shown stroke by stroke: checked against a rowing machine&rsquo;s own monitor, the watch&rsquo;s length from one stroke to the next did not follow it.')}</div>
     </div>`;
   drawRowStrokeChart(c);
   drawRowStrokesChart(c);
@@ -38210,18 +38263,18 @@ function drawRowStrokesChart(c) {
   const ks = c.strokes || [];
   if (ks.length < 2) { el.innerHTML = ''; return; }
   const x = ks.map(k => k.t / 60);
+  /* Drive time only. The watch's stroke-to-stroke LENGTH is withheld: against the monitor's drive
+     length on the 2026-11-19 session it correlated at r = 0.05, with a 17 cm spread against the
+     monitor's 4, and its thirds showed a 27 cm fade the monitor did not (1.33 -> 1.36 m). */
   loamPlot(el, [
-    { x, y: ks.map(k => k.lengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Stroke length'), line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
-      hovertemplate: '%{x:.1f} min<br>%{y:.2f} m<extra></extra>' },
-    { x, y: ks.map(k => k.driveS), type: 'scatter', mode: 'lines+markers', name: loamT('Drive time'), yaxis: 'y2', line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 },
+    { x, y: ks.map(k => k.driveS), type: 'scatter', mode: 'lines+markers', name: loamT('Drive time'), line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 },
       hovertemplate: '%{x:.1f} min<br>%{y:.2f} s<extra></extra>' },
   ], {
-    margin: { l: 44, r: 44, t: 8, b: 42 },
+    margin: { l: 44, r: 12, t: 8, b: 42 },
     xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
-    /* From zero, so a steady piece reads as steady: autoscaled, four centimetres looks like a cliff. */
-    yaxis: { title: 'm', fixedrange: true, rangemode: 'tozero' },
-    yaxis2: { title: 's', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false, rangemode: 'tozero' },
-    showlegend: true, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+    /* From zero, so a steady piece reads as steady: autoscaled, a few hundredths looks like a cliff. */
+    yaxis: { title: 's', fixedrange: true, rangemode: 'tozero' },
+    showlegend: false, hovermode: 'x',
   }, { displayModeBar: false, responsive: true });
 }
 function animateRowFigure(c) {
@@ -46308,17 +46361,18 @@ const LOAM_NB = {
   'Rowing machine': 'Romaskin',
   /* The stroke replay (renderRowStroke). */
   'Stroke replay': 'Takreprise',
-  'stroke length, stroke to stroke': 'taklengde, fra tak til tak',
-  'stroke length, first third to last third': 'taklengde, første til siste tredel',
   'drive, first third to last third': 'drag, første til siste tredel',
   'fastest handle speed': 'høyeste håndtaksfart',
   '{p}% of the way through the drive': '{p}% ut i draget',
   'Stroke by stroke': 'Tak for tak',
-  'length and drive time of every stroke': 'lengde og dragtid for hvert tak',
-  'Stroke length': 'Taklengde',
+  'drive time of every stroke': 'dragtid for hvert tak',
   'Drive time': 'Dragtid',
-  'Each dot is one stroke. A length that shortens or a drive that slows toward the end is what tiring looks like here; a flat line is a piece you held together.':
-    'Hver prikk er ett tak. En lengde som blir kortere, eller et drag som blir tregere mot slutten, er slik tretthet ser ut her; en flat linje er et drag du holdt sammen.',
+  'Each dot is one stroke. A drive that slows toward the end is what tiring looks like here; a flat line is a piece you held together. Length is not shown stroke by stroke: checked against a rowing machine&rsquo;s own monitor, the watch&rsquo;s length from one stroke to the next did not follow it.':
+    'Hver prikk er ett tak. Et drag som blir tregere mot slutten, er slik tretthet ser ut her; en flat linje er et drag du holdt sammen. Lengden vises ikke tak for tak: sjekket mot romaskinens egen monitor fulgte ikke klokkens lengde fra ett tak til det neste den.',
+  'Your watch times the drive from the catch to the finish of the handle. A rowing machine&rsquo;s monitor times only the part that speeds the flywheel up, which is shorter, so the ratio here reads closer to even than the monitor&rsquo;s would.':
+    'Klokken din tar tiden på draget fra isettet til uttaket av håndtaket. Monitoren på en romaskin tar bare tiden på delen som setter fart på svinghjulet, som er kortere, så forholdet her blir nærmere likt enn monitorens ville blitt.',
+  'Which end of the stroke is the catch is read from where your hands linger, which is the catch for most rowers; with the rowing machine&rsquo;s monitor connected, the monitor settles it.':
+    'Hvilken ende av taket som er isettet, leses fra der hendene dveler, som er isettet for de fleste roere; med romaskinens monitor tilkoblet avgjør monitoren det.',
   'What should I work on first?': 'Hva bør jeg jobbe med først?',
   'Is my recovery rushed?': 'Er framglidingen min for rask?',
   'Give me a drill for my arms': 'Gi meg en øvelse for armene',
@@ -46366,7 +46420,8 @@ const LOAM_NB = {
     'Ett punkt per tak. Effekt er det som nådde svinghjulet; draglengde er hvor langt håndtaket gikk, målt av maskinens egen sensor.',
   'Stroke rate: the monitor read {a}, Loam read {b} from your movement.': 'Takt: monitoren leste {a}, Loam leste {b} fra bevegelsen din.',
   'Handle travel: the monitor measured {a} m a stroke, your watch {b} m.': 'Håndtakets vei: monitoren målte {a} m per tak, klokken din {b} m.',
-  'Drive time: the monitor measured {a} s, your watch {b} s.': 'Dragtid: monitoren målte {a} s, klokken din {b} s.',
+  'Drive time: the monitor measured {a} s, the part of the drive that speeds the flywheel up; your watch {b} s, the handle from the catch to the finish.':
+    'Dragtid: monitoren målte {a} s, delen av draget som setter fart på svinghjulet; klokken din {b} s, håndtaket fra isettet til uttaket.',
   'stroke rate range, p10 to p90': 'taktområde, p10 til p90',
   'stroke rate, first half to second half': 'takt, første til andre halvdel',
   'strokes, from stroke rate': 'tak, fra takten',
@@ -65697,7 +65752,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '771034581 · 2026-11-16';
+const LOAM_BUILD = '3cd50a73f · 2026-11-19';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
