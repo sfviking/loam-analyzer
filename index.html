@@ -5333,7 +5333,8 @@ function addCombinedRow(out, r) {
   if (r.erg_distance != null || r.erg_strokeCount != null || r.erg_strokeRate != null || r.erg_power != null || r.erg_avgPower != null) {
     const e = { t };
     for (const k of ['elapsed', 'distance', 'speed', 'strokeRate', 'pace', 'avgPace', 'power', 'avgPower', 'calories', 'heartRate', 'strokeCount',
-      'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState'])
+      'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState',
+      'workoutType', 'durationType', 'workoutDuration', 'machineType'])
       if (r['erg_' + k] != null) e[k] = r['erg_' + k];
     out.erg.push(e);
   }
@@ -7479,7 +7480,12 @@ function rowSummary(read, hrRows, ride) {
    own increases, so a monitor reset mid-recording does not subtract a workout. The monitor may
    send a stroke's data more than once; the last copy of each stroke number is kept. */
 const ROW_ERG_FIELDS = ['elapsed', 'distance', 'speed', 'strokeRate', 'pace', 'avgPace', 'power', 'avgPower', 'calories', 'heartRate', 'strokeCount',
-  'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState'];
+  'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState',
+  'workoutType', 'durationType', 'workoutDuration', 'machineType'];
+/* The monitor's workout types (PM5 Bluetooth definition): 0-1 Just Row, 2-3 a set distance, 4-5 a set
+   time, 6-9 intervals, 10-11 calories and watt-minutes. Duration type 128 is metres, 0 is seconds. */
+const ROW_ERG_WORKOUT_KINDS = ['just row', 'just row', 'distance', 'distance', 'time', 'time', 'intervals', 'intervals', 'intervals', 'intervals', 'calories', 'watt-minutes'];
+const ROW_ERG_WORKOUT_END = 10;
 const ROW_ERG_MIN_STROKES = 5;
 const ROW_ERG_PACE_STEP_S = 2;
 /* Splits are every 500 m, as the monitor and every erg app show them; a last part-split shorter than
@@ -7563,6 +7569,30 @@ function rowErg(ergRows, ride) {
     if (!paceSeries.length || r.t - paceSeries[paceSeries.length - 1].t >= ROW_ERG_PACE_STEP_S) paceSeries.push({ t: r.t, paceS: r.pace });
   }
   const avgPower = num('avgPower').filter(v => v > 0), cal = num('calories');
+  /* HOW FULL EACH STROKE IS: the monitor's average drive force over its peak. It is the monitor's own
+     drive (the part that speeds the flywheel up), so no target from on-water force sensors applies;
+     it is compared within a piece only. And how evenly the work is spread: each stroke's change from
+     the one before, as a share of the mean, which a steady build or fade does not inflate the way a
+     spread around the mean would. */
+  const ratios = real.filter(k => k.peakForceN > 0 && k.avgForceN > 0).map(k => k.avgForceN / k.peakForceN);
+  const rThird = Math.floor(ratios.length / 3), rThirds = rThird >= ROW_ERG_MIN_STROKES;
+  const works = real.map(k => k.workJ).filter(v => v > 0);
+  const workMean = mean(works);
+  let workStep = null;
+  if (works.length >= ROW_ERG_MIN_STROKES && workMean > 0) {
+    let sum = 0;
+    for (let i = 1; i < works.length; i++) sum += Math.abs(works[i] - works[i - 1]);
+    workStep = sum / (works.length - 1) / workMean;
+  }
+  /* What the monitor was set to: the last workout it reported in the recording, and whether it
+     reached its end. Several workouts in one recording are not told apart yet. */
+  const lastOf = (k) => { for (let i = rows.length - 1; i >= 0; i--) if (Number.isFinite(rows[i][k])) return rows[i][k]; return null; };
+  const wType = lastOf('workoutType'), dType = lastOf('durationType'), target = lastOf('workoutDuration');
+  const workout = wType == null ? null : {
+    type: wType, kind: ROW_ERG_WORKOUT_KINDS[wType] || 'other',
+    targetM: dType === 128 && target > 0 ? target : null, targetS: dType === 0 && target > 0 ? target : null,
+    ended: rows.some(r => r.workoutState === ROW_ERG_WORKOUT_END),
+  };
   return {
     n: rows.length,
     distanceM, elapsedS,
@@ -7579,6 +7609,8 @@ function rowErg(ergRows, ride) {
     workJ: med(real.map(k => k.workJ).filter(v => v > 0)),
     powerFirstW: thirds ? mean(first.map(k => k.powerW)) : null, powerLastW: thirds ? mean(last.map(k => k.powerW)) : null,
     driveLengthFirstM: thirds ? med(first.map(k => k.driveLengthM)) : null, driveLengthLastM: thirds ? med(last.map(k => k.driveLengthM)) : null,
+    forceRatio: med(ratios), forceRatioFirst: rThirds ? med(ratios.slice(0, rThird)) : null, forceRatioLast: rThirds ? med(ratios.slice(-rThird)) : null,
+    workStep, workout, machineType: lastOf('machineType'),
     perStroke: real, paceSeries, splits,
   };
 }
@@ -16986,7 +17018,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 36;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session; v36: a rowing session with the monitor carries each stroke's metres, rate and pace and the 500 m splits the piece chart and splits table draw from, so one cached before this would reopen without them)
+const ANALYSIS_CACHE_VERSION = 38;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session; v36: a rowing session with the monitor carries each stroke's metres, rate and pace and the 500 m splits the piece chart and splits table draw from, so one cached before this would reopen without them; v37: a Miss tapped in the rest after End set is attached to the set that just ended rather than dropped, so a lift session cached before this would reopen with that set's miss missing; v38: a rowing session with the monitor carries the force ratio, the stroke-to-stroke work change and what the monitor was set to, so one cached before this would reopen without those tiles)
 // v34: reanalyze stored rides for live Levo telemetry and GX shift events.
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
@@ -19354,7 +19386,8 @@ const LoamStrength = (function () {
  *   depth" / "Parallel", and same for the lift itself. A set's labels are
  *   resolved over its whole window (the lifter taps the type a few seconds after
  *   Start), so late taps still count. "Miss" marks a failed rep and is attached
- *   to the set it falls in.
+ *   to the set it falls in, or, tapped in the rest after End set (before the next
+ *   Start), to the set that just ended.
  *
  *   Stickiness stops at a RECORDING SEAM: a merged session is several recordings
  *   laid end to end and every sticky label resets when a recording starts, so
@@ -19464,9 +19497,11 @@ function parseFragmentSetMarks(anns, tRecordingEnd) {
       const set = mkSet(tStart, tEnd);
       // The watch editor is available during rest. Its last saved count belongs only to the
       // completed set before it; never carry it through another Start or a recording seam.
+      // A Miss is the same: it is tapped once the bar is down, which is usually after End set.
       if (close && close.t < nextOpen) {
         for (const a of anns) {
           if (a.t < close.t || a.t > nextOpen || (a.t === nextOpen && i + 1 < opens.length)) continue;
+          if (norm(a.text) === 'miss') { set.misses.push(+a.t.toFixed(2)); continue; }
           const edit = /^(?:set reps: (\d{1,3})(?:; weight: (.+))?|set weight: (.+))$/.exec(norm(a.text));
           if (!edit) continue;
           const loadText = edit[2] ?? edit[3];
@@ -33231,7 +33266,12 @@ function liftAvatarSVG(charKey, thighDeg, leanDeg, barPos, lift, tf, opts = {}) 
 
    The badge compares the top set with the lifter's own logged history of the SAME lift and nothing
    else: no estimated 1RM (that is the app's Stats tab, beside the set it came from), no first-session "best"
-   claimed against nothing, and no claim for an untapped set, which could be any lift. */
+   claimed against nothing, and no claim for an untapped set, which could be any lift.
+
+   The top set is the heaviest with a COUNTED rep, the rule the Stats tab's best already follows
+   (liftedLoadKg, history.js): a load nobody was seen to lift is not a best. Taking the heaviest load
+   alone headlined a missed 183 kg attempt as "183 kg x 0, BEST YET" (2026-11-18). Correcting that
+   set's count to 1 makes it the top set again. */
 const LIFT_CARD_PER_ROW = 12;
 function liftCardBest(D, top, history) {
   const lift = top && top.set && top.set.lift;
@@ -33243,14 +33283,19 @@ function liftCardBest(D, top, history) {
      sessions its previous best. Same start as liftHistoryRemember stores; unknown starts still count. */
   const dt = typeof parseUTCFromFilename === 'function' ? parseUTCFromFilename(D.title || '') : null;
   const start = dt ? Math.round(dt.getTime() / 1000) : null;
+  if (!(top.set.reps >= 1)) return null;
   let prevKg = null, n = 0;
   for (const r of history || []) {
     if (!r || r.key === D.key) continue;   // the stored history already holds this session
     if (start != null && r.start != null && r.start >= start) continue;
     for (const x of r.byLift || []) {
-      if (x.lift !== lift || !x.hasLoad || !(x.topLoadKg > 0)) continue;
+      if (x.lift !== lift || !x.hasLoad) continue;
+      /* The same reading of a stored record as liftBests: a record from before liftedLoadKg existed
+         falls back to its top set, and only when that set had a counted rep. */
+      const kg = x.liftedLoadKg != null ? x.liftedLoadKg : (x.topLoadReps >= 1 ? x.topLoadKg : null);
+      if (!(kg > 0)) continue;
       n++;
-      if (prevKg == null || x.topLoadKg > prevKg) prevKg = x.topLoadKg;
+      if (prevKg == null || kg > prevKg) prevKg = kg;
     }
   }
   return prevKg != null && top.kg > prevKg ? { prevKg, n } : null;
@@ -33261,7 +33306,9 @@ function liftSignatureSVG(D) {
   const weights = liftSessionWeightsKg(D);
   const loaded = sets.map((set, i) => ({ set, i, kg: weights[i] }))
     .filter(x => Number.isFinite(x.kg) && x.kg > 0);
-  const top = loaded.reduce((best, x) => !best || x.kg > best.kg ? x : best, null);
+  /* Columns are scaled to the heaviest LOAD; the headline is the heaviest set with a counted rep. */
+  const maxKg = loaded.reduce((m, x) => Math.max(m, x.kg), 0);
+  const top = loaded.filter(x => x.set.reps >= 1).reduce((best, x) => !best || x.kg > best.kg ? x : best, null);
   const lifts = [...new Set(sets.map(set => set.lift || 'unlabeled'))];
   /* An unlabeled set among labelled ones is a lift nobody named, so the card says Weightlifting
      rather than naming only the lifts it can. */
@@ -33280,7 +33327,7 @@ function liftSignatureSVG(D) {
   const r1 = v => +(+v).toFixed(1);
 
   /* With no load typed there are no bars, only stubs, so the chart gives back the height. */
-  const W = 480, PAD = 24, BAR_MAX = top ? 128 : 8, LABEL_H = 24;
+  const W = 480, PAD = 24, BAR_MAX = maxKg > 0 ? 128 : 8, LABEL_H = 24;
   const rows = Math.max(1, Math.ceil(sets.length / LIFT_CARD_PER_ROW));
   const perRow = Math.max(1, Math.ceil(sets.length / rows));
   const slot = (W - PAD * 2) / perRow;
@@ -33298,9 +33345,16 @@ function liftSignatureSVG(D) {
     rowSets.forEach((set, j) => {
       const i = row * perRow + j, cx = r1(PAD + slot * (j + 0.5));
       const kg = weights[i], hasWeight = Number.isFinite(kg) && kg > 0, isTop = !!top && i === top.i;
+      const noRep = !(set.reps >= 1);
       const bw = r1(Math.min(slot * 0.66, 64)), bx = r1(cx - bw / 2);
-      if (hasWeight) {
-        const h = r1(Math.max(3, BAR_MAX * kg / top.kg));
+      if (hasWeight && noRep) {
+        /* A load with no counted rep keeps its height (the load was logged) but is drawn as an
+           outline, so the tallest column is not read as the heaviest set lifted. */
+        const h = r1(Math.max(3, BAR_MAX * kg / maxKg));
+        chart += `<rect class="lc-miss" x="${bx}" y="${r1(base - h)}" width="${bw}" height="${h}" rx="5" fill="#b3d494" fill-opacity="0.08" stroke="#7d9b66" stroke-dasharray="4 3"/>`;
+        chart += text(cx, r1(base - h - 8), kgToDisp(kg), loadSize, DIM, 'middle', ' font-weight="600"');
+      } else if (hasWeight) {
+        const h = r1(Math.max(3, BAR_MAX * kg / maxKg));
         if (isTop) chart += `<ellipse cx="${cx}" cy="${base - h / 2}" rx="${r1(Math.max(bw * 1.4, 40))}" ry="${r1(h / 2 + 34)}" fill="url(#lcTopHalo)"/>`;
         chart += `<rect class="lc-bar" x="${bx}" y="${r1(base - h)}" width="${bw}" height="${h}" rx="5" fill="url(#${isTop ? 'lcTop' : 'lcBar'})"${isTop ? ' filter="url(#lcGlow)"' : ''}/>`;
         chart += text(cx, r1(base - h - 8), kgToDisp(kg), isTop ? r1(loadSize + 2) : loadSize, isTop ? AMBER : INK, 'middle', ` font-weight="${isTop ? 800 : 600}"`);
@@ -33310,7 +33364,7 @@ function liftSignatureSVG(D) {
         chart += `<rect class="lc-stub" x="${bx}" y="${base - 8}" width="${bw}" height="8" rx="3" fill="none" stroke="#5b6b50" stroke-dasharray="3 3"/>`
           + text(cx, base - 16, '—', loadSize, DIM, 'middle');
       }
-      chart += text(cx, base + 24, `×${set.reps}`, repSize, isTop ? AMBER : INK, 'middle', ' font-weight="700"')
+      chart += text(cx, base + 24, `×${set.reps}`, repSize, isTop ? AMBER : noRep ? DIM : INK, 'middle', ' font-weight="700"')
         + text(cx, base + 42, i + 1, 11, '#7c8b76', 'middle', '', MONO);
     });
     if (mixed) {
@@ -33336,7 +33390,9 @@ function liftSignatureSVG(D) {
   const headline = top
     ? `<text x="${PAD}" y="176" fill="${INK}" font-size="64" font-weight="800" letter-spacing="-2" font-family="${DISP}">${escapeHtml(String(kgToDisp(top.kg)))}<tspan font-size="32" font-weight="600" fill="${DIM}" letter-spacing="0"> ${escapeHtml(unit)}</tspan><tspan fill="${AMBER}"> × ${escapeHtml(String(top.set.reps))}</tspan></text>`
     : text(PAD, 172, headlinePlain, 44, INK, 'start', ' font-weight="800" letter-spacing="-1"');
-  const sub = top ? loamT('Heaviest logged set') + (mixed ? ' · ' + (liftNameCap(top.set.lift) || loamT('Unlabeled')) : '') : loamT('Session totals');
+  /* "Heaviest logged set" would be false beside a heavier column with no counted rep. */
+  const subHead = top && maxKg > top.kg ? loamT('Heaviest set with a counted rep') : loamT('Heaviest logged set');
+  const sub = top ? subHead + (mixed ? ' · ' + (liftNameCap(top.set.lift) || loamT('Unlabeled')) : '') : loamT('Session totals');
 
   let badge = '';
   if (showBest) {
@@ -38124,6 +38180,10 @@ function renderRowErg(D) {
     e.workJ ? tile(Math.round(e.workJ) + ' J', loamT('work per stroke')) : '',
     e.dragFactor ? tile(String(Math.round(e.dragFactor)), loamT('drag factor')) : '',
     e.powerFirstW != null && e.powerLastW != null ? tile(`${Math.round(e.powerFirstW)} &rarr; ${Math.round(e.powerLastW)} W`, loamT('power, first third to last third')) : '',
+    e.forceRatio != null ? tile(e.forceRatio.toFixed(2), loamT('average to peak force')) : '',
+    e.forceRatioFirst != null && e.forceRatioLast != null ? tile(`${e.forceRatioFirst.toFixed(2)} &rarr; ${e.forceRatioLast.toFixed(2)}`, loamT('average to peak force, first third to last third')) : '',
+    e.workStep != null ? tile(Math.round(e.workStep * 100) + '%', loamT('work, change from one stroke to the next')) : '',
+    rowWorkoutTile(e.workout, tile),
   ].filter(Boolean).join('');
   const agree = [];
   if (e.rateMedian != null && s.rateMedian != null)
@@ -38142,10 +38202,19 @@ function renderRowErg(D) {
         : loamT('Your piece by the metre: one point per stroke, pace per 500 m and stroke rate as the monitor showed them. This recording carries no power per stroke.')}</div>
       ${rowSplitsTable(D)}
       <div id="rowErgChart" class="chart" style="height:220px"></div>
-      <div class="strength-tablenote analysis-explanation">${loamT('Drive length is how far the handle travelled on each stroke, by the machine&rsquo;s own sensor.')}${agree.length ? ' ' + agree.join(' ') : ''}</div>
+      <div class="strength-tablenote analysis-explanation">${loamT('Drive length is how far the handle travelled on each stroke, by the machine&rsquo;s own sensor.')}${e.forceRatio != null ? ' ' + loamT('Average to peak force is how full each stroke is: the monitor&rsquo;s average force on the handle over its peak. Compare it within a piece; targets from other force sensors measure a different drive and do not apply.') : ''}${agree.length ? ' ' + agree.join(' ') : ''}</div>
     </div>`;
   drawRowPieceChart(e);
   drawRowErgChart(e);
+}
+/* What the monitor was set to, when the recording says: a set distance or time, Just Row or intervals. */
+function rowWorkoutTile(w, tile) {
+  if (!w) return '';
+  const clock = (sec) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
+  const v = w.kind === 'distance' && w.targetM ? `${Math.round(w.targetM)} m` : w.kind === 'time' && w.targetS ? clock(w.targetS)
+    : w.kind === 'just row' ? 'Just Row' : w.kind === 'intervals' ? loamT('intervals') : null;
+  if (!v) return '';
+  return tile(v, w.kind === 'distance' || w.kind === 'time' ? (w.ended ? loamT('set on the monitor') : loamT('set on the monitor, not finished')) : loamT('set on the monitor'));
 }
 /* Splits every 500 m, timed on the monitor's own clock, with heart rate from the watch when worn. */
 function rowSplitsTable(D) {
@@ -38258,6 +38327,9 @@ function rowDigest(D) {
       drive_s: r2(e.driveS), recovery_s: r2(e.recoveryS), recovery_per_drive: e.driveS > 0 && e.recoveryS > 0 ? r2(e.recoveryS / e.driveS) : null,
       distance_per_stroke_m: r2(e.strokeDistanceM), peak_handle_force_n: r2(e.peakForceN), average_handle_force_n: r2(e.avgForceN), work_per_stroke_j: r2(e.workJ),
       splits_500m: (e.splits || []).map(x => ({ end_m: r2(x.endM), time_s: r2(x.timeS), pace_s_per_500m: r2(x.paceS), stroke_rate_spm: r2(x.spm), power_w: r2(x.powerW) })),
+      force_ratio_avg_to_peak: r2(e.forceRatio), force_ratio_first_third: r2(e.forceRatioFirst), force_ratio_last_third: r2(e.forceRatioLast),
+      work_change_stroke_to_stroke_pct: e.workStep == null ? null : r2(e.workStep * 100),
+      set_on_monitor: !e.workout ? null : { kind: e.workout.kind, target_m: e.workout.targetM, target_s: e.workout.targetS, finished: e.workout.ended },
     },
     limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. '
       + 'The watch\'s drive is the handle from catch to finish, which runs longer than a monitor\'s drive (0.95 s against 0.60 s on the one session recorded with both), so its recovery_per_drive reads closer to even and is not the ratio rowing teaching refers to. '
@@ -38274,7 +38346,7 @@ function rowCoachPrompt(level) {
     + 'When the digest has a `monitor` block, the session was recorded with the machine\'s own monitor connected: its distance, pace per 500 m, watts, drag factor, stroke count and per-stroke drive length, drive time, recovery time, force and work are measured by the machine and may be quoted and coached on. '
     + 'What is NOT measured and must never be stated, estimated or implied: without a `monitor` block, distance, split or pace per 500 m, watts, calories and drag factor; with or without it, leg drive, knee angle, seat position, shin angle, back angle, layback, posture, or whether legs or back moved first. If asked, say it is not in the recording and that the machine\'s monitor is the source for distance, split and watts. '
     + 'The arm reads are the handle\'s travel minus the head\'s. They have not been checked against video: present them as what the sensors suggest, not as fact. '
-    + 'You may compare the measured numbers with standard teaching: legs then body then arms on the drive with the arms straight until late; arms away, then body, then slide on the recovery; a recovery near twice the drive at steady rates of 18 to 24 strokes a minute, closing toward even above about 30. Hold that ratio against the monitor\'s drive and recovery only: the average stroke\'s drive is the handle from catch to finish, longer than the monitor\'s, so its ratio reads closer to even without the rower doing anything wrong. Say plainly when a number is already in a sensible range. '
+    + 'You may compare the measured numbers with standard teaching: legs then body then arms on the drive with the arms straight until late; arms away, then body, then slide on the recovery; a recovery near twice the drive at steady rates of 18 to 24 strokes a minute, closing toward even above about 30. `force_ratio_avg_to_peak` is the monitor\'s average drive force over its peak, how full the stroke is: compare it only within the session, never against a target from on-water or other force sensors, which time a different drive. Hold that ratio against the monitor\'s drive and recovery only: the average stroke\'s drive is the handle from catch to finish, longer than the monitor\'s, so its ratio reads closer to even without the rower doing anything wrong. Say plainly when a number is already in a sensible range. '
     + 'Give at most three priorities, most useful first, each with one concrete drill or cue the athlete can try on the next session, and say which number would show it worked. Heart rate is descriptive only: no zones, no fitness or medical claims. Do not invent trends from a single session. Keep it short. '
     + 'Athlete level: ' + (level || 'intermediate') + '.';
 }
@@ -43531,6 +43603,7 @@ const LOAM_NB = {
   /* The card bar and the Coach's read heading. */
   'Your session, set by set. Column height shows logged weight; reps reflect your corrections.': 'Økten din, sett for sett. Søylehøyden viser registrert vekt; repetisjonene følger korrigeringene dine.',
   'Heaviest logged set': 'Tyngste registrerte sett',
+  'Heaviest set with a counted rep': 'Tyngste sett med en talt repetisjon',
   'Session totals': 'Totalt for økten',
   'previous logged best {v}': 'forrige registrerte beste {v}',
   'Unlabeled': 'Umerket',
@@ -46537,6 +46610,14 @@ const LOAM_NB = {
   'Drive length is how far the handle travelled on each stroke, by the machine&rsquo;s own sensor.':
     'Draglengde er hvor langt håndtaket gikk i hvert tak, målt av maskinens egen sensor.',
   'Split': 'Mellomtid',
+  'average to peak force': 'snitt mot toppkraft',
+  'average to peak force, first third to last third': 'snitt mot toppkraft, første til siste tredel',
+  'work, change from one stroke to the next': 'arbeid, endring fra tak til tak',
+  'set on the monitor': 'satt på monitoren',
+  'set on the monitor, not finished': 'satt på monitoren, ikke fullført',
+  'intervals': 'intervaller',
+  'Average to peak force is how full each stroke is: the monitor&rsquo;s average force on the handle over its peak. Compare it within a piece; targets from other force sensors measure a different drive and do not apply.':
+    'Snitt mot toppkraft er hvor fullt hvert tak er: monitorens snittkraft på håndtaket delt på toppen. Sammenlign det innenfor et drag; mål fra andre kraftsensorer måler et annet drag og gjelder ikke.',
   'Pace per 500 m': 'Tempo per 500 m',
   'Stroke rate: the monitor read {a}, Loam read {b} from your movement.': 'Takt: monitoren leste {a}, Loam leste {b} fra bevegelsen din.',
   'Handle travel: the monitor measured {a} m a stroke, your watch {b} m.': 'Håndtakets vei: monitoren målte {a} m per tak, klokken din {b} m.',
@@ -65872,7 +65953,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '3202fafcc · 2026-11-20';
+const LOAM_BUILD = '57a3c1801 · 2026-11-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
