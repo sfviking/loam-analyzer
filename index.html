@@ -7482,6 +7482,10 @@ const ROW_ERG_FIELDS = ['elapsed', 'distance', 'speed', 'strokeRate', 'pace', 'a
   'driveLength', 'driveTime', 'recoveryTime', 'strokeDistance', 'peakForce', 'avgForce', 'work', 'dragFactor', 'workoutState', 'strokeState'];
 const ROW_ERG_MIN_STROKES = 5;
 const ROW_ERG_PACE_STEP_S = 2;
+/* Splits are every 500 m, as the monitor and every erg app show them; a last part-split shorter than
+   ROW_ERG_SPLIT_MIN_M is left off rather than shown as a wild pace over a few metres. */
+const ROW_ERG_SPLIT_M = 500;
+const ROW_ERG_SPLIT_MIN_M = 50;
 function rowErg(ergRows, ride) {
   const rows = (ergRows || []).filter(r => r && Number.isFinite(r.t) && (!ride || (r.t >= ride.start && r.t <= ride.end)))
     .slice().sort((a, b) => a.t - b.t);
@@ -7504,6 +7508,51 @@ function rowErg(ergRows, ride) {
     if (Number.isFinite(r.power) && r.power > 0) cur.powerW = r.power;
   }
   const real = strokes.filter(k => k.driveLengthM > 0 && k.driveS > 0);
+  /* THE PIECE BY DISTANCE. Metres and monitor seconds are summed from their own increases (0x31
+     carries both in one frame), so a reset does not subtract and the setting-up before the first
+     stroke, when the monitor's clock has not started, is not in split 1. Each stroke is placed at the
+     metres it was rowed at, with the monitor's rate and pace as they stood when its data arrived. */
+  const track = [];
+  let gm = 0, ge = 0, lastD = null, lastE = null;
+  for (const r of rows) {
+    if (!Number.isFinite(r.distance)) continue;
+    if (lastD != null && r.distance > lastD) gm += r.distance - lastD;
+    lastD = r.distance;
+    if (Number.isFinite(r.elapsed)) { if (lastE != null && r.elapsed > lastE) ge += r.elapsed - lastE; lastE = r.elapsed; }
+    track.push({ t: r.t, m: gm, e: ge });
+  }
+  /* `key` where `by` (non-decreasing along the track) first reaches v, interpolated. */
+  const along = (key, by, v) => {
+    if (v <= track[0][by]) return track[0][key];
+    for (let i = 1; i < track.length; i++) {
+      if (track[i][by] < v) continue;
+      const a = track[i - 1], b = track[i], f = b[by] > a[by] ? (v - a[by]) / (b[by] - a[by]) : 1;
+      return a[key] + f * (b[key] - a[key]);
+    }
+    return track[track.length - 1][key];
+  };
+  let ri = -1, rate = null, pace = null;
+  for (const k of real) {
+    while (ri + 1 < rows.length && rows[ri + 1].t <= k.t) {
+      ri++;
+      if (rows[ri].strokeRate > 0) rate = rows[ri].strokeRate;
+      if (rows[ri].pace > 0) pace = rows[ri].pace;
+    }
+    k.m = along('m', 't', k.t);
+    k.spm = rate;
+    k.paceS = pace;
+  }
+  const clock = ge > 0 ? 'e' : 't', totalM = gm, splits = [];
+  for (let m0 = 0; m0 < totalM; m0 += ROW_ERG_SPLIT_M) {
+    const m1 = Math.min(m0 + ROW_ERG_SPLIT_M, totalM);
+    if (m1 - m0 < ROW_ERG_SPLIT_MIN_M) break;
+    const t0 = along('t', 'm', m0), t1 = along('t', 'm', m1), timeS = along(clock, 'm', m1) - along(clock, 'm', m0);
+    const ks = real.filter(k => k.t > t0 && k.t <= t1);
+    const pw = ks.map(k => k.powerW).filter(Number.isFinite);
+    splits.push({ n: splits.length + 1, startM: m0, endM: m1, t0, t1, timeS,
+      paceS: timeS > 0 ? timeS * ROW_ERG_SPLIT_M / (m1 - m0) : null,
+      spm: mean(ks.map(k => k.spm)), powerW: pw.length ? mean(pw) : null, strokes: ks.length });
+  }
   const third = Math.floor(real.length / 3);
   const thirds = third >= ROW_ERG_MIN_STROKES;
   const first = thirds ? real.slice(0, third) : [], last = thirds ? real.slice(-third) : [];
@@ -7530,7 +7579,7 @@ function rowErg(ergRows, ride) {
     workJ: med(real.map(k => k.workJ).filter(v => v > 0)),
     powerFirstW: thirds ? mean(first.map(k => k.powerW)) : null, powerLastW: thirds ? mean(last.map(k => k.powerW)) : null,
     driveLengthFirstM: thirds ? med(first.map(k => k.driveLengthM)) : null, driveLengthLastM: thirds ? med(last.map(k => k.driveLengthM)) : null,
-    perStroke: real, paceSeries,
+    perStroke: real, paceSeries, splits,
   };
 }
 
@@ -16937,7 +16986,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 35;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session)
+const ANALYSIS_CACHE_VERSION = 36;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session; v36: a rowing session with the monitor carries each stroke's metres, rate and pace and the 500 m splits the piece chart and splits table draw from, so one cached before this would reopen without them)
 // v34: reanalyze stored rides for live Levo telemetry and GX shift events.
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
@@ -28720,7 +28769,8 @@ async function analyze(files) {
       const ergRead = rowErg(sensors.erg, spanRide);
       const r2e = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
       const erg = ergRead ? { ...ergRead,
-        perStroke: ergRead.perStroke.map(k => ({ t: r2e(k.t, 1), powerW: r2e(k.powerW, 0), driveLengthM: r2e(k.driveLengthM), driveS: r2e(k.driveS), recoveryS: r2e(k.recoveryS), peakForceN: r2e(k.peakForceN, 0) })),
+        perStroke: ergRead.perStroke.map(k => ({ t: r2e(k.t, 1), m: r2e(k.m, 1), spm: r2e(k.spm, 0), paceS: r2e(k.paceS, 1), powerW: r2e(k.powerW, 0), driveLengthM: r2e(k.driveLengthM), driveS: r2e(k.driveS), recoveryS: r2e(k.recoveryS), peakForceN: r2e(k.peakForceN, 0) })),
+        splits: ergRead.splits.map(x => ({ n: x.n, startM: r2e(x.startM, 1), endM: r2e(x.endM, 1), t0: r2e(x.t0, 1), t1: r2e(x.t1, 1), timeS: r2e(x.timeS, 1), paceS: r2e(x.paceS, 1), spm: r2e(x.spm, 1), powerW: r2e(x.powerW, 0), strokes: x.strokes })),
         paceSeries: ergRead.paceSeries.map(c => ({ t: r2e(c.t, 1), paceS: r2e(c.paceS, 1) })) } : null;
       channels.ergRows = ergRead ? ergRead.n : 0;
       const rowRender = { rowing: summary, series, channels, stroke, erg,
@@ -38086,33 +38136,77 @@ function renderRowErg(D) {
     <div class="section-title" style="margin-top:22px">${loamT('From the monitor')}<span class="subtitle">${loamT('each stroke as the machine measured it')}</span></div>
     <div class="panel">
       <div class="stiles ski-stiles">${tiles}</div>
-      <div id="rowErgChart" class="chart" style="height:260px"></div>
-      <div class="strength-tablenote analysis-explanation">${loamT('One point per stroke. Power is what reached the flywheel; drive length is how far the handle travelled, by the machine&rsquo;s own sensor.')}${agree.length ? ' ' + agree.join(' ') : ''}</div>
+      <div id="rowPieceChart" class="chart" style="height:260px"></div>
+      <div class="strength-tablenote analysis-explanation">${(e.perStroke || []).some(k => k.powerW != null)
+        ? loamT('Your piece by the metre: one point per stroke, power is what reached the flywheel and stroke rate is the monitor&rsquo;s own.')
+        : loamT('Your piece by the metre: one point per stroke, pace per 500 m and stroke rate as the monitor showed them. This recording carries no power per stroke.')}</div>
+      ${rowSplitsTable(D)}
+      <div id="rowErgChart" class="chart" style="height:220px"></div>
+      <div class="strength-tablenote analysis-explanation">${loamT('Drive length is how far the handle travelled on each stroke, by the machine&rsquo;s own sensor.')}${agree.length ? ' ' + agree.join(' ') : ''}</div>
     </div>`;
+  drawRowPieceChart(e);
   drawRowErgChart(e);
+}
+/* Splits every 500 m, timed on the monitor's own clock, with heart rate from the watch when worn. */
+function rowSplitsTable(D) {
+  const e = D && D.erg, sp = (e && e.splits) || [];
+  if (!sp.length) return '';
+  const hr = (D.series && D.series.hr) || [];
+  const pace = (v) => (v > 0 ? `${Math.floor(v / 60)}:${(v % 60).toFixed(1).padStart(4, '0')}` : '—');
+  const power = sp.some(x => x.powerW != null);
+  const hrOf = (x) => { const b = hr.filter(p => p.t > x.t0 && p.t <= x.t1).map(p => p.bpm); return b.length ? Math.round(b.reduce((a, v) => a + v, 0) / b.length) : null; };
+  const withHr = sp.map(hrOf), anyHr = withHr.some(v => v != null);
+  const rows = sp.map((x, i) => `<tr><td>${Math.round(x.endM)} m</td><td>${pace(x.timeS)}</td><td>${pace(x.paceS)}</td><td>${x.spm != null ? Math.round(x.spm) : '—'}</td>`
+    + (power ? `<td>${x.powerW != null ? Math.round(x.powerW) : '—'}</td>` : '') + (anyHr ? `<td>${withHr[i] != null ? withHr[i] : '—'}</td>` : '') + '</tr>').join('');
+  return `<div style="overflow-x:auto;margin:10px 0 6px"><table class="strength-table" id="rowSplits"><thead><tr>
+    <th>${loamT('Split')}</th><th>${loamT('time')}</th><th>/500 m</th><th>spm</th>${power ? '<th>W</th>' : ''}${anyHr ? `<th>${loamT('heart rate')}</th>` : ''}
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+/* The piece by distance, as the tester asked: metres along the bottom, power (or, when the monitor sent
+   none, its pace) and its stroke rate up the sides. */
+function drawRowPieceChart(e) {
+  const el = document.getElementById('rowPieceChart');
+  if (!el || typeof Plotly === 'undefined') return;
+  const ks = (e.perStroke || []).filter(k => Number.isFinite(k.m));
+  if (ks.length < 2) { el.innerHTML = ''; return; }
+  const power = ks.some(k => k.powerW != null);
+  const fmt = (v) => (v > 0 ? `${Math.floor(v / 60)}:${(v % 60).toFixed(1).padStart(4, '0')}` : '—');
+  const x = ks.map(k => k.m), info = ks.map(k => [(k.t / 60).toFixed(1), fmt(k.paceS), k.powerW != null ? k.powerW + ' W' : '', k.spm != null ? k.spm : '—']);
+  const hover = '%{x:.0f} m, %{customdata[0]} min<br>%{customdata[1]} /500 m %{customdata[2]}<br>%{customdata[3]} spm<extra></extra>';
+  /* Pace reads faster upwards, as a monitor's does, with m:ss ticks: an explicit high-to-low range,
+     since the page's plot wrapper does not keep `autorange: 'reversed'`. */
+  const paces = ks.map(k => k.paceS).filter(v => v > 0);
+  const lo = paces.length ? Math.floor(Math.min(...paces) / 5) * 5 : 90, hi = paces.length ? Math.ceil(Math.max(...paces) / 5) * 5 : 150;
+  const ticks = []; for (let v = lo; v <= hi; v += Math.max(5, Math.round((hi - lo) / 25) * 5)) ticks.push(v);
+  loamPlot(el, [
+    power ? { x, y: ks.map(k => k.powerW), type: 'scatter', mode: 'lines+markers', name: loamT('Power'), customdata: info, hovertemplate: hover, line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 } }
+      : { x, y: ks.map(k => k.paceS), type: 'scatter', mode: 'lines+markers', name: loamT('Pace per 500 m'), customdata: info, hovertemplate: hover, line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 } },
+    { x, y: ks.map(k => k.spm), type: 'scatter', mode: 'lines', name: senseT('Stroke rate', 'rowing'), yaxis: 'y2', customdata: info, hovertemplate: hover, line: { color: '#3d7a5a', width: 1.4 } },
+  ], {
+    margin: { l: power ? 48 : 64, r: 44, t: 8, b: 42 },
+    xaxis: { title: loamT('metres rowed'), fixedrange: true, rangemode: 'tozero' },
+    yaxis: power ? { title: 'W', fixedrange: true, rangemode: 'tozero' }
+      : { title: '/500 m', fixedrange: true, range: [hi + 2, lo - 2], tickvals: ticks, ticktext: ticks.map(fmt) },
+    yaxis2: { title: 'spm', overlaying: 'y', side: 'right', fixedrange: true, showgrid: false, rangemode: 'tozero' },
+    showlegend: true, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  }, { displayModeBar: false, responsive: true });
 }
 function drawRowErgChart(e) {
   const el = document.getElementById('rowErgChart');
   if (!el || typeof Plotly === 'undefined') return;
-  const ks = (e.perStroke || []).filter(k => k.powerW != null || k.driveLengthM != null);
+  const ks = (e.perStroke || []).filter(k => k.driveLengthM != null);
   if (ks.length < 2) { el.innerHTML = ''; return; }
-  const x = ks.map(k => k.t / 60);
-  /* Power only when the monitor sent it: the 2026-11-19 recording has none (the app dropped every
-     power notification), and an empty trace drew a bare 0-4 W axis. */
-  const power = ks.some(k => k.powerW != null);
-  const length = { x, y: ks.map(k => k.driveLengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Drive length'), line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
-    hovertemplate: '%{x:.1f} min<br>%{y:.2f} m<extra></extra>' };
-  const lengthAxis = { title: 'm', fixedrange: true, rangemode: 'tozero' };
-  loamPlot(el, power ? [
-    { x, y: ks.map(k => k.powerW), type: 'scatter', mode: 'lines+markers', name: loamT('Power'), line: { color: '#c14e2e', width: 1.2 }, marker: { size: 5 },
-      hovertemplate: '%{x:.1f} min<br>%{y:.0f} W<extra></extra>' },
-    { ...length, yaxis: 'y2' },
-  ] : [length], {
-    margin: { l: 44, r: power ? 44 : 12, t: 8, b: 42 },
-    xaxis: { title: loamT('minutes into the recording'), fixedrange: true },
-    yaxis: power ? { title: 'W', fixedrange: true, rangemode: 'tozero' } : lengthAxis,
-    ...(power ? { yaxis2: { ...lengthAxis, overlaying: 'y', side: 'right', showgrid: false } } : {}),
-    showlegend: true, legend: { orientation: 'h', y: 1.12 }, hovermode: 'x',
+  /* By the metre, under the piece above; the watch's own stroke-to-stroke length is withheld (r = 0.05
+     against this on 2026-11-19), so this is the per-stroke length the page shows. */
+  const byM = ks.every(k => Number.isFinite(k.m));
+  loamPlot(el, [
+    { x: ks.map(k => (byM ? k.m : k.t / 60)), y: ks.map(k => k.driveLengthM), type: 'scatter', mode: 'lines+markers', name: loamT('Drive length'), line: { color: '#3d7a5a', width: 1.2 }, marker: { size: 5 },
+      hovertemplate: (byM ? '%{x:.0f} m' : '%{x:.1f} min') + '<br>%{y:.2f} m<extra></extra>' },
+  ], {
+    margin: { l: 48, r: 12, t: 8, b: 42 },
+    xaxis: { title: byM ? loamT('metres rowed') : loamT('minutes into the recording'), fixedrange: true, rangemode: 'tozero' },
+    yaxis: { title: 'm', fixedrange: true, rangemode: 'tozero' },
+    showlegend: false, hovermode: 'x',
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -38163,6 +38257,7 @@ function rowDigest(D) {
       drive_length_m: r2(e.driveLengthM), drive_length_first_third_m: r2(e.driveLengthFirstM), drive_length_last_third_m: r2(e.driveLengthLastM),
       drive_s: r2(e.driveS), recovery_s: r2(e.recoveryS), recovery_per_drive: e.driveS > 0 && e.recoveryS > 0 ? r2(e.recoveryS / e.driveS) : null,
       distance_per_stroke_m: r2(e.strokeDistanceM), peak_handle_force_n: r2(e.peakForceN), average_handle_force_n: r2(e.avgForceN), work_per_stroke_j: r2(e.workJ),
+      splits_500m: (e.splits || []).map(x => ({ end_m: r2(x.endM), time_s: r2(x.timeS), pace_s_per_500m: r2(x.paceS), stroke_rate_spm: r2(x.spm), power_w: r2(x.powerW) })),
     },
     limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. '
       + 'The watch\'s drive is the handle from catch to finish, which runs longer than a monitor\'s drive (0.95 s against 0.60 s on the one session recorded with both), so its recovery_per_drive reads closer to even and is not the ratio rowing teaching refers to. '
@@ -46435,8 +46530,14 @@ const LOAM_NB = {
   'drag factor': 'dragfaktor',
   'power, first third to last third': 'effekt, første til siste tredel',
   'Drive length': 'Draglengde',
-  'One point per stroke. Power is what reached the flywheel; drive length is how far the handle travelled, by the machine&rsquo;s own sensor.':
-    'Ett punkt per tak. Effekt er det som nådde svinghjulet; draglengde er hvor langt håndtaket gikk, målt av maskinens egen sensor.',
+  'Your piece by the metre: one point per stroke, power is what reached the flywheel and stroke rate is the monitor&rsquo;s own.':
+    'Draget ditt meter for meter: ett punkt per tak, effekt er det som nådde svinghjulet, og takten er monitorens egen.',
+  'Your piece by the metre: one point per stroke, pace per 500 m and stroke rate as the monitor showed them. This recording carries no power per stroke.':
+    'Draget ditt meter for meter: ett punkt per tak, tempo per 500 m og takt slik monitoren viste dem. Dette opptaket har ingen effekt per tak.',
+  'Drive length is how far the handle travelled on each stroke, by the machine&rsquo;s own sensor.':
+    'Draglengde er hvor langt håndtaket gikk i hvert tak, målt av maskinens egen sensor.',
+  'Split': 'Mellomtid',
+  'Pace per 500 m': 'Tempo per 500 m',
   'Stroke rate: the monitor read {a}, Loam read {b} from your movement.': 'Takt: monitoren leste {a}, Loam leste {b} fra bevegelsen din.',
   'Handle travel: the monitor measured {a} m a stroke, your watch {b} m.': 'Håndtakets vei: monitoren målte {a} m per tak, klokken din {b} m.',
   'Drive time: the monitor measured {a} s, the part of the drive that speeds the flywheel up; your watch {b} s, the handle from the catch to the finish.':
@@ -65771,7 +65872,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'db2229b85 · 2026-11-19';
+const LOAM_BUILD = '3202fafcc · 2026-11-20';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
