@@ -38080,7 +38080,7 @@ function renderRowErg(D) {
     agree.push(loamT('Stroke rate: the monitor read {a}, Loam read {b} from your movement.', { a: Math.round(e.rateMedian), b: Math.round(s.rateMedian) }));
   if (c && e.driveLengthM)
     agree.push(loamT('Handle travel: the monitor measured {a} m a stroke, your watch {b} m.', { a: e.driveLengthM.toFixed(2), b: c.handleTravelM.toFixed(2) }));
-  if (c && e.driveS)
+  if (c && c.orientedBy === 'monitor' && e.driveS)
     agree.push(loamT('Drive time: the monitor measured {a} s, the part of the drive that speeds the flywheel up; your watch {b} s, the handle from the catch to the finish.', { a: e.driveS.toFixed(2), b: c.driveS.toFixed(2) }));
   el.innerHTML = `
     <div class="section-title" style="margin-top:22px">${loamT('From the monitor')}<span class="subtitle">${loamT('each stroke as the machine measured it')}</span></div>
@@ -38124,6 +38124,16 @@ function drawRowErgChart(e) {
 function rowStrokeOf(D) {
   return D && D.stroke && D.rowing && D.rowing.source === 'wrist' ? D.stroke : null;
 }
+/* The same, only when the machine's monitor named the catch. Every read that depends on which end
+   is the catch (drive and recovery, the arm reads, the handle's speed through the drive, the figure)
+   is withheld without it: where the hands linger was right on the one session graded against a
+   monitor and wrong on that session before the rule was flipped, and it reads a rower whose arms
+   bend at the catch back to front, telling the rower the arm read is for that the arms are fine.
+   Owner, 2026-11-19: "let's hide if it's not accurate without a connection". */
+function rowStrokeOriented(D) {
+  const c = rowStrokeOf(D);
+  return c && c.orientedBy === 'monitor' ? c : null;
+}
 function rowDigest(D) {
   const s = D.rowing, c = rowStrokeOf(D), e = D.erg, r2 = (v) => (v == null ? null : +(+v).toFixed(2));
   return {
@@ -38132,9 +38142,12 @@ function rowDigest(D) {
     stroke_rate: { median_spm: r2(s.rateMedian), p10_spm: r2(s.rateP10), p90_spm: r2(s.rateP90), first_half_spm: r2(s.rateFirstHalf), second_half_spm: r2(s.rateSecondHalf), read_from: s.source },
     strokes_estimated: s.strokes,
     heart_rate: s.hrAvg == null ? null : { avg_bpm: s.hrAvg, max_bpm: s.hrMax, first_bpm: s.hrFirst, last_bpm: s.hrLast, samples: s.hrN },
-    average_stroke: !c ? null : {
+    average_stroke: !c ? null : c.orientedBy !== 'monitor' ? {
+      strokes_averaged: c.n, stroke_s: r2(c.periodS), handle_travel_m: r2(c.handleTravelM), head_travel_m: r2(c.headTravelM),
+      withheld: 'drive and recovery times, handle speed and the arm reads: without the machine\'s monitor connected, which end of the stroke is the catch is not known',
+    } : {
       strokes_averaged: c.n, stroke_s: r2(c.periodS), drive_s: r2(c.driveS), recovery_s: r2(c.recoveryS), recovery_per_drive: r2(c.recoveryS / c.driveS),
-      drive_timed_as: 'the handle, catch to finish', catch_found_by: c.orientedBy === 'monitor' ? 'the machine\'s monitor' : 'where the hands linger',
+      drive_timed_as: 'the handle, catch to finish', catch_found_by: 'the machine\'s monitor',
       handle_travel_m: r2(c.handleTravelM),
       drive_first_third_s: r2(c.driveFirstS), drive_last_third_s: r2(c.driveLastS),
       peak_handle_speed_mps: r2(c.peakSpeedMps), peak_handle_speed_at_fraction_of_drive: r2(c.peakAt),
@@ -38154,7 +38167,7 @@ function rowDigest(D) {
     limits: 'Handle = watch on the wrist, head = AirPods; both from double-integrated acceleration, not checked against video. Legs, knees, seat, back angle and layback are NOT measured. '
       + 'The watch\'s drive is the handle from catch to finish, which runs longer than a monitor\'s drive (0.95 s against 0.60 s on the one session recorded with both), so its recovery_per_drive reads closer to even and is not the ratio rowing teaching refers to. '
       + 'Stroke-to-stroke handle length is NOT reported: it did not follow the monitor\'s drive length. '
-      + (c && c.orientedBy !== 'monitor' ? 'Which end is the catch was inferred from where the hands linger; a rower whose arms bend at the catch can be read back to front, which would invert the arm reads. ' : '')
+      + (c && c.orientedBy !== 'monitor' ? 'Without the monitor, which end of the stroke is the catch is not known, so drive and recovery times, handle speed and the arm reads are NOT given; say the monitor has to be connected for them. ' : '')
       + (e ? 'Distance, pace, watts, drag factor and the per-stroke drive numbers under `monitor` are the machine\'s own and may be quoted as measured; where `monitor` and `average_stroke` disagree, the monitor is the reference.'
         : 'Distance, split, pace, watts, calories and drag factor are NOT measured: they are the machine monitor\'s. The stroke count is time times rate.')
       + ' Graded against one session recorded with the monitor connected.',
@@ -38162,7 +38175,7 @@ function rowDigest(D) {
 }
 function rowCoachPrompt(level) {
   return 'You are an indoor rowing (rowing machine) coach reading one recorded session. Use ONLY the numbers in the digest; quote them. '
-    + 'What is measured: stroke rate, time rowing, an estimated stroke count, heart rate when present, and the average stroke as the handle\'s and the head\'s travel along the rail, with drive and recovery times and how the arms move relative to the body. '
+    + 'What is measured: stroke rate, time rowing, an estimated stroke count, heart rate when present, and the average stroke as the handle\'s and the head\'s travel along the rail; with the monitor connected, also drive and recovery times and how the arms move relative to the body. '
     + 'When the digest has a `monitor` block, the session was recorded with the machine\'s own monitor connected: its distance, pace per 500 m, watts, drag factor, stroke count and per-stroke drive length, drive time, recovery time, force and work are measured by the machine and may be quoted and coached on. '
     + 'What is NOT measured and must never be stated, estimated or implied: without a `monitor` block, distance, split or pace per 500 m, watts, calories and drag factor; with or without it, leg drive, knee angle, seat position, shin angle, back angle, layback, posture, or whether legs or back moved first. If asked, say it is not in the recording and that the machine\'s monitor is the source for distance, split and watts. '
     + 'The arm reads are the handle\'s travel minus the head\'s. They have not been checked against video: present them as what the sensors suggest, not as fact. '
@@ -38201,6 +38214,13 @@ function renderRowStroke(D) {
   const c = rowStrokeOf(D);
   if (!c) { el.innerHTML = ''; return; }
   const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${l}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
+  if (c.orientedBy !== 'monitor') {
+    el.innerHTML = `
+    <div class="section-title" style="margin-top:22px">${loamT('Stroke replay')} <span class="beta-badge">${loamT('EXPERIMENTAL')}</span></div>
+    <div class="strength-tablenote analysis-explanation">${loamT('<strong>Connect the rowing machine&rsquo;s monitor to see your stroke replayed.</strong> Without it, Loam cannot reliably tell the catch from the finish, and read the wrong way round the replay shows your arms backwards. Your stroke length does not depend on which end is which.')}</div>
+    <div class="stiles ski-stiles">${tile(c.handleTravelM.toFixed(2) + ' m', loamT('stroke length'), loamT('how far the handle travels'))}</div>`;
+    return;
+  }
   const pctT = (v) => Math.round(v * 100) + '%';
   const tiles = [
     tile(c.handleTravelM.toFixed(2) + ' m', loamT('stroke length'), loamT('how far the handle travels')),
@@ -38216,8 +38236,7 @@ function renderRowStroke(D) {
     ? loamT('<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch and the head is your AirPods; both are measured. <strong>The legs and the lean of the body are drawn to fit and are not measured</strong>, so this shows when your arms work against your body, not the order of legs and back.', { n: c.n })
     : loamT('<strong>Your average stroke, from {n} strokes of the longest piece.</strong> The handle is your watch. With AirPods in as well, Loam can also show your body and when the arms work against it.', { n: c.n });
   const rest = loamT('Nothing here was checked against video. The usual teaching, for comparison: on the drive the legs go first with the arms straight and the arms finish it; on the way back the hands go away first, then the body, then the slide; and at a steady rate the recovery takes about twice as long as the drive, closing toward even as the rate climbs past 30.')
-    + ' ' + loamT('Your watch times the drive from the catch to the finish of the handle. A rowing machine&rsquo;s monitor times only the part that speeds the flywheel up, which is shorter, so the ratio here reads closer to even than the monitor&rsquo;s would.')
-    + (c.orientedBy === 'monitor' ? '' : ' ' + loamT('Which end of the stroke is the catch is read from where your hands linger, which is the catch for most rowers; with the rowing machine&rsquo;s monitor connected, the monitor settles it.'));
+    + ' ' + loamT('Your watch times the drive from the catch to the finish of the handle. A rowing machine&rsquo;s monitor times only the part that speeds the flywheel up, which is shorter, so the ratio here reads closer to even than the monitor&rsquo;s would.');
   el.innerHTML = `
     <div class="section-title" style="margin-top:22px">${loamT('Stroke replay')} <span class="beta-badge">${loamT('EXPERIMENTAL')}</span></div>
     ${leadNote(lead, rest, 'strength-tablenote', loamT('How this is read'))}
@@ -46371,8 +46390,8 @@ const LOAM_NB = {
     'Hver prikk er ett tak. Et drag som blir tregere mot slutten, er slik tretthet ser ut her; en flat linje er et drag du holdt sammen. Lengden vises ikke tak for tak: sjekket mot romaskinens egen monitor fulgte ikke klokkens lengde fra ett tak til det neste den.',
   'Your watch times the drive from the catch to the finish of the handle. A rowing machine&rsquo;s monitor times only the part that speeds the flywheel up, which is shorter, so the ratio here reads closer to even than the monitor&rsquo;s would.':
     'Klokken din tar tiden på draget fra isettet til uttaket av håndtaket. Monitoren på en romaskin tar bare tiden på delen som setter fart på svinghjulet, som er kortere, så forholdet her blir nærmere likt enn monitorens ville blitt.',
-  'Which end of the stroke is the catch is read from where your hands linger, which is the catch for most rowers; with the rowing machine&rsquo;s monitor connected, the monitor settles it.':
-    'Hvilken ende av taket som er isettet, leses fra der hendene dveler, som er isettet for de fleste roere; med romaskinens monitor tilkoblet avgjør monitoren det.',
+  '<strong>Connect the rowing machine&rsquo;s monitor to see your stroke replayed.</strong> Without it, Loam cannot reliably tell the catch from the finish, and read the wrong way round the replay shows your arms backwards. Your stroke length does not depend on which end is which.':
+    '<strong>Koble til romaskinens monitor for å se taket ditt spilt av.</strong> Uten den kan ikke Loam skille isettet fra uttaket på en pålitelig måte, og lest feil vei viser avspillingen armene dine baklengs. Taklengden avhenger ikke av hvilken ende som er hvilken.',
   'What should I work on first?': 'Hva bør jeg jobbe med først?',
   'Is my recovery rushed?': 'Er framglidingen min for rask?',
   'Give me a drill for my arms': 'Gi meg en øvelse for armene',
@@ -55045,7 +55064,7 @@ function renderCoachPanelChips(D, sport, chips) {
   }
   const coachOpts = { openWater: !!(D && D.swim && D.swim.hasLengths === false), sidesUnreliable,
     fastWalk: sport === 'walking' && isFastWalk(D && D.summary), gpsOnly: !!(D && D.gpsOnly),
-    noStroke: sport === 'rowing' && !rowStrokeOf(D) };
+    noStroke: sport === 'rowing' && !rowStrokeOriented(D) };
   /* Translated HERE rather than inside `coachChips`, which is a pure per-sport picker with some
      twenty return sites. The chip's text is also the QUESTION sent to the coach, and the coach
      already answers in the reader's language (`coachLanguage`), so asking in it is the consistent
@@ -65752,7 +65771,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '3cd50a73f · 2026-11-19';
+const LOAM_BUILD = 'db2229b85 · 2026-11-19';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
