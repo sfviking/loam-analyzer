@@ -25079,6 +25079,20 @@ const LoamSki = (function () {
 
     /* Walk the rate series with level hysteresis in one direction. `sign` is -1 for falls, +1 for
        rises. Returns index ranges that sustained the entry threshold for SKI_ANCHOR_MIN_S. */
+    /* Index to bound a boundary search walking from `from` towards `limit` (step -1 or +1): the sample
+       at which the rate has sat under SKI_STOP_RATE_MPS for SKI_ANCHOR_MIN_S, or `limit` if it never does. */
+    function settledBound(series, rate, from, limit, step) {
+      let runStart = -1;
+      for (let k = from; step > 0 ? k <= limit : k >= limit; k += step) {
+        const r = rate[k];
+        if (r != null && Math.abs(r) < SKI_STOP_RATE_MPS && series[k].frag === series[from].frag) {
+          if (runStart < 0) runStart = k;
+          if (Math.abs(series[k].t - series[runStart].t) >= SKI_ANCHOR_MIN_S) return k;
+        } else runStart = -1;
+      }
+      return limit;
+    }
+
     function anchorsFor(series, rate, sign, enter, exit) {
       const out = [];
       let i = 0;
@@ -25150,7 +25164,14 @@ const LoamSki = (function () {
         const nextStart = gi + 1 < groups.length ? groups[gi + 1].anchors[0].i : series.length - 1;
         const down = g.dir === 'down';
 
-        const lo = Math.max(prevEnd, 0), hi = Math.min(nextStart, series.length - 1);
+        /* The search stops at the first SETTLED DWELL beyond the anchor: SKI_ANCHOR_MIN_S of rate under
+           SKI_STOP_RATE_MPS. Without that bound it ran across the whole gap to the neighbouring leg, and over
+           a long wait the barometer drifts 1-3 m -- more than SKI_EXTREMUM_BAND_M -- so the extremum landed at
+           the far end of a 5-15 min queue or break, the wait was billed to the descent, and the mean-rate
+           gate refused it. Measured 2026-11-24 at SNO: 9 of 14 skied descents refused at 0.06-0.31 m/s,
+           with 190-970 s of stopped time inside each. */
+        const lo = settledBound(series, rate, first.i, Math.max(prevEnd, 0), -1);
+        const hi = settledBound(series, rate, last.j, Math.min(nextStart, series.length - 1), +1);
         let sIdx = first.i, eIdx = last.j;
         /* Start: extremum of the leg's origin side (a max for a descent, a min for a rise). */
         {
@@ -65980,7 +66001,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'f90c6c62f · 2026-11-25';
+const LOAM_BUILD = 'be69010e5 · 2026-11-25';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
