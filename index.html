@@ -1876,6 +1876,16 @@
     font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; color: var(--text-dim);
   }
   .ski-budget-key i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  /* Piste colours, by the convention the piste is rated in (LoamSkiCatalog.skiPisteColour). The word
+     is always beside the dot: a colour alone is not a label. Black carries a ring so it shows on the
+     dark theme; double black is a diamond. */
+  .ski-piste { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  .ski-piste-green { background: #2e9e48; }
+  .ski-piste-blue { background: #2f6fd6; }
+  .ski-piste-red { background: #d63a3a; }
+  .ski-piste-black { background: #1b1b1b; box-shadow: 0 0 0 1px var(--text-muted); }
+  .ski-piste-double-black { background: #1b1b1b; box-shadow: 0 0 0 1px var(--text-muted); border-radius: 1px; transform: rotate(45deg) scale(0.85); }
+  .ski-piste-freeride { background: #e88a1a; }
   .ski-b-skiing { background: var(--sky); }
   .ski-b-lifts { background: var(--text-muted); }
   .ski-b-lines { background: var(--amber); }
@@ -4475,6 +4485,7 @@ function loamSeasonRequested(search, host) {
       <span class="subtitle" id="skiGpsSubtitle"></span>
     </div>
     <div id="skiGpsBudget" class="ski-budget"></div>
+    <div id="skiGpsColours" class="ski-budget-key"></div>
     <div class="panel" style="overflow-x:auto;">
       <table id="skiGpsTable">
         <thead></thead>
@@ -9598,6 +9609,37 @@ function skiCatalogCells(bounds) {
   return cells;
 }
 
+/* A piste's colour from its OpenSkiData rating and the convention it is rated in: a European red is
+   a North American blue, so the rating alone cannot name a colour. Null for an unrated piste, an
+   unknown convention or an unknown value, which the runs table leaves without a colour rather than
+   guessing one. */
+const SKI_PISTE_COLOURS = ['green', 'blue', 'red', 'black', 'double-black', 'freeride'];
+const SKI_COLOUR_BY_CONVENTION = {
+  europe: { novice: 'green', easy: 'blue', intermediate: 'red', advanced: 'black', expert: 'black', extreme: 'black', freeride: 'freeride' },
+  north_america: { novice: 'green', easy: 'green', intermediate: 'blue', advanced: 'black', expert: 'double-black', extreme: 'double-black', freeride: 'freeride' },
+  japan: { novice: 'green', easy: 'green', intermediate: 'red', advanced: 'black', expert: 'black', extreme: 'black', freeride: 'freeride' },
+};
+function skiPisteColour(difficulty, convention) {
+  return SKI_COLOUR_BY_CONVENTION[convention]?.[difficulty] ?? null;
+}
+
+/* The day by piste colour: runs, vertical and moving time on each colour a run was matched to, in
+   colour order. `runs` are `{ colour, drop, movingS }`; a run with no colour is left out, and
+   `unrated` counts them so the key never passes for the whole day. */
+function skiColourBreakdown(runs) {
+  const by = new Map();
+  let unrated = 0;
+  for (const r of runs || []) {
+    if (!SKI_PISTE_COLOURS.includes(r.colour)) { unrated++; continue; }
+    const b = by.get(r.colour) || { colour: r.colour, runs: 0, dropM: 0, movingS: 0 };
+    b.runs++;
+    b.dropM += Number.isFinite(r.drop) ? r.drop : 0;
+    b.movingS += Number.isFinite(r.movingS) ? r.movingS : 0;
+    by.set(r.colour, b);
+  }
+  return { colours: SKI_PISTE_COLOURS.filter(c => by.has(c)).map(c => by.get(c)), unrated };
+}
+
 function skiCatalogFeatures(data) {
   if (data?.schema !== 1 || !Number.isFinite(Date.parse(data.sourceUpdatedAt))
       || !Array.isArray(data.features) || data.features.length > 100000) throw new Error('response');
@@ -9612,8 +9654,13 @@ function skiCatalogFeatures(data) {
     seen.add(f.id);
     // Same-labelled pieces must not compete with one another in the ambiguity gate.
     const key = `${f.kind}:${f.label}`;
-    if (groups.has(key)) groups.get(key).paths.push(...f.paths);
-    else groups.set(key, { kind: f.kind, label: f.label, url: f.url, paths: [...f.paths] });
+    const colour = f.kind === 'piste' ? skiPisteColour(f.difficulty, f.convention) : null;
+    if (groups.has(key)) {
+      const g = groups.get(key);
+      g.paths.push(...f.paths);
+      // Pieces of one name rated differently say nothing about the name's colour.
+      if (g.colour !== colour) g.colour = null;
+    } else groups.set(key, { kind: f.kind, label: f.label, url: f.url, paths: [...f.paths], colour });
   }
   return [...groups.values()].map(f => {
     const bounds = [90, 180, -90, -180];
@@ -9665,7 +9712,7 @@ async function downloadSkiCatalog(bounds, { native = false, signal, fetcher = fe
   return data;
 }
 
-return { SKI_CATALOG_ROOT, skiCatalogCells, skiCatalogFeatures, downloadSkiCatalog };
+return { SKI_CATALOG_ROOT, SKI_PISTE_COLOURS, skiCatalogCells, skiCatalogFeatures, downloadSkiCatalog, skiPisteColour, skiColourBreakdown };
 })();
 /* ==== End ski catalogue port ==== */
 
@@ -9955,6 +10002,18 @@ function skiMapTitle(D, win, kind) {
   if (!D || LoamRouteMap.routeMapProfile(displaySport(D)) !== 'ski') return '';
   return routeMapNamesFor(D, win, kind).map(n => n.label).join(' → ');
 }
+/* The colour of the piste a run matched most of, by its rating's convention, or null when it matched
+   none or that piste is unrated. Display only, matched on each render, like skiMapTitle. */
+function skiMapColour(D, win) {
+  if (!D || LoamRouteMap.routeMapProfile(displaySport(D)) !== 'ski') return null;
+  const names = routeMapNamesFor(D, win, 'piste');
+  if (!names.length) return null;
+  const top = names.reduce((a, b) => (b.meters > a.meters ? b : a));
+  const f = routeMapState(D).features?.find(x => x.kind === 'piste' && x.label === top.label);
+  return f?.colour ?? null;
+}
+const SKI_PISTE_COLOUR_WORDS = { green: 'Green', blue: 'Blue', red: 'Red', black: 'Black', 'double-black': 'Double black', freeride: 'Freeride' };
+
 /* A run on the ride on screen: the rider's own name or a saved segment's wins, then the map name,
    then the generic "Descent N". Needs D because a map name is matched against THIS ride's track,
    which is why it cannot live in runDisplayLabel: that also titles other rides' laps. */
@@ -40973,14 +41032,27 @@ function renderSkiGpsDay(D) {
   /* Map names, matched on each render and never saved (see skiMapTitle). A lift reads its whole
      ride; a run reads its fall, the stretch this table measures. */
   const runName = lap => skiMapTitle(D, { tStart: lap.tTop ?? lap.t0, tEnd: lap.tBottom ?? lap.t1 }, 'piste');
+  const runColour = lap => skiMapColour(D, { tStart: lap.tTop ?? lap.t0, tEnd: lap.tBottom ?? lap.t1 });
   const liftName = L => skiMapTitle(D, L, 'lift');
+  const dot = c => c ? `<i class="ski-piste ski-piste-${c}" role="img" aria-label="${escapeHtml(loamT(SKI_PISTE_COLOUR_WORDS[c]))}"></i>` : '';
   // min-width: a narrow column otherwise stacks "Gold Coast Face → Gold Coast" one word per line.
-  const mapLine = name => name ? `<small class="ski-map-name" style="display:block;min-width:9em;font-weight:400;color:var(--text-muted);white-space:normal">${escapeHtml(name)}</small>` : '';
+  const mapLine = (name, colour) => name ? `<small class="ski-map-name" style="display:block;min-width:9em;font-weight:400;color:var(--text-muted);white-space:normal">${dot(colour)}${escapeHtml(name)}</small>` : '';
+  /* The day by piste colour, under the budget bar. Hidden until a run matches a rated piste, which
+     is never before the names have loaded. */
+  const colours = LoamSkiCatalog.skiColourBreakdown(day.laps.filter(l => l.run)
+    .map(l => ({ colour: runColour(l), drop: l.drop, movingS: l.movingS })));
+  const colourHost = document.getElementById('skiGpsColours');
+  if (colourHost) colourHost.innerHTML = colours.colours.length
+    ? `<span>${escapeHtml(loamT('By piste colour'))}</span>`
+      + colours.colours.map(c => `<span>${dot(c.colour)}${escapeHtml(loamT(SKI_PISTE_COLOUR_WORDS[c.colour]))} · `
+        + `${escapeHtml(c.runs === 1 ? loamT('1 run') : loamT('{n} runs', { n: c.runs }))} · ${U.elev(c.dropM)} · ${Math.round(c.movingS / 60)}m</span>`).join('')
+      + (colours.unrated ? `<span>${escapeHtml(loamT('{n} not on a rated piste', { n: colours.unrated }))}</span>` : '')
+    : '';
   for (const lap of day.laps) {
     if (lap.run) {
       const t0 = lap.tTop ?? lap.t0, t1 = lap.tBottom ?? lap.t1;
       rows.push(`<tr class="${best.has(lap.runIndex) ? 'ski-best' : ''}" data-t0="${t0}" data-t1="${t1}" data-label="${escapeHtml(runName(lap) || loamT('Run {n}', { n: lap.runIndex }))}"><td>${lap.runIndex}</td>`
-        + `<td>${lap.group ? `${lap.group}&middot;${lap.groupLap}` : '&mdash;'}${mapLine(runName(lap))}</td>`
+        + `<td>${lap.group ? `${lap.group}&middot;${lap.groupLap}` : '&mdash;'}${mapLine(runName(lap), runColour(lap))}</td>`
         + `<td>${U.elev(lap.drop)}</td><td>${U.dist(lap.distance)}</td><td>${skiClockT(lap.movingS)}</td>`
         + `<td>${lap.avgMovingSpeed != null ? U.speed(lap.avgMovingSpeed) : '&mdash;'}</td>`
         + `<td>${lap.peakSpeed ? U.speed(lap.peakSpeed) : '&mdash;'}</td>`
@@ -46752,6 +46824,15 @@ const LOAM_NB = {
   'Time skiing': 'Tid på ski',
   'Lift lines': 'Heiskø',
   'Steepest pitch': 'Brattest',
+  'By piste colour': 'Etter løypefarge',
+  'Green': 'Grønn',
+  'Blue': 'Blå',
+  'Red': 'Rød',
+  'Black': 'Svart',
+  'Double black': 'Dobbel svart',
+  'Freeride': 'Frikjøring',
+  '{n} not on a rated piste': '{n} ikke i en merket løype',
+  '1 run': '1 kjøring',
   'Lifts': 'Heiser',
   'Breaks': 'Pauser',
   'Standing and getting about': 'Stående og på vei',
@@ -66002,7 +66083,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '6c800fa40 · 2026-11-27';
+const LOAM_BUILD = '482f96534 · 2026-11-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
