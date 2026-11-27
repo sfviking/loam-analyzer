@@ -4115,7 +4115,7 @@ function loamSeasonRequested(search, host) {
            inside it: swept text node by text node, "The <strong>Most scrubbed</strong> chips jump
            to..." came out with its middle translated and its two ends English. localizeStaticChrome
            replaces the whole run instead. -->
-      <div class="dim analysis-explanation form-turn-only" style="font-size:12px; margin-top:6px;"><span id="formPictureLead">Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.</span>
+      <div class="dim analysis-explanation form-turn-only" style="font-size:12px; margin-top:6px;"><span id="formPictureLead">Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.</span><span id="formPictureLeadSki" class="hidden">Use Lap differences to compare the same turn across runs in this recording.</span>
         <details class="caveat-more"><summary>Every part of the picture</summary><span id="formPictureMore">The figure is a schematic driven by phone tilt. The pale needle marks peak tilt change; the head needle shows relative AirPods movement with drift removed. The map locates the recording, not a precise line through the terrain. GPS speed traces and corner speeds from a FIT file may differ.</span></details>
       </div>
     </div>
@@ -14633,7 +14633,7 @@ function formRenderScrubChips(D, subset, labelSuffix) {
   const picksEl = document.getElementById('formScrubPicks');
   if (!picksEl || !D) return;
   const scrubFmt = (mph) => `${U.speedNum(mph / 2.23694).toFixed(1)} ${U.speedUnit()}`;
-  const pool = (subset || formInRunTurns(D)).filter(T => formTurnRollRange(D, T) <= 65);
+  const pool = formScrubCoached(D) ? (subset || formInRunTurns(D)).filter(T => formTurnRollRange(D, T) <= 65) : [];
   const scrubRanked = pool.map(T => ({ T, mph: turnScrubMph(T) }))
     .filter(o => o.mph >= FORM_SCRUB_MIN_MPH)
     .sort((a, b) => b.mph - a.mph);
@@ -14656,6 +14656,13 @@ function formRenderScrubChips(D, subset, labelSuffix) {
     };
   });
 }
+
+/* Whether the replay flags a corner for the speed it scrubbed. Not on a ski day: a skier turns to
+   control speed, so the corner that bled the most is the turn doing its job, not the MTB braking
+   corner worth re-watching -- the same reason the highlights card is hidden there (2026-10-24). The
+   measurement stays in the tiles and the per-turn table; only the "MOST SCRUBBED" picks, the 〰
+   markers and the most-scrubbed default go. */
+function formScrubCoached(D) { return !isSkiSport(D && D.sport); }
 
 /* Speed scrubbed through a turn: how much speed (mph) was bled from the entry to the slowest point of
    the corner (apex or exit). High scrub = braking into / sliding through the corner, the turns most
@@ -14691,13 +14698,13 @@ function formFillTurnSelect(D, turns, segs, want) {
   /* Scrub markers stay scoped to corners inside runs (formInRunTurns): transit-turn scrub is not
      coached, so it is not flagged either. The 〰 threshold is absolute, so narrowing the LIST never
      changes which corners carry the marker -- only which are on offer. */
-  const inRunSet = new Set(formInRunTurns(D).map(T => T.n));
+  const inRunSet = new Set(formInRunTurns(D).map(T => T.n)), scrubOn = formScrubCoached(D);
   /* Scrub amounts follow the Units toggle (turnScrubMph computes in mph internally). */
   const scrubFmt = (mph) => `${U.speedNum(mph / 2.23694).toFixed(1)} ${U.speedUnit()}`;
   const turnOpts = (turns || []).map(T => {
     const r = (T.radius != null && !isNaN(T.radius)) ? ` · r ${U.small(T.radius)}` : '';
     const mph = turnScrubMph(T);
-    const sc = (inRunSet.has(T.n) && mph >= FORM_SCRUB_MIN_MPH) ? ` · 〰 ${loamT('scrub {v}', { v: scrubFmt(mph) })}` : '';
+    const sc = (scrubOn && inRunSet.has(T.n) && mph >= FORM_SCRUB_MIN_MPH) ? ` · 〰 ${loamT('scrub {v}', { v: scrubFmt(mph) })}` : '';
     return `<option value="${T.n}">T${T.n} ${T.direction}${r}${sc}</option>`;
   }).join('');
   /* `runDefaultLabelT` and not `loamT` on the whole label: a name the rider typed is theirs, and only
@@ -14758,7 +14765,7 @@ function setupFormReplay(D) {
      and re-watch: a wave marker in the dropdown plus a clickable "Most scrubbed" quick-pick row.
      Scoped to corners inside runs (see formInRunTurns): transit-turn scrub is not coached. */
   const inRunSet = new Set(formInRunTurns(D).map(T => T.n));
-  const scrubRanked = ordered.filter(T => inRunSet.has(T.n))
+  const scrubRanked = ordered.filter(T => formScrubCoached(D) && inRunSet.has(T.n))
     .map(T => ({ T, mph: turnScrubMph(T) }))
     .filter(o => o.mph >= FORM_SCRUB_MIN_MPH)
     .sort((a, b) => b.mph - a.mph);
@@ -14766,6 +14773,9 @@ function setupFormReplay(D) {
      chronological one (typically a trivial early bend). The dropdown stays chronological. */
   const reviewPicks = formReviewPicks(D);
   if (!formLeanReplayable(D)) segs = [];
+  { const skiLead = !formScrubCoached(D);
+    document.getElementById('formPictureLead')?.classList.toggle('hidden', skiLead);
+    document.getElementById('formPictureLeadSki')?.classList.toggle('hidden', !skiLead); }
   formFillTurnSelect(D, ordered, segs, !ordered.length ? 'jump:' + formReplayJumps(D)[0].id : reviewPicks.length ? reviewPicks[0].turn.n : (scrubRanked.length ? scrubRanked[0].T.n : null));
   formRenderScrubChips(D);
   const pick = () => {
@@ -14866,6 +14876,8 @@ function formCoachFacts(D, turn, S) {
     leanScope: S.leanScope || 'ride',
     segLabel: formTurnSegmentLabel(D, turn),
     speedUnit: U.speedUnit(), smallUnit: U.smallUnit(),
+    /* A ski day is asked about in ski words: the coach reading this runs on the ski prompt. */
+    ski: isSkiSport(D && D.sport),
   };
 }
 
@@ -14934,6 +14946,7 @@ function formSegmentCoachFacts(D, run, S) {
     hasGaze: false,
     hasWrist: !!S.wristRoll,
     speedUnit: U.speedUnit(), smallUnit: U.smallUnit(),
+    ski: isSkiSport(D && D.sport),
   };
 }
 
@@ -15371,6 +15384,122 @@ function formSnowSky(W, ground, tau) {
   }
   return out + '</g>';
 }
+/* The skier the Form Replay draws on a ski day, seen from behind, as one group pivoting about the
+   contact patch by the measured lean `lc` (deg, + = right) -- the same rotation the bike rider gets, so
+   the picture's angle is still the phone's and nothing else (owner, 2026-11-27: "That's not how a ski
+   form looks like", of an upright figure on a pair of poles).
+
+   The posture is a skier's rather than a measurement: low, knees and hips flexed, hands forward and
+   wide, poles trailing back to the snow, skis parallel at hip width, a goggle strap round the lid.
+   One part of it follows the lean, and it is geometry rather than a read: a rigid tilt sinks the
+   inside foot below the snow and lifts the outside one, so the inside leg is drawn shorter and the
+   outside one longer until both skis sit on the snow line -- the flexed inside leg and long outside
+   leg every turning skier shows. The knees are not driven further into the turn than the torso: the
+   phone is on the torso, and legs drawn past it would be an edge angle this data never saw. */
+function formSkierSvg(o) {
+  const { cx, ground, lc, AV, gazeCol, look } = o;
+  const g = (n) => Math.round(n * 100) / 100;
+  const rad = (d) => d * Math.PI / 180;
+  const sinL = Math.sin(rad(lc)), cosL = Math.cos(rad(lc));
+  const helmetCy = 104, helmetR = 16, shY = 128, shHalf = 19, hipY = 168, hipHalf = 11, footHalf = 13;
+  /* Local height that lands a point at local x offset `dx` exactly `above` px over the snow once the
+     group is rotated: y_world = dx sin + (y - ground) cos. */
+  const onSnow = (dx, above) => ground + (-above - dx * sinL) / cosL;
+  const legs = [-1, 1].map((k) => {
+    const bx = cx + k * footHalf, footY = Math.max(ground - 22, Math.min(ground + 22, onSnow(k * footHalf, 0)));
+    const hx = cx + k * hipHalf, ankleY = footY - 21;
+    /* A shorter leg is a more bent one: its knee bows out a little more. */
+    const bend = Math.max(0, Math.min(1, (ground - footY) / 16 + 0.5));
+    const kx = (hx + bx) / 2 + k * (2 + 4 * bend), ky = hipY + (ankleY - hipY) * 0.47;
+    return { k, bx, footY, hx, ankleY, kx, ky };
+  });
+  const hands = [-1, 1].map((k) => ({ k, hx: cx + k * 36, hy: 160, ex: cx + k * 33, ey: 147 }));
+  const pants = AV.costume ? AV.leg : AV.kit ? '#2d4a72' : AV.leg;
+  const skiCol = AV.costume ? '#f07a18' : AV.kit ? '#e8622a' : '#d6691f';
+  const bootCol = AV.costume ? '#1b1e24' : '#3a4450';
+  const strapCol = AV.kit ? '#e8622a' : '#2b3138';
+  /* Poles trail back from the hands, foreshortened because they point at the viewer, tips carried
+     off the snow. The lean swings the outside one up, as a skier carries it; the inside one would be
+     driven through the slope, so its tip stops just above the snow, as a pole about to be planted. */
+  const poles = hands.map(({ k, hx, hy }) => {
+    const tx = cx + k * 40, ty = Math.max(hy + 24, Math.min(ground - 16, onSnow(k * 40, 4)));
+    const bxk = hx + (tx - hx) * 0.84, byk = hy + (ty - hy) * 0.84;
+    return `<line data-pole="" x1="${g(hx)}" y1="${g(hy - 8)}" x2="${g(tx)}" y2="${g(ty)}" stroke="#aeb8c2" stroke-width="2.6" stroke-linecap="round"/>`
+      + `<ellipse cx="${g(bxk)}" cy="${g(byk)}" rx="5.5" ry="1.8" fill="none" stroke="#aeb8c2" stroke-width="1.6"/>`;
+  }).join('');
+  const legSvg = legs.map(({ hx, kx, ky, bx, ankleY }) =>
+    `<polyline points="${hx},${hipY} ${g(kx)},${g(ky)} ${bx},${g(ankleY)}" fill="none" stroke="${pants}" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+  /* Boots, then each ski's tail coming toward the viewer from the heel, widening as it nears. */
+  const feet = legs.map(({ bx, footY, ankleY }) =>
+    `<rect x="${bx-8}" y="${g(ankleY-4)}" width="16" height="${g(footY-ankleY+3)}" rx="4" fill="${bootCol}" stroke="#151a20" stroke-width="1"/>`
+    + `<line x1="${bx-6.5}" y1="${g(ankleY+4)}" x2="${bx+6.5}" y2="${g(ankleY+4)}" stroke="#aab4be" stroke-width="1.6" opacity="0.8"/>`
+    + `<line x1="${bx-6.5}" y1="${g(ankleY+11)}" x2="${bx+6.5}" y2="${g(ankleY+11)}" stroke="#aab4be" stroke-width="1.6" opacity="0.8"/>`
+    + `<path data-ski="" d="M${bx-7},${g(footY-3)} L${bx+7},${g(footY-3)} L${bx+9.5},${g(footY+13)} Q${bx},${g(footY+9.5)} ${bx-9.5},${g(footY+13)} Z" fill="${skiCol}" stroke="#1a1f26" stroke-width="1.2" stroke-linejoin="round"/>`
+    + `<line x1="${bx}" y1="${g(footY-1)}" x2="${bx}" y2="${g(footY+9)}" stroke="#f1f5f9" stroke-width="1.4" opacity="0.7"/>`).join('');
+  const arms = hands.map(({ k, hx, hy, ex, ey }) =>
+    `<polyline points="${cx + k * (shHalf - 2)},${shY+2} ${ex},${ey} ${hx},${hy}" fill="none" stroke="${AV.arm}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+  const grips = hands.map(({ hx, hy }) =>
+    `<line x1="${hx}" y1="${hy-10}" x2="${hx}" y2="${hy+2}" stroke="#1f262d" stroke-width="5" stroke-linecap="round"/>`
+    + `<circle cx="${hx}" cy="${hy}" r="5.2" fill="${AV.glove}"/>`).join('');
+  /* Costume bones along the same anchors, so the skeleton skis in the skier's pose. */
+  const B = AV.bone;
+  const bone = (pts, w) => `<polyline points="${pts}" fill="none" stroke="${B}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>`;
+  let bones = '', limbBones = '';
+  if (AV.costume) {
+    for (let y = shY + 2; y <= hipY - 7; y += 6) bones += `<rect x="${cx-2.2}" y="${y}" width="4.4" height="3.8" rx="1.6" fill="${B}"/>`;
+    for (let i = 0; i < 3; i++) {
+      const y0 = shY + 7 + i * 8, out = 14 - i;
+      bones += `<path d="M${cx-3},${y0} Q${cx-out+2},${y0-1} ${cx-out},${y0+5} M${cx+3},${y0} Q${cx+out-2},${y0-1} ${cx+out},${y0+5}" fill="none" stroke="${B}" stroke-width="2.2" stroke-linecap="round"/>`;
+    }
+    bones += `<path d="M${cx-11},${hipY-4} Q${cx},${hipY+4} ${cx+11},${hipY-4}" fill="none" stroke="${B}" stroke-width="2.6" stroke-linecap="round"/>`;
+    limbBones = legs.map(({ hx, kx, ky, bx, ankleY }) => bone(`${hx},${hipY} ${g(kx)},${g(ky)} ${bx},${g(ankleY)}`, 2.6)
+      + `<circle cx="${g(kx)}" cy="${g(ky)}" r="3" fill="${B}"/>`).join('');
+  }
+  const armBones = !AV.costume ? '' : hands.map(({ k, hx, hy, ex, ey }) => bone(`${cx + k * (shHalf - 2)},${shY+2} ${ex},${ey} ${hx},${hy}`, 2.2)
+    + `<circle cx="${ex}" cy="${ey}" r="2.4" fill="${B}"/>`).join('');
+  /* The back of the head: a pumpkin's ribs and stem; a bobble hat's band and cuff; or a ski helmet's
+     vents. Every one but the pumpkin carries a goggle strap round the back, which is what says skier
+     at a glance. */
+  const strap = AV.costume ? ''
+    : `<path d="M${cx-helmetR+0.5},${helmetCy+1} Q${cx},${helmetCy+4.5} ${cx+helmetR-0.5},${helmetCy+1}" fill="none" stroke="${strapCol}" stroke-width="5"/>`
+      + `<path d="M${cx-helmetR+0.5},${helmetCy+1} Q${cx},${helmetCy+4.5} ${cx+helmetR-0.5},${helmetCy+1}" fill="none" stroke="#f1f5f9" stroke-width="0.9" opacity="0.55"/>`;
+  const lid = AV.costume
+    ? [-9, -3, 3, 9].map((dx) => `<path d="M${g(cx+dx*0.55)},${helmetCy-helmetR+2} Q${g(cx+dx*1.3)},${helmetCy} ${g(cx+dx*0.55)},${helmetCy+helmetR-2}" fill="none" stroke="#b4520c" stroke-width="1.5" opacity="0.75"/>`).join('')
+      + `<path d="M${cx-1},${helmetCy-helmetR+1} q0.5,-6 5,-8.5" fill="none" stroke="#4b6b2a" stroke-width="3.6" stroke-linecap="round"/>`
+    : AV.winter
+    ? [-6, -2, 2, 6].map((dx) => `<circle cx="${cx+dx}" cy="${g(helmetCy-6)}" r="1.1" fill="${AV.knit}" opacity="0.8"/>`).join('')
+      + [-8, -4, 0, 4, 8].map((dx) => `<line x1="${cx+dx}" y1="${helmetCy+8}" x2="${cx+dx}" y2="${helmetCy+12}" stroke="#7d1d24" stroke-width="1.2" opacity="0.7"/>`).join('')
+      + `<circle cx="${cx}" cy="${helmetCy-helmetR-3}" r="6" fill="#d8434b" stroke="#8e2129" stroke-width="1"/>`
+    : `<rect x="${cx-7}" y="${helmetCy-12}" width="4" height="8" rx="2" fill="${AV.vent}" opacity="0.85"/>`
+      + `<rect x="${cx-2}" y="${helmetCy-13}" width="4" height="9" rx="2" fill="${AV.vent}" opacity="0.9"/>`
+      + `<rect x="${cx+3}" y="${helmetCy-12}" width="4" height="8" rx="2" fill="${AV.vent}" opacity="0.85"/>`;
+  const nA = rad(look - 90), nx = cx + Math.cos(nA) * (helmetR + 13), ny = helmetCy + Math.sin(nA) * (helmetR + 13);
+  return `<g transform="rotate(${g(lc)} ${cx} ${ground})">`
+    + poles
+    + legSvg + limbBones
+    /* the seat of the ski pants, low and back: what reads as a crouch from behind */
+    + `<ellipse cx="${cx}" cy="${hipY-2}" rx="15" ry="8.5" fill="${pants}"/>`
+    + feet
+    + `<path d="M${cx-shHalf},${shY} Q${cx},${shY-8} ${cx+shHalf},${shY} L${cx+hipHalf+5},${hipY-3} Q${cx},${hipY+4} ${cx-hipHalf-5},${hipY-3} Z" fill="${AV.torso}"/>`
+    + (AV.seam ? `<path d="M${cx},${shY-4} L${cx},${hipY-1}" stroke="${AV.seam}" stroke-width="1.4" opacity="0.55"/>` : '')
+    + bones
+    + arms + armBones + grips
+    + `<rect x="${cx-5}" y="${shY-12}" width="10" height="14" rx="4.5" fill="${AV.neck}"/>`
+    + (AV.winter
+      ? `<path d="M${cx-3},${shY-4} L${cx-10},${shY+20} L${cx-3.5},${shY+21.5} L${cx+2},${shY-3} Z" fill="${AV.scarf}"/>`
+        + `<line x1="${cx-8.4}" y1="${shY+14}" x2="${cx-2.6}" y2="${shY+15.2}" stroke="${AV.knit}" stroke-width="2" opacity="0.9"/>`
+        + `<rect x="${cx-7.5}" y="${shY-8}" width="15" height="6.5" rx="3.2" fill="${AV.scarf}"/>`
+      : '')
+    + `<line x1="${cx}" y1="${helmetCy}" x2="${g(nx)}" y2="${g(ny)}" stroke="${gazeCol}" stroke-width="4" stroke-linecap="round" filter="url(#frGlow)"/>`
+    + `<circle cx="${cx}" cy="${helmetCy}" r="${helmetR}" fill="${AV.helmShell}" stroke="${AV.helmStroke}" stroke-width="2"/>`
+    + (AV.crown ? `<path d="M${cx-helmetR+1},${helmetCy-2} A ${helmetR} ${helmetR} 0 0 1 ${cx+helmetR-1},${helmetCy-2} Z" fill="${AV.crown}"/>` : '')
+    + lid + strap
+    + `<rect x="${cx-helmetR-1}" y="${helmetCy+3}" width="3.4" height="8" rx="1.7" fill="#e9edf0" stroke="#9aa3ab" stroke-width="0.6"/>`
+    + `<rect x="${cx+helmetR-2.4}" y="${helmetCy+3}" width="3.4" height="8" rx="1.7" fill="#e9edf0" stroke="#9aa3ab" stroke-width="0.6"/>`
+    + `<circle cx="${cx}" cy="${ground}" r="4" fill="#0e1310"/>`
+    + `</g>`;
+}
+
 /* The turn scene at playhead `tau`: the rear-view SVG and what the metric strip reads at that
    instant. It writes nothing, so the clip recorder (shareTurnReplay) can draw any instant of a
    replay without moving the one on screen. */
@@ -15406,6 +15535,9 @@ function formTurnScene(F, tau) {
   const pk = Math.max(0, Math.min(58, S.peakLean || 0)) * visualSign;
   const g = (n) => Math.round(n * 100) / 100;
   const rad = (d) => d * Math.PI / 180;
+  /* A ski day draws a skier (formSkierSvg) on the same pivot, lean and gaze; everything else in the
+     scene -- protractor, hero, strip, sky -- is the same picture. */
+  const ski = isSkiSport(F.D && F.D.sport);
 
   /* gaze cue (AirPods head look-ahead) */
   const headOn = headRel != null;
@@ -15504,10 +15636,10 @@ function formTurnScene(F, tau) {
       + `<path d="M${cx-helmetR+3},${helmetCy+1} Q${cx},${g(helmetCy+3)} ${cx+helmetR-3},${helmetCy+1}" fill="none" stroke="${AV.seamCol}" stroke-width="1.6" opacity="0.6"/>`
       + `<circle cx="${cx}" cy="${helmetCy+helmetR-4}" r="3.4" fill="${AV.dial}" stroke="${AV.dialStroke}" stroke-width="1.2"/>`
       + `<circle cx="${cx}" cy="${helmetCy+helmetR-4}" r="1.1" fill="${AV.dialHub}"/>`;
-  const rider =
+  const rider = ski ? formSkierSvg({ cx, ground, lc, AV, gazeCol, look }) :
     `<g transform="rotate(${g(lc)} ${cx} ${ground})">`
     /* rear wheel: tyre, rim, hub, faint spokes */
-    + `<ellipse cx="${cx}" cy="${wheelCy}" rx="11" ry="${wheelRy}" fill="none" stroke="#0d120b" stroke-width="9"/>`
+    + `<ellipse data-wheel="" cx="${cx}" cy="${wheelCy}" rx="11" ry="${wheelRy}" fill="none" stroke="#0d120b" stroke-width="9"/>`
     + `<ellipse cx="${cx}" cy="${wheelCy}" rx="11" ry="${wheelRy}" fill="none" stroke="#3c4c35" stroke-width="2.2"/>`
     + `<line x1="${cx}" y1="${g(wheelCy-wheelRy+3)}" x2="${cx}" y2="${g(wheelCy+wheelRy-3)}" stroke="#26321e" stroke-width="1.3" opacity="0.7"/>`
     + `<line x1="${cx-7}" y1="${g(wheelCy-wheelRy+16)}" x2="${cx+7}" y2="${g(wheelCy+wheelRy-16)}" stroke="#26321e" stroke-width="1" opacity="0.5"/>`
@@ -15650,12 +15782,20 @@ function formTurnScene(F, tau) {
   const ghostAngle = ghostOn ? Math.max(-58, Math.min(58, ghostLean * visualSign)) : 0;
   /* In season the faster lap is a sheet ghost: the same stick posture under a scalloped sheet, so its
      lean still reads, and eye holes so it reads as a ghost at a glance. */
+  /* The stick posture under the ghost: legs to the pedals and hands on the bar, or a skier's crouch
+     with the hands low and wide. */
+  const ghostLimbs = ski
+    ? 'M180 168 L180 128 M180 168 L171 202 L167 232 M180 168 L189 202 L193 232 M180 128 L147 148 L144 160 M180 128 L213 148 L216 160 M158 251 H178 M182 251 H202'
+    : 'M180 248 L180 158 M180 157 L157 193 L171 222 M180 157 L203 193 L189 222 M180 112 L148 147 M180 112 L212 147';
+  const ghostHead = ski ? 'cx="180" cy="104" r="16"' : 'cx="180" cy="86" r="17"';
   const ghostBody = !ghostOn ? '' : AV.costume
     ? `<g id="formGhostBody" transform="rotate(${ghostAngle} 180 252)" opacity="0.5">`
-      + `<path d="M180 248 L180 158 M180 157 L157 193 L171 222 M180 157 L203 193 L189 222 M180 112 L148 147 M180 112 L212 147" fill="none" stroke="#e9e4f5" stroke-width="8" stroke-linecap="round"/>`
+      + `<path d="${ghostLimbs}" fill="none" stroke="#e9e4f5" stroke-width="8" stroke-linecap="round"/>`
+      + (ski ? '<g transform="translate(0 18)">' : '')
       + `<path d="M161 88 C161 63 199 63 199 88 L205 150 q-4.2 7 -8.33 0 q-4.2 7 -8.33 0 q-4.2 7 -8.33 0 q-4.2 7 -8.33 0 q-4.2 7 -8.33 0 q-4.2 7 -8.35 0 Z" fill="#e9e4f5" opacity="0.8"/>`
-      + `<ellipse cx="173" cy="86" rx="2.8" ry="3.8" fill="#0b0710"/><ellipse cx="187" cy="86" rx="2.8" ry="3.8" fill="#0b0710"/></g>`
-    : `<g id="formGhostBody" transform="rotate(${ghostAngle} 180 252)" opacity="0.32" fill="none" stroke="#a8d5ef" stroke-width="9" stroke-linecap="round"><path d="M180 248 L180 158 L180 111 M180 157 L157 193 L171 222 M180 157 L203 193 L189 222 M180 112 L148 147 M180 112 L212 147"/><circle cx="180" cy="86" r="17"/></g>`;
+      + `<ellipse cx="173" cy="86" rx="2.8" ry="3.8" fill="#0b0710"/><ellipse cx="187" cy="86" rx="2.8" ry="3.8" fill="#0b0710"/>`
+      + (ski ? '</g>' : '') + `</g>`
+    : `<g id="formGhostBody" transform="rotate(${ghostAngle} 180 252)" opacity="0.32" fill="none" stroke="#a8d5ef" stroke-width="9" stroke-linecap="round"><path d="${ski ? ghostLimbs : 'M180 248 L180 158 L180 111 M180 157 L157 193 L171 222 M180 157 L203 193 L189 222 M180 112 L148 147 M180 112 L212 147'}"/><circle ${ghostHead}/></g>`;
   const svg = defs
     + `<rect width="${W}" height="${H}" fill="url(#frBg)"/><rect width="${W}" height="${H}" fill="url(#frHalo)"/>`
     + sky
@@ -21006,6 +21146,19 @@ function num(v, unit, places) {
   return `${v.toFixed(p)}${unit ? ' ' + unit : ''}`;
 }
 
+/**
+ * The words that name the sport. A ski day reaches the replay through the same descents-and-turns path
+ * as a ride (`facts.ski`), and a question telling the ski coach what "the bike was doing" contradicts
+ * the ski system prompt sent beside it. Only these words move; the measurements keep their language.
+ */
+function words(f) {
+  return f && f.ski
+    ? { day: 'ski day', dayWide: 'day-wide', went: 'skied', ground: 'run', saw: 'the piste, the snow',
+        kit: 'the skis were', notLean: 'edge angle', who: 'skier', bend: 'turn', again: 'run' }
+    : { day: 'ride', dayWide: 'ride-wide', went: 'rode', ground: 'trail', saw: 'the trail, the surface',
+        kit: 'the bike was', notLean: 'bike lean', who: 'rider', bend: 'corner', again: 'lap' };
+}
+
 /** `1:07` — a duration the coach can read back as a lap time. */
 function mmss(s) {
   const t = Math.max(0, Math.round(s));
@@ -21048,7 +21201,7 @@ function pickLeanBaseline(segment, ride, minPerSide) {
  * so the coach is never handed a placeholder it could mistake for a measurement.
  */
 function formTurnLines(facts) {
-  const f = facts || {};
+  const f = facts || {}, w = words(f);
   const side = f.direction === 'L' ? 'left' : 'right';
   const lines = [];
   lines.push(`Direction: ${side}-hander`);
@@ -21062,19 +21215,19 @@ function formTurnLines(facts) {
        at -- which is the whole reason `pickLeanBaseline` returns its scope rather than just numbers. */
     const where = (f.leanScope === 'segment' && f.segLabel)
       ? `on ${f.segLabel}, the segment this corner is on`
-      : 'across the whole ride';
+      : `across the whole ${w.day}`;
     lines.push(`My median phone lean change ${where}: ${num(f.medLeanL, 'degrees', 0)} left, ${num(f.medLeanR, 'degrees', 0)} right`);
   }
   if (!f.calibrationWarning && has(f.peakLook)) lines.push(`Peak relative head turn (AirPods, drift removed; not eye gaze): ${num(f.peakLook, 'degrees', 0)}`);
-  if (has(f.wristRange)) lines.push(`Wrist roll range through the corner (Watch; not bike lean): ${num(f.wristRange, 'degrees', 0)}`);
+  if (has(f.wristRange)) lines.push(`Wrist roll range through the corner (Watch; not ${w.notLean}): ${num(f.wristRange, 'degrees', 0)}`);
   if (f.calibrationWarning) lines.push(`Measurement limit: ${f.calibrationWarning} Do not infer technique, turn-side weakness or head timing from these motion channels.`);
   const c = f.comparison;
   if (c) {
-    lines.push(`Matched corner: T${c.n} on ${c.label}, another lap in this recording. Aligned at detected entry, apex and exit; not at equal elapsed time.`);
+    lines.push(`Matched corner: T${c.n} on ${c.label}, another ${w.again} in this recording. Aligned at detected entry, apex and exit; not at equal elapsed time.`);
     for (const [label, a, b] of [['Entry', f.entrySpeed, c.entrySpeed], ['Apex', f.apexSpeed, c.apexSpeed], ['Exit', f.exitSpeed, c.exitSpeed]]) {
-      if (has(a) && has(b)) lines.push(`${label} speed, this lap vs reference: ${num(a, f.speedUnit)} vs ${num(b, f.speedUnit)}`);
+      if (has(a) && has(b)) lines.push(`${label} speed, this ${w.again} vs reference: ${num(a, f.speedUnit)} vs ${num(b, f.speedUnit)}`);
     }
-    if (has(c.durationDeltaS)) lines.push(`Entry-to-exit duration difference: ${num(c.durationDeltaS, 'seconds')} (positive means this corner took longer; detected boundaries, not a whole-lap gap).`);
+    if (has(c.durationDeltaS)) lines.push(`Entry-to-exit duration difference: ${num(c.durationDeltaS, 'seconds')} (positive means this corner took longer; detected boundaries, not a whole-${w.again} gap).`);
   }
   return lines;
 }
@@ -21084,7 +21237,7 @@ function formTurnLines(facts) {
  * conversation as their turn, and a first-person question is what the following reply answers.
  */
 function formTurnQuestion(facts) {
-  const f = facts || {};
+  const f = facts || {}, w = words(f);
   const label = f.n != null ? `T${f.n}` : 'this turn';
   const lines = formTurnLines(f);
   const missing = [];
@@ -21098,19 +21251,19 @@ function formTurnQuestion(facts) {
   const scope = f.calibrationWarning || !f.segLabel ? ''
     : f.leanScope === 'segment'
       ? `\n\nRead this corner against the other corners on ${f.segLabel} -- the medians above are that `
-        + `segment's, not the ride's. The session data you were given pools every trail I rode today, `
+        + `segment's, not the ${w.day}'s. The session data you were given pools every ${w.ground} I ${w.went} today, `
         + `so a ride-wide median describes a mix of terrain rather than this one; if you use a figure `
         + `from it, say that is what you are doing.`
       : `\n\nThis corner is on ${f.segLabel}, but that segment has too few corners per side to give it `
-        + `its own lean median, so the medians above are ride-wide and pool every trail I rode today. `
+        + `its own lean median, so the medians above are ${w.dayWide} and pool every ${w.ground} I ${w.went} today. `
         + `Do not read a left/right asymmetry out of this single corner against them.`;
-  return `I am watching the Form Replay for corner ${label} -- the animated rider and the tiles under it. `
+  return `I am watching the Form Replay for ${w.bend} ${label} -- the animated ${w.who} and the tiles under it. `
     + `Explain the observed differences if a matched corner is provided; otherwise describe this corner.\n\n${lines.join('\n')}${gap}${scope}\n\n`
-    + `Tell me what these numbers say about how I rode this one corner, and one thing worth trying next time. `
+    + `Tell me what these numbers say about how I ${w.went} this one ${w.bend}, and one thing worth trying next time. `
     + `Phone lean is a change from entry, not an absolute body angle. Head motion is not eye gaze and `
-    + `wrist roll is not bike lean. More lean or less speed loss is not automatically better; left/right `
-    + `medians describe different corners, not a rider weakness. Read only these numbers: nothing here `
-    + `saw the trail, the surface, my line, or what the bike was doing, `
+    + `wrist roll is not ${w.notLean}. More lean or less speed loss is not automatically better; left/right `
+    + `medians describe different corners, not a ${w.who} weakness. Read only these numbers: nothing here `
+    + `saw ${w.saw}, my line, or what ${w.kit} doing, `
     + `so describe what was measured rather than asserting why it happened.`;
 }
 
@@ -21120,7 +21273,7 @@ function formTurnQuestion(facts) {
  * dash, and a median the sample cannot support is refused out loud rather than quoted.
  */
 function formSegmentLines(facts) {
-  const f = facts || {};
+  const f = facts || {}, w = words(f);
   const lines = [];
   if (f.calibrationWarning) lines.push(`Measurement limit: ${f.calibrationWarning} Do not infer technique or turn-side weakness from motion channels.`);
   if (has(f.durationS)) lines.push(`Time: ${mmss(f.durationS)}`);
@@ -21140,7 +21293,7 @@ function formSegmentLines(facts) {
        the coach whether this segment is tighter or more open than the rest of the day, which is the
        difference a ride-wide median hides. */
     const vs = has(f.rideMedRadius)
-      ? ` (median across the whole ride: ${num(f.rideMedRadius, f.smallUnit)})` : '';
+      ? ` (median across the whole ${w.day}: ${num(f.rideMedRadius, f.smallUnit)})` : '';
     lines.push(`Median apex radius on this segment: ${num(f.medRadius, f.smallUnit)}${vs}`);
   }
   if (has(f.tightestRadius)) lines.push(`Tightest corner on this segment: ${num(f.tightestRadius, f.smallUnit)}`);
@@ -21151,7 +21304,7 @@ function formSegmentLines(facts) {
     lines.push(`Too few corners per side on this segment for a per-side lean median, so there is no left/right asymmetry to read here.`);
   }
   if (!f.calibrationWarning && has(f.rideMedLeanL) && has(f.rideMedLeanR)) {
-    lines.push(`For contrast only, my median phone lean change across the whole ride: ${num(f.rideMedLeanL, 'degrees', 0)} left, ${num(f.rideMedLeanR, 'degrees', 0)} right`);
+    lines.push(`For contrast only, my median phone lean change across the whole ${w.day}: ${num(f.rideMedLeanL, 'degrees', 0)} left, ${num(f.rideMedLeanR, 'degrees', 0)} right`);
   }
   if (has(f.scrubbedCount)) {
     const worst = (f.worstScrub || []).map(o => `T${o.n} ${o.direction === 'L' ? 'left' : 'right'} (-${num(o.amount, f.speedUnit)})`);
@@ -21159,8 +21312,8 @@ function formSegmentLines(facts) {
       + (worst.length ? `, worst first: ${worst.join(', ')}` : ''));
   }
   if (f.peerLabel && has(f.peerDurationS) && has(f.gapS)) {
-    lines.push(`My fastest lap of this same segment today was ${f.peerLabel} at ${mmss(f.peerDurationS)}, `
-      + `${num(f.gapS, 'seconds', 1)} quicker than the lap I am watching`);
+    lines.push(`My fastest ${w.again} of this same segment today was ${f.peerLabel} at ${mmss(f.peerDurationS)}, `
+      + `${num(f.gapS, 'seconds', 1)} quicker than the ${w.again} I am watching`);
   }
   return lines;
 }
@@ -21170,7 +21323,7 @@ function formSegmentLines(facts) {
  * question, because it lands in the conversation as the rider's turn.
  */
 function formSegmentQuestion(facts) {
-  const f = facts || {};
+  const f = facts || {}, w = words(f);
   const label = f.label ? `"${f.label}"` : 'this segment';
   const lines = formSegmentLines(f);
   const missing = [];
@@ -21179,16 +21332,16 @@ function formSegmentQuestion(facts) {
   const gap = missing.length ? `\n\nNot measured here: ${missing.join('; ')}. Do not guess at them.` : '';
   return `I am watching the whole-segment Form Replay for ${label} -- my lean, left and right, through `
     + `the segment end to end. Read this SEGMENT for me.\n\n${lines.join('\n')}${gap}\n\n`
-    + `Judge it on its own terms. The session data you were given covers my whole ride, and a ride-wide `
-    + `median pools this trail together with everything else I rode today, so a tight technical segment `
+    + `Judge it on its own terms. The session data you were given covers my whole ${w.day}, and a ${w.dayWide} `
+    + `median pools this ${w.ground} together with everything else I ${w.went} today, so a tight technical segment `
     + `looks slow and cramped against it while a mellow one looks flat -- neither of which is about how `
-    + `I rode. Compare the corners on this segment to EACH OTHER and to the numbers above, and if the `
-    + `only figure you have is a ride-wide one, say so rather than reading it as though it described `
-    + `this trail. Tell me what these numbers say about how I rode this segment, and one thing worth `
-    + `trying on my next lap of it. Read only these numbers: nothing here saw the trail, the surface, `
-    + `my line, or what the bike was doing, so describe what was measured rather than asserting why it `
+    + `I ${w.went}. Compare the corners on this segment to EACH OTHER and to the numbers above, and if the `
+    + `only figure you have is a ${w.dayWide} one, say so rather than reading it as though it described `
+    + `this ${w.ground}. Tell me what these numbers say about how I ${w.went} this segment, and one thing worth `
+    + `trying on my next ${w.again} of it. Read only these numbers: nothing here saw ${w.saw}, `
+    + `my line, or what ${w.kit} doing, so describe what was measured rather than asserting why it `
     + `happened. Phone tilt is relative to this segment’s median, not an absolute body angle. More lean `
-    + `or less speed loss is not automatically better; different left/right corners do not establish a rider weakness.`;
+    + `or less speed loss is not automatically better; different left/right corners do not establish a ${w.who} weakness.`;
 }
 
 return { formTurnLines, formTurnQuestion, formSegmentLines, formSegmentQuestion, pickLeanBaseline, LEAN_BASE_MIN_PER_SIDE };
@@ -45827,6 +45980,7 @@ const LOAM_NB = {
   'No AirPods head data for this turn.': 'Ingen AirPods-data om hodet i denne svingen.',
   'No Apple Watch wrist data this turn.': 'Ingen Apple Watch-data fra håndleddet i denne svingen.',
   'Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.': 'Bruk Forskjeller mellom runder for å sammenligne samme sving mellom runder i dette opptaket. Mest fartstap fremhever fartstap i én sving; det betyr ikke at noe ble gjort feil.',
+  'Use Lap differences to compare the same turn across runs in this recording.': 'Bruk Forskjeller mellom runder for å sammenligne samme sving mellom nedkjøringer i dette opptaket.',
   'The figure is a schematic driven by phone tilt. The pale needle marks peak tilt change; the head needle shows relative AirPods movement with drift removed. The map locates the recording, not a precise line through the terrain. GPS speed traces and corner speeds from a FIT file may differ.': 'Figuren er skjematisk og styres av telefonhelning. Den lyse nålen markerer størst endring; hodenålen viser relativ AirPods-bevegelse med drift fjernet. Kartet plasserer opptaket, ikke et presist sporvalg. GPS-fart og svingfart fra en FIT-fil kan avvike.',
   'Lean now': 'Helning nå',
   'Lean into turn': 'Helning inn i svingen',
@@ -48169,6 +48323,7 @@ function localizeStaticChrome() {
      the two either side of it are. */
   html('#roadUpsellStaticCta', 'Next ride: start <strong>Loam Capture</strong> on your phone (jersey pocket is fine) with AirPods in, ride as usual, then attach this bike\'s FIT to the session. Add your Apple Watch for heart rate and handlebar lean. Power stays from the meter; everything above is added from motion.');
   html('#formPictureLead', 'Use Lap differences to compare the same corner across laps in this recording. Most scrubbed highlights speed loss within one corner; it does not identify a mistake.');
+  text('#formPictureLeadSki', 'Use Lap differences to compare the same turn across runs in this recording.');
   text('#formPictureMore', 'The figure is a schematic driven by phone tilt. The pale needle marks peak tilt change; the head needle shows relative AirPods movement with drift removed. The map locates the recording, not a precise line through the terrain. GPS speed traces and corner speeds from a FIT file may differ.');
   text('#backToCompareBtn', 'Back to comparison');
   title('#backToCompareBtn', 'Return to the cross-session comparison');
@@ -60047,7 +60202,7 @@ function renderRideSignature(D, sport) {
     let segs = '';
     for (let i = 1; i < pts.length; i++) {
       if (sigBrk.has(i)) continue;
-      segs += `<line x1="${g(X(pts[i-1]))}" y1="${g(Y(pts[i-1]))}" x2="${g(X(pts[i]))}" y2="${g(Y(pts[i]))}" stroke="${speedColor((pts[i].speed||0), maxS)}" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>`;
+      segs += `<line x1="${g(X(pts[i-1]))}" y1="${g(Y(pts[i-1]))}" x2="${g(X(pts[i]))}" y2="${g(Y(pts[i]))}" stroke="${speedColor((pts[i].speed||0), maxS)}" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>`;
     }
     /* Turn + jump accents. */
     let accents = '';
@@ -60068,6 +60223,24 @@ function renderRideSignature(D, sport) {
       }
     }
     const s0 = pts[0], s1 = pts[pts.length - 1];
+
+    /* The elevation profile, drawn behind the stat strip: the day's shape (a ski day's sawtooth, a
+       ride's one long drop) from the same fixes as the track, against time. Withheld under 10 m of
+       range, where the line would be GPS altitude noise stretched to fill the strip. */
+    let elevSvg = '';
+    {
+      const alt = pts.filter(r => Number.isFinite(r.altitude));
+      let lo = Infinity, hi = -Infinity;
+      for (const r of alt) { if (r.altitude < lo) lo = r.altitude; if (r.altitude > hi) hi = r.altitude; }
+      const t0 = pts[0].t, tSpan = pts[pts.length - 1].t - t0;
+      if (alt.length >= 8 && hi - lo >= 10 && tSpan > 0) {
+        const eTop = H - 86, eBot = H - 6;
+        const line = alt.map((r, i) => `${i ? 'L' : 'M'}${g(r.t === t0 ? 0 : (r.t - t0) / tSpan * W)},${g(eBot - (r.altitude - lo) / (hi - lo) * (eBot - eTop))}`).join(' ');
+        const xa = g((alt[0].t - t0) / tSpan * W), xb = g((alt[alt.length - 1].t - t0) / tSpan * W);
+        elevSvg = `<path d="${line} L${xb},${H} L${xa},${H} Z" fill="url(#rsElev)"/>`
+          + `<path d="${line}" fill="none" stroke="RS_ELEV" stroke-opacity="0.5" stroke-width="1.6" stroke-linejoin="round"/>`;
+      }
+    }
 
     /* Stats, sport-aware. Walking shares the running layout. */
     const s = D.summary || {};
@@ -60127,6 +60300,15 @@ function renderRideSignature(D, sport) {
         { ...rsSplit(U.elev(s.altLoss)), label: 'DESCENT' },
       ];
     } else {
+      if (s.skiVertical != null) {
+        /* A recorded ski day leads with what a skier counts, as the imported one above does. */
+        stats = [
+          { num: String(s.skiRuns), unit: '', label: 'RUNS' },
+          { ...rsSplit(U.elev(s.skiVertical)), label: 'VERTICAL' },
+          { ...rsSplit(U.speed(s.maxSpeed)), label: 'TOP SPEED' },
+          { ...rsSplit(U.dist(s.skiDistance != null ? s.skiDistance : s.distance)), label: 'DISTANCE' },
+        ];
+      } else {
       const fourth = (s.nJumps && D.hasFit)
         ? { num: String(s.nJumps), unit: '', label: 'JUMPS' }
         : s.skiVertical != null ? { ...rsSplit(U.elev(s.skiVertical)), label: 'VERTICAL' }
@@ -60137,7 +60319,15 @@ function renderRideSignature(D, sport) {
         { num: String(s.nTurns != null ? s.nTurns : (D.turns ? D.turns.length : 0)), unit: '', label: 'TURNS' },
         fourth,
       ];
+      }
     }
+    /* A ski day's card is night over snow rather than forest: the same layout in navy and ice.
+       The canvas export paints its own base, so the palette travels in _rideSig. */
+    const C = (s.skiVertical != null || (D.gpsOnly && D.skiDay))
+      ? { bg: ['#17293f', '#0d1827', '#060c15'], ink: '#060c15', halo: '#7fc4ee', glow: '#bfe6ff', label: '#9db4c8',
+          elev: '#e8f4ff', bar: ['#9fd8ff', '#4f8fd8', '#e8f4ff'], mark: '#7fc4ee', start: '#8fd0f5' }
+      : { bg: ['#20291b', '#141a10', '#0a0d07'], ink: '#0a0d07', halo: '#7fb069', glow: '#f5c850', label: '#9aa88f',
+          elev: '#a8d08a', bar: ['#e0a458', '#e0573a', '#7fb069'], mark: '#e0a458', start: '#8caa6d' };
     /* Moving minutes when the summary knows them, so the header and the AVG PACE tile below it
        describe the same clock: distance over this many minutes has to come out at the pace printed
        two lines down, or the card contradicts itself in the one artefact people share. Sports whose
@@ -60168,26 +60358,33 @@ function renderRideSignature(D, sport) {
          headline numbers were illegible on the primary surface. 16px labels land at ~7px and 40px
          values at ~18px; the 2x PNG export grows in step and still reads as a poster. */
       return `<text x="${cx}" y="${H-46}" font-size="40" font-weight="700" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">${st.num}<tspan font-size="18" font-weight="500" fill="#cbd5e1"> ${st.unit || ''}</tspan></text>`
-        + `<text x="${cx}" y="${H-20}" font-size="16" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${loamT(st.label)}</text>`
+        + `<text x="${cx}" y="${H-20}" font-size="16" letter-spacing="2" fill="${C.label}" font-family="'JetBrains Mono',monospace">${loamT(st.label)}</text>`
         + (i > 0 ? `<line x1="${cx-14}" y1="${H-72}" x2="${cx-14}" y2="${H-14}" stroke="#ffffff" stroke-opacity="0.08"/>` : '');
     }).join('');
 
     const defsSvg =
 `<defs>
     <linearGradient id="rsBg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#20291b"/><stop offset="52%" stop-color="#141a10"/><stop offset="100%" stop-color="#0a0d07"/>
+      <stop offset="0%" stop-color="${C.bg[0]}"/><stop offset="52%" stop-color="${C.bg[1]}"/><stop offset="100%" stop-color="${C.bg[2]}"/>
     </linearGradient>
     <radialGradient id="rsHalo" cx="32%" cy="40%" r="65%">
-      <stop offset="0%" stop-color="#7fb069" stop-opacity="0.16"/><stop offset="100%" stop-color="#7fb069" stop-opacity="0"/>
+      <stop offset="0%" stop-color="${C.halo}" stop-opacity="0.16"/><stop offset="100%" stop-color="${C.halo}" stop-opacity="0"/>
     </radialGradient>
     <filter id="rsBlur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter>
     <linearGradient id="rsScrim" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#0a0d07" stop-opacity="0.85"/><stop offset="100%" stop-color="#0a0d07" stop-opacity="0"/>
+      <stop offset="0%" stop-color="${C.ink}" stop-opacity="0.85"/><stop offset="100%" stop-color="${C.ink}" stop-opacity="0"/>
     </linearGradient>
     <linearGradient id="rsScrimB" x1="0" y1="1" x2="0" y2="0">
-      <stop offset="0%" stop-color="#0a0d07" stop-opacity="0.9"/><stop offset="100%" stop-color="#0a0d07" stop-opacity="0"/>
+      <stop offset="0%" stop-color="${C.ink}" stop-opacity="0.9"/><stop offset="100%" stop-color="${C.ink}" stop-opacity="0"/>
     </linearGradient>
     <clipPath id="rsClip"><rect x="${boxX}" y="${boxTop}" width="${boxW}" height="${boxH}"/></clipPath>
+    <clipPath id="rsHead"><rect width="${W}" height="${boxTop}"/></clipPath>
+    <linearGradient id="rsElev" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${C.elev}" stop-opacity="0.30"/><stop offset="100%" stop-color="${C.elev}" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="rsBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="${C.bar[0]}"/><stop offset="55%" stop-color="${C.bar[1]}"/><stop offset="100%" stop-color="${C.bar[2]}"/>
+    </linearGradient>
   </defs>`;
 
     /* The terrain panel needs a darkening wash so the track and white text stay legible over imagery;
@@ -60195,7 +60392,7 @@ function renderRideSignature(D, sport) {
     const terrainImgs = sigTiles.map(t =>
       `<image href="${t.url}" x="${g(t.x)}" y="${g(t.y)}" width="${g(t.w)}" height="${g(t.h)}" preserveAspectRatio="none"/>`).join('');
     const terrainLayer = sigTiles.length
-      ? `<g clip-path="url(#rsClip)">${terrainImgs}</g><rect x="${boxX}" y="${boxTop}" width="${boxW}" height="${boxH}" fill="#0a0d07" fill-opacity="0.42"/>`
+      ? `<g clip-path="url(#rsClip)">${terrainImgs}</g><rect x="${boxX}" y="${boxTop}" width="${boxW}" height="${boxH}" fill="${C.ink}" fill-opacity="0.42"/>`
       : '';
     /* Esri's required credit for World_Topo_Map (its service `copyrightText`), printed on the card
        whenever its tiles are, because the PNG leaves the app. Two lines at the foot of the panel. */
@@ -60210,17 +60407,24 @@ function renderRideSignature(D, sport) {
        terrain) and the PNG export (over a canvas that draws the gradient + terrain itself). */
     const chromeSvg =
 `<rect width="${W}" height="${H}" fill="url(#rsHalo)"/>
-  <path d="${glowPath}" fill="none" stroke="#a8d08a" stroke-width="11" stroke-opacity="0.30" stroke-linecap="round" stroke-linejoin="round" filter="url(#rsBlur)"/>
+  <rect x="${boxX}" y="${boxTop}" width="${boxW}" height="${boxH}" fill="none" stroke="#ffffff" stroke-opacity="0.10"/>
+  <path d="${glowPath}" fill="none" stroke="${C.glow}" stroke-width="15" stroke-opacity="0.34" stroke-linecap="round" stroke-linejoin="round" filter="url(#rsBlur)"/>
   <g>${segs}</g>
+  <path d="${glowPath}" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.40" stroke-linecap="round" stroke-linejoin="round"/>
   <g>${accents}</g>
-  <circle cx="${g(X(s0))}" cy="${g(Y(s0))}" r="6.5" fill="#8caa6d" stroke="#0a0d07" stroke-width="2"/>
-  <circle cx="${g(X(s1))}" cy="${g(Y(s1))}" r="6.5" fill="#e0573a" stroke="#0a0d07" stroke-width="2"/>
+  <circle cx="${g(X(s0))}" cy="${g(Y(s0))}" r="12" fill="${C.start}" fill-opacity="0.28"/>
+  <circle cx="${g(X(s0))}" cy="${g(Y(s0))}" r="6.5" fill="${C.start}" stroke="${C.ink}" stroke-width="2"/>
+  <circle cx="${g(X(s1))}" cy="${g(Y(s1))}" r="12" fill="#e0573a" fill-opacity="0.28"/>
+  <circle cx="${g(X(s1))}" cy="${g(Y(s1))}" r="6.5" fill="#e0573a" stroke="${C.ink}" stroke-width="2"/>
   <rect width="${W}" height="90" fill="url(#rsScrim)"/>
   <rect y="${H-116}" width="${W}" height="116" fill="url(#rsScrimB)"/>
+  <g clip-path="url(#rsHead)" fill="none" stroke="${C.elev}" stroke-opacity="0.13">${[40, 62, 84, 106, 128, 150, 172, 194, 216, 238].map(r => `<circle cx="${W - 30}" cy="-10" r="${r}"/>`).join('')}</g>
+  <rect width="${W}" height="5" fill="url(#rsBar)"/>
+  ${elevSvg.replace('RS_ELEV', C.elev)}
   ${terrainCredit}
-  <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="#e0a458">A</tspan>M</text>
-  <text x="38" y="78" font-size="15" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${subtitle}</text>
-  <text x="${W-38}" y="50" text-anchor="end" font-size="14" letter-spacing="2" fill="#9aa88f" font-family="'JetBrains Mono',monospace">${loamT('{word} SIGNATURE', { word: rideWord })}</text>
+  <text x="38" y="52" font-size="30" font-weight="800" letter-spacing="2" fill="#f1f5f9" font-family="'Bricolage Grotesque','IBM Plex Sans',sans-serif">LO<tspan fill="${C.mark}">A</tspan>M</text>
+  <text x="38" y="78" font-size="15" letter-spacing="2" fill="${C.label}" font-family="'JetBrains Mono',monospace">${subtitle}</text>
+  <text x="${W-38}" y="50" text-anchor="end" font-size="14" letter-spacing="2" fill="${C.label}" font-family="'JetBrains Mono',monospace">${loamT('{word} SIGNATURE', { word: rideWord })}</text>
   ${statCols}`;
 
     const svg =
@@ -60236,7 +60440,7 @@ function renderRideSignature(D, sport) {
        (owner report, 2026-08-21) even though the card's own subtitle beside it read RUN. The swim
        card had already been fixed this way; the moving sports still fell through to the default in
        rideSigDeliver, so every one of them said ride. */
-    _rideSig = { defs: defsSvg, chrome: chromeSvg, tiles: sigTiles, W, H, boxX, boxTop, boxW, boxH,
+    _rideSig = { defs: defsSvg, chrome: chromeSvg, tiles: sigTiles, W, H, boxX, boxTop, boxW, boxH, bg: C.bg, ink: C.ink,
       filename: loamCardFilename(normalizeSport(sport),
         D.recordedAt ? new Date(D.recordedAt) : parseUTCFromFilename(D.title || '')),
       caption: loamT('My {noun}, analyzed with Loam.', { noun: lexNounT(lex) }) };
@@ -60288,7 +60492,8 @@ function rideSigCompose(opts) {
   const ctx = c.getContext('2d'); ctx.scale(scale, scale);
 
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, '#20291b'); grad.addColorStop(0.52, '#141a10'); grad.addColorStop(1, '#0a0d07');
+  const bg = R.bg || ['#20291b', '#141a10', '#0a0d07'];
+  grad.addColorStop(0, bg[0]); grad.addColorStop(0.52, bg[1]); grad.addColorStop(1, bg[2]);
   ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
 
   const drawChrome = () => {
@@ -60308,7 +60513,7 @@ function rideSigCompose(opts) {
   let pending = tiles.length;
   const done = () => {
     if (--pending > 0) return;
-    ctx.fillStyle = 'rgba(10,13,7,0.42)'; ctx.fillRect(R.boxX, R.boxTop, R.boxW, R.boxH);
+    ctx.globalAlpha = 0.42; ctx.fillStyle = R.ink || '#0a0d07'; ctx.fillRect(R.boxX, R.boxTop, R.boxW, R.boxH); ctx.globalAlpha = 1;
     ctx.restore(); drawChrome();
   };
   tiles.forEach(t => {
@@ -66202,7 +66407,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = '109ca2a44 · 2026-11-27';
+const LOAM_BUILD = 'e6472ddd2 · 2026-11-27';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
