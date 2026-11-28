@@ -1564,6 +1564,47 @@
   .stat.hero { grid-column: 1 / -1; }
   .stat.hero .value { font-size: 54px; font-weight: 800; font-variant-numeric: tabular-nums; }
   .stat.hero .value .unit { font-size: 16px; }
+  /* The ski day's hero band (skiHeroHTML). Dark in both lights, like the share card, so its colors
+     are literals drawn for that one ground. ID-scoped because the visual view's value clamp and flat
+     tiles (`:root[data-analysis-view="visual"] .stat ...`) would otherwise flatten it back into a tile. */
+  #statsPanel .stat.ski-hero {
+    grid-column: 1 / -1; position: relative; overflow: hidden; isolation: isolate;
+    border: 0; border-radius: 14px; padding: 18px 18px 14px; min-height: 176px;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 16px;
+    color: #f2f8fd;
+    background:
+      radial-gradient(120% 95% at 100% 0%, rgba(88, 174, 224, .45) 0%, rgba(88, 174, 224, 0) 60%),
+      linear-gradient(160deg, #1b4166 0%, #0d1e31 55%, #070e18 100%);
+    box-shadow: 0 12px 28px -16px rgba(7, 14, 24, .6), inset 0 0 0 1px rgba(143, 220, 255, .12);
+  }
+  /* The ridge wipes in left to right, so the day plays out in the order it was skied. A clip rather
+     than a dash offset: under `vector-effect: non-scaling-stroke` the dash runs in screen units while
+     `pathLength` does not, and the runs stopped part-way down. */
+  #statsPanel .ski-hero-ridge {
+    position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 50%; z-index: -1;
+    animation: skiRidgeWipe 1.6s cubic-bezier(.3, .7, .2, 1) .15s both;
+  }
+  @keyframes skiRidgeWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+  @media (prefers-reduced-motion: reduce) { #statsPanel .ski-hero-ridge { animation: none; } }
+  #statsPanel .ski-ridge-rest { fill: none; stroke: rgba(207, 233, 255, .4); stroke-width: 1.25; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+  #statsPanel .ski-ridge-run {
+    fill: none; stroke: #fff; stroke-width: 2.25; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke;
+    filter: drop-shadow(0 0 3px rgba(143, 220, 255, .8));
+  }
+  #statsPanel .ski-hero-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 18px; }
+  #statsPanel .ski-hero .label { color: rgba(214, 232, 247, .8); margin-bottom: 6px; }
+  #statsPanel .ski-hero .value { color: #fff; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; word-spacing: -0.12em; }
+  #statsPanel .ski-hero-v .value { font-size: clamp(46px, 13vw, 66px); font-weight: 800; letter-spacing: -0.04em; }
+  #statsPanel .ski-hero-s { text-align: right; }
+  #statsPanel .ski-hero-s .value { font-size: clamp(28px, 7.5vw, 38px); font-weight: 700; color: #8fdcff; }
+  #statsPanel .ski-hero .value .unit { color: rgba(214, 232, 247, .78); font-size: .38em; font-weight: 500; margin-left: 0; letter-spacing: 0; }
+  #statsPanel .ski-hero .sub { color: rgba(214, 232, 247, .72); }
+  #statsPanel .ski-hero-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  #statsPanel .ski-hero-chips span {
+    font: 600 11px 'JetBrains Mono', monospace; letter-spacing: .08em; text-transform: uppercase;
+    color: #f2f8fd; background: rgba(7, 14, 24, .45); border: 1px solid rgba(255, 255, 255, .22);
+    border-radius: 999px; padding: 4px 10px; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  }
   /* The focus slot: the coach's one lead line, pinned to the top of the
      highlights card with the amber rule (the DO slot from the design doc;
      labeled FOCUS until the producers emit true drill sentences). */
@@ -4020,6 +4061,10 @@ function loamSeasonRequested(search, host) {
     </div>
   </section>
 
+  <!-- A ski day read as linked turns rather than turn by turn (analyzer/sports/ski/linked-turns.js).
+       Filled by renderSkiLinkedTurns, which writes its heading too, so every word goes through loamT. -->
+  <section id="skiLinkedSection" class="hidden"></section>
+
   <section id="turnSection">
     <div class="section-title">
       Per-turn metrics
@@ -5923,6 +5968,18 @@ function bodyFrameMoved(D) { return !!(D && D.calibWin && D.calibWin.mountShift)
    mean happens to cancel out. Preserve the detected events and speed, withhold their lean. */
 function confidenceScopedRide(D) {
   return bodyFrameMoved(D) ? { ...D, turns: (D.turns || []).map(T => ({ ...T, leanDelta: null })) } : D;
+}
+/* The phone's freefall airtimes are WITHHELD on a ski day: on the first ski day graded against a
+   count (Northstar 2026-11-27, owner: none, then "maybe a couple of tiny bumps") it found 7, all on
+   the phone's own > 3 g landing, so at least 5 of the 7 are not jumps.
+   A ski turn is the jump's signature at a smaller scale -- unweight, then load the edge -- and that
+   day had 26 sub-0.4 g dips of 0.18-1.0 s, every one on a descent, median 0.22 s against the 0.18
+   floor. See decisions/analyzer-and-app.md. Withheld at render rather than at analysis so a cached
+   ski day and the app's vendored copy drop them on reopen; the count is kept for whoever grades it. */
+function skiAirtimeScoped(D) {
+  const n = (D && D.airtime && D.airtime.jumps && D.airtime.jumps.length) || 0;
+  if (!n || !isSkiSport(D.sport)) return D;
+  return { ...D, airtime: { ...D.airtime, jumps: [], status: 'withheld-ski', withheld: n } };
 }
 function dTurnSidesUnreliable(D) {
   if (bodyFrameMoved(D)) return true;
@@ -13288,7 +13345,8 @@ function formRenderLimits(D, S) {
   _form.warning = warning;
   el.innerHTML = (warning ? `<strong class="form-calibration-warning">${loamT(warning)}</strong>` : '')
     + `<span class="compact-only">${loamT('Schematic · tilt, not body position')}</span>`
-    + `<span class="analysis-explanation">${loamT(S.segment ? 'Schematic · phone tilt relative to this segment’s median. Body position and equipment tilt are not measured.'
+    + `<span class="analysis-explanation">${loamT(S.sequence ? 'Schematic · phone tilt relative to this sequence’s median. Body position and equipment tilt are not measured.'
+      : S.segment ? 'Schematic · phone tilt relative to this segment’s median. Body position and equipment tilt are not measured.'
       : 'Schematic · phone tilt change from corner entry. Body position and equipment tilt are not measured.')}</span>`
     + `<span class="analysis-explanation">${loamT('AirPods show relative head movement, not eye gaze. Watch roll is wrist movement, not equipment angle.')}</span>`;
 }
@@ -14042,16 +14100,27 @@ function formInitMap(S) {
         ghostDots += `<circle id="fgd-${T.n}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${d >= 0 ? '#86c06b' : '#d95f38'}" stroke="#f1f5f9" stroke-width="1.3" opacity="0.9"/>`;
       }
     }
+    /* A linked-turn sequence: a dot where each turn peaked, in the turn table's side colors (right
+       amber, left moss), the one the playhead is in enlarged by formUpdateMap. */
+    let seqDots = '';
+    if (S.sequence && S.seqTurns) {
+      S.seqTurns.forEach((e, i) => {
+        const p = toSvg(formInterp(M.t, M.lat, e.t), formInterp(M.t, M.lon, e.t));
+        seqDots += `<circle id="fsd-${i}" data-seq-turn="${e.side}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${e.side === 'L' ? '#7fb069' : '#e0a458'}" stroke="#f1f5f9" stroke-width="1.3" opacity="0.9"/>`;
+      });
+    }
     el.innerHTML = `<svg viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" width="100%" height="100%" style="display:block;background:transparent;">`
       + `<g id="formPan" transform="translate(${panX().toFixed(1)} ${panY().toFixed(1)})">`
       + seg(M.t[0], S.tStart, '#9fc0d8') + seg(S.tStart, S.tEnd, '#86c06b') + seg(S.tEnd, M.t[M.t.length - 1], '#e8b25e')
-      + `<g id="formCovered"></g>` + ghostDots
+      + `<g id="formCovered"></g>` + ghostDots + seqDots
       + (G ? `<g id="formGhostDot"><circle r="5.5" fill="#f1f5f9" fill-opacity="0.3" stroke="#f1f5f9" stroke-width="1.6" stroke-dasharray="2.5 2.5"/></g>` : '')
       /* The vision cone: where the head points, drawn from the rider over the map and turned each frame
          by travel heading plus the head's offset (formUpdateMap). Only a corner with a usable AirPods
          channel gets one; a segment replay has no per-turn head reference and draws none. */
       + (S.headRel && !S.segment ? `<g id="formGaze"><path d="${gazeConePath(46, 15)}" fill="#9fc0d8" fill-opacity="0.24" stroke="#9fc0d8" stroke-opacity="0.85" stroke-width="1.2" stroke-linejoin="round"/></g>` : '')
-      + `<circle cx="${ap[0].toFixed(1)}" cy="${ap[1].toFixed(1)}" r="7" fill="none" stroke="#e8b25e" stroke-width="2.5"/>`
+      /* The apex ring. A sequence has one apex per turn, which its own dots mark; one ring at the
+         window's middle would read as a turn that is not there. */
+      + (S.sequence ? '' : `<circle cx="${ap[0].toFixed(1)}" cy="${ap[1].toFixed(1)}" r="7" fill="none" stroke="#e8b25e" stroke-width="2.5"/>`)
       + `<circle cx="${sp[0].toFixed(1)}" cy="${sp[1].toFixed(1)}" r="3.5" fill="#8caa6d" stroke="#0a0d07" stroke-width="1.5"/>`
       + `<circle cx="${ep[0].toFixed(1)}" cy="${ep[1].toFixed(1)}" r="3.5" fill="#e8b25e" stroke="#0a0d07" stroke-width="1.5"/>`
       + `<g id="formNav"><circle r="6" fill="#f1f5f9" stroke="#0a0d07" stroke-width="2"/><path d="M0,-11 L4.5,-4.5 L-4.5,-4.5 Z" fill="#f1f5f9" stroke="#0a0d07" stroke-width="1"/></g>`
@@ -14156,6 +14225,16 @@ function formUpdateMap(S, tNow) {
     const visualSign = (_form && _form.turn && _form.turn.direction === 'L') ? -1 : 1;
     const look = Math.max(-72, Math.min(72, (S.headRel[k] || 0) * visualSign));
     gaze.setAttribute('transform', `translate(${here[0].toFixed(1)} ${here[1].toFixed(1)}) rotate(${(rel + look).toFixed(1)})`);
+  }
+
+  if (S.sequence && S.seqTurns) {
+    const k = formSequenceTurnAt(S, tNow);
+    S.seqTurns.forEach((e, i) => {
+      const dot = el.querySelector('#fsd-' + i);
+      /* 9, not the ghost dots' 6: at a turn's peak the rider marker (r 6 plus its 2 px casing) sits on
+         its dot, and only a dot larger than the marker still shows, as a ring in the turn's color. */
+      if (dot) { dot.setAttribute('r', i === k ? '9' : '3.5'); dot.setAttribute('opacity', i === k ? '1' : '0.9'); }
+    });
   }
 
   /* Racing ghost: the fastest same-segment lap's position at the same elapsed time
@@ -14711,7 +14790,10 @@ function formFillTurnSelect(D, turns, segs, want) {
      the generated "Descent 2" form is a string this page wrote and may therefore translate. */
   const segOpts = _formSegs.map(r => `<option value="seg:${r.n}">▶ ${escapeHtml(runDisplayLabel(r))} · ${fmtDuration(r.tEnd - r.tStart)}</option>`).join('');
   const jumpOpts = formReplayJumps(D, _formScopeRun).map(j => `<option value="jump:${j.id}">${escapeHtml(formJumpLabel(D, j))}</option>`).join('');
-  sel.innerHTML = `<optgroup label="${escapeHtml(loamT('Single turn'))}">${turnOpts}</optgroup>`
+  /* A ski day leads with its linked turns, the read it is built around (renderSkiLinkedTurns). */
+  const seqOpts = formSkiSequences(D).map(q => `<option value="seq:${q.i}">${escapeHtml(formSequenceLabel(D, q))}</option>`).join('');
+  sel.innerHTML = (seqOpts ? `<optgroup label="${escapeHtml(loamT('Linked turns'))}">${seqOpts}</optgroup>` : '')
+    + `<optgroup label="${escapeHtml(loamT('Single turn'))}">${turnOpts}</optgroup>`
     + (segOpts ? `<optgroup label="${escapeHtml(loamT('Whole segment'))}">${segOpts}</optgroup>` : '')
     + (jumpOpts ? `<optgroup label="${escapeHtml(loamT('Jumps'))}">${jumpOpts}</optgroup>` : '');
   if (want != null && Array.from(sel.options).some(o => o.value === String(want))) sel.value = String(want);
@@ -14725,6 +14807,7 @@ function formFillTurnSelect(D, turns, segs, want) {
 function formCurrentSelectValue(segs) {
   if (!_form) return null;
   if (_form.jump) return 'jump:' + _form.jump.id;
+  if (_form.seq) return 'seq:' + _form.seq.i;
   if (_form.turn) return String(_form.turn.n);
   const r = _form.run;
   if (!r) return null;
@@ -14752,10 +14835,11 @@ function setupFormReplay(D) {
   if (!D || D.phoneMount === 'handlebar') { sec.classList.add('hidden'); return; }
   /* A moved mount withholds LEAN, so turns go; a jump replay reads force and airtime, not lean. */
   const ordered = !bodyFrameMoved(D) && D.turns?.length && D.rollSmooth?.length ? formCriticalTurns(D) : [];
-  if (!ordered.length && !formReplayJumps(D).length) { sec.classList.add('hidden'); return; }
+  _formScopeRun = null;   /* a fresh render is always the whole ride, never a leftover segment scope */
+  const longestSeq = D.rollSmooth?.length ? formLongestSequence(D) : null;
+  if (!ordered.length && !longestSeq && !formReplayJumps(D).length) { sec.classList.add('hidden'); return; }
   sec.classList.remove('hidden');
   const sel = document.getElementById('formTurn');
-  _formScopeRun = null;   /* a fresh render is always the whole ride, never a leftover segment scope */
   /* Two ways to replay: a single critical turn (default, with gaze + hand), or a whole segment/run
      end to end (continuous signed lean). Segments come from the same auto run-segmentation the Runs
      panel uses, so the labels line up. */
@@ -14776,7 +14860,10 @@ function setupFormReplay(D) {
   { const skiLead = !formScrubCoached(D);
     document.getElementById('formPictureLead')?.classList.toggle('hidden', skiLead);
     document.getElementById('formPictureLeadSki')?.classList.toggle('hidden', !skiLead); }
-  formFillTurnSelect(D, ordered, segs, !ordered.length ? 'jump:' + formReplayJumps(D)[0].id : reviewPicks.length ? reviewPicks[0].turn.n : (scrubRanked.length ? scrubRanked[0].T.n : null));
+  /* A ski day opens on its longest linked sequence (owner, 2026-11-28: a sequence of turns "is more
+     interesting" than one of them). */
+  formFillTurnSelect(D, ordered, segs, longestSeq ? 'seq:' + longestSeq.i
+    : !ordered.length ? 'jump:' + formReplayJumps(D)[0].id : reviewPicks.length ? reviewPicks[0].turn.n : (scrubRanked.length ? scrubRanked[0].T.n : null));
   formRenderScrubChips(D);
   const pick = () => {
     const v = sel.value;
@@ -14788,6 +14875,10 @@ function setupFormReplay(D) {
     if (v && v.indexOf('seg:') === 0) {
       const run = _formSegs.find(r => r.n === +v.slice(4)) || _formSegs[0];
       if (run) { formSelectSegment(D, run); return; }
+    }
+    if (v && v.indexOf('seq:') === 0) {
+      const q = formSkiSequences(D).find(x => x.i === +v.slice(4));
+      if (q) { formSelectSequence(D, q); return; }
     }
     const T = (D.turns || []).find(x => x.n === +v) || ordered[0];
     if (T) formSelectTurn(D, T);
@@ -15194,6 +15285,126 @@ function formSelectSegment(D, run) {
   if (replacing) formCrossfade();
 }
 
+/* ---- Linked turns (ski): one continuous replay through a sequence of linked turns ----
+   A ski day's turns are not a trail's corners (analyzer/sports/ski/linked-turns.js): the skier chooses
+   where to turn and links them, so the stretch worth watching is a run of linked turns -- not one turn
+   of it, and not the whole run with its traverses and stops. The sequences and their turns are the
+   Linked turns card's own (`D.skiLinked.sequences`), so the replay and the card count the same turns;
+   the picture is the whole-segment series over that window, signed left/right lean as skied.
+   Index `i` is the sequence's place in that list, which is what the card's rows and `seq:` name. */
+function formSkiSequences(D) {
+  if (!D || !isSkiSport(D.sport) || !formLeanReplayable(D)) return [];
+  const all = D.skiLinked && Array.isArray(D.skiLinked.sequences) ? D.skiLinked.sequences : [];
+  const R = _formScopeRun;
+  return all.map((q, i) => ({ ...q, i }))
+    .filter(q => Array.isArray(q.edges) && q.edges.length
+      && (!R || Math.min(R.tEnd, q.tEnd) - Math.max(R.tStart, q.tStart) > 0));
+}
+/* The day's longest sequence, earliest on a tie: the card's first "Longest sequences" row. */
+function formLongestSequence(D) {
+  return formSkiSequences(D).reduce((b, q) => (!b || q.turns > b.turns ? q : b), null);
+}
+function formSequenceLabel(D, q) {
+  return `▶ ${loamT('Run {n}', { n: q.run })} · ${skiClockAt(D)(q.tStart)} · ${loamT('{n} turns', { n: q.turns })}`;
+}
+/* The turn the playhead is in: the last one started, so the gap a passed-over slow edge leaves between
+   two linked turns still reads as the turn before it, and the padding either side as the first/last. */
+function formSequenceTurnAt(S, tNow) {
+  const E = S && S.seqTurns;
+  if (!E || !E.length) return -1;
+  let k = 0;
+  for (let i = 0; i < E.length; i++) if (E[i].tStart <= tNow) k = i;
+  return k;
+}
+/* The window a sequence replays: one typical turn before its first turn's peak to one after its last,
+   inside the sequence. Not the sequence's own tStart / tEnd: those are the outer edges of its first
+   and last lobes, and a lobe runs from one zero crossing of the yaw rate to the next, so a straight
+   run-in with no crossing becomes part of the first turn -- 49.8 s of it on the E2E fixture, whose
+   27-turn weave then replayed as 89 s. */
+function formSequenceWindow(q) {
+  const E = q.edges, first = E[0], last = E[E.length - 1];
+  const lead = q.periodS > 0 ? q.periodS : 2;
+  return { tStart: Math.max(first.tStart, first.t - lead), tEnd: Math.min(last.tEnd, last.t + lead) };
+}
+/* How long turn k took, peak to peak: half the span to its neighbours' peaks, or the one interval it
+   has at either end. Peak to peak is how the card's "per turn" is measured (skiSequenceSummary), and
+   it is immune to the run-in a first lobe can carry (formSequenceWindow). */
+function formSequenceTurnS(S, k) {
+  const E = S.seqTurns, n = E.length;
+  if (n < 2) return null;
+  if (k <= 0) return E[1].t - E[0].t;
+  if (k >= n - 1) return E[n - 1].t - E[n - 2].t;
+  return (E[k + 1].t - E[k - 1].t) / 2;
+}
+function formSequenceSeries(D, q) {
+  const S = formSegmentSeries(D, formSequenceWindow(q));
+  if (!S) return null;
+  S.sequence = true;
+  S.seqTurns = q.edges.map(e => ({ t: e.t, tStart: e.tStart, tEnd: e.tEnd, side: e.side }));
+  S.turnCount = S.seqTurns.length;
+  S.seqPeriodS = q.periodS;
+  /* The Sides tile's yardstick is the RUN the sequence is on: a sequence is seconds long and rarely
+     holds three turns a side from the corner detector, so its own window would fall back to the
+     whole day every time, and the day pools the lift queues and the walk. */
+  const host = formTurnSegmentRun(D, { tPeak: (q.tStart + q.tEnd) / 2 });
+  const leanRef = LoamFormCoach.pickLeanBaseline(host ? formSegmentLeanMedians(D, host) : null, formRideLeanMedians(D));
+  S.medLeanL = leanRef.L; S.medLeanR = leanRef.R; S.leanScope = leanRef.scope;
+  S.leanScopeLabel = leanRef.scope === 'segment' && host ? runDisplayLabel(host) : null;
+  return S;
+}
+function formSelectSequence(D, q) {
+  if (bodyFrameMoved(D) || (D && D.phoneMount === 'handlebar')) return;
+  const replacing = !!_form;
+  formStopAnim(); formClipInvalidate(); formMarkReplayKind('sequence');
+  _formZoomMult = 1; formResetView();
+  /* No coach question yet: both questions are built from a corner's or a trail's facts, and a
+     sequence is neither. */
+  formCoachSync(D, null, null);
+  const S = formSequenceSeries(D, q);
+  const note = document.getElementById('formNote');
+  if (!S) {
+    _form = null;
+    document.getElementById('formComparison').innerHTML = '';
+    document.getElementById('formLimits').innerHTML = '';
+    document.getElementById('formReplaySvg').innerHTML = '';
+    document.getElementById('formMetrics').innerHTML = '';
+    if (note) note.textContent = loamT('Not enough motion data for this sequence.');
+    formInitMap(null);
+    return;
+  }
+  _form = { D, turn: null, run: null, seq: q, S, tau: 0, dur: S.dur, mult: +(document.getElementById('formSpeedSel').value || 0.5), playing: false, raf: null, lastTs: null };
+  formRenderLimits(D, S);
+  formSetupComparison(D, null);
+  formParkAtPeak();
+  if (note) {
+    const dot = (col) => `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col};margin-right:5px;vertical-align:middle;"></span>`;
+    const chip = (label, on, col) => `<span style="margin-right:14px;white-space:nowrap;opacity:${on ? 1 : 0.5};">${dot(on ? col : '#5b6b7a')}${loamT(label)}${on ? '' : loamT(' · off')}</span>`;
+    note.innerHTML = `<div style="margin-bottom:4px;font-size:12px;">`
+      + chip('Tilt · phone', true, '#e0a458') + chip('Wrist · Watch', !!S.wristRoll, '#7fb0d0') + `</div>`
+      + `<span class="dim analysis-detailed-only">`
+      + loamT('Linked-turn replay: signed left/right lean through {n} linked turns, the same turns the Linked turns card counts. The dots on the map are where each one peaked.', { n: S.turnCount })
+      + ' ' + loamT('Relative head movement is shown when you pick a single turn.') + `</span>`;
+  }
+  const btn = document.getElementById('formPlay'); if (btn) btn.textContent = loamT('▶ Play sequence');
+  formInitMap(S);
+  formFrame();
+  if (replacing) formCrossfade();
+}
+/* From the Linked turns card: open one sequence and play it. Off the segment page first when it is
+   scoped to another run, as formOpenJump does. */
+function formOpenSequence(i) {
+  const D = _lastRender && _lastRender.D;
+  if (!D) return;
+  if (_formScopeRun && !formSkiSequences(D).some(q => q.i === i)) closeSegmentPage();
+  const q = formSkiSequences(D).find(x => x.i === i);
+  if (!q) return;
+  const sel = document.getElementById('formTurn');
+  if (sel) sel.value = 'seq:' + i;
+  formMarkActiveChip(null); formSelectSequence(D, q);
+  if (_form) { _form.tau = 0; formSetPlaying(true); }
+  formScrollToReplay();
+}
+
 /* Park a freshly selected turn/segment mid-action at its peak lean instead of the window start
    (one second before entry), where the paused frame headlined an upright rider, "0°" lean, and an
    amber "trailing" gaze. Play still shows the whole approach-to-exit arc: formSetPlaying rewinds
@@ -15281,7 +15492,7 @@ function formSetPlaying(on) {
   }
   _form.playing = on; _form.lastTs = null;
   const btn = document.getElementById('formPlay');
-  const noun = _form.jump ? 'jump' : (_form.S && _form.S.segment) ? 'segment' : 'turn';
+  const noun = _form.jump ? 'jump' : _form.seq ? 'sequence' : (_form.S && _form.S.segment) ? 'segment' : 'turn';
   /* Whole phrases rather than a verb plus a noun: Norwegian takes the definite article on the noun
      ("Spill av svingen"), so a concatenation would need the bare word and read wrong. */
   if (btn) btn.textContent = on ? loamT('⏸ Pause')
@@ -15349,6 +15560,20 @@ function avatarPalette() {
   return own;
 }
 
+/* "My kit" on a ski day is the owner's SKI gear, not the bike kit (owner, 2026-11-28: "a blue POC
+   helmet with POC goggles ... grey and neon yellow jacket and pants"): a blue lid with the goggle
+   strap round the back, a grey shell with a neon-yellow yoke and cuffs, grey pants with neon-yellow
+   lower legs. Colors only, no maker's marks. It wins over the winter edition's bobble hat and scarf
+   (a skier on the hill wears the helmet), and the snow still falls; the Halloween costume and the
+   classic figure are left as they are. */
+function avatarSkiPalette(AV) {
+  if (!AV || !AV.kit || AV.costume) return AV;
+  return Object.assign({}, AV, { skiKit: true, knit: null, scarf: null,
+    torso: 'url(#frJktSki)', arm: '#5c626b', glove: '#16191e', neck: '#4a5058',
+    helmShell: 'url(#frHelmSki)', helmStroke: '#0f2f63', vent: '#0d2650', crown: null,
+    pants: '#565c65', neon: '#d9f21c', strap: '#15181d' });
+}
+
 /* Six-armed snowflakes for the winter skies, as two shapes to <use>: arm length 10 about the origin,
    stroked by whoever places them. The branches are the watch complication's (SnowflakeMark), swept
    toward the tip; the small shape keeps one pair, because two at a few pixels blur into a cog. Not
@@ -15414,10 +15639,10 @@ function formSkierSvg(o) {
     return { k, bx, footY, hx, ankleY, kx, ky };
   });
   const hands = [-1, 1].map((k) => ({ k, hx: cx + k * 36, hy: 160, ex: cx + k * 33, ey: 147 }));
-  const pants = AV.costume ? AV.leg : AV.kit ? '#2d4a72' : AV.leg;
+  const pants = AV.costume ? AV.leg : AV.skiKit ? AV.pants : AV.kit ? '#2d4a72' : AV.leg;
   const skiCol = AV.costume ? '#f07a18' : AV.kit ? '#e8622a' : '#d6691f';
   const bootCol = AV.costume ? '#1b1e24' : '#3a4450';
-  const strapCol = AV.kit ? '#e8622a' : '#2b3138';
+  const strapCol = AV.skiKit ? AV.strap : AV.kit ? '#e8622a' : '#2b3138';
   /* Poles trail back from the hands, foreshortened because they point at the viewer, tips carried
      off the snow. The lean swings the outside one up, as a skier carries it; the inside one would be
      driven through the slope, so its tip stops just above the snow, as a pole about to be planted. */
@@ -15428,7 +15653,9 @@ function formSkierSvg(o) {
       + `<ellipse cx="${g(bxk)}" cy="${g(byk)}" rx="5.5" ry="1.8" fill="none" stroke="#aeb8c2" stroke-width="1.6"/>`;
   }).join('');
   const legSvg = legs.map(({ hx, kx, ky, bx, ankleY }) =>
-    `<polyline points="${hx},${hipY} ${g(kx)},${g(ky)} ${bx},${g(ankleY)}" fill="none" stroke="${pants}" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+    `<polyline points="${hx},${hipY} ${g(kx)},${g(ky)} ${bx},${g(ankleY)}" fill="none" stroke="${pants}" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>`
+    /* The ski kit's neon-yellow lower legs, knee to boot. */
+    + (AV.skiKit ? `<polyline data-kit-neon="" points="${g(kx)},${g(ky)} ${bx},${g(ankleY)}" fill="none" stroke="${AV.neon}" stroke-width="13" stroke-linecap="round"/>` : '')).join('');
   /* Boots, then each ski's tail coming toward the viewer from the heel, widening as it nears. */
   const feet = legs.map(({ bx, footY, ankleY }) =>
     `<rect x="${bx-8}" y="${g(ankleY-4)}" width="16" height="${g(footY-ankleY+3)}" rx="4" fill="${bootCol}" stroke="#151a20" stroke-width="1"/>`
@@ -15437,7 +15664,9 @@ function formSkierSvg(o) {
     + `<path data-ski="" d="M${bx-7},${g(footY-3)} L${bx+7},${g(footY-3)} L${bx+9.5},${g(footY+13)} Q${bx},${g(footY+9.5)} ${bx-9.5},${g(footY+13)} Z" fill="${skiCol}" stroke="#1a1f26" stroke-width="1.2" stroke-linejoin="round"/>`
     + `<line x1="${bx}" y1="${g(footY-1)}" x2="${bx}" y2="${g(footY+9)}" stroke="#f1f5f9" stroke-width="1.4" opacity="0.7"/>`).join('');
   const arms = hands.map(({ k, hx, hy, ex, ey }) =>
-    `<polyline points="${cx + k * (shHalf - 2)},${shY+2} ${ex},${ey} ${hx},${hy}" fill="none" stroke="${AV.arm}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+    `<polyline points="${cx + k * (shHalf - 2)},${shY+2} ${ex},${ey} ${hx},${hy}" fill="none" stroke="${AV.arm}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>`
+    /* The ski kit's neon cuffs: the last third of the forearm. */
+    + (AV.skiKit ? `<line data-kit-neon="" x1="${g(ex + (hx - ex) * 0.55)}" y1="${g(ey + (hy - ey) * 0.55)}" x2="${hx}" y2="${hy}" stroke="${AV.neon}" stroke-width="8" stroke-linecap="round"/>` : '')).join('');
   const grips = hands.map(({ hx, hy }) =>
     `<line x1="${hx}" y1="${hy-10}" x2="${hx}" y2="${hy+2}" stroke="#1f262d" stroke-width="5" stroke-linecap="round"/>`
     + `<circle cx="${hx}" cy="${hy}" r="5.2" fill="${AV.glove}"/>`).join('');
@@ -15462,11 +15691,14 @@ function formSkierSvg(o) {
      at a glance. */
   const strap = AV.costume ? ''
     : `<path d="M${cx-helmetR+0.5},${helmetCy+1} Q${cx},${helmetCy+4.5} ${cx+helmetR-0.5},${helmetCy+1}" fill="none" stroke="${strapCol}" stroke-width="5"/>`
-      + `<path d="M${cx-helmetR+0.5},${helmetCy+1} Q${cx},${helmetCy+4.5} ${cx+helmetR-0.5},${helmetCy+1}" fill="none" stroke="#f1f5f9" stroke-width="0.9" opacity="0.55"/>`;
+      + `<path d="M${cx-helmetR+0.5},${helmetCy+1} Q${cx},${helmetCy+4.5} ${cx+helmetR-0.5},${helmetCy+1}" fill="none" stroke="#f1f5f9" stroke-width="0.9" opacity="0.55"/>`
+      /* The ski kit's goggles show past the lid at either side: a dark frame with a mirror glint. */
+      + (AV.skiKit ? [-1, 1].map((k) => `<ellipse data-goggle="" cx="${cx + k * (helmetR + 0.5)}" cy="${helmetCy - 0.5}" rx="2.6" ry="4" fill="#1b1f25"/>`
+        + `<ellipse cx="${cx + k * (helmetR + 1.2)}" cy="${helmetCy - 1.5}" rx="1" ry="2" fill="#9cc8f0" opacity="0.85"/>`).join('') : '');
   const lid = AV.costume
     ? [-9, -3, 3, 9].map((dx) => `<path d="M${g(cx+dx*0.55)},${helmetCy-helmetR+2} Q${g(cx+dx*1.3)},${helmetCy} ${g(cx+dx*0.55)},${helmetCy+helmetR-2}" fill="none" stroke="#b4520c" stroke-width="1.5" opacity="0.75"/>`).join('')
       + `<path d="M${cx-1},${helmetCy-helmetR+1} q0.5,-6 5,-8.5" fill="none" stroke="#4b6b2a" stroke-width="3.6" stroke-linecap="round"/>`
-    : AV.winter
+    : AV.winter && !AV.skiKit
     ? [-6, -2, 2, 6].map((dx) => `<circle cx="${cx+dx}" cy="${g(helmetCy-6)}" r="1.1" fill="${AV.knit}" opacity="0.8"/>`).join('')
       + [-8, -4, 0, 4, 8].map((dx) => `<line x1="${cx+dx}" y1="${helmetCy+8}" x2="${cx+dx}" y2="${helmetCy+12}" stroke="#7d1d24" stroke-width="1.2" opacity="0.7"/>`).join('')
       + `<circle cx="${cx}" cy="${helmetCy-helmetR-3}" r="6" fill="#d8434b" stroke="#8e2129" stroke-width="1"/>`
@@ -15481,17 +15713,19 @@ function formSkierSvg(o) {
     + `<ellipse cx="${cx}" cy="${hipY-2}" rx="15" ry="8.5" fill="${pants}"/>`
     + feet
     + `<path d="M${cx-shHalf},${shY} Q${cx},${shY-8} ${cx+shHalf},${shY} L${cx+hipHalf+5},${hipY-3} Q${cx},${hipY+4} ${cx-hipHalf-5},${hipY-3} Z" fill="${AV.torso}"/>`
+    /* The ski kit's neon-yellow yoke across the shoulders. */
+    + (AV.skiKit ? `<path data-kit-neon="" d="M${cx-shHalf},${shY} Q${cx},${shY-8} ${cx+shHalf},${shY} L${cx+shHalf-2.5},${shY+9} Q${cx},${shY+3} ${cx-shHalf+2.5},${shY+9} Z" fill="${AV.neon}"/>` : '')
     + (AV.seam ? `<path d="M${cx},${shY-4} L${cx},${hipY-1}" stroke="${AV.seam}" stroke-width="1.4" opacity="0.55"/>` : '')
     + bones
     + arms + armBones + grips
     + `<rect x="${cx-5}" y="${shY-12}" width="10" height="14" rx="4.5" fill="${AV.neck}"/>`
-    + (AV.winter
+    + (AV.winter && !AV.skiKit
       ? `<path d="M${cx-3},${shY-4} L${cx-10},${shY+20} L${cx-3.5},${shY+21.5} L${cx+2},${shY-3} Z" fill="${AV.scarf}"/>`
         + `<line x1="${cx-8.4}" y1="${shY+14}" x2="${cx-2.6}" y2="${shY+15.2}" stroke="${AV.knit}" stroke-width="2" opacity="0.9"/>`
         + `<rect x="${cx-7.5}" y="${shY-8}" width="15" height="6.5" rx="3.2" fill="${AV.scarf}"/>`
       : '')
     + `<line x1="${cx}" y1="${helmetCy}" x2="${g(nx)}" y2="${g(ny)}" stroke="${gazeCol}" stroke-width="4" stroke-linecap="round" filter="url(#frGlow)"/>`
-    + `<circle cx="${cx}" cy="${helmetCy}" r="${helmetR}" fill="${AV.helmShell}" stroke="${AV.helmStroke}" stroke-width="2"/>`
+    + `<circle cx="${cx}" cy="${helmetCy}" r="${helmetR}"${AV.skiKit ? ' data-helmet="ski"' : ''} fill="${AV.helmShell}" stroke="${AV.helmStroke}" stroke-width="2"/>`
     + (AV.crown ? `<path d="M${cx-helmetR+1},${helmetCy-2} A ${helmetR} ${helmetR} 0 0 1 ${cx+helmetR-1},${helmetCy-2} Z" fill="${AV.crown}"/>` : '')
     + lid + strap
     + `<rect x="${cx-helmetR-1}" y="${helmetCy+3}" width="3.4" height="8" rx="1.7" fill="#e9edf0" stroke="#9aa3ab" stroke-width="0.6"/>`
@@ -15569,7 +15803,7 @@ function formTurnScene(F, tau) {
   const elbowLx = (shLx + gxL) / 2 - 6, elbowLy = (shY + gyL) / 2 + 6;
   const elbowRx = (shRx + gxR) / 2 + 6, elbowRy = (shY + gyR) / 2 + 6;
   const wheelCy = ground - 46, wheelRy = 46;
-  const AV = avatarPalette();
+  const AV = ski ? avatarSkiPalette(avatarPalette()) : avatarPalette();
   /* The scene's own colors, so the season can repaint the night without touching what the picture
      measures. Year-round values are the literals this view always drew. */
   const SC = AV.costume
@@ -15745,6 +15979,8 @@ function formTurnScene(F, tau) {
     + `<radialGradient id="frHelmK" cx="42%" cy="32%" r="72%"><stop offset="0%" stop-color="#f4f6f8"/><stop offset="62%" stop-color="#d3d8dd"/><stop offset="100%" stop-color="#a7adb5"/></radialGradient>`
     + `<linearGradient id="frShort" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#33517a"/><stop offset="100%" stop-color="#213a5c"/></linearGradient>`
     + `<filter id="frGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="2.4"/></filter>`
+    + (AV.skiKit ? `<radialGradient id="frHelmSki" cx="40%" cy="30%" r="72%"><stop offset="0%" stop-color="#5b9bf0"/><stop offset="58%" stop-color="#2a66c8"/><stop offset="100%" stop-color="#173f88"/></radialGradient>`
+      + `<linearGradient id="frJktSki" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7b818a"/><stop offset="58%" stop-color="#5b6169"/><stop offset="100%" stop-color="#43484f"/></linearGradient>` : '')
     + (AV.winter ? `<radialGradient id="frHelmW" cx="40%" cy="30%" r="72%"><stop offset="0%" stop-color="#e65a62"/><stop offset="60%" stop-color="#c0323b"/><stop offset="100%" stop-color="#8e2129"/></radialGradient>` : '')
     + (AV.costume ? `<radialGradient id="frHelmP" cx="40%" cy="32%" r="72%"><stop offset="0%" stop-color="#ffb04a"/><stop offset="58%" stop-color="#f07a18"/><stop offset="100%" stop-color="#b4520c"/></radialGradient>`
       + `<radialGradient id="frMoon" cx="38%" cy="34%" r="70%"><stop offset="0%" stop-color="#ffd590"/><stop offset="60%" stop-color="#ff9a33"/><stop offset="100%" stop-color="#d0631a"/></radialGradient>`
@@ -15818,7 +16054,7 @@ function formFrame() {
   /* ---- Metric strip ---- */
   const speedNow = formRecordedSpeed(S, tNow);
   const speedCard = speedNow == null ? '' : `<div class="form-metric"><div class="fm-label">${loamT('Speed')}</div><div class="fm-value">${U.speedNum(speedNow).toFixed(1)}<span class="fm-unit">${U.speedUnit()}</span></div><div class="fm-sub">${loamT('at this point')}</div></div>`;
-  const leanCard = `<div class="form-metric"><div class="fm-label">${loamT(seg ? 'Phone tilt change' : 'Phone lean change')}</div><div class="fm-value">${Math.abs(lean).toFixed(0)}<span class="fm-unit">° ${loamT(sideLetter)}</span></div><div class="fm-sub">${loamT(seg ? 'peak {deg}° this segment' : 'peak {deg}° this turn', { deg: Math.abs(S.peakLean).toFixed(0) })}</div></div>`;
+  const leanCard = `<div class="form-metric"><div class="fm-label">${loamT(seg ? 'Phone tilt change' : 'Phone lean change')}</div><div class="fm-value">${Math.abs(lean).toFixed(0)}<span class="fm-unit">° ${loamT(sideLetter)}</span></div><div class="fm-sub">${loamT(S.sequence ? 'peak {deg}° this sequence' : seg ? 'peak {deg}° this segment' : 'peak {deg}° this turn', { deg: Math.abs(S.peakLean).toFixed(0) })}</div></div>`;
   let cards = speedCard + leanCard;
   let ghostCornerTile = '';   /* built in the segment branch, appended last so it never reflows its neighbors */
   if (S.headRel) {
@@ -15840,8 +16076,16 @@ function formFrame() {
     /* Whole-segment, lean-only: show which way the rider is leaning right now and the cornering state,
        plus the segment's biggest lean either side, instead of the per-turn commitment/gaze cards. */
     const dirNow = lean >= 2 ? 'right' : (lean <= -2 ? 'left' : 'upright');
+    /* A linked-turn sequence names the turn the playhead is in, first, so the tile row never reflows. */
+    const kSeq = S.sequence ? formSequenceTurnAt(S, tNow) : -1;
+    if (kSeq >= 0) {
+      const E = S.seqTurns[kSeq], took = formSequenceTurnS(S, kSeq), len = took == null ? '—' : loamNum(took, 1);
+      cards += `<div class="form-metric" data-seq-tile=""><div class="fm-label">${loamT('Turn {k} of {n}', { k: kSeq + 1, n: S.seqTurns.length })}</div>`
+        + `<div class="fm-value" style="text-transform:capitalize;">${loamT(E.side === 'L' ? 'left' : 'right')}</div>`
+        + `<div class="fm-sub">${S.seqPeriodS != null ? loamT('{s} s · typical {p} s', { s: len, p: loamNum(S.seqPeriodS, 1) }) : loamT('{s} s', { s: len })}</div></div>`;
+    }
     cards += `<div class="form-metric"><div class="fm-label">${loamT('Leaning')}</div><div class="fm-value" style="text-transform:capitalize;">${loamT(dirNow)}</div><div class="fm-sub">${loamT('phase:' + phase).replace(/^phase:/, '')}</div></div>`;
-    cards += `<div class="form-metric"><div class="fm-label">${loamT('Segment peak lean')}</div><div class="fm-value">${Math.abs(S.peakLean).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">${loamT('max either side')}</div></div>`;
+    cards += `<div class="form-metric"><div class="fm-label">${loamT(S.sequence ? 'Sequence peak lean' : 'Segment peak lean')}</div><div class="fm-value">${Math.abs(S.peakLean).toFixed(0)}<span class="fm-unit">°</span></div><div class="fm-sub">${loamT('max either side')}</div></div>`;
     /* Ghost tiles: the live time-at-distance gap to the fastest same-segment lap
        (same math as the ghost race: how long the ghost needed to reach where you
        are now on its own clock, vs your elapsed time; positive = behind), and,
@@ -15907,7 +16151,8 @@ function formFrame() {
       ? loamT('which side is which is unreliable on this {noun}', { noun: lexNounT(sportLex(displaySport(F.D))) })
       : loamT('different corners; not a technique score');
     const hl = (on) => on ? 'color:#e0a458;' : '';
-    const scope = S.leanScope === 'segment' ? loamT('this segment')
+    /* A sequence's baseline is the run it is on (formSequenceSeries), named as the runs table does. */
+    const scope = S.leanScope === 'segment' ? (S.sequence && S.leanScopeLabel ? escapeHtml(S.leanScopeLabel) : loamT('this segment'))
       : loamT('whole {noun}', { noun: lexNounT(sportLex(displaySport(F.D))) });
     cards += `<div class="form-metric"><div class="fm-label">${loamT('Sides · median lean')}</div><div class="fm-value" style="font-size:18px;"><span style="${hl(here==='L')}">${S.medLeanL.toFixed(0)}°L</span> · <span style="${hl(here==='R')}">${S.medLeanR.toFixed(0)}°R</span></div><div class="fm-sub">${weaker} · ${scope}</div></div>`;
   }
@@ -17229,7 +17474,7 @@ function effortPRHeadline(read) {
 const DB_NAME = 'loam-library';
 const DB_VERSION = 6;  // v6: analysis byte sizes indexed so eviction never deserializes render payloads
 // v17: lossless Float64 storage; old pages must not treat packed buffers as sensor rows.
-const ANALYSIS_CACHE_VERSION = 40;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session; v36: a rowing session with the monitor carries each stroke's metres, rate and pace and the 500 m splits the piece chart and splits table draw from, so one cached before this would reopen without them; v37: a Miss tapped in the rest after End set is attached to the set that just ended rather than dropped, so a lift session cached before this would reopen with that set's miss missing; v38: a rowing session with the monitor carries the force ratio, the stroke-to-stroke work change and what the monitor was set to, so one cached before this would reopen without those tiles; v39: a tapped squat's slow second pass keeps a cycle only if its drive held (WRIST_SLOW_CONFIRM_S), so a lift session cached before this would reopen counting the walk back to the rack as a rep -- 4 against 3 on set 2 of the owner's 2026-11-23 session; v40: a phone ski day's runs and vertical come from skiGpsDay, so one cached before this would reopen on grade-segment descents split at every stop and the elevation range as its vertical -- 10 descents and 650 m against 5 runs and 2,615 m on the 2026-11-27 Flumserberg day)
+const ANALYSIS_CACHE_VERSION = 43;  // bump to invalidate cached analyses when analyze() output or algorithms change (v2: GPS+IMU fused turn speed; v3: store R + wrist for Form Replay; v4: jumps dedup + summary, phone/watch airtime detection; v5: roll unwrap + lean plausibility gate; v6: D.sport on MTB render drives runs-table columns; v7: re-save descents with the segment approach lead-in so an existing segment's start can be dragged up-trail after a plain re-drop, no cache-busting needed; v8: strength rep counter drops the trailing re-rack + cadence-relative un-rack gate (curls 17->15), animated curl Spotter Cam pose, Dips/Other lift labels; v9: cache is keyed off the ride record's stored analysisKey, not the bare dedupKey, so calibrated/sported entries are actually re-openable again; oversized renders are skipped and the store is byte-bounded so a multi-hour ride can no longer blow the quota; v10: imuRateHz sample-rate guard carried on every render payload; v11: golf Good / Mishit taps attach in an asymmetric post-impact window assigned once per session, and the summary carries the good-vs-rest split, so an already-opened range session has to recompute rather than reopening a summary that predates the quality read; v12: phone freefall detection now runs on FIT rides too and attaches a measured landing g to each FIT jump, and the summary carries maxJumpDist / nBigJumps, so a cached ride re-opened from before this has jumps with no landing column and a hero card that cannot show a distance; v13: three analysis-time changes shipped without a bump -- ground-covered distance / driftDistance in computeRunSummary (#488), the crop and its stored context (#492: a cached ride never got the crop bar), and session-control marks kept out of descent labels (#483) -- plus the FIT chart's motor-power trace; v14: the cached copy is PROJECTED (cacheableRender) -- raw accel/gyro dropped and the wrist/AirPods rows cut to the two fields a render reads -- so a medium ride now fits under the entry cap instead of being recomputed on every open; and a golf entry stored before this has no sensors at all, so its truncation notice, its recording-quality panel and its pelvis card would go on answering from channels that are not there; v15: the indoor ski render carries the smoothed barometric `profile` its two charts are drawn from, so a ski session cached before this re-opens with no series to draw -- same shape as v12's jumps with no landing column; v16: the indoor ski render carries the per-leg edge changes, load, steps, activity and heart rate, the lap anatomy, and the `signals` its six further charts draw, so a session cached under v15 would reopen with every new surface blank; v18: a bike ride's render carries `pedalCad`, the AirPods pedaling cadence, which the projected cache cannot re-derive because it keeps only the AirPods' t and yaw; v19: a foot session's summary carries `sessionDistance` / `outsideDistance`, the whole-recording distance the Distance tile now leads with, so a run cached before this would reopen on the run-window figure that disagreed with the coach and Strava; v20: a run's oscillation is read from the AirPods when worn and from running windows only, and the summary carries `oscSource`, so a run cached before this would reopen on the phone's bounce under a head-bob caption; v21: compact jump-force and experimental wrist/torso replay signals (`replay`), which the projected cache cannot re-derive; v22: `calibWin.mountShift` names the instant by change-point rather than by largest angle, so a ride cached before this would reopen quoting the old, wrong time; v23: an MTB summary carries `outsideDistance`, the ground outside the ride window the Distance tile now names, so a ride cached before this would reopen without the line; v24: a set tapped Bench is counted under the bench rep profile and every wrist set carries pauseS / forearmDeg, so a lift session cached under v23 would reopen on the squat profile's count -- 7 / 3 / 2 / 2 against 16 / 8 / 5 / 10 on the session the profile was graded on -- with no Forearm column; the owner's own session was that cached entry; v25: a walk's render and library row carry `brisk`, its minutes at 100+ / 130+ spm, so a walk cached under v24 would reopen with no Brisk tile and stay out of the week's tally; v26: `calibWin.mountShift` is withheld when the pose comes back across the split (posture, not a move), so a strap-pocket ride cached before this would reopen with every turn's lean withheld and turn replay off; v27: the strength counters read the wrist's vertical axis the right way up (upAccelMps2) and every set carries `repThighDeg`, so a lift cached under v26 would reopen on the inverted count -- the walk-out counted as rep 1 on the 2026-10-25 ATG squat -- with the Spotter Cam drawing bar travel instead of the thigh; v28: a tapped squat set is counted under the hands-on-the-bar ceiling and the slow second pass (#1173), which shipped without a bump, so a lift session opened before the update would reopen on its v27 count -- on the owner's 2026-10-29 session, the walk back to the rack drawn as set 8's rep 2 in the Spotter Cam and the set's real first rep missing. analyzer/sports/strength/cache-version.test.js now fails when the saved-lift code changes without one; v29: completed-set rep corrections from watch annotations are authoritative manual counts in the saved analysis; v30: watch-authored set weights reach saved analysis, cards, volume and history; v31: "Clean and jerk" is a lift label; v32: a rowing session saved before the stroke replay carries no `stroke`, so it reopened with no animation, no stroke tiles and a coach given no stroke -- owner, 2026-11-10: "I don't see animation"; v33: a phone-cadence run's segment and climb cadence use the headline's gate (conf > 0.15 and moving) and its walked stretches are read in the walk band, so a run cached before this would reopen with noise windows in its climb cadence and the harmonic on its walk breaks; v35: a rowing session's stroke replay takes its catch from the machine's monitor when it was connected, and otherwise from where the hands linger read as the catch rather than the finish, so a session cached before this would reopen drawn back to front with its arm reads inverted -- 84% / 100% (arms early) against 0% / 8% (taught order) on the 2026-11-19 session; v36: a rowing session with the monitor carries each stroke's metres, rate and pace and the 500 m splits the piece chart and splits table draw from, so one cached before this would reopen without them; v37: a Miss tapped in the rest after End set is attached to the set that just ended rather than dropped, so a lift session cached before this would reopen with that set's miss missing; v38: a rowing session with the monitor carries the force ratio, the stroke-to-stroke work change and what the monitor was set to, so one cached before this would reopen without those tiles; v39: a tapped squat's slow second pass keeps a cycle only if its drive held (WRIST_SLOW_CONFIRM_S), so a lift session cached before this would reopen counting the walk back to the rack as a rep -- 4 against 3 on set 2 of the owner's 2026-11-23 session; v40: a phone ski day's runs and vertical come from skiGpsDay, so one cached before this would reopen on grade-segment descents split at every stop and the elevation range as its vertical -- 10 descents and 650 m against 5 runs and 2,615 m on the 2026-11-27 Flumserberg day; v41: a phone ski day carries `skiLinked`, its linked-turn read, which needs the gyroscope the projected cache drops, so a day cached before this would reopen without it; v42: that read carries the load through the linked turns (`load`), from the accelerometer the cache also drops; v43: and every sequence of the day with its turns (`sequences`), which the Form Replay plays, so a day cached under v42 would reopen with no sequence to replay)
 // v34: reanalyze stored rides for live Levo telemetry and GX shift events.
 const ANALYSIS_CACHE_MAX = 25;     // keep the N most recently analyzed recordings; evict oldest (so the Library/switcher can re-open more rides without re-dropping the file)
 /* The analyses store holds the fully decoded render (sensors + derived series), which for a multi-hour
@@ -25946,7 +26191,8 @@ const LoamSki = (function () {
      * `alternationFrac` is the honesty check and is reported rather than gated on: linked skiing
      * alternates, noise does not, and a caller that sees 0.5 is looking at something that is not
      * skiing. It is NOT a threshold here, because the one session that could set one is the session
-     * this was measured on.
+     * this was measured on. And a HIGH value is not proof of skiing: walking alternates too (75% on
+     * the marked walk at Northstar, 2026-11-27), which is why linked-turns.js gates on GPS speed.
      */
     function skiRhythm(edges) {
       const e = edges || [];
@@ -26134,7 +26380,49 @@ const LoamSki = (function () {
         meanProfile,
       };
     }
-    return { skiYawAboutVertical, skiEdgeChanges, skiRhythm, skiLoadSeries, skiLegLoad, skiTurnLoad, SKI_EDGE_MIN_PEAK_RADS, SKI_EDGE_SMOOTH_S, SKI_EDGE_MIN_DUR_S, SKI_RHYTHM_MIN_EDGES, SKI_G0_MPS2, SKI_PROFILE_BINS, SKI_LOAD_SMOOTH_S, SKI_MIN_PROFILE_TURNS };
+    /* Kept either side of a set of chains when the load series is cut down to them, so the
+       SKI_LOAD_SMOOTH_S box in skiTurnLoad sees whole windows at a chain's first and last turn. */
+    const SKI_CHAIN_LOAD_MARGIN_S = 1;
+
+    /* First index in a time-sorted series at or after `t`. */
+    function skiLowerBound(rows, t) {
+      let lo = 0, hi = rows.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (rows[m].t < t) lo = m + 1; else hi = m; }
+      return lo;
+    }
+
+    /**
+     * The load read over chains of linked turns (linked-turns.js): `skiTurnLoad`'s shape over every turn
+     * in them, and the sideways load's p90 over the chains' own spans, so the stops and slow stretches
+     * between them are not in it.
+     *
+     * WHY OUTDOORS TOO, AND ONLY ON THE CHAINS. The shape needs no speed and no calibration, so nothing
+     * about a dome made it indoor-only. On the Northstar day (2026-11-27) the linked turns put the
+     * load's centre at 0.547-0.564 of the arc per run (0.556 over 474 turns, turn-to-turn sd 0.056),
+     * where the SNO racer read 0.55, and their second half carried 1.56-1.76x the first. The marked walk
+     * and the lift rides, read the same way, sit at 0.50 and 1.04: no turn in them. Over a whole run the
+     * shushing, the stops and the walk would pull every number toward that flat shape, which is why the
+     * read is taken over the chains and nothing else.
+     *
+     * The series is cut to the chains' span before skiTurnLoad smooths it: a day is 700k rows.
+     */
+    function skiChainsLoad(loadSeries, chains) {
+      const cs = (chains || []).filter(c => Array.isArray(c) && c.length);
+      if (!cs.length) return null;
+      const rows = (loadSeries || []).filter(r => r && Number.isFinite(r.t));
+      const t0 = Math.min(...cs.map(c => c[0].tStart)) - SKI_CHAIN_LOAD_MARGIN_S;
+      const t1 = Math.max(...cs.map(c => c[c.length - 1].tEnd)) + SKI_CHAIN_LOAD_MARGIN_S;
+      const win = rows.slice(skiLowerBound(rows, t0), skiLowerBound(rows, t1 + 1e-9));
+      const shape = skiTurnLoad(win, cs.flat());
+      const lat = [];
+      for (const c of cs) {
+        const a = c[0].tStart, b = c[c.length - 1].tEnd;
+        for (let k = skiLowerBound(win, a); k < win.length && win[k].t <= b; k++) lat.push(win[k].lateral);
+      }
+      lat.sort((x, y) => x - y);
+      return { ...shape, lateralP90: lat.length ? +pct(lat, 0.9).toFixed(2) : null };
+    }
+    return { skiYawAboutVertical, skiEdgeChanges, skiRhythm, skiLoadSeries, skiLegLoad, skiTurnLoad, skiChainsLoad, SKI_CHAIN_LOAD_MARGIN_S, SKI_EDGE_MIN_PEAK_RADS, SKI_EDGE_SMOOTH_S, SKI_EDGE_MIN_DUR_S, SKI_RHYTHM_MIN_EDGES, SKI_G0_MPS2, SKI_PROFILE_BINS, SKI_LOAD_SMOOTH_S, SKI_MIN_PROFILE_TURNS };
   })();
 
   /* ---- ported from analyzer/sports/ski/session-reads.js ---- */
@@ -26955,9 +27243,333 @@ const LoamSki = (function () {
       const lifts = segs.filter(s => s.kind === 'lift' && s.dir === 'up').length;
       return { runs, lifts };
     }
-    return { skiRunsFromDescents, SKI_RUN_SPLIT_CLIMB_M };
+
+    /* The steepest pitch of the day's runs: the biggest fall over SKI_RUN_PITCH_M of ground, the same
+       measurement the Record screen and the wrist show live (`LiveRunMetrics.steepest`) and the GPS
+       import reads (`skiGpsSteepestPitch`). Not the steepest run's AVERAGE grade, which is what the
+       phone path's tile showed once runs were whole runs: Northstar 2026-11-27 read -17.9% over a
+       1.32 mi run while the live screen read 34%; this reads 35.8%, run 1.
+       Altitude is a trailing median of SKI_RUN_PITCH_SMOOTH_N readings (the live smoothing: barometric
+       error is spikes), interpolated at each fix. Ground is integrated Doppler speed, so a skier standing
+       while the fix wanders adds none, and no window spans a hop over SKI_RUN_PITCH_MAX_GAP_S: the ground
+       lost in a dropout is unknown while the altitude lost is not, so a window across one reads too steep.
+       `runs` [{ tStart, tEnd }], `location` the fixes (speed null when unknown), `altRows` { t, alt }.
+       Returns { pct, run (1-based), t } or null when no run covers that much ground. */
+    const SKI_RUN_PITCH_M = 100;
+    const SKI_RUN_PITCH_SMOOTH_N = 5;
+    const SKI_RUN_PITCH_MAX_GAP_S = 5;
+
+    function skiSmoothedAlts(altRows) {
+      const raw = (altRows || []).filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.alt))
+        .slice().sort((a, b) => a.t - b.t);
+      return raw.map((r, i) => {
+        const w = raw.slice(Math.max(0, i - SKI_RUN_PITCH_SMOOTH_N + 1), i + 1).map(x => x.alt).sort((a, b) => a - b);
+        return { t: r.t, alt: w[w.length >> 1] };
+      });
+    }
+
+    function skiAltAt(alts, t) {
+      if (!alts.length || t < alts[0].t || t > alts[alts.length - 1].t) return null;
+      let lo = 0, hi = alts.length - 1;
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; if (alts[m].t <= t) lo = m; else hi = m; }
+      const a = alts[lo], b = alts[hi];
+      return b.t > a.t ? a.alt + (b.alt - a.alt) * (t - a.t) / (b.t - a.t) : a.alt;
+    }
+
+    function skiSteepestRunPitch(runs, location, altRows) {
+      const alts = skiSmoothedAlts(altRows);
+      let best = null;
+      (runs || []).forEach((run, k) => {
+        if (!run || !Number.isFinite(run.tStart) || !Number.isFinite(run.tEnd)) return;
+        const pts = [];
+        for (const r of location || []) {
+          if (!r || r.speed == null || !Number.isFinite(r.speed) || r.t < run.tStart || r.t > run.tEnd) continue;
+          const alt = skiAltAt(alts, r.t);
+          if (alt == null) continue;
+          const prev = pts.length ? pts[pts.length - 1] : null;
+          const dt = prev ? r.t - prev.t : 0;
+          const gap = !!prev && dt > SKI_RUN_PITCH_MAX_GAP_S;
+          pts.push({ t: r.t, alt,
+            ground: prev ? prev.ground + (gap || !(dt > 0) ? 0 : (r.speed + prev.speed) / 2 * dt) : 0,
+            speed: r.speed, stretch: prev ? prev.stretch + (gap ? 1 : 0) : 0 });
+        }
+        let j = 0;
+        for (let i = 0; i < pts.length; i++) {
+          if (j < i) j = i;
+          while (j < pts.length && pts[j].stretch === pts[i].stretch && pts[j].ground - pts[i].ground < SKI_RUN_PITCH_M) j++;
+          if (j >= pts.length || pts[j].stretch !== pts[i].stretch) continue;
+          const pct = (pts[i].alt - pts[j].alt) / (pts[j].ground - pts[i].ground) * 100;
+          if (!best || pct > best.pct) best = { pct, run: k + 1, t: pts[i].t };
+        }
+      });
+      return best;
+    }
+    return { skiRunsFromDescents, SKI_RUN_SPLIT_CLIMB_M, skiSteepestRunPitch, SKI_RUN_PITCH_M };
   })();
-  return { analyzeSkiDome, ...SkiLapCycles, ...SkiAgitation, ...SkiTurnRhythm, ...SkiEdgeLoad, ...SkiSessionReads, ...SkiGpsDay, ...SkiOutdoorRuns };
+  /* ---- ported from analyzer/sports/ski/linked-turns.js: a ski day read as linked turns, gated on
+     GPS speed. The measurements behind every constant are in that module's header; pinned by
+     analyzer/sports/ski/drift.test.js. ---- */
+  const SkiLinkedTurns = (function () {
+    /* An edge change counts as a turn only when the GPS speed at its peak is at least this. The walk gave
+       no sequence at 2, 3 or 4 m/s; 3 is the middle. Ski-boot walking stayed under 1.5 m/s. */
+    const SKI_LINK_MIN_MPS = 3;
+
+    /* Two alternating turns further apart than this are not linked. Measured: 1,328 of the 1,430
+       alternating pairs inside the runs sat under 4 s; the rest are traverses and stops. */
+    const SKI_LINK_MAX_GAP_S = 4;
+
+    /* Fewer turns than this are not a sequence: six is three each way, the least that has a rhythm. */
+    const SKI_LINK_MIN_TURNS = 6;
+
+    /* Time counted as moving, for the share of a run spent in linked turns. Under the turn gate on
+       purpose, so a slow stretch between two sequences is time that was NOT linked rather than time the
+       read ignores. */
+    const SKI_MOVING_MPS = 1.5;
+
+    /* A GPS fix further than this from the instant asked about is no answer. The track is 1 Hz. */
+    const SKI_FIX_NEAR_S = 1.5;
+
+    /* The course from positions is centred on a fix, so it trails the body by about half a sample.
+       Measured best at 0.5 s (93-94% agreement); at 0 and 1.5 s it falls to 58-63% on 1-2 s turns. */
+    const SKI_COURSE_LAG_S = 0.5;
+
+    /* Under this much ground between the fixes either side, a course is GPS jitter. */
+    const SKI_COURSE_MIN_MOVE_M = 2;
+
+    /* Both ends of a lobe must be moving at least this for its course change to be read. */
+    const SKI_COURSE_MIN_MPS = 2;
+
+    /* A swing at least this big, whose GPS course turned less than this share of it, is a spin and not a
+       turn. See the header for the numbers. */
+    const SKI_SPIN_MIN_DEG = 120;
+    const SKI_SPIN_MAX_COURSE_RATIO = 0.25;
+
+    /* How many of the day's sequences the card lists. */
+    const SKI_BEST_SEQUENCES = 5;
+
+    function skiLinkMedian(vals) {
+      const s = (vals || []).filter(Number.isFinite).sort((a, b) => a - b);
+      if (!s.length) return null;
+      const m = s.length >> 1;
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    }
+
+    /* Spread of a set of intervals as a coefficient of variation, in percent. Three intervals are the
+       floor, as in turn-rhythm.js: fewer are numbers, not a spread. */
+    function skiLinkCvPct(vals) {
+      const v = (vals || []).filter(Number.isFinite);
+      if (v.length < 3) return null;
+      const mean = v.reduce((a, b) => a + b, 0) / v.length;
+      if (!(mean > 0)) return null;
+      const varr = v.reduce((a, b) => a + (b - mean) ** 2, 0) / v.length;
+      return Math.sqrt(varr) / mean * 100;
+    }
+
+    /**
+     * GPS fixes with a course worked out from POSITIONS, centred on each fix (the one before to the one
+     * after). The analyzer's location rows carry no CoreLocation course; on the Northstar day this
+     * agreed with the phone as often as CoreLocation's own course did (93% against 92% on 1-2 s turns).
+     */
+    function skiCourseFixes(locRows) {
+      const rows = (locRows || []).filter(r => r && Number.isFinite(r.t) && Number.isFinite(r.latitude)
+        && Number.isFinite(r.longitude)).slice().sort((a, b) => a.t - b.t);
+      const rad = Math.PI / 180, earthM = 6371000;
+      return rows.map((r, i) => {
+        const a = rows[i - 1], b = rows[i + 1];
+        let bearing = null;
+        if (a && b && b.t - a.t <= 3) {
+          const dy = (b.latitude - a.latitude) * rad * earthM;
+          const dx = (b.longitude - a.longitude) * rad * earthM * Math.cos(r.latitude * rad);
+          if (Math.hypot(dx, dy) >= SKI_COURSE_MIN_MOVE_M) bearing = (Math.atan2(dx, dy) / rad + 360) % 360;
+        }
+        return { t: r.t, speed: Number.isFinite(r.speed) ? r.speed : null, bearing };
+      });
+    }
+
+    /** The fix nearest `t`, or null when none is within SKI_FIX_NEAR_S. `fixes` sorted by t. */
+    function skiFixNear(fixes, t) {
+      if (!fixes || !fixes.length || !Number.isFinite(t)) return null;
+      let lo = 0, hi = fixes.length - 1;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (fixes[m].t < t) lo = m + 1; else hi = m; }
+      let best = null, bd = Infinity;
+      for (const k of [lo - 1, lo]) {
+        const f = fixes[k];
+        if (f) { const d = Math.abs(f.t - t); if (d < bd) { bd = d; best = f; } }
+      }
+      return best && bd <= SKI_FIX_NEAR_S ? best : null;
+    }
+
+    /**
+     * Signed change of GPS course across one lobe, in degrees, positive clockwise (a right turn, the
+     * same sign as `skiEdgeChanges`' 'R'). Null when the track cannot say: no fix near either end, no
+     * course at either, or either end too slow.
+     */
+    function skiCourseChange(fixes, tStart, tEnd) {
+      const a = skiFixNear(fixes, tStart + SKI_COURSE_LAG_S), b = skiFixNear(fixes, tEnd + SKI_COURSE_LAG_S);
+      if (!a || !b || b.t - a.t < 1 || a.bearing == null || b.bearing == null) return null;
+      if (!(a.speed >= SKI_COURSE_MIN_MPS) || !(b.speed >= SKI_COURSE_MIN_MPS)) return null;
+      let d = b.bearing - a.bearing;
+      while (d > 180) d -= 360;
+      while (d < -180) d += 360;
+      return d;
+    }
+
+    /**
+     * Each edge change marked 'slow' (under SKI_LINK_MIN_MPS, or no speed), 'spin' (see the header) or
+     * 'turn'. Returns new objects carrying `speedMps` and, for those at speed, `courseDeg`.
+     */
+    function skiClassifyTurns(edges, fixes) {
+      return (edges || []).map(e => {
+        const f = skiFixNear(fixes, e.t);
+        const speed = f && f.speed != null ? f.speed : null;
+        if (!(speed >= SKI_LINK_MIN_MPS)) return { ...e, speedMps: speed, kind: 'slow' };
+        const course = skiCourseChange(fixes, e.tStart, e.tEnd);
+        const spin = e.headingDeg >= SKI_SPIN_MIN_DEG && course != null
+          && Math.abs(course) < SKI_SPIN_MAX_COURSE_RATIO * e.headingDeg;
+        return { ...e, speedMps: speed, courseDeg: course, kind: spin ? 'spin' : 'turn' };
+      });
+    }
+
+    /**
+     * Chains of linked turns: consecutive 'turn's that alternate side and peak within SKI_LINK_MAX_GAP_S
+     * of each other, kept when they reach SKI_LINK_MIN_TURNS. A 'slow' edge is passed over (the gap rule
+     * ends the chain if the stop was long); a 'spin' ends it outright, because the turns either side of a
+     * change of stance are not one rhythm.
+     */
+    function skiLinkedChains(classified) {
+      const chains = [];
+      let cur = [];
+      const close = () => { if (cur.length >= SKI_LINK_MIN_TURNS) chains.push(cur); cur = []; };
+      for (const e of classified || []) {
+        if (e.kind === 'slow') continue;
+        if (e.kind === 'spin') { close(); continue; }
+        const prev = cur[cur.length - 1];
+        if (prev && e.side !== prev.side && e.t - prev.t <= SKI_LINK_MAX_GAP_S) cur.push(e);
+        else { close(); cur = [e]; }
+      }
+      close();
+      return chains;
+    }
+
+    /* Intervals between the turns of a set of chains, and the ground covered in each (speed x interval),
+       for the summaries below. */
+    function skiChainSteps(chains) {
+      const intervals = [], metres = [];
+      for (const c of chains) {
+        for (let i = 1; i < c.length; i++) {
+          const dt = c[i].t - c[i - 1].t;
+          intervals.push(dt);
+          if (Number.isFinite(c[i].speedMps)) metres.push(c[i].speedMps * dt);
+        }
+      }
+      return { intervals, metres };
+    }
+
+    /* The turns of one chain as the Form Replay needs them: where each one peaked and the lobe it
+       spans, to the hundredth of a second. Kept on the render because the gyroscope they came from is
+       not (cacheableRender drops it), so a reopened day could not find them again. */
+    function skiSequenceEdges(chain) {
+      const r2 = (v) => +v.toFixed(2);
+      return chain.map(e => ({ t: r2(e.t), tStart: r2(e.tStart), tEnd: r2(e.tEnd), side: e.side }));
+    }
+
+    /** One chain as the card shows it. */
+    function skiSequenceSummary(chain) {
+      const tStart = chain[0].tStart, tEnd = chain[chain.length - 1].tEnd;
+      const { intervals, metres } = skiChainSteps([chain]);
+      const cv = skiLinkCvPct(intervals);
+      const period = skiLinkMedian(intervals), m = skiLinkMedian(metres), speed = skiLinkMedian(chain.map(e => e.speedMps));
+      return {
+        tStart, tEnd, durS: +(tEnd - tStart).toFixed(1), turns: chain.length,
+        periodS: period == null ? null : +period.toFixed(2),
+        periodCvPct: cv == null ? null : Math.round(cv),
+        headingDeg: Math.round(skiLinkMedian(chain.map(e => e.headingDeg))),
+        speedMps: speed == null ? null : +speed.toFixed(1),
+        metresPerTurn: m == null ? null : Math.round(m),
+      };
+    }
+
+    /* Seconds with the GPS speed at or over SKI_MOVING_MPS inside [t0, t1]. A gap between fixes counts at
+       most 2 s, so a dropout is not billed as moving. */
+    function skiMovingS(fixes, t0, t1) {
+      let s = 0, prev = null;
+      for (const f of fixes || []) {
+        if (f.t < t0 || f.t > t1) continue;
+        if (prev && f.speed != null && f.speed >= SKI_MOVING_MPS) s += Math.min(2, f.t - prev.t);
+        prev = f;
+      }
+      return s;
+    }
+
+    /* The shared summary of a set of chains, for one run or the whole day. */
+    function skiChainsRead(chains, movingS) {
+      const { intervals, metres } = skiChainSteps(chains);
+      const linkedS = chains.reduce((n, c) => n + (c[c.length - 1].tEnd - c[0].tStart), 0);
+      const longest = chains.reduce((b, c) => (!b || c.length > b.length ? c : b), null);
+      const cv = skiLinkCvPct(intervals), period = skiLinkMedian(intervals), m = skiLinkMedian(metres);
+      const side = (s) => skiLinkMedian(chains.flat().filter(e => e.side === s).map(e => e.durS));
+      const leftS = side('L'), rightS = side('R');
+      return {
+        movingS: Math.round(movingS),
+        linkedS: Math.round(linkedS),
+        /* Capped: a chain's span runs edge to edge and can include a second under the moving speed, so
+           a run skied as one long sequence would otherwise read a few percent over all of it. */
+        linkedShare: movingS > 0 ? +Math.min(1, linkedS / movingS).toFixed(2) : null,
+        sequences: chains.length,
+        linkedTurns: chains.reduce((n, c) => n + c.length, 0),
+        longestTurns: longest ? longest.length : 0,
+        longestS: longest ? +(longest[longest.length - 1].tEnd - longest[0].tStart).toFixed(1) : 0,
+        periodS: period == null ? null : +period.toFixed(2),
+        periodCvPct: cv == null ? null : Math.round(cv),
+        metresPerTurn: m == null ? null : Math.round(m),
+        leftTurnS: leftS == null ? null : +leftS.toFixed(2),
+        rightTurnS: rightS == null ? null : +rightS.toFixed(2),
+      };
+    }
+
+    /**
+     * The read for a ski day: per run, the day as a whole, and its longest sequences.
+     *
+     * Null when the recording has no GPS speed at all, which is an indoor session: without speed the walk
+     * and the standing-around cannot be told from linked turns (see the header), so this read is not
+     * offered rather than offered without its gate.
+     *
+     * `loadOf(chains)`, when given, is asked for the load read of a set of chains -- a run's, each listed
+     * sequence's, the day's -- and its answer is carried as `load` beside the timing. Passed in rather
+     * than imported so this module stays free of the accelerometer: the page hands it
+     * `skiChainsLoad` (edge-load.js) over the day's load series.
+     */
+    function skiLinkedTurnsDay(edges, locRows, runs, loadOf = null) {
+      const fixes = skiCourseFixes(locRows);
+      if (!fixes.some(f => f.speed != null)) return null;
+      const sorted = (edges || []).filter(e => e && Number.isFinite(e.t)).slice().sort((a, b) => a.t - b.t);
+      const all = [], perRun = [];
+      let movingTotal = 0, spins = 0;
+      (runs || []).forEach((run, i) => {
+        const classified = skiClassifyTurns(sorted.filter(e => e.t >= run.tStart && e.t <= run.tEnd), fixes);
+        const chains = skiLinkedChains(classified);
+        const movingS = skiMovingS(fixes, run.tStart, run.tEnd);
+        const runSpins = classified.filter(e => e.kind === 'spin').length;
+        movingTotal += movingS;
+        spins += runSpins;
+        chains.forEach(c => all.push({ chain: c, run: i + 1 }));
+        perRun.push({ run: i + 1, tStart: run.tStart, tEnd: run.tEnd, spins: runSpins, ...skiChainsRead(chains, movingS),
+          load: loadOf ? loadOf(chains) : null });
+      });
+      /* Every sequence of the day, in time order, with its turns: what the Form Replay offers. `best`
+         names its entries by their index here (`seq`), so the card's rows open the same sequence. */
+      const sequences = all.map(x => ({ run: x.run, ...skiSequenceSummary(x.chain), edges: skiSequenceEdges(x.chain) }));
+      /* Array sort is stable and `all` is in time order, so equal lengths stay earliest first. */
+      const best = all.map((x, seq) => ({ ...x, seq }))
+        .sort((a, b) => b.chain.length - a.chain.length)
+        .slice(0, SKI_BEST_SEQUENCES)
+        .map(x => ({ run: x.run, seq: x.seq, ...skiSequenceSummary(x.chain), load: loadOf ? loadOf([x.chain]) : null }));
+      const dayChains = all.map(x => x.chain);
+      return { runs: perRun, day: { spins, ...skiChainsRead(dayChains, movingTotal), load: loadOf ? loadOf(dayChains) : null }, best, sequences };
+    }
+    return { SKI_LINK_MIN_MPS, SKI_LINK_MAX_GAP_S, SKI_LINK_MIN_TURNS, SKI_MOVING_MPS, SKI_FIX_NEAR_S, SKI_COURSE_LAG_S, SKI_COURSE_MIN_MOVE_M, SKI_COURSE_MIN_MPS, SKI_SPIN_MIN_DEG, SKI_SPIN_MAX_COURSE_RATIO, SKI_BEST_SEQUENCES, skiCourseFixes, skiCourseChange, skiClassifyTurns, skiLinkedChains, skiSequenceSummary, skiLinkedTurnsDay };
+  })();
+  return { analyzeSkiDome, ...SkiLapCycles, ...SkiAgitation, ...SkiTurnRhythm, ...SkiEdgeLoad, ...SkiSessionReads, ...SkiGpsDay, ...SkiOutdoorRuns, ...SkiLinkedTurns };
 })();
 
 /* ===== Training plan: history, scaffold and coach =========================== *
@@ -29910,7 +30522,7 @@ async function analyze(files) {
        lift-served day. Flumserberg 2026-11-27 (5 runs by the skier): 10 descents and 650 m before,
        5 runs and 2,615 m after. See analyzer/sports/ski/outdoor-runs.js for why this splits on a
        climb and not on a detected lift. */
-    let skiRunSegments = null, skiDay = null;
+    let skiRunSegments = null, skiDay = null, skiLinked = null;
     if (isSkiSport(sport)) {
       LoamSki.markSkiDownloads(gradeSegments, sensors.location);
       const haveBaro = sensors.baro && sensors.baro.length > 10;
@@ -29937,6 +30549,14 @@ async function analyze(files) {
         skiVertical: counted.reduce((n, r) => n + r.drop, 0),
         skiDistance: counted.reduce((n, r) => n + pathIn(r.tStart, r.tEnd), 0),
         liftDistance: gradeSegments.filter(sg => sg.kind === 'lift').reduce((n, sg) => n + pathIn(sg.tStart, sg.tEnd), 0) });
+      /* The day read as linked turns, over the same counted runs the runs table numbers. Computed
+         HERE because it needs the gyroscope, which the cached render drops (cacheableRender). */
+      const yawV = LoamSki.skiYawAboutVertical(sensors.gyro || [], sensors.gravity || []);
+      /* And the load carried through those turns, from the accelerometer, which the cache drops too. */
+      const loadV = LoamSki.skiLoadSeries(sensors.accel || [], sensors.gravity || []);
+      skiLinked = LoamSki.skiLinkedTurnsDay(
+        yawV.length ? LoamSki.skiEdgeChanges(yawV, ride.start, ride.end) : [], sensors.location || [], counted,
+        loadV.length ? (chains) => LoamSki.skiChainsLoad(loadV, chains) : null);
     }
 
     onProgress('saving to library');
@@ -29974,7 +30594,7 @@ async function analyze(files) {
       sensors, t, yawSeg, rollSmooth, R,
       replay: LoamReplay.prepare(sensors, turns, ridingJumps, phoneAir.jumps, phoneAir.scaledFromG),
       ride, turns, summary, gradeSegments, calibWin, sport, imuRateHz, fitRepair, emtbReason,
-      fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData, fitSync,
+      fitData, fitInRide, ridingJumps, jumpDupsRemoved, airtime, hasFit: !!fitData, fitSync, skiLinked,
       libraryRideId: saved && saved.id, savedDescents: saved && saved.descents,
       title: sensorFile && sensorFile.name,
     };
@@ -33115,7 +33735,7 @@ function hideAllSections() {
   /* The foot layout moves the runs table down past the run's own reads (placeRunsBelowFootReads);
      put it back, or a ride opened after a run inherits a page built for a runner. */
   try { restoreRunsSectionHome(); } catch (e) {}
-  ['strengthResults','xcskiResults','skiNamesSection','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','shiftReviewSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
+  ['strengthResults','xcskiResults','skiNamesSection','roadMountControl','golfResults','swimResults','triResults','treadmillResults','sessionOverview','sampleRateNotice','truncNotice', 'guessedSportNotice','fitRepairNotice','mtbCalibNotice','emtbNotice','rideSignatureSection','coachHighlights','crashSection','geekStatsSection','runsSection','jumpsSection','airtimeSection','analogSection','cadPowerSection','shiftReviewSection','roadDataSection','roadSection','roadDescentsSection','skiGpsSection','roadDescentHistorySection','roadPowerCurveSection','roadQuadrantSection','roadLapsSection','roadUpsellSection','formReplaySection','skiLinkedSection','turnSection','radiusSection','runOverlaySection','runSplitsSection','runLapsSection','hrZonesSection','estPowerSection','runDecouplingSection','recordingQualitySection','runSegmentsSection','runMountNotice','gpsOnlyNotice','gpsUpsellSection','runCompareSection','coachSection'].forEach(id => {
     const el = document.getElementById(id); if (el) el.classList.add('hidden');
   });
   /* Blank shared nodes that each sport path is expected to SET, so no path can inherit another
@@ -38348,8 +38968,8 @@ function drawSkiRhythm(byDescent) {
 
 /* The mean sideways-load profile across an ensemble of turns, each stretched to the same length. A
    shape, not a size, and a marker at the centroid rather than a verdict about it. */
-function drawSkiLoadShape(turnLoad) {
-  const el = document.getElementById('skiLoadShapeChart');
+function drawSkiLoadShape(turnLoad, elId = 'skiLoadShapeChart') {
+  const el = document.getElementById(elId);
   if (!el || typeof Plotly === 'undefined') return;
   const p = turnLoad && turnLoad.meanProfile;
   if (!p || !p.length) { skiChartNote(el, 'Too few turns for a load shape.'); return; }
@@ -41237,12 +41857,13 @@ function renderSkiGpsStats(D) {
   const tile = (cls, label, value, sub) =>
     `<div class="stat${cls ? ' ' + cls : ''}"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
   document.getElementById('statsPanel').innerHTML = [
-    tile('accent', loamT('Runs'), String(T.runs),
-      loamT('{n} lifts', { n: T.lifts }) + (T.downloads ? ' · ' + loamT('{n} back down', { n: T.downloads }) : '')),
-    tile('accent2', loamT('Vertical skied'), U.elev(T.vertical),
-      s.liftAscent ? loamT('lifts carried {v}', { v: U.elev(s.liftAscent) }) : loamT('top to bottom of each run')),
-    tile('accent3', loamT('Top speed'), T.topSpeed ? U.speed(T.topSpeed) : '&mdash;',
-      T.topSpeedRun ? loamT('held 3 s · run {n}', { n: T.topSpeedRun }) : loamT('held 3 s')),
+    skiHeroHTML({ vertical: T.vertical,
+      vertSub: s.liftAscent ? loamT('lifts carried {v}', { v: U.elev(s.liftAscent) }) : loamT('top to bottom of each run'),
+      topSpeed: T.topSpeed,
+      topSub: T.topSpeedRun ? loamT('held 3 s · run {n}', { n: T.topSpeedRun }) : loamT('held 3 s'),
+      chips: [skiRunsChip(T.runs), ...(T.lifts ? [skiLiftsChip(T.lifts)] : []),
+        ...(T.downloads ? [loamT('{n} back down', { n: T.downloads })] : [])],
+      profile: skiHeroProfile(D, day.laps.filter(l => l.run).map(l => ({ tStart: l.tTop, tEnd: l.tBottom }))) }),
     tile('', loamT('Distance skied'), U.dist(T.distance),
       longest ? loamT('longest run {d}', { d: U.dist(longest.distance) }) : loamT('runs only, lifts left out')),
     tile('', loamT('Time skiing'), durTileHTML(T.skiingS),
@@ -47065,7 +47686,8 @@ const LOAM_NB = {
   '{lengths} lengths · {sets} sets': '{lengths} lengder · {sets} sett',
   'road ride': 'landeveistur',
   'e-MTB ride': 'el-terrengtur',
-  '{n} lifts': '{n} løft',
+  '{n} lifts': '{n} heiser',
+  '1 lift': '1 heis',
   '{n} FIT jumps ignored (no phone recording to sync to)':
     '{n} FIT-hopp ignorert (ingen telefonopptak å synkronisere mot)',
   'FIT {noun} loaded (GPS-only · {fixes} fixes{lifts}{jumps})':
@@ -48163,6 +48785,54 @@ const LOAM_NB = {
   'wet ground': 'vått underlag',
   'calm': 'vindstille',
   'Weather data by Apple Weather': 'Værdata fra Apple Vær',
+  /* A ski day's linked turns (renderSkiLinkedTurns). */
+  'Linked turns': 'Sammenhengende svinger',
+  'how much of each run was linked turns, and their rhythm': 'hvor mye av hver nedkjøring som var sammenhengende svinger, og rytmen i dem',
+  'of moving time in linked turns': 'av tiden i bevegelse i sammenhengende svinger',
+  '{a} of {b}': '{a} av {b}',
+  'linked sequence': 'sammenhengende serie',
+  'linked sequences': 'sammenhengende serier',
+  '{n} turns': '{n} svinger',
+  'longest sequence': 'lengste serie',
+  'per turn, typical': 'per sving, typisk',
+  'timing spread {v}': 'tidsspredning {v}',
+  'ground per turn': 'strekning per sving',
+  'left / right turn': 'venstre / høyre sving',
+  '{s} s': '{s} s',
+  'Linked': 'Sammenhengende',
+  'Sequences': 'Serier',
+  'Longest': 'Lengste',
+  'Spread': 'Spredning',
+  'Size': 'Størrelse',
+  'Longest sequences': 'Lengste serier',
+  'Started': 'Startet',
+  'Lasted': 'Varte',
+  '<strong>A turn</strong> here is a change of turning direction about true vertical, counted from the phone with no calibration, and only while the GPS shows you moving at {speed} or more: walking and standing still alternate left and right as often as skiing does, so without the speed they cannot be told apart. <strong>Linked</strong> is {n} or more turns in a row, each the other way to the one before and no more than {gap} s after it. <strong>Spread</strong> is how much the time per turn varied inside the sequences, and <strong>size</strong> is the ground covered per turn at the speed you were going.':
+    '<strong>En sving</strong> er her et skifte av dreieretning om loddlinjen, telt fra telefonen uten kalibrering, og bare mens GPS-en viser at du beveger deg i {speed} eller mer: gange og stillestående veksler mellom venstre og høyre like ofte som skikjøring, så uten farten kan de ikke skilles. <strong>Sammenhengende</strong> er {n} eller flere svinger på rad, hver motsatt vei av den forrige og ikke mer enn {gap} s etter den. <strong>Spredning</strong> er hvor mye tiden per sving varierte innenfor seriene, og <strong>størrelse</strong> er strekningen per sving i farten du holdt.',
+  'Left out: {n} swings where your body turned much further than your path did, which is what a spin into or out of switch looks like.':
+    'Utelatt: {n} vridninger der kroppen snudde mye mer enn sporet ditt, slik en snu inn i eller ut av baklengs kjøring ser ut.',
+  'The phone is on your body, not your skis, so this is the rhythm of your turning and not of your edging: it says nothing about edge angle or carving. A skier who keeps the upper body quiet through short turns can read fewer turns than they made. Nothing here says which rhythm is right.':
+    'Telefonen sitter på kroppen, ikke på skiene, så dette er rytmen i svingene dine og ikke i kantingen: den sier ingenting om kantvinkel eller carving. En skiløper som holder overkroppen rolig gjennom korte svinger kan få færre svinger enn de kjørte. Ingenting her sier hvilken rytme som er riktig.',
+  'No linked sequences: no stretch of {n} turns in a row at speed.': 'Ingen sammenhengende serier: ingen strekning med {n} svinger på rad i fart.',
+  /* The Form Replay through one linked sequence (formSelectSequence). */
+  'Not enough motion data for this sequence.': 'Ikke nok bevegelsesdata for denne serien.',
+  'Linked-turn replay: signed left/right lean through {n} linked turns, the same turns the Linked turns card counts. The dots on the map are where each one peaked.':
+    'Avspilling av sammenhengende svinger: helning med fortegn venstre/høyre gjennom {n} sammenhengende svinger, de samme som kortet Sammenhengende svinger teller. Prikkene på kartet viser hvor hver av dem var på sitt sterkeste.',
+  '▶ Play sequence': '▶ Spill av serien',
+  '↻ Replay sequence': '↻ Spill av serien på nytt',
+  'Turn {k} of {n}': 'Sving {k} av {n}',
+  '{s} s · typical {p} s': '{s} s · typisk {p} s',
+  'Sequence peak lean': 'Største helning i serien',
+  'peak {deg}° this sequence': 'topp {deg}° i denne serien',
+  'Schematic · phone tilt relative to this sequence’s median. Body position and equipment tilt are not measured.':
+    'Skjematisk · telefonhelning relativt til medianen for denne serien. Kroppsstilling og utstyrets helning er ikke målt.',
+  'into the turn, where the load centred': 'ut i svingen, der belastningen hadde sitt tyngdepunkt',
+  'second half ×{r}': 'andre halvdel ×{r}',
+  'sideways load in linked turns': 'sidebelastning i sammenhengende svinger',
+  'Load at': 'Belastning ved',
+  'the average of {n} linked turns, each stretched to the same length': 'gjennomsnittet av {n} sammenhengende svinger, hver strukket til samme lengde',
+  '<strong>Load at</strong> is where in the turn the sideways load centred, from one edge change (0%) to the next (100%): 50% is spread evenly, and above it the load came late. <strong>Sideways</strong> is the 90th percentile of the sideways force, in g, inside the sequences only, so the stops and slow stretches are not in it. Both need {n} linked turns, and show a dash with fewer. They describe the turns; they do not grade them.':
+    '<strong>Belastning ved</strong> er hvor i svingen sidebelastningen hadde sitt tyngdepunkt, fra ett kantskifte (0 %) til det neste (100 %): 50 % er jevnt fordelt, og over det kom belastningen sent. <strong>Sidelast</strong> er 90-persentilen av sidekraften, i g, bare innenfor seriene, så stopp og rolige partier er ikke med. Begge trenger {n} sammenhengende svinger og viser en strek med færre. De beskriver svingene; de gir dem ikke karakter.',
 };
 
 /* ---------- Static chrome ----------
@@ -49179,7 +49849,7 @@ function steepestDescentTile(segments, pace, floor) {
   const distance = d.distance > 0 ? ` · ${U.dist(d.distance)}` : '';
   return `<div class="stat accent4">
     <div class="label">${loamT('Steepest descent')}</div>
-    <div class="value">${d.gradePct.toFixed(1)}<span class="unit">%</span></div>
+    <div class="value">${loamNum(d.gradePct, 1)}<span class="unit">%</span></div>
     <div class="sub">${loamT('{v} avg', { v: movement })}${distance}</div>
   </div>`;
 }
@@ -49213,7 +49883,7 @@ function steepestInclineTile(segments, pace, floor) {
   const distance = d.distance > 0 ? ` · ${U.dist(d.distance)}` : '';
   return `<div class="stat accent">
     <div class="label">${loamT('Steepest incline')}</div>
-    <div class="value">+${d.gradePct.toFixed(1)}<span class="unit">%</span></div>
+    <div class="value">+${loamNum(d.gradePct, 1)}<span class="unit">%</span></div>
     <div class="sub">${loamT('{v} avg', { v: movement })}${distance}</div>
   </div>`;
 }
@@ -54373,6 +55043,22 @@ function buildDigest(D, sport, metric) {
     ...(s.skiVertical != null ? { runs: s.skiRuns, lifts: s.skiLifts, ...u.elev('vertical_skied', s.skiVertical),
       ...u.dist('distance_on_runs', s.skiDistance), ...u.dist('distance_on_lifts', s.liftDistance),
       distance_note: '`distance` is the whole track, lift rides included; distance_on_runs is the skiing.' } : {}),
+    /* The day as linked turns, when the analysis carried it. Rhythm and continuity, never edge angle or
+       carving (the ski system prompt forbids both), and no number in it is a grade. */
+    ...(ski && D.skiLinked ? { linked_turns: {
+      share_of_moving_time_linked: D.skiLinked.day.linkedShare, sequences: D.skiLinked.day.sequences,
+      turns_in_sequences: D.skiLinked.day.linkedTurns, longest_sequence_turns: D.skiLinked.day.longestTurns,
+      longest_sequence_s: D.skiLinked.day.longestS, median_s_per_turn: D.skiLinked.day.periodS,
+      timing_spread_pct: D.skiLinked.day.periodCvPct, ...u.len('median_ground_per_turn', D.skiLinked.day.metresPerTurn),
+      left_turn_s: D.skiLinked.day.leftTurnS, right_turn_s: D.skiLinked.day.rightTurnS,
+      spins_left_out: D.skiLinked.day.spins,
+      ...(D.skiLinked.day.load ? { load_centred_frac: D.skiLinked.day.load.centroid,
+        late_half_over_early_half: D.skiLinked.day.load.lateHalfRatio, sideways_g_p90: D.skiLinked.day.load.lateralP90 } : {}),
+      per_run: D.skiLinked.runs.map(r => ({ run: r.run, moving_s: r.movingS, share_linked: r.linkedShare,
+        sequences: r.sequences, longest_turns: r.longestTurns, median_s_per_turn: r.periodS, timing_spread_pct: r.periodCvPct,
+        ...(r.load ? { load_centred_frac: r.load.centroid, sideways_g_p90: r.load.lateralP90 } : {}) })),
+      note: 'A turn is a change of turning direction of the torso about true vertical, counted only while GPS speed was at least 3 m/s; a sequence is 6 or more alternating turns no more than 4 s apart. Swings where the body turned far more than the GPS track (spins into or out of switch) are left out. This is rhythm and continuity, not technique: it says nothing about edge angle, carving or skidding, and no turn time is better than another. load_centred_frac is where in the turn the sideways load centred (0.5 is even, higher is later) and sideways_g_p90 how hard it was, both over the linked turns only; one skier measured, so neither is a grade.',
+    } } : {}),
     turns: {
       total: s.nTurns, left: s.leftTurns, right: s.rightTurns,
       ...u.len('median_apex_radius', s.medianRadius),
@@ -57151,6 +57837,7 @@ const SECTION_CATALOG = [
   { id: 'runsSection', label: 'Runs' },
   { id: 'runCompareSection', label: 'Compare laps', navResolve: 'compare',
     lock: 'one chip, two possible targets: the nav resolves the element itself, so there is no single element to switch off' },
+  { id: 'skiLinkedSection', label: 'Linked turns' },
   { id: 'turnSection', label: 'Turns' },
   { id: 'formReplaySection', label: 'Form replay' },
   { id: 'radiusSection', label: 'Radius' },
@@ -57978,7 +58665,7 @@ function buildSectionNav() {
 }
 
 function renderAll(D) {
-  D = confidenceScopedRide(D);
+  D = skiAirtimeScoped(confidenceScopedRide(D));
   const rSport = renderPathSport(D.sport);
   _lastRender = { fn: renderAll, D };
   D.summary = summaryTurnsForSport(D.summary, D.turns, D.sport);
@@ -58047,12 +58734,13 @@ function renderAll(D) {
         D.ride),
       D.sensors.location || []);
   }
-  renderStats(D.summary, D.hasFit, D.savedDescents || D.descents, D.gradeSegments);
+  renderStats(D.summary, D.hasFit, D.savedDescents || D.descents, D.gradeSegments, D);
   renderCoachHighlights(D, rSport);
   renderCrashSection(D);
   renderMap(D.sensors.location, D.turns, D.ride, D.ridingJumps?.length ? D.ridingJumps : D.airtime?.jumps || [], D.crashes);
   renderBikeTimeline(D);
   renderTurnTable(D.turns);
+  renderSkiLinkedTurns(D);
   setupFormReplay(D);
   renderRadiusChart(D.turns);
   renderParams(D.summary, D.hasFit);
@@ -59143,7 +59831,94 @@ function mtbOutsideSub(s) {
   return `<div class="sub">${loamT('excl. {out} outside the {noun}', { out: U.dist(s.outsideDistance), noun: lexNounT(pageLex(), { definite: true }) })}</div>`;
 }
 
-function renderStats(s, hasFit, descents, gradeSegments) {
+/* THE SKI DAY'S HERO (owner, 2026-11-27: "Make card more exciting", over a Flumserberg card of eight
+   same-sized numbers). A ski day is told by its vertical and its top speed, and by its shape: up a
+   lift, down a run, again. So the two numbers share one band over that sawtooth, drawn from the same
+   altitude rows the run split reads (barometer first, then GPS), with the runs solid and everything
+   else -- lifts, queues, the walk to the car -- dashed. Shared by the phone-recorded and GPS-track
+   ski cards so the two cannot drift apart. The band is dark in both lights, like the share card. */
+const SKI_HERO_BINS = 96;
+function skiHeroProfile(D, runs) {
+  const ride = D && D.ride, sn = (D && D.sensors) || {};
+  if (!ride || !(ride.end > ride.start)) return null;
+  const inRide = r => r && r.t >= ride.start && r.t <= ride.end;
+  const baro = (sn.baro || []).filter(r => inRide(r) && Number.isFinite(r.relativeAltitude));
+  const rows = baro.length > 10 ? baro.map(r => [r.t, r.relativeAltitude])
+    : (sn.location || []).filter(r => inRide(r) && Number.isFinite(r.altitude)).map(r => [r.t, r.altitude]);
+  if (rows.length < 20) return null;
+  const n = SKI_HERO_BINS, span = ride.end - ride.start;
+  const sum = new Array(n).fill(0), cnt = new Array(n).fill(0);
+  for (const [t, a] of rows) {
+    const i = Math.min(n - 1, Math.floor(((t - ride.start) / span) * n));
+    sum[i] += a; cnt[i]++;
+  }
+  const alt = [];
+  let last = null;
+  for (let i = 0; i < n; i++) { if (cnt[i]) last = sum[i] / cnt[i]; alt.push(last); }
+  const first = alt.find(v => v != null);
+  for (let i = 0; i < n && alt[i] == null; i++) alt[i] = first;
+  const lo = Math.min(...alt), hi = Math.max(...alt);
+  /* Under ~20 m the ridge would be altitude noise stretched to fill the band. */
+  if (!(hi - lo >= 20)) return null;
+  return {
+    y: alt.map(v => (v - lo) / (hi - lo)),
+    runs: (runs || []).filter(r => r && r.tEnd > r.tStart)
+      .map(r => [(r.tStart - ride.start) / span, (r.tEnd - ride.start) / span]),
+  };
+}
+function skiHeroRidge(p) {
+  if (!p) return '';
+  const W = 300, H = 72, top = 4, n = p.y.length;
+  const x = i => ((i / (n - 1)) * W).toFixed(1);
+  const y = v => (top + (1 - v) * (H - top - 2)).toFixed(1);
+  const pt = i => `${x(i)},${y(p.y[i])}`;
+  const all = p.y.map((_, i) => pt(i));
+  /* A bin is in a run when its centre is: whole-bin membership would paint the lift's last bin. */
+  const inRun = i => p.runs.some(([a, b]) => (i + 0.5) / n >= a && (i + 0.5) / n <= b);
+  const runs = [];
+  for (let i = 0; i < n; i++) {
+    if (!inRun(i)) continue;
+    let j = i;
+    while (j + 1 < n && inRun(j + 1)) j++;
+    const from = Math.max(0, i - 1);
+    if (j > from) runs.push(`M${pt(from)}` + Array.from({ length: j - from }, (_, k) => ` L${pt(from + k + 1)}`).join(''));
+    i = j;
+  }
+  return `<svg class="ski-hero-ridge" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+    <defs><linearGradient id="skiHeroFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cfe9ff" stop-opacity=".30"/><stop offset="1" stop-color="#cfe9ff" stop-opacity="0"/>
+    </linearGradient></defs>
+    <path d="M0,${H} L${all.join(' L')} L${W},${H} Z" fill="url(#skiHeroFill)"/>
+    <path class="ski-ridge-rest" d="M${all.join(' L')}"/>
+    ${runs.length ? `<path class="ski-ridge-run" d="${runs.join(' ')}"/>` : ''}
+  </svg>`;
+}
+function skiHeroHTML({ vertical, vertSub, topSpeed, topSub, chips, profile }) {
+  const v = rsSplit(U.elev(vertical));
+  const sp = topSpeed > 0 ? rsSplit(U.speed(topSpeed)) : null;
+  /* The space before the unit is kept so the value's text still reads "2598 m", which the session
+     header quotes verbatim. */
+  return `<div class="stat ski-hero" data-ski-hero>
+    ${skiHeroRidge(profile)}
+    <div class="ski-hero-row">
+      <div class="ski-hero-v">
+        <div class="label">${loamT('Vertical skied')}</div>
+        <div class="value">${v.num} <span class="unit">${v.unit}</span></div>
+        ${vertSub ? `<div class="sub">${vertSub}</div>` : ''}
+      </div>
+      <div class="ski-hero-s">
+        <div class="label">${loamT('Top speed')}</div>
+        <div class="value">${sp ? `${sp.num} <span class="unit">${sp.unit}</span>` : '&mdash;'}</div>
+        ${topSub ? `<div class="sub">${topSub}</div>` : ''}
+      </div>
+    </div>
+    ${chips.length ? `<div class="ski-hero-chips">${chips.map(c => `<span>${c}</span>`).join('')}</div>` : ''}
+  </div>`;
+}
+const skiRunsChip = n => n === 1 ? loamT('1 run') : loamT('{n} runs', { n });
+const skiLiftsChip = n => n === 1 ? loamT('1 lift') : loamT('{n} lifts', { n });
+
+function renderStats(s, hasFit, descents, gradeSegments, D) {
   const dur = s.duration;
   /* Vertical drop follows the Units toggle like every other tile (it used to hardcode meters,
      contradicting the hero card's feet on the same screen); the other system rides in the sub. */
@@ -59152,14 +59927,11 @@ function renderStats(s, hasFit, descents, gradeSegments) {
   const dropSub = s.altDrop == null ? '—'
     : U.metric() ? (s.altDrop*3.28084).toFixed(0) + ' ft' : s.altDrop.toFixed(1) + ' m';
   /* A ski day's vertical is what was SKIED, summed over its runs; the elevation range above is one
-     run's worth on a lift-served day. */
-  const skiVertCard = s.skiVertical != null ? `
-    <div class="stat">
-      <div class="label">${loamT('Vertical skied')}</div>
-      <span class="value">${U.elev(s.skiVertical)}</span>
-      <div class="sub">${s.skiRuns === 1 ? loamT('1 run') : loamT('{n} runs', { n: s.skiRuns })} · ${loamT('{n} lifts', { n: s.skiLifts })}</div>
-    </div>` : null;
-  const jumpCard = skiVertCard ? skiVertCard : (s.nJumps && hasFit) ? `
+     run's worth on a lift-served day. It leads the card with the top speed, in the ski hero.
+     A ski day has no steepest-incline tile: its climbs are lifts, and the one the lift marker misses
+     headlines the tile (+30.9% on the Flumserberg day, 2026-11-27). */
+  const skiDay = s.skiVertical != null;
+  const jumpCard = skiDay ? '' : (s.nJumps && hasFit) ? `
     <div class="stat accent4">
       <div class="label">${loamT('Jumps')}</div>
       <div class="value">${s.nJumps}</div>
@@ -59170,18 +59942,25 @@ function renderStats(s, hasFit, descents, gradeSegments) {
       ${dropVal}
       <div class="sub">${dropSub}</div>
     </div>`;
-  const altCard = (s.nJumps && hasFit) ? `
+  const altCard = (s.nJumps && hasFit && !skiDay) ? `
     <div class="stat">
       <div class="label">${loamT('Vertical drop')}</div>
       ${dropVal}
       <div class="sub">${dropSub}</div>
     </div>` : '';
-  document.getElementById('statsPanel').innerHTML = `
+  const otherSpeed = U.metric() ? loamNum(s.maxSpeed*2.23694, 1)+' mph' : loamNum(s.maxSpeed*3.6, 1)+' km/h';
+  const lead = skiDay
+    ? skiHeroHTML({ vertical: s.skiVertical, topSpeed: s.maxSpeed, topSub: otherSpeed,
+        chips: [skiRunsChip(s.skiRuns), ...(s.skiLifts ? [skiLiftsChip(s.skiLifts)] : [])],
+        profile: skiHeroProfile(D, descents) })
+    : `
     <div class="stat hero accent3">
       <div class="label">${loamT('Max speed')}</div>
       <div class="value">${U.speed(s.maxSpeed)}</div>
-      <div class="sub">${U.metric() ? (s.maxSpeed*2.23694).toFixed(1)+' mph' : (s.maxSpeed*3.6).toFixed(1)+' km/h'}${loamT(' · fastest moment of the {noun}', { noun: lexNounT(pageLex(), { definite: true }) })}</div>
-    </div>
+      <div class="sub">${otherSpeed}${loamT(' · fastest moment of the {noun}', { noun: lexNounT(pageLex(), { definite: true }) })}</div>
+    </div>`;
+  document.getElementById('statsPanel').innerHTML = `
+    ${lead}
     <div class="stat accent">
       <div class="label">${loamT('Turns')}</div>
       <div class="value">${s.nTurns}</div>
@@ -59211,9 +59990,30 @@ function renderStats(s, hasFit, descents, gradeSegments) {
     </div>
     ${jumpCard}
     ${altCard}
-    ${steepestInclineTile(gradeSegments, false)}
-    ${steepestDescentTile(descents, false)}
+    ${skiDay ? '' : steepestInclineTile(gradeSegments, false)}
+    ${skiDay ? skiPitchTile(D, descents) : steepestDescentTile(descents, false)}
   `;
+}
+
+/* A ski day's steepest is the steepest 100 m PITCH inside a run, the number the Record screen and the
+   wrist show live and the GPS import shows, not the steepest run's average grade: once a run became
+   a whole top-to-bottom run that tile read -17.9% over 1.32 mi against the live 34% (Northstar,
+   2026-11-27, owner: "I saw a steeper decline earlier than in the analysis"). Read at render, from the
+   fixes and barometer the cached render keeps, so a ski day opened before this reads it too. */
+function skiPitchTile(D, descents) {
+  const sensors = (D && D.sensors) || {};
+  const runs = (descents || []).filter(d => d && Number.isFinite(d.tStart) && Number.isFinite(d.tEnd))
+    .slice().sort((a, b) => a.tStart - b.tStart);
+  const altRows = sensors.baro && sensors.baro.length > 10
+    ? sensors.baro.map(r => ({ t: r.t, alt: r.relativeAltitude }))
+    : (sensors.location || []).map(r => ({ t: r.t, alt: r.altitude }));
+  const p = LoamSki.skiSteepestRunPitch(runs, sensors.location || [], altRows);
+  if (!p) return '';
+  return `<div class="stat accent4">
+    <div class="label">${loamT('Steepest pitch')}</div>
+    <div class="value">${Math.round(p.pct)}<span class="unit">%</span></div>
+    <div class="sub">${loamT('over 100 m · run {n}', { n: p.run })}</div>
+  </div>`;
 }
 
 /* Draw a per-point colored track as few Leaflet layers as possible: consecutive
@@ -61249,9 +62049,9 @@ function renderAirtime(D) {
   const A = D.airtime;
   const el = document.getElementById('airtimeSummary');
   const hasAir = !!(A && A.jumps && A.jumps.length);
-  /* A ski day reaches this view too: the freefall detector runs on the descents-and-turns path
-     whatever the sport. Nobody skis with a Specialized head unit, so a skier is offered none, and
-     an airtime is placed by the day's clock rather than as "ride+". */
+  /* A ski day does not reach this view while `skiAirtimeScoped` withholds its airtimes; the ski
+     wording stays for when a graded ski day brings them back. Nobody skis with a Specialized head
+     unit, so a skier is offered none, and an airtime is placed by the day's clock, not "ride+". */
   const ski = isSkiSport(D && D.sport);
   const sub = document.getElementById('airtimeSubtitle');
   if (sub) sub.textContent = loamT(D && D.hasFit || ski
@@ -61643,6 +62443,92 @@ function renderCornerLedger(turns, hostId, deltasByN) {
   /* The segment map carries only the turns listed here (syncSegTurnMarkers is
      a no-op until openSegmentPage has set up the map and its location window). */
   if (isSeg) syncSegTurnMarkers(shown);
+}
+
+/* A ski day read as linked turns (analyzer/sports/ski/linked-turns.js): how much of each run was
+   linked turns, their rhythm, and how steady it was. Shown when the analysis carried the read, which a
+   phone ski day with GPS speed does; a day cached before v41 is recomputed, so a render that should
+   have it always does. */
+function renderSkiLinkedTurns(D) {
+  const sec = document.getElementById('skiLinkedSection');
+  if (!sec) return;
+  const L = D && isSkiSport(D.sport) ? D.skiLinked : null;
+  if (!L || !L.runs || !L.runs.length) { sec.classList.add('hidden'); sec.innerHTML = ''; return; }
+  const T = loamT, d = L.day;
+  const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
+  const secs = (v) => (v == null ? '—' : T('{s} s', { s: loamNum(v, 1) }));
+  const spread = (v) => (v == null ? '—' : `±${v}%`);
+  const size = (m) => (m == null ? '—' : U.dist(m));
+  /* The load read (skiChainsLoad): where in the turn the sideways load centred, and how hard. A dash
+     where a run or a sequence has fewer linked turns than the profile needs. */
+  const loadAt = (l) => (l && l.centroid != null ? `${Math.round(l.centroid * 100)}%` : '—');
+  const sideG = (l) => (l && l.lateralP90 != null ? `${loamNum(l.lateralP90, 2)} g` : '—');
+  const at = skiClockAt(D);
+  /* The replay offers every sequence it can play; a row it cannot (a moved mount) gets no button. */
+  const playable = new Set(formSkiSequences(D).map(q => q.i));
+  const tile = (v, l, sub) => `<div><div class="stile-v">${v}</div><div class="stile-l">${T(l)}</div>${sub ? `<div class="stile-l ski-dim">${sub}</div>` : ''}</div>`;
+  const tiles = [
+    tile(pct(d.linkedShare), 'of moving time in linked turns', T('{a} of {b}', { a: fmtDuration(d.linkedS), b: fmtDuration(d.movingS) })),
+    tile(String(d.sequences), d.sequences === 1 ? 'linked sequence' : 'linked sequences', T('{n} turns', { n: d.linkedTurns })),
+    tile(d.longestTurns ? T('{n} turns', { n: d.longestTurns }) : '—', 'longest sequence', d.longestTurns ? secs(d.longestS) : ''),
+    tile(secs(d.periodS), 'per turn, typical', d.periodCvPct != null ? T('timing spread {v}', { v: spread(d.periodCvPct) }) : ''),
+    tile(size(d.metresPerTurn), 'ground per turn'),
+    tile(d.leftTurnS != null && d.rightTurnS != null ? `${loamNum(d.leftTurnS, 2)} / ${loamNum(d.rightTurnS, 2)} s` : '—', 'left / right turn'),
+    d.load && d.load.centroid != null
+      ? tile(loadAt(d.load), 'into the turn, where the load centred',
+        d.load.lateHalfRatio != null ? T('second half ×{r}', { r: loamNum(d.load.lateHalfRatio, 1) }) : '') : '',
+    d.load && d.load.lateralP90 != null ? tile(sideG(d.load), 'sideways load in linked turns') : '',
+  ].join('');
+  const runRows = L.runs.map(r => `<tr data-ski-linked-run="${r.run}"><td>${T('Run {n}', { n: r.run })}</td><td>${fmtDuration(r.movingS)}</td>
+    <td>${pct(r.linkedShare)}</td><td>${r.sequences}</td><td>${r.longestTurns || '—'}</td>
+    <td>${secs(r.periodS)}</td><td>${spread(r.periodCvPct)}</td><td>${size(r.metresPerTurn)}</td>
+    <td>${loadAt(r.load)}</td><td>${sideG(r.load)}</td></tr>`).join('');
+  const bestRows = (L.best || []).map(b => `<tr data-ski-linked-best=""><td>${T('Run {n}', { n: b.run })}${playable.has(b.seq)
+      ? ` <button type="button" class="ghost-btn" data-seq-replay="${b.seq}">${T('Replay')}</button>` : ''}</td><td>${at(b.tStart)}</td>
+    <td>${b.turns}</td><td>${secs(b.durS)}</td><td>${secs(b.periodS)}</td><td>${spread(b.periodCvPct)}</td>
+    <td>${b.speedMps != null ? U.speed(b.speedMps) : '—'}</td><td>${size(b.metresPerTurn)}</td>
+    <td>${loadAt(b.load)}</td><td>${sideG(b.load)}</td></tr>`).join('');
+  const notes = [
+    d.sequences ? '' : T('No linked sequences: no stretch of {n} turns in a row at speed.', { n: LoamSki.SKI_LINK_MIN_TURNS }),
+    T('<strong>A turn</strong> here is a change of turning direction about true vertical, counted from the phone with no calibration, and only while the GPS shows you moving at {speed} or more: walking and standing still alternate left and right as often as skiing does, so without the speed they cannot be told apart. <strong>Linked</strong> is {n} or more turns in a row, each the other way to the one before and no more than {gap} s after it. <strong>Spread</strong> is how much the time per turn varied inside the sequences, and <strong>size</strong> is the ground covered per turn at the speed you were going.',
+      { speed: U.speed(LoamSki.SKI_LINK_MIN_MPS), n: LoamSki.SKI_LINK_MIN_TURNS, gap: LoamSki.SKI_LINK_MAX_GAP_S }),
+    L.runs.some(r => r.load) ? T('<strong>Load at</strong> is where in the turn the sideways load centred, from one edge change (0%) to the next (100%): 50% is spread evenly, and above it the load came late. <strong>Sideways</strong> is the 90th percentile of the sideways force, in g, inside the sequences only, so the stops and slow stretches are not in it. Both need {n} linked turns, and show a dash with fewer. They describe the turns; they do not grade them.', { n: LoamSki.SKI_MIN_PROFILE_TURNS }) : '',
+    d.spins ? T('Left out: {n} swings where your body turned much further than your path did, which is what a spin into or out of switch looks like.', { n: d.spins }) : '',
+    T('The phone is on your body, not your skis, so this is the rhythm of your turning and not of your edging: it says nothing about edge angle or carving. A skier who keeps the upper body quiet through short turns can read fewer turns than they made. Nothing here says which rhythm is right.'),
+  ].filter(Boolean).map(p => `<p>${p}</p>`).join('');
+  sec.innerHTML = `
+    <div class="section-title">${T('Linked turns')}
+      <span class="subtitle">${T('how much of each run was linked turns, and their rhythm')}</span>
+    </div>
+    <div class="panel panel-content">
+      <div class="stiles ski-stiles">${tiles}</div>
+      <div class="ski-scroll" style="margin-top:14px"><table class="ski-runs" id="skiLinkedRuns">
+        <thead><tr><th>${T('Run')}</th><th>${T('Moving')}</th><th>${T('Linked')}</th><th>${T('Sequences')}</th><th>${T('Longest')}</th><th>${T('Per turn')}</th><th>${T('Spread')}</th><th>${T('Size')}</th><th>${T('Load at')}</th><th>${T('Sideways')}</th></tr></thead>
+        <tbody>${runRows}</tbody>
+      </table></div>
+      ${bestRows ? `<div class="section-title" style="font-size:15px; margin-top:18px">${T('Longest sequences')}</div>
+      <div class="ski-scroll"><table class="ski-runs" id="skiLinkedBest">
+        <thead><tr><th>${T('Run')}</th><th>${T('Started')}</th><th>${T('Turns')}</th><th>${T('Lasted')}</th><th>${T('Per turn')}</th><th>${T('Spread')}</th><th>${T('Speed')}</th><th>${T('Size')}</th><th>${T('Load at')}</th><th>${T('Sideways')}</th></tr></thead>
+        <tbody>${bestRows}</tbody>
+      </table></div>` : ''}
+      ${d.load && d.load.meanProfile ? `<div class="section-title" style="font-size:15px; margin-top:18px">${T('When the load arrived')}
+        <span class="subtitle">${T('the average of {n} linked turns, each stretched to the same length', { n: d.load.turns })}</span></div>
+      <div id="skiLinkedLoadChart" class="chart" style="height:240px"></div>` : ''}
+      <div class="strength-tablenote analysis-explanation">${notes}</div>
+    </div>`;
+  sec.classList.remove('hidden');
+  sec.querySelectorAll('[data-seq-replay]').forEach(b => { b.onclick = () => formOpenSequence(+b.dataset.seqReplay); });
+  if (d.load && d.load.meanProfile) drawSkiLoadShape(d.load, 'skiLinkedLoadChart');
+}
+
+/* Wall clock for a time into the recording, because that is how a skier finds a sequence again in a
+   video or in memory. The Linked turns card and the replay's dropdown both name a sequence this way. */
+function skiClockAt(D) {
+  const start = D && (D.recordedAt || parseUTCFromFilename(D.title || ''));
+  const t0 = start ? new Date(start).getTime() : NaN;
+  const lang = loamLang() === 'en' ? undefined : loamLang();
+  return (t) => (Number.isFinite(t0)
+    ? new Date(t0 + t * 1000).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' }) : fmtDuration(t));
 }
 
 function renderTurnTable(turns) {
@@ -66407,7 +67293,7 @@ const LOAM_VERSION = '1.5.0';
    literal in the render, because it was hardcoded to 'August 2026' and would have gone stale
    silently at the next release: a version bump and a date that disagree is worse than no date. */
 const LOAM_RELEASED = 'September 2026';
-const LOAM_BUILD = 'e6472ddd2 · 2026-11-27';
+const LOAM_BUILD = 'e0f79487e · 2026-11-28';
 const LOAM_WHATS_NEW = [
   { h: 'New', items: [
     /* 1.5 leads each section; what follows is earlier releases, kept because this sheet is the only
